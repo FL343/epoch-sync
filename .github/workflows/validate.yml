@@ -1,0 +1,53 @@
+name: reconcile
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: '*/5 * * * *'
+permissions:
+  contents: read
+concurrency:
+  group: reconcile
+  cancel-in-progress: false
+jobs:
+  reconcile:
+    if: github.repository == 'FL343/epoch-sync'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: run
+        env:
+          STEAM_PUBLISHER_KEY: ${{ secrets.STEAM_PUBLISHER_KEY }}
+          APPID: ${{ secrets.APPID }}
+          LB_PREFIX: ${{ secrets.LB_PREFIX }}
+          RANKED_LB: ${{ secrets.RANKED_LB }}
+          LP_LB: ${{ secrets.LP_LB }}
+          STATE_SALT: ${{ secrets.STATE_SALT }}
+        run: node validate.js
+      - name: persist
+        run: |
+          if [ -n "$(git status --porcelain processed.json skill.json leavers.json)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add processed.json skill.json leavers.json
+            git commit -m "state: update reconciliation state"
+            git push
+          else
+            echo "no state change"
+          fi
+      - name: heartbeat
+        run: |
+          last=$(git log -1 --format=%ct)
+          now=$(date +%s)
+          age=$(( (now - last) / 86400 ))
+          if [ "$age" -ge 14 ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            date -u +%FT%TZ > .heartbeat
+            git add .heartbeat
+            git commit -m "chore: heartbeat"
+            git push
+          else
+            echo "heartbeat not due (age ${age}d)"
+          fi
