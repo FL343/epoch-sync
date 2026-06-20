@@ -12,6 +12,13 @@ For consistent matches it derives placement from the agreed score vector, update
 TrueSkill (mu/sigma) rating, and writes the authoritative display rating + visible
 points to trusted (publisher-write-only) leaderboards that clients read back.
 
+Visible points (the LP ladder) move for **ranked matches only** (matchType 2); quick
+matches update the hidden rating only. A consensus-detected leaver (in roster, no
+settle record) loses a fixed points penalty in the ranked ladder — this is the
+authoritative half of the client's optimistic deduction, so it survives read-back
+rather than being reverted. Single-side records can't frame a leaver (majority roster
+vote), and each match is penalized at most once (idempotent via `processed.json`).
+
 ## Files
 
 - `validate.js` — read shards, decode records, group by match, compare vectors,
@@ -28,4 +35,5 @@ State files committed back each run (idempotency): `processed.json`, `skill.json
 
 All values are injected via environment / Actions secrets — none are committed:
 `STEAM_PUBLISHER_KEY`, `APPID`, `LB_PREFIX`, `RANKED_LB`, `LP_LB`, `STATE_SALT`.
-Optional: `APPLY_MMR=0` (dry-run, no writes), `ALLOW_TEST=1`, `K_FACTOR`.
+Optional: `APPLY_MMR=0` (dry-run, no writes), `ALLOW_TEST=1`, `K_FACTOR`,
+`LEAVER_LP_PENALTY` (ranked leaver points deduction, default 100).

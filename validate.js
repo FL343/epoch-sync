@@ -98,6 +98,7 @@ function loadLeavers() { try { return JSON.parse(fs.readFileSync(LEAVERS_FILE, '
 function saveLeavers(s) { try { fs.writeFileSync(LEAVERS_FILE, JSON.stringify(s, null, 0)); } catch (e) { ghWarn('write ' + LEAVERS_FILE + ' failed: ' + (e && e.message)); } }
 const LP_LB = process.env.LP_LB;
 const LP_MAX = 9999;
+const LEAVER_LP_PENALTY = Number(process.env.LEAVER_LP_PENALTY || 100);   // ranked leaver authoritative LP deduction (pairs the client optimistic -100)
 const LP_SEG = [
   { min: 0, win: 45, loss: 15, drip: 5 },
   { min: 2000, win: 35, loss: 20, drip: 3 },
@@ -112,6 +113,10 @@ function lpDelta(lp, rank, pc) {
   const base = p >= 0.5 ? seg.win * (2 * p - 1) : -seg.loss * (1 - 2 * p);
   return Math.round(base + seg.drip);
 }
+// visible points only move for ranked matches (matchType 2); quick updates the hidden rating only
+function appliesLp(mt) { return (mt | 0) === 2; }
+// clamp-aware authoritative leaver deduction (never below 0)
+function leaverLpPenalty(cur, pen) { return Math.max(0, (cur | 0) - (pen | 0)); }
 function eloDeltas(parts, mmr) {
   const delta = {}; for (const p of parts) delta[p.steamID] = 0;
   for (let i = 0; i < parts.length; i++) for (let j = i + 1; j < parts.length; j++) {
@@ -217,6 +222,7 @@ async function main() {
   for (const c of fresh) {
     if (c.void) { console.log('  VOID ' + c.m + ': consensus -> no MMR/points'); processed.add(c.m); voided++; continue; }
     const g = c.g;
+    const matchType = g[0].d[2] | 0;   // 2=ranked; visible LP only moves for ranked (quick = MMR only)
     const seatToId = {};
     for (const r of g) seatToId[r.d[5] | 0] = r.steamID;
     const pc = g[0].d[8] | 0, scores = g[0].d.slice(10, 10 + pc);
@@ -232,7 +238,7 @@ async function main() {
       skill[pid(r.id)] = { mu: r.mu, sigma: r.sigma };
       changed[r.id] = { mu: r.mu, sigma: r.sigma };
       let lpLine = '';
-      if (lpId) {
+      if (lpId && appliesLp(matchType)) {   // quick = MMR only; visible LP ladder is ranked-only
         const cur = lp[r.id] == null ? 0 : lp[r.id];
         const d = lpDelta(cur, rankOf[r.id], parts.length);
         const nv = Math.max(0, Math.min(LP_MAX, cur + d));
@@ -245,6 +251,14 @@ async function main() {
       leavers[pid(x.steamID)] = leavers[pid(x.steamID)] || { leaves: 0, lastMatch: '' };
       leavers[pid(x.steamID)].leaves += 1; leavers[pid(x.steamID)].lastMatch = c.m; leaverHits++;
       console.log('  leaver ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' (in roster, no record; total ' + leavers[pid(x.steamID)].leaves + ')');
+      // authoritative ranked leaver penalty: deduct LEAVER_LP_PENALTY from the points board so a client optimistic deduction survives read-back
+      //   (would otherwise be reverted). Ranked-only; consensus-detected leaver only (single side can't frame); once/match (processed).
+      if (lpId && appliesLp(matchType)) {
+        const cur = lp[x.steamID] == null ? 0 : lp[x.steamID];
+        const nv = leaverLpPenalty(cur, LEAVER_LP_PENALTY);
+        if (nv !== cur) { lp[x.steamID] = nv; changedLp[x.steamID] = nv; }
+        console.log('  leaver LP ' + c.m + ': ' + plog(x.steamID) + ' pts ' + cur + '-' + LEAVER_LP_PENALTY + '->' + nv);
+      }
     }
     processed.add(c.m); settled++;
   }
@@ -278,4 +292,4 @@ async function main() {
 if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
-module.exports = { isVoidDisp, voidByConsensus, lpDelta, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers };
+module.exports = { isVoidDisp, voidByConsensus, lpDelta, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, leaverLpPenalty };
