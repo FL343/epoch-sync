@@ -117,6 +117,59 @@ function lpDelta(lp, rank, pc) {
 function appliesLp(mt) { return (mt | 0) === 2; }
 // clamp-aware authoritative leaver deduction (never below 0)
 function leaverLpPenalty(cur, pen) { return Math.max(0, (cur | 0) - (pen | 0)); }
+
+// ===== authoritative XP ladder: client optimistic value = display only, this job = truth. =====
+const XP_LB = process.env.XP_LB;   // optional: unset -> skip XP entirely (a live run is unaffected before board/secret exist)
+const XP_FILE = process.env.XP_FILE || 'xp.json';
+function loadXp() { try { return JSON.parse(fs.readFileSync(XP_FILE, 'utf8')) || {}; } catch (e) { return {}; } }
+function saveXp(s) { try { fs.writeFileSync(XP_FILE, JSON.stringify(s, null, 0)); } catch (e) { ghWarn('write ' + XP_FILE + ' failed: ' + (e && e.message)); } }
+// per-game point formula -- lockstep mirror of the client config (asserted by the schema-lockstep test).
+const XP_CFG = { base: 100, rankBonus: [80, 45, 20, 0], moneyDivisor: 50, moneyBonusCap: 120, rankedMult: 1.25, dailyFirstWin: 150 };
+// repeat-leaver discount: gradient + minimum-sample gate in one, via min-denominator smoothing. values tunable on real data.
+const LEAVER_XP = { minSample: 20, tiers: [{ maxRate: 0.05, factor: 1.0 }, { maxRate: 0.15, factor: 0.5 }, { maxRate: 1.01, factor: 0.3 }] };
+// per-end disposition -> credit class (lockstep mirror of client table): 0,1 valid / 5 abandoner / else innocent.
+function dispClassOf(code) { const c = code | 0; return (c === 0 || c === 1) ? 'valid' : (c === 5 ? 'abandoner' : 'innocent'); }
+// effective leave rate with min-denominator smoothing -> tier factor. leaves/games cumulative per player; a first leave cannot spike to 100%.
+function effectiveLeaverFactor(leaves, games) {
+  const total = (leaves | 0) + (games | 0);
+  const rate = total > 0 ? (leaves | 0) / Math.max(total, LEAVER_XP.minSample) : 0;
+  for (const t of LEAVER_XP.tiers) if (rate <= t.maxRate) return t.factor;
+  return LEAVER_XP.tiers[LEAVER_XP.tiers.length - 1].factor;
+}
+// per-record point gain, mirroring the client per-game formula + credit rules. rank0 = 0-based; factor = repeat-leaver discount.
+//   valid = full (rank + money + ranked x + daily-first); innocent = base only; abandoner = 0.
+function computeXpGain(cls, rank0, money, isRanked, firstWinToday, factor) {
+  if (cls === 'abandoner') return 0;
+  let xp = XP_CFG.base;
+  if (cls === 'valid') {
+    const rb = XP_CFG.rankBonus;
+    xp += (rank0 >= 0 && rank0 < rb.length) ? rb[rank0] : 0;
+    xp += Math.min(XP_CFG.moneyBonusCap, Math.max(0, Math.floor((money | 0) / XP_CFG.moneyDivisor)));
+  }
+  if (isRanked) xp = xp * XP_CFG.rankedMult;
+  if (cls === 'valid' && firstWinToday) xp += XP_CFG.dailyFirstWin;
+  return Math.max(0, Math.round(Math.round(xp) * (factor == null ? 1 : factor)));
+}
+// credit authoritative points for one consistent match group (mutates the board map + changedXp + state).
+//   deduped by seat; leaves come from the leaver state; today = UTC day index for the daily-first bonus.
+function creditXp(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers, today) {
+  const isRanked = appliesLp(matchType);
+  const recBySeat = {};
+  for (const r of g) { const s = r.d[5] | 0; if (recBySeat[s] == null) recBySeat[s] = r; }
+  for (const seatKey of Object.keys(recBySeat)) {
+    const r = recBySeat[seatKey], seat = seatKey | 0, sid = r.steamID, p = pid(sid);
+    const cls = dispClassOf(r.dispCode);
+    const st = xpState[p] = xpState[p] || { lastWinDay: 0, games: 0 };
+    const factor = effectiveLeaverFactor((leavers[p] && leavers[p].leaves) || 0, st.games);
+    const rank0 = ((rankOf[sid] || 1) | 0) - 1;   // 0-based for rankBonus index (group rank is 1-based)
+    let firstWin = false;
+    if (cls === 'valid' && rank0 === 0 && (st.lastWinDay | 0) < today) { firstWin = true; st.lastWinDay = today; }
+    const gain = computeXpGain(cls, rank0, scores[seat] | 0, isRanked, firstWin, factor);
+    if (gain > 0) { xp[sid] = (xp[sid] | 0) + gain; changedXp[sid] = xp[sid]; }
+    if (cls === 'valid') st.games += 1;   // denominator = real finishes (innocent/abandoner don't count; mirrors client window)
+    console.log('  xp ' + plog(sid) + ' ' + cls + ' rank' + (rank0 + 1) + (firstWin ? ' dailyWin' : '') + ' x' + factor + ' +' + gain + ' -> ' + (xp[sid] | 0));
+  }
+}
 function eloDeltas(parts, mmr) {
   const delta = {}; for (const p of parts) delta[p.steamID] = 0;
   for (let i = 0; i < parts.length; i++) for (let j = i + 1; j < parts.length; j++) {
@@ -216,11 +269,21 @@ async function main() {
     const lr2 = await getJson(BASE + '/ISteamLeaderboards/GetLeaderboardEntries/v1/?key=' + KEY + '&appid=' + APPID + '&rangestart=1&rangeend=5000&datarequest=RequestGlobal&leaderboardid=' + lpId + '&format=json');
     for (const e of ((lr2.json && lr2.json.leaderboardEntryInformation && lr2.json.leaderboardEntryInformation.leaderboardEntries) || [])) lp[e.steamID] = e.score | 0;
   }
+  // XP ladder is optional: skip the whole XP path (no board, no state) if XP_LB is unset or the board is missing.
+  const xpLb = XP_LB ? ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).find(x => String(x.name || x.Name) === XP_LB) : null;
+  const xpId = xpLb ? (xpLb.id || xpLb.ID) : null;
+  if (XP_LB && !xpId) ghWarn('xp board not found (pre-create with onlytrustedwrites) -> skip xp this run');
+  const xp = {};
+  if (xpId) {
+    const lr3 = await getJson(BASE + '/ISteamLeaderboards/GetLeaderboardEntries/v1/?key=' + KEY + '&appid=' + APPID + '&rangestart=1&rangeend=5000&datarequest=RequestGlobal&leaderboardid=' + xpId + '&format=json');
+    for (const e of ((lr3.json && lr3.json.leaderboardEntryInformation && lr3.json.leaderboardEntryInformation.leaderboardEntries) || [])) xp[e.steamID] = e.score | 0;
+  }
+  const xpState = xpId ? loadXp() : {};
 
   fresh.sort((a, b) => (a.m < b.m ? -1 : a.m > b.m ? 1 : 0));
-  const changed = {}; const changedLp = {}; let settled = 0, voided = 0;
+  const today = Math.floor(Date.now() / 86400000);   // UTC day index (matches client lastWinDay) for the daily-first bonus
+  const changed = {}; const changedLp = {}; const changedXp = {}; let settled = 0, voided = 0;
   for (const c of fresh) {
-    if (c.void) { console.log('  VOID ' + c.m + ': consensus -> no MMR/points'); processed.add(c.m); voided++; continue; }
     const g = c.g;
     const matchType = g[0].d[2] | 0;   // 2=ranked; visible LP only moves for ranked (quick = MMR only)
     const seatToId = {};
@@ -228,10 +291,14 @@ async function main() {
     const pc = g[0].d[8] | 0, scores = g[0].d.slice(10, 10 + pc);
     const parts = [];
     for (let seat = 0; seat < pc; seat++) { if (seatToId[seat] != null) parts.push({ steamID: seatToId[seat], seat, score: scores[seat] | 0 }); }
-    if (parts.length < 2) continue;
     const sorted = [...parts].sort((a, b) => b.score - a.score);
     let rank = 1; const rankOf = {};
     for (let i = 0; i < sorted.length; i++) { if (i > 0 && sorted[i].score < sorted[i - 1].score) rank = i + 1; sorted[i].rank = rank; rankOf[sorted[i].steamID] = rank; }
+    // points are credited for BOTH settled AND consensus-VOID matches -- VOID only gates MMR/LP; an innocent victim
+    //   still earns participation points (mirrors the client crediting innocent records). per-record class-driven.
+    if (xpId) creditXp(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers, today);
+    if (c.void) { console.log('  VOID ' + c.m + ': consensus -> no MMR/points'); processed.add(c.m); voided++; continue; }
+    if (parts.length < 2) { processed.add(c.m); continue; }
     const tsIn = parts.map(p => { const sk = skill[pid(p.steamID)] || ts.DEFAULTS; return { id: p.steamID, rank: rankOf[p.steamID], mu: sk.mu, sigma: sk.sigma }; });
     const tsOut = ts.updateMatch(tsIn);
     for (const r of tsOut) {
@@ -281,15 +348,24 @@ async function main() {
     else console.log('  ok points ' + plog(sid) + ' = ' + changedLp[sid]);
     return okFlag;
   });
+  const wXp = await mapPool(Object.keys(changedXp), CONCURRENCY, async (sid) => {
+    const res = await postForm('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: xpId, steamid: sid, score: changedXp[sid], scoremethod: 'ForceUpdate', format: 'json' });
+    const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
+    if (!okFlag) ghWarn('write xp ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
+    else console.log('  ok xp ' + plog(sid) + ' = ' + changedXp[sid]);
+    return okFlag;
+  });
   const rOk = wRating.filter(x => x.status === 'fulfilled' && x.value).length;
   const pOk = wPoints.filter(x => x.status === 'fulfilled' && x.value).length;
+  const xOk = wXp.filter(x => x.status === 'fulfilled' && x.value).length;
   saveProcessed(processed);
   saveSkill(skill);
   saveLeavers(leavers);
-  console.log('written: rating ' + rOk + '/' + wRating.length + ', points ' + pOk + '/' + wPoints.length + ', state updated (idempotent)');
+  if (xpId) saveXp(xpState);
+  console.log('written: rating ' + rOk + '/' + wRating.length + ', points ' + pOk + '/' + wPoints.length + ', xp ' + xOk + '/' + wXp.length + ', state updated (idempotent)');
 }
 
 if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
-module.exports = { isVoidDisp, voidByConsensus, lpDelta, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, leaverLpPenalty };
+module.exports = { isVoidDisp, voidByConsensus, lpDelta, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, pid, XP_CFG, LEAVER_XP };
