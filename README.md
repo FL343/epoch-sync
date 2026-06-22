@@ -31,11 +31,12 @@ absent, so a run is unaffected before it is provisioned.
 ## Files
 
 - `validate.js` — read shards, decode records, group by match, compare vectors,
-  consensus VOID, rating/points update.
+  consensus VOID, rating/points update, mismatch compensation (compress the strong side's swing,
+  protect/reward the weak side) revealed back to the client via points-board detail bytes.
 - `trueskill.js` — TrueSkill (mu/sigma) update + display rating.
 - `test/void-consensus.js`, `test/leaver-absence.js`, `test/lp-penalty.js`,
-  `test/xp-ladder.js` — unit tests for the pure helpers (run one with `node test/<name>.js`;
-  CI runs all of `test/*.js` before each reconcile).
+  `test/xp-ladder.js`, `test/reduced-stakes.js` — unit tests for the pure helpers (run one with
+  `node test/<name>.js`; CI runs all of `test/*.js` before each reconcile).
 - `.github/workflows/validate.yml` — scheduled run + state persistence.
 
 State files committed back each run (idempotency): `processed.json`, `skill.json`,

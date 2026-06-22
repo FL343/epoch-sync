@@ -75,6 +75,16 @@ async function postForm(path, params) {
   const t = await r.text(); let j = null; try { j = JSON.parse(t); } catch (e) {}
   return { status: r.status, ok: r.ok, json: j, text: t };
 }
+// detail data is stored as RAW bytes by the API -- a hex string or encodeURIComponent would mangle bytes > 127 (UTF-8),
+//   so the int32-LE detail array is appended pre-percent-encoded one byte at a time.
+function pctBytes(arr) { const b = Buffer.alloc(arr.length * 4); arr.forEach((n, i) => b.writeInt32LE(n | 0, i * 4)); return Array.from(b).map(x => '%' + x.toString(16).padStart(2, '0')).join(''); }
+async function postFormDetails(path, params, detailsArr) {
+  let body = Object.keys(params).map(k => k + '=' + encodeURIComponent(params[k])).join('&');
+  if (detailsArr && detailsArr.length) body += '&details=' + pctBytes(detailsArr);
+  const r = await fetch(BASE + path, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body });
+  const t = await r.text(); let j = null; try { j = JSON.parse(t); } catch (e) {}
+  return { status: r.status, ok: r.ok, json: j, text: t };
+}
 async function mapPool(items, limit, fn) {
   const out = new Array(items.length);
   let next = 0;
@@ -99,12 +109,14 @@ function saveLeavers(s) { try { fs.writeFileSync(LEAVERS_FILE, JSON.stringify(s,
 const LP_LB = process.env.LP_LB;
 const LP_MAX = 9999;
 const LEAVER_LP_PENALTY = Number(process.env.LEAVER_LP_PENALTY || 100);   // ranked leaver authoritative LP deduction (pairs the client optimistic -100)
+// `rs` = mismatch retention coefficient (fraction of the win/loss component applied to EXPECTED outcomes in a
+//   mismatched match) per tier: lower tiers move closer to normal, higher tiers compress hard (protect the top ladder).
 const LP_SEG = [
-  { min: 0, win: 45, loss: 15, drip: 5 },
-  { min: 2000, win: 35, loss: 20, drip: 3 },
-  { min: 4000, win: 28, loss: 25, drip: 2 },
-  { min: 6000, win: 22, loss: 22, drip: 1 },
-  { min: 8000, win: 20, loss: 20, drip: 0 },
+  { min: 0, win: 45, loss: 15, drip: 5, rs: 0.70 },
+  { min: 2000, win: 35, loss: 20, drip: 3, rs: 0.50 },
+  { min: 4000, win: 28, loss: 25, drip: 2, rs: 0.30 },
+  { min: 6000, win: 22, loss: 22, drip: 1, rs: 0.15 },
+  { min: 8000, win: 20, loss: 20, drip: 0, rs: 0.05 },
 ];
 function lpSeg(lp) { let s = LP_SEG[0]; for (const x of LP_SEG) if (lp >= x.min) s = x; return s; }
 function lpDelta(lp, rank, pc) {
@@ -117,6 +129,39 @@ function lpDelta(lp, rank, pc) {
 function appliesLp(mt) { return (mt | 0) === 2; }
 // clamp-aware authoritative leaver deduction (never below 0)
 function leaverLpPenalty(cur, pen) { return Math.max(0, (cur | 0) - (pen | 0)); }
+
+// ===== mismatch compensation (the matchmaking-fairness layer): compress the strong side's swing, protect/reward the
+//   weak side. authoritative -- the client shows a flat optimistic delta (it can't see opponents' ratings); this is the
+//   only place the real adjusted delta + UPSET/PROTECTED tag is computed, revealed back to the client via board details. =====
+const RS_THRESHOLD = Number(process.env.RS_THRESHOLD || 400);            // pre-match rating spread (display points) that triggers
+const RS_UPSET_BONUS = Number(process.env.RS_UPSET_BONUS || 1.0);        // weak side over-performs: 1.0 = full (>1 = super reward)
+const RS_STRONG_UPSET_LOSS = Number(process.env.RS_STRONG_UPSET_LOSS || 0.5); // strong side upset: mild penalty (not the strict tier coeff)
+const RS_MAGIC = 0xC5;                                                   // reveal-details marker; flags: 0 none / 1 upset / 2 protected
+// pure: parts = [{ steamID, mmr (pre-match display rating), rank (1-based), lp (current) }]. returns null if not applicable,
+//   else { [steamID]: { adjDelta, flag, normalDelta } }. Drip is never discounted (only the win/loss component is scaled).
+function reducedStakesPlan(parts, matchType) {
+  if (!appliesLp(matchType) || !parts || parts.length < 2) return null;
+  const mmrs = parts.map(p => p.mmr | 0);
+  if (Math.max.apply(null, mmrs) - Math.min.apply(null, mmrs) <= RS_THRESHOLD) return null;
+  const mean = mmrs.reduce((a, b) => a + b, 0) / mmrs.length;
+  const pc = parts.length, out = {};
+  for (const p of parts) {
+    const seg = lpSeg(p.lp | 0);
+    const prog = pc <= 1 ? 0.5 : (pc - 1 - ((p.rank | 0) - 1)) / (pc - 1);
+    const base = prog >= 0.5 ? seg.win * (2 * prog - 1) : -seg.loss * (1 - 2 * prog);
+    const normalDelta = Math.round(base + seg.drip);
+    let factor = 1, flag = 0;
+    if ((p.mmr | 0) < mean) {                                  // weak side
+      if (base > 0) { factor = RS_UPSET_BONUS; flag = 1; }     //   placed up = upset (full/super, not compressed)
+      else { factor = seg.rs; if (normalDelta < 0) flag = 2; } //   placed down = protected (loss compressed; reveal only on a real net loss)
+    } else if ((p.mmr | 0) > mean) {                           // strong side (no client reveal)
+      if (base >= 0) factor = seg.rs;                           //   won as expected = gain compressed
+      else factor = RS_STRONG_UPSET_LOSS;                       //   lost an upset = mild penalty
+    }
+    out[p.steamID] = { adjDelta: Math.round(base * factor + seg.drip), flag, normalDelta };
+  }
+  return out;
+}
 
 // ===== authoritative XP ladder: client optimistic value = display only, this job = truth. =====
 const XP_LB = process.env.XP_LB;   // optional: unset -> skip XP entirely (a live run is unaffected before board/secret exist)
@@ -264,10 +309,10 @@ async function main() {
   const lpLb = ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).find(x => String(x.name || x.Name) === LP_LB);
   const lpId = lpLb ? (lpLb.id || lpLb.ID) : null;
   if (!lpId) ghWarn('points board not found (pre-create with onlytrustedwrites) -> skip points this run');
-  const lp = {};
+  const lp = {}, lpDet = {};   // lpDet = existing detail bytes per player, so an unread reveal survives a later normal-match LP update
   if (lpId) {
     const lr2 = await getJson(BASE + '/ISteamLeaderboards/GetLeaderboardEntries/v1/?key=' + KEY + '&appid=' + APPID + '&rangestart=1&rangeend=5000&datarequest=RequestGlobal&leaderboardid=' + lpId + '&format=json');
-    for (const e of ((lr2.json && lr2.json.leaderboardEntryInformation && lr2.json.leaderboardEntryInformation.leaderboardEntries) || [])) lp[e.steamID] = e.score | 0;
+    for (const e of ((lr2.json && lr2.json.leaderboardEntryInformation && lr2.json.leaderboardEntryInformation.leaderboardEntries) || [])) { lp[e.steamID] = e.score | 0; lpDet[e.steamID] = decodeDetails(e.detailData); }
   }
   // XP ladder is optional: skip the whole XP path (no board, no state) if XP_LB is unset or the board is missing.
   const xpLb = XP_LB ? ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).find(x => String(x.name || x.Name) === XP_LB) : null;
@@ -282,7 +327,7 @@ async function main() {
 
   fresh.sort((a, b) => (a.m < b.m ? -1 : a.m > b.m ? 1 : 0));
   const today = Math.floor(Date.now() / 86400000);   // UTC day index (matches client lastWinDay) for the daily-first bonus
-  const changed = {}; const changedLp = {}; const changedXp = {}; let settled = 0, voided = 0;
+  const changed = {}; const changedLp = {}; const changedXp = {}; const reveal = {}; let settled = 0, voided = 0;
   for (const c of fresh) {
     const g = c.g;
     const matchType = g[0].d[2] | 0;   // 2=ranked; visible LP only moves for ranked (quick = MMR only)
@@ -301,16 +346,20 @@ async function main() {
     if (parts.length < 2) { processed.add(c.m); continue; }
     const tsIn = parts.map(p => { const sk = skill[pid(p.steamID)] || ts.DEFAULTS; return { id: p.steamID, rank: rankOf[p.steamID], mu: sk.mu, sigma: sk.sigma }; });
     const tsOut = ts.updateMatch(tsIn);
+    // mismatch compensation uses PRE-match ratings (tsIn) + current LP -> per-player adjusted LP delta + reveal flag.
+    const rsPlan = reducedStakesPlan(tsIn.map(t => ({ steamID: t.id, mmr: ts.displayRating(t.mu, t.sigma), rank: t.rank, lp: (lp[t.id] == null ? 0 : lp[t.id]) })), matchType);
     for (const r of tsOut) {
       skill[pid(r.id)] = { mu: r.mu, sigma: r.sigma };
       changed[r.id] = { mu: r.mu, sigma: r.sigma };
       let lpLine = '';
       if (lpId && appliesLp(matchType)) {   // quick = MMR only; visible LP ladder is ranked-only
         const cur = lp[r.id] == null ? 0 : lp[r.id];
-        const d = lpDelta(cur, rankOf[r.id], parts.length);
+        const rs = rsPlan && rsPlan[r.id];
+        const d = rs ? rs.adjDelta : lpDelta(cur, rankOf[r.id], parts.length);
         const nv = Math.max(0, Math.min(LP_MAX, cur + d));
         lp[r.id] = nv; changedLp[r.id] = nv;
-        lpLine = ' | pts ' + cur + (d >= 0 ? '+' : '') + d + '->' + nv;
+        if (rs && rs.flag) reveal[r.id] = { matchHash: g[0].d[3] | 0, seed: g[0].d[4] | 0, flag: rs.flag, adjDelta: d, normalDelta: rs.normalDelta };
+        lpLine = ' | pts ' + cur + (d >= 0 ? '+' : '') + d + '->' + nv + (rs && rs.flag ? (' [' + (rs.flag === 1 ? 'UPSET' : 'PROTECTED') + ' normal ' + rs.normalDelta + ']') : '');
       }
       console.log('  settle ' + c.m + ': ' + plog(r.id) + ' rank' + rankOf[r.id] + ' mu' + r.mu.toFixed(2) + ' sigma' + r.sigma.toFixed(2) + ' -> ' + ts.displayRating(r.mu, r.sigma) + lpLine);
     }
@@ -342,10 +391,15 @@ async function main() {
     return okFlag;
   });
   const wPoints = await mapPool(Object.keys(changedLp), CONCURRENCY, async (sid) => {
-    const res = await postForm('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: lpId, steamid: sid, score: changedLp[sid], scoremethod: 'ForceUpdate', format: 'json' });
+    // reveal details: this run's flagged outcome if any, else preserve an existing unread reveal (don't clobber it with a normal-match LP write).
+    const rv = reveal[sid];
+    const prev = lpDet[sid];
+    const detailsArr = rv ? [RS_MAGIC, rv.matchHash, rv.seed, rv.flag, rv.adjDelta, rv.normalDelta]
+      : (prev && prev.length >= 6 && (prev[0] & 0xff) === RS_MAGIC ? prev.slice(0, 6) : null);
+    const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: lpId, steamid: sid, score: changedLp[sid], scoremethod: 'ForceUpdate', format: 'json' }, detailsArr);
     const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
     if (!okFlag) ghWarn('write points ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
-    else console.log('  ok points ' + plog(sid) + ' = ' + changedLp[sid]);
+    else console.log('  ok points ' + plog(sid) + ' = ' + changedLp[sid] + (rv ? (' [reveal ' + (rv.flag === 1 ? 'UPSET' : 'PROTECTED') + ']') : ''));
     return okFlag;
   });
   const wXp = await mapPool(Object.keys(changedXp), CONCURRENCY, async (sid) => {
@@ -368,4 +422,4 @@ async function main() {
 if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
-module.exports = { isVoidDisp, voidByConsensus, lpDelta, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, pid, XP_CFG, LEAVER_XP };
+module.exports = { isVoidDisp, voidByConsensus, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, pid, XP_CFG, LEAVER_XP, reducedStakesPlan, RS_MAGIC };
