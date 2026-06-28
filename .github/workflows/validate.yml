@@ -26,14 +26,19 @@ jobs:
           LB_PREFIX: ${{ secrets.LB_PREFIX }}
           RANKED_LB: ${{ secrets.RANKED_LB }}
           LP_LB: ${{ secrets.LP_LB }}
+          XP_LB: ${{ secrets.XP_LB }}
           STATE_SALT: ${{ secrets.STATE_SALT }}
         run: node validate.js
       - name: persist
         run: |
-          if [ -n "$(git status --porcelain processed.json skill.json leavers.json xp.json)" ]; then
+          state_files=""
+          for f in processed.json skill.json leavers.json xp.json; do
+            [ -f "$f" ] && state_files="$state_files $f"
+          done
+          if [ -n "$state_files" ] && [ -n "$(git status --porcelain -- $state_files)" ]; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add processed.json skill.json leavers.json xp.json
+            git add -- $state_files
             git commit -m "state: update reconciliation state"
             git push
           else
