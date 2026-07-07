@@ -125,8 +125,33 @@ function lpDelta(lp, rank, pc) {
   const base = p >= 0.5 ? seg.win * (2 * p - 1) : -seg.loss * (1 - 2 * p);
   return Math.round(base + seg.drip);
 }
-// visible points only move for ranked matches (matchType 2); quick updates the hidden rating only
+// visible points only move for ranked matches (matchType 2); quick updates the hidden rating only.
+// team match types (3/4) intentionally stay false here: the halved team-LP path ships together with
+// the ranked team gate -- until then a type-4 record cannot legitimately exist.
 function appliesLp(mt) { return (mt | 0) === 2; }
+// team match types: 3/4 = quick/ranked team-brawl (mode 1); 5/6 reserved for mode 2.
+function isTeamMt(mt) { mt = mt | 0; return mt === 3 || mt === 4; }
+// team matches rank by the fixed seat convention instead of raw score order: seats (0,1) = team A,
+// (2,3) = team B; the winning pair (higher seat-pair total, tie -> team A) takes ranks {1,2} ordered
+// by own score (tie -> lower seat), the losing pair takes {3,4}. Derived from the consistent score
+// vector only -- never from the self-reported rank field. Returns null unless all 4 seats are
+// present (e.g. leaver matches fall back to raw score order). Mirrors the client's results ordering.
+function teamRankOf(parts) {
+  if (!parts || parts.length !== 4) return null;
+  let a = 0, b = 0;
+  for (const p of parts) { if (((p.seat | 0) >> 1) === 0) a += p.score | 0; else b += p.score | 0; }
+  const winTeam = b > a ? 1 : 0;
+  const order = [...parts].sort((x, y) => {
+    const tx = (((x.seat | 0) >> 1) === winTeam) ? 0 : 1;
+    const ty = (((y.seat | 0) >> 1) === winTeam) ? 0 : 1;
+    if (tx !== ty) return tx - ty;
+    if ((y.score | 0) !== (x.score | 0)) return (y.score | 0) - (x.score | 0);
+    return (x.seat | 0) - (y.seat | 0);
+  });
+  const rankOf = {};
+  for (let i = 0; i < order.length; i++) rankOf[order[i].steamID] = i + 1;
+  return rankOf;
+}
 // clamp-aware authoritative leaver deduction (never below 0)
 function leaverLpPenalty(cur, pen) { return Math.max(0, (cur | 0) - (pen | 0)); }
 
@@ -339,6 +364,13 @@ async function main() {
     const sorted = [...parts].sort((a, b) => b.score - a.score);
     let rank = 1; const rankOf = {};
     for (let i = 0; i < sorted.length; i++) { if (i > 0 && sorted[i].score < sorted[i - 1].score) rank = i + 1; sorted[i].rank = rank; rankOf[sorted[i].steamID] = rank; }
+    // team modes: overwrite with the team-convention ranks BEFORE XP/TrueSkill so both consume the
+    // same ordering the client showed optimistically (winning pair {1,2}); falls back to raw score
+    // order when a seat is missing (teamRankOf returns null).
+    if (isTeamMt(matchType)) {
+      const tr = teamRankOf(parts);
+      if (tr) { for (const p of parts) rankOf[p.steamID] = tr[p.steamID]; for (const s of sorted) s.rank = tr[s.steamID]; }
+    }
     // points are credited for BOTH settled AND consensus-VOID matches -- VOID only gates MMR/LP; an innocent victim
     //   still earns participation points (mirrors the client crediting innocent records). per-record class-driven.
     if (xpId) creditXp(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers, today);
@@ -422,4 +454,4 @@ async function main() {
 if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
-module.exports = { isVoidDisp, voidByConsensus, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, pid, XP_CFG, LEAVER_XP, reducedStakesPlan, RS_MAGIC };
+module.exports = { isVoidDisp, voidByConsensus, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, pid, XP_CFG, LEAVER_XP, reducedStakesPlan, RS_MAGIC };
