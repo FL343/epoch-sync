@@ -125,12 +125,23 @@ function lpDelta(lp, rank, pc) {
   const base = p >= 0.5 ? seg.win * (2 * p - 1) : -seg.loss * (1 - 2 * p);
   return Math.round(base + seg.drip);
 }
-// visible points only move for ranked matches (matchType 2); quick updates the hidden rating only.
-// team match types (3/4) intentionally stay false here: the halved team-LP path ships together with
-// the ranked team gate -- until then a type-4 record cannot legitimately exist.
-function appliesLp(mt) { return (mt | 0) === 2; }
+// matchType layout: base mode code in the low nibble, FFA "premade seat-pair" bitmask in bits 4..7
+// (bit k set = seats (2k, 2k+1) queued together as a party). The host derives the mask from the
+// mutually-acknowledged party groups at seat time and broadcasts it with the match start payload,
+// so every honest end composes the same code -- and since the match group key contains d[2], a
+// lone end forging its mask just orphans its own record (and gets convicted absent by the rest).
+// Team codes (3/4/5/6) never carry a mask: the fixed seat convention already encodes grouping.
+// FFA codes carry it so the settle pass can apply the premade average-rank LP rule (design line 66)
+// with no record-layout change.
+function baseMt(mt) { return (mt | 0) & 0xF; }
+function premadeMaskOf(mt) { return ((mt | 0) >> 4) & 0xF; }
+// visible points move for ranked matches only; quick classes update the hidden rating.
+// base 4 (ranked team-brawl) flips on HERE, in the same change that ships the halved team-LP path
+// (teamLpPlan below) -- the plan's red line: a type-4 record must never reach the individual
+// full-stakes LP path. Base 6 (ranked mode 2) stays false until mode 2 ships its own LP rules (M5).
+function appliesLp(mt) { const b = baseMt(mt); return b === 2 || b === 4; }
 // team match types: 3/4 = quick/ranked team-brawl (mode 1); 5/6 reserved for mode 2.
-function isTeamMt(mt) { mt = mt | 0; return mt === 3 || mt === 4; }
+function isTeamMt(mt) { const b = baseMt(mt); return b === 3 || b === 4; }
 // team matches rank by the fixed seat convention instead of raw score order: seats (0,1) = team A,
 // (2,3) = team B; the winning pair (higher seat-pair total, tie -> team A) takes ranks {1,2} ordered
 // by own score (tie -> lower seat), the losing pair takes {3,4}. Derived from the consistent score
@@ -162,28 +173,100 @@ const RS_THRESHOLD = Number(process.env.RS_THRESHOLD || 400);            // pre-
 const RS_UPSET_BONUS = Number(process.env.RS_UPSET_BONUS || 1.0);        // weak side over-performs: 1.0 = full (>1 = super reward)
 const RS_STRONG_UPSET_LOSS = Number(process.env.RS_STRONG_UPSET_LOSS || 0.5); // strong side upset: mild penalty (not the strict tier coeff)
 const RS_MAGIC = 0xC5;                                                   // reveal-details marker; flags: 0 none / 1 upset / 2 protected
-// pure: parts = [{ steamID, mmr (pre-match display rating), rank (1-based), lp (current) }]. returns null if not applicable,
-//   else { [steamID]: { adjDelta, flag, normalDelta } }. Drip is never discounted (only the win/loss component is scaled).
-function reducedStakesPlan(parts, matchType) {
-  if (!appliesLp(matchType) || !parts || parts.length < 2) return null;
+// pure: parts = [{ steamID, seat, mmr (pre-match display rating), rank (1-based), lp (current) }]. returns null if
+//   not applicable, else { [steamID]: { adjDelta, flag, normalDelta } }. Drip is never discounted (only the
+//   win/loss component is scaled).
+// M3 (PARTY_MODES §5.3, design line 66): FFA settles in UNITS -- a premade seat-pair (both members present)
+//   is one unit: average rank interpolates the win/loss component, average LP picks the tier, and BOTH members
+//   get the same delta (the premade "debt": queuing together taxes the good rank into the pair average).
+//   Mismatch compensation then applies per unit (pair average rating vs the match mean). Solo players are
+//   1-man units == the original per-player formula, bit for bit. A pair whose partner is absent (leaver)
+//   falls back to solo. With no live pair and no mismatch this returns null (caller's plain lpDelta path).
+function reducedStakesPlan(parts, matchType, premadeMask) {
+  if (!appliesLp(matchType) || isTeamMt(matchType) || !parts || parts.length < 2) return null;
+  const units = [], used = new Set();
+  if (premadeMask | 0) {
+    const bySeat = {};
+    for (const p of parts) bySeat[p.seat | 0] = p;
+    for (let pair = 0; pair < 4; pair++) {
+      if (!(((premadeMask | 0) >> pair) & 1)) continue;
+      const m0 = bySeat[pair * 2], m1 = bySeat[pair * 2 + 1];
+      if (m0 && m1) { units.push([m0, m1]); used.add(m0.steamID); used.add(m1.steamID); }
+    }
+  }
+  for (const p of parts) if (!used.has(p.steamID)) units.push([p]);
   const mmrs = parts.map(p => p.mmr | 0);
-  if (Math.max.apply(null, mmrs) - Math.min.apply(null, mmrs) <= RS_THRESHOLD) return null;
+  const mismatch = Math.max.apply(null, mmrs) - Math.min.apply(null, mmrs) > RS_THRESHOLD;
+  if (!mismatch && units.every(u => u.length === 1)) return null;   // fair all-solo match: plain lpDelta path
   const mean = mmrs.reduce((a, b) => a + b, 0) / mmrs.length;
   const pc = parts.length, out = {};
-  for (const p of parts) {
-    const seg = lpSeg(p.lp | 0);
-    const prog = pc <= 1 ? 0.5 : (pc - 1 - ((p.rank | 0) - 1)) / (pc - 1);
+  for (const u of units) {
+    const uRank = u.reduce((s, p) => s + (p.rank | 0), 0) / u.length;
+    const uLp = u.reduce((s, p) => s + (p.lp | 0), 0) / u.length;
+    const uMmr = u.reduce((s, p) => s + (p.mmr | 0), 0) / u.length;
+    const seg = lpSeg(uLp);
+    const prog = pc <= 1 ? 0.5 : (pc - 1 - (uRank - 1)) / (pc - 1);
     const base = prog >= 0.5 ? seg.win * (2 * prog - 1) : -seg.loss * (1 - 2 * prog);
     const normalDelta = Math.round(base + seg.drip);
     let factor = 1, flag = 0;
-    if ((p.mmr | 0) < mean) {                                  // weak side
+    if (mismatch && uMmr < mean) {                             // weak side
       if (base > 0) { factor = RS_UPSET_BONUS; flag = 1; }     //   placed up = upset (full/super, not compressed)
       else { factor = seg.rs; if (normalDelta < 0) flag = 2; } //   placed down = protected (loss compressed; reveal only on a real net loss)
-    } else if ((p.mmr | 0) > mean) {                           // strong side (no client reveal)
+    } else if (mismatch && uMmr > mean) {                      // strong side (no client reveal)
       if (base >= 0) factor = seg.rs;                           //   won as expected = gain compressed
       else factor = RS_STRONG_UPSET_LOSS;                       //   lost an upset = mild penalty
     }
-    out[p.steamID] = { adjDelta: Math.round(base * factor + seg.drip), flag, normalDelta };
+    const adjDelta = Math.round(base * factor + seg.drip);
+    for (const p of u) out[p.steamID] = { adjDelta, flag, normalDelta };
+  }
+  return out;
+}
+
+// ===== M3 (PARTY_MODES §5.2 + §6 line 118 + §7): team-brawl visible-LP planner (match types 3/4; only 4
+//   actually applies LP). Binary team outcome from the frozen score vector -- a leaver's score still counts
+//   for his team's total. The win/loss component uses the TEAM-average tier (design: "team LP first, then
+//   halve"), is scaled by mismatch compensation at TEAM granularity (team-average rating vs the match mean,
+//   coefficient = team-average tier's rs), then HALVED per member; drip is added per member at full value
+//   from his OWN tier (design line 76: the halving only ever touches the win/loss component).
+//   §7 abandoned-teammate shield: a present member whose teammate was convicted absent gets his loss
+//   compressed by his own tier's rs (min with any mismatch factor) and a PROTECTED reveal on a real net loss.
+//   parts: [{ steamID, seat, mmr, lp }] (present ends only); scores: full 4-seat frozen vector;
+//   leaverSeats: consensus-absent seats. Returns { [steamID]: { adjDelta, flag, normalDelta } } or null. =====
+function teamLpPlan(parts, matchType, scores, leaverSeats) {
+  if (!appliesLp(matchType) || !isTeamMt(matchType)) return null;
+  if (!parts || !parts.length || !scores || scores.length < 4) return null;
+  const teamOf = s => ((s | 0) >> 1) & 1;
+  const aTotal = (scores[0] | 0) + (scores[1] | 0), bTotal = (scores[2] | 0) + (scores[3] | 0);
+  const winTeam = bTotal > aTotal ? 1 : 0;   // tie -> team A (mirrors teamRankOf / the client rule)
+  // team aggregates over PRESENT members (an absent leaver has no record: not averaged in)
+  const agg = [{ n: 0, lp: 0, mmr: 0 }, { n: 0, lp: 0, mmr: 0 }];
+  for (const p of parts) { const t = teamOf(p.seat); agg[t].n++; agg[t].lp += p.lp | 0; agg[t].mmr += p.mmr | 0; }
+  const mmrs = parts.map(p => p.mmr | 0);
+  const mismatch = mmrs.length >= 2 && (Math.max.apply(null, mmrs) - Math.min.apply(null, mmrs) > RS_THRESHOLD);
+  const mean = mmrs.reduce((a, b) => a + b, 0) / (mmrs.length || 1);
+  const shielded = new Set();
+  for (const s of (leaverSeats || [])) for (const p of parts) {
+    if (teamOf(p.seat) === teamOf(s) && (p.seat | 0) !== (s | 0)) shielded.add(p.steamID);
+  }
+  const out = {};
+  for (const p of parts) {
+    const t = teamOf(p.seat), won = t === winTeam;
+    const tAvgLp = agg[t].n ? agg[t].lp / agg[t].n : (p.lp | 0);
+    const tAvgMmr = agg[t].n ? agg[t].mmr / agg[t].n : (p.mmr | 0);
+    const tSeg = lpSeg(tAvgLp), ownSeg = lpSeg(p.lp | 0);
+    const base = won ? tSeg.win : -tSeg.loss;
+    let factor = 1, flag = 0, protectedLoss = false;
+    if (mismatch && tAvgMmr < mean) {                          // weak team
+      if (won) { factor = RS_UPSET_BONUS; flag = 1; }
+      else { factor = tSeg.rs; protectedLoss = true; }
+    } else if (mismatch && tAvgMmr > mean) {                   // strong team
+      factor = won ? tSeg.rs : RS_STRONG_UPSET_LOSS;
+    }
+    if (!won && shielded.has(p.steamID)) { factor = Math.min(factor, ownSeg.rs); protectedLoss = true; }
+    const normalDelta = Math.round(base / 2 + ownSeg.drip);
+    const adjDelta = Math.round(base * factor / 2 + ownSeg.drip);
+    if (protectedLoss && normalDelta < 0 && flag === 0) flag = 2;
+    out[p.steamID] = { adjDelta, flag, normalDelta };
   }
   return out;
 }
@@ -376,10 +459,28 @@ async function main() {
     if (xpId) creditXp(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers, today);
     if (c.void) { console.log('  VOID ' + c.m + ': consensus -> no MMR/points'); processed.add(c.m); voided++; continue; }
     if (parts.length < 2) { processed.add(c.m); continue; }
+    const leavers0 = detectLeavers(g);   // consensus-absent seats: LP penalty below + §7 teammate shield input
     const tsIn = parts.map(p => { const sk = skill[pid(p.steamID)] || ts.DEFAULTS; return { id: p.steamID, rank: rankOf[p.steamID], mu: sk.mu, sigma: sk.sigma }; });
-    const tsOut = ts.updateMatch(tsIn);
-    // mismatch compensation uses PRE-match ratings (tsIn) + current LP -> per-player adjusted LP delta + reveal flag.
-    const rsPlan = reducedStakesPlan(tsIn.map(t => ({ steamID: t.id, mmr: ts.displayRating(t.mu, t.sigma), rank: t.rank, lp: (lp[t.id] == null ? 0 : lp[t.id]) })), matchType);
+    let tsOut;
+    if (isTeamMt(matchType)) {
+      // M3: team modes rate as TWO TEAMS (strength = sum mu, binary outcome) -- the ordinal pairwise
+      // update would also transfer rating between TEAMMATES (rank 1 vs rank 2), which team play must not.
+      const winTeam = ((scores[2] | 0) + (scores[3] | 0)) > ((scores[0] | 0) + (scores[1] | 0)) ? 1 : 0;
+      const sides = [[], []];
+      for (let i = 0; i < parts.length; i++) sides[(parts[i].seat >> 1) & 1].push(tsIn[i]);
+      tsOut = (sides[0].length && sides[1].length)
+        ? ts.updateTeamMatch([{ players: sides[winTeam], rank: 1 }, { players: sides[1 - winTeam], rank: 2 }])
+        : ts.updateMatch(tsIn);   // one side fully absent -> degenerate: ordinal fallback among the present
+    } else {
+      tsOut = ts.updateMatch(tsIn);
+    }
+    // visible-LP plan uses PRE-match ratings (tsIn) + current LP -> per-player adjusted delta + reveal flag.
+    //   team matches: halved team-LP path (teamLpPlan); FFA: per-unit plan (premade pairs from the
+    //   matchType mask settle at their average rank -- design line 66; solos = original formula).
+    const planIn = tsIn.map((t, i) => ({ steamID: t.id, seat: parts[i].seat | 0, mmr: ts.displayRating(t.mu, t.sigma), rank: t.rank, lp: (lp[t.id] == null ? 0 : lp[t.id]) }));
+    const rsPlan = isTeamMt(matchType)
+      ? teamLpPlan(planIn, matchType, scores, leavers0.map(x => x.seat))
+      : reducedStakesPlan(planIn, matchType, premadeMaskOf(matchType));
     for (const r of tsOut) {
       skill[pid(r.id)] = { mu: r.mu, sigma: r.sigma };
       changed[r.id] = { mu: r.mu, sigma: r.sigma };
@@ -395,7 +496,7 @@ async function main() {
       }
       console.log('  settle ' + c.m + ': ' + plog(r.id) + ' rank' + rankOf[r.id] + ' mu' + r.mu.toFixed(2) + ' sigma' + r.sigma.toFixed(2) + ' -> ' + ts.displayRating(r.mu, r.sigma) + lpLine);
     }
-    for (const x of detectLeavers(g)) {
+    for (const x of leavers0) {
       leavers[pid(x.steamID)] = leavers[pid(x.steamID)] || { leaves: 0, lastMatch: '' };
       leavers[pid(x.steamID)].leaves += 1; leavers[pid(x.steamID)].lastMatch = c.m; leaverHits++;
       console.log('  leaver ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' (in roster, no record; total ' + leavers[pid(x.steamID)].leaves + ')');
@@ -454,4 +555,4 @@ async function main() {
 if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
-module.exports = { isVoidDisp, voidByConsensus, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, pid, XP_CFG, LEAVER_XP, reducedStakesPlan, RS_MAGIC };
+module.exports = { isVoidDisp, voidByConsensus, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, pid, XP_CFG, LEAVER_XP, LP_SEG, reducedStakesPlan, teamLpPlan, RS_MAGIC };

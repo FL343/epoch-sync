@@ -1,7 +1,7 @@
 'use strict';
 // Unit tests for the team-mode match handling (match types 3/4): isTeamMt classification,
-// appliesLp stays ranked-FFA-only (type-4 team LP ships with the halved team-LP path later),
-// and teamRankOf -- the seat-convention ranking (seats (0,1) vs (2,3), winning pair {1,2})
+// appliesLp (ranked classes 2 AND 4 -- type 4 flipped on together with the halved team-LP
+// path, see test/team-lp.js), and teamRankOf -- the seat-convention ranking (seats (0,1) vs (2,3), winning pair {1,2})
 // that replaces raw score order for team matches. Mirrors the client's results ordering.
 //   node test/team-rank.js
 process.env.STATE_SALT = process.env.STATE_SALT || 'test-salt';
@@ -19,8 +19,14 @@ eq('isTeamMt: 1/2 (FFA) false', [isTeamMt(1), isTeamMt(2)], [false, false]);
 eq('isTeamMt: 3/4 (team mode 1) true', [isTeamMt(3), isTeamMt(4)], [true, true]);
 eq('isTeamMt: 5/6 (mode 2, reserved) false until it ships', [isTeamMt(5), isTeamMt(6)], [false, false]);
 eq('appliesLp: 3 (quick team) false -- quick never moves LP', appliesLp(3), false);
-eq('appliesLp: 4 (ranked team) false -- pinned until the halved team-LP path ships', appliesLp(4), false);
+eq('appliesLp: 4 (ranked team) TRUE -- flipped in the same change as the halved team-LP path (teamLpPlan)', appliesLp(4), true);
 eq('appliesLp: 2 (ranked FFA) still true', appliesLp(2), true);
+eq('appliesLp: 5/6 (mode 2, reserved) false until mode 2 ships its own LP rules', [appliesLp(5), appliesLp(6)], [false, false]);
+// premade-mask codes (base mode in the low nibble, premade seat-pair mask in bits 4..7):
+// the mask must not change any classification -- only the FFA settle pass consumes it
+eq('appliesLp: masked ranked FFA (0x12/0x22/0x32) still true', [appliesLp(0x12), appliesLp(0x22), appliesLp(0x32)], [true, true, true]);
+eq('appliesLp: masked quick FFA (0x11/0x21) still false', [appliesLp(0x11), appliesLp(0x21)], [false, false]);
+eq('isTeamMt: masked FFA codes stay non-team', [isTeamMt(0x12), isTeamMt(0x22)], [false, false]);
 
 // ============================================================
 console.log('=== teamRankOf (seat convention (0,1) vs (2,3), winners {1,2}) ===');

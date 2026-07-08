@@ -12,12 +12,23 @@ For consistent matches it derives placement from the agreed score vector, update
 TrueSkill (mu/sigma) rating, and writes the authoritative display rating + visible
 points to trusted (publisher-write-only) leaderboards that clients read back.
 
-Visible points (the LP ladder) move for **ranked matches only** (matchType 2); quick
-matches update the hidden rating only. A consensus-detected leaver (in roster, no
+Visible points (the LP ladder) move for **ranked matches only** (base matchType 2 or 4);
+quick matches update the hidden rating only. A consensus-detected leaver (in roster, no
 settle record) loses a fixed points penalty in the ranked ladder — this is the
 authoritative half of the client's optimistic deduction, so it survives read-back
 rather than being reverted. Single-side records can't frame a leaver (majority roster
 vote), and each match is penalized at most once (idempotent via `processed.json`).
+
+**Team match types** (base 3/4 = quick/ranked team-brawl): placement follows the fixed
+seat convention — seats (0,1) vs (2,3), winning pair takes ranks {1,2} — instead of raw
+score order, the rating update treats each side as one team (strength = summed mu,
+binary outcome, per-member updates), and ranked team points are the halved team result
+(win/loss component from the team-average tier, personal drip added at full value).
+A player whose teammate was convicted absent gets his loss compressed (protected).
+**Premade pairs inside an FFA match** are declared as a seat-pair bitmask in the
+matchType's high bits (the match group key contains the full code, so a lone forged
+mask only orphans that record): the pair settles at its average placement and average
+tier with one shared delta, and mismatch compensation treats the pair as a single unit.
 
 It also maintains a separate **cumulative progression ladder** (`XP_LB`, optional): a
 per-game points total that only accrues. Each present record earns points derived from
@@ -35,7 +46,8 @@ absent, so a run is unaffected before it is provisioned.
   protect/reward the weak side) revealed back to the client via points-board detail bytes.
 - `trueskill.js` — TrueSkill (mu/sigma) update + display rating.
 - `test/void-consensus.js`, `test/leaver-absence.js`, `test/lp-penalty.js`,
-  `test/xp-ladder.js`, `test/reduced-stakes.js` — unit tests for the pure helpers (run one with
+  `test/xp-ladder.js`, `test/reduced-stakes.js`, `test/team-rank.js`, `test/team-lp.js`
+  — unit tests for the pure helpers (run one with
   `node test/<name>.js`; CI runs all of `test/*.js` before each reconcile).
 - `.github/workflows/validate.yml` — scheduled run + state persistence.
 
