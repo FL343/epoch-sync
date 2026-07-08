@@ -1,0 +1,37 @@
+name: canary
+# Dead-man switch: the reconcile workflow is fired by an EXTERNAL 5-minute timer, so if that timer
+# (or its token) dies there are no runs at all -- no failures, no failure e-mails, pure silence.
+# This schedule runs on GitHub's own cron (independent of the external timer) and FAILS when the
+# last successful reconcile is older than the freshness threshold; a failed run triggers GitHub's
+# built-in workflow-failure e-mail to the repo owner. GitHub throttles schedules on low-activity
+# repos to a few firings per day -- fine for a canary (detection within hours, not minutes).
+# Manual drill: dispatch with max_age=1 to force a failure and verify the e-mail actually arrives.
+on:
+  schedule:
+    - cron: '23 */3 * * *'
+  workflow_dispatch:
+    inputs:
+      max_age:
+        description: 'freshness threshold in seconds (default 10800 = 3h)'
+        required: false
+        default: '10800'
+permissions:
+  actions: read
+jobs:
+  canary:
+    if: github.repository == 'FL343/epoch-sync'
+    runs-on: ubuntu-latest
+    steps:
+      - name: freshness
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAX_AGE: ${{ inputs.max_age || '10800' }}
+        run: |
+          last=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow reconcile --status success --limit 1 --json updatedAt --jq '.[0].updatedAt // empty')
+          if [ -z "$last" ]; then echo "::error::no successful reconcile run found at all"; exit 1; fi
+          age=$(( $(date -u +%s) - $(date -u -d "$last" +%s) ))
+          echo "last successful reconcile: $last (${age}s ago, threshold ${MAX_AGE}s)"
+          if [ "$age" -gt "$MAX_AGE" ]; then
+            echo "::error::reconcile silent for ${age}s -- external dispatch timer, its token, or the workflow itself is dead"
+            exit 1
+          fi
