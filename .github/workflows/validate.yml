@@ -40,6 +40,10 @@ jobs:
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add -- $state_files
             git commit -m "state: update reconciliation state"
+            # a code push landing mid-run would reject this push; losing the state commit means the
+            # next run re-settles the same matches = double-applied LP/XP. Rebase (state files are
+            # bot-only, trivially clean) and fail LOUDLY if it still cannot land.
+            git pull --rebase origin "${GITHUB_REF_NAME}" || { echo "::error::state rebase failed -- resolve manually before next run"; exit 1; }
             git push
           else
             echo "no state change"
@@ -55,6 +59,7 @@ jobs:
             date -u +%FT%TZ > .heartbeat
             git add .heartbeat
             git commit -m "chore: heartbeat"
+            git pull --rebase origin "${GITHUB_REF_NAME}" || { echo "::error::heartbeat rebase failed"; exit 1; }
             git push
           else
             echo "heartbeat not due (age ${age}d)"

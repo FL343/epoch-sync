@@ -98,6 +98,35 @@ async function mapPool(items, limit, fn) {
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
   return out;
 }
+// ---- board reads (scale-safe) ----
+// GetLeaderboardEntries silently caps a single request at 5000 rows; an un-paged read past that
+// size drops records / base values WITHOUT any error. All full-board reads go through the cursor
+// pagination below; PAGE_CAP bounds a pathological board (raise via env before raising shards).
+const PAGE_SIZE = 5000;
+const PAGE_CAP = Math.max(1, Number(process.env.PAGE_CAP || 10));   // 10 pages = 50k entries per board
+async function readBoardAll(id, label) {
+  const ents = [];
+  for (let page = 0; page < PAGE_CAP; page++) {
+    const start = page * PAGE_SIZE + 1, end = (page + 1) * PAGE_SIZE;
+    const er = await getJson(BASE + '/ISteamLeaderboards/GetLeaderboardEntries/v1/?key=' + KEY + '&appid=' + APPID + '&rangestart=' + start + '&rangeend=' + end + '&datarequest=RequestGlobal&leaderboardid=' + id + '&format=json');
+    if (!er.ok) throw new Error(label + ' HTTP ' + er.status);
+    const page0 = (er.json && er.json.leaderboardEntryInformation && er.json.leaderboardEntryInformation.leaderboardEntries) || [];
+    for (const e of page0) ents.push(e);
+    if (page0.length < PAGE_SIZE) return { ents, complete: true };   // short page = board exhausted
+  }
+  ghWarn(label + ' hit PAGE_CAP=' + PAGE_CAP + ' (' + ents.length + ' entries read, board larger) -- raise PAGE_CAP');
+  return { ents, complete: false };
+}
+// Single-player entry read (score + details) -- on-demand base-value fetch for a player who falls
+// outside the bulk-read window of a larger-than-cap board. null = the player has no entry at all.
+// Without this, settling such a player would use a base of 0 = a silent LP/XP reset.
+async function readUserEntry(id, sid, label) {
+  const er = await getJson(BASE + '/ISteamLeaderboards/GetLeaderboardEntries/v1/?key=' + KEY + '&appid=' + APPID + '&rangestart=0&rangeend=0&datarequest=RequestAroundUser&steamid=' + sid + '&leaderboardid=' + id + '&format=json');
+  if (!er.ok) throw new Error(label + ' user read HTTP ' + er.status);
+  const ents = (er.json && er.json.leaderboardEntryInformation && er.json.leaderboardEntryInformation.leaderboardEntries) || [];
+  for (const e of ents) if (String(e.steamID) === String(sid)) return e;
+  return null;
+}
 function loadProcessed() { try { return new Set(JSON.parse(fs.readFileSync(PROCESSED_FILE, 'utf8'))); } catch (e) { return new Set(); } }
 function saveProcessed(set) { try { fs.writeFileSync(PROCESSED_FILE, JSON.stringify([...set], null, 0)); } catch (e) { ghWarn('write ' + PROCESSED_FILE + ' failed: ' + (e && e.message)); } }
 const SKILL_FILE = process.env.SKILL_FILE || 'skill.json';
@@ -358,10 +387,7 @@ async function main() {
   const shardOut = await mapPool(nonEmpty, CONCURRENCY, async (s) => {
     const id = s.id || s.ID;
     const label = 's' + String(s.name || s.Name).replace(PREFIX, '');
-    const er = await getJson(BASE + '/ISteamLeaderboards/GetLeaderboardEntries/v1/?key=' + KEY + '&appid=' + APPID + '&rangestart=1&rangeend=5000&datarequest=RequestGlobal&leaderboardid=' + id + '&format=json');
-    if (!er.ok) throw new Error('shard ' + label + ' HTTP ' + er.status);
-    const ents = (er.json && er.json.leaderboardEntryInformation && er.json.leaderboardEntryInformation.leaderboardEntries) || [];
-    if (ents.length >= 5000) ghWarn('shard ' + label + ' read ' + ents.length + ' entries, may be truncated at rangeend=5000');
+    const { ents } = await readBoardAll(id, 'shard ' + label);   // paged; cap-hit is warned inside
     const out = [];
     for (const e of ents) {
       const d = decodeDetails(e.detailData);
@@ -418,22 +444,51 @@ async function main() {
   const lpId = lpLb ? (lpLb.id || lpLb.ID) : null;
   if (!lpId) ghWarn('points board not found (pre-create with onlytrustedwrites) -> skip points this run');
   const lp = {}, lpDet = {};   // lpDet = existing detail bytes per player, so an unread reveal survives a later normal-match LP update
+  let lpComplete = true;
   if (lpId) {
-    const lr2 = await getJson(BASE + '/ISteamLeaderboards/GetLeaderboardEntries/v1/?key=' + KEY + '&appid=' + APPID + '&rangestart=1&rangeend=5000&datarequest=RequestGlobal&leaderboardid=' + lpId + '&format=json');
-    for (const e of ((lr2.json && lr2.json.leaderboardEntryInformation && lr2.json.leaderboardEntryInformation.leaderboardEntries) || [])) { lp[e.steamID] = e.score | 0; lpDet[e.steamID] = decodeDetails(e.detailData); }
+    const br = await readBoardAll(lpId, 'points board');
+    lpComplete = br.complete;
+    for (const e of br.ents) { lp[e.steamID] = e.score | 0; lpDet[e.steamID] = decodeDetails(e.detailData); }
   }
   // XP ladder is optional: skip the whole XP path (no board, no state) if XP_LB is unset or the board is missing.
   const xpLb = XP_LB ? ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).find(x => String(x.name || x.Name) === XP_LB) : null;
   const xpId = xpLb ? (xpLb.id || xpLb.ID) : null;
   if (XP_LB && !xpId) ghWarn('xp board not found (pre-create with onlytrustedwrites) -> skip xp this run');
   const xp = {};
+  let xpComplete = true;
   if (xpId) {
-    const lr3 = await getJson(BASE + '/ISteamLeaderboards/GetLeaderboardEntries/v1/?key=' + KEY + '&appid=' + APPID + '&rangestart=1&rangeend=5000&datarequest=RequestGlobal&leaderboardid=' + xpId + '&format=json');
-    for (const e of ((lr3.json && lr3.json.leaderboardEntryInformation && lr3.json.leaderboardEntryInformation.leaderboardEntries) || [])) xp[e.steamID] = e.score | 0;
+    const br = await readBoardAll(xpId, 'xp board');
+    xpComplete = br.complete;
+    for (const e of br.ents) xp[e.steamID] = e.score | 0;
   }
   const xpState = xpId ? loadXp() : {};
 
   fresh.sort((a, b) => (a.m < b.m ? -1 : a.m > b.m ? 1 : 0));
+  // On-demand base values: when a bulk read hit PAGE_CAP the maps are incomplete -- a settling
+  // player missing from them may still hold an entry beyond the window, and settling from base 0
+  // would silently reset his LP/XP. Fetch exactly the players this run settles (record holders +
+  // roster members: leaver LP penalty targets roster sids that wrote no record). A missing entry
+  // after the targeted read is a genuine new player (base 0 correct).
+  if ((lpId && !lpComplete) || (xpId && !xpComplete)) {
+    const need = new Set();
+    for (const c of fresh) for (const r of c.g) {
+      need.add(String(r.steamID));
+      for (const sid of Object.values(r.roster || {})) need.add(String(sid));
+    }
+    const fetched = await mapPool([...need], CONCURRENCY, async (sid) => {
+      if (lpId && !lpComplete && lp[sid] == null) {
+        const e = await readUserEntry(lpId, sid, 'points');
+        if (e) { lp[sid] = e.score | 0; lpDet[sid] = decodeDetails(e.detailData); }
+      }
+      if (xpId && !xpComplete && xp[sid] == null) {
+        const e = await readUserEntry(xpId, sid, 'xp');
+        if (e) xp[sid] = e.score | 0;
+      }
+    });
+    const failed = fetched.filter(x => x.status === 'rejected');
+    if (failed.length) { ghErr('on-demand base reads failed (' + failed.length + '/' + need.size + ') -- abort run, do NOT settle from base 0'); process.exit(1); }
+    console.log('on-demand base reads: ' + need.size + ' players (bulk window incomplete)');
+  }
   const today = Math.floor(Date.now() / 86400000);   // UTC day index (matches client lastWinDay) for the daily-first bonus
   const changed = {}; const changedLp = {}; const changedXp = {}; const reveal = {}; let settled = 0, voided = 0;
   for (const c of fresh) {
@@ -555,4 +610,4 @@ async function main() {
 if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
-module.exports = { isVoidDisp, voidByConsensus, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, pid, XP_CFG, LEAVER_XP, LP_SEG, reducedStakesPlan, teamLpPlan, RS_MAGIC };
+module.exports = { isVoidDisp, voidByConsensus, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, pid, XP_CFG, LEAVER_XP, LP_SEG, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP };
