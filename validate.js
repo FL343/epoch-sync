@@ -154,6 +154,32 @@ function lpDelta(lp, rank, pc) {
   const base = p >= 0.5 ? seg.win * (2 * p - 1) : -seg.loss * (1 - 2 * p);
   return Math.round(base + seg.drip);
 }
+// ===== hard promotion/relegation series (user design 2026-07-10). =====
+// A player whose pre-match LP sits within BOUNDARY_MARGIN of a tier line is "in series" -- the
+// client shows the promotion/relegation-match UI + intro music for exactly that state (lockstep
+// mirror of RatingStore.boundaryState). The series rule makes the outcome decisive:
+//   promotion match + top-half finish (teams: team won)  -> always crosses UP   (lands min+PROMO_LAND)
+//   relegation match + bottom-half finish (teams: lost)  -> always crosses DOWN (lands min-RELEG_LAND)
+// Implemented as a clamp on the final per-player delta so it composes with reduced-stakes factors,
+// team halving and the premade average-rank rule; a natural delta already past the line is kept.
+// The margin (120) exceeds the largest natural swing (~50), so line crossings can ONLY happen in a
+// series match -- this clamp adds the reverse guarantee (series win/loss is always decisive).
+// PROTECTED ends (flag 2: mismatch weak side / abandoned-teammate shield, design line 7) keep their
+// compressed natural loss instead of the forced drop. The leaver -100 penalty path stays independent.
+const BOUNDARY_MARGIN = 120, PROMO_LAND = 10, RELEG_LAND = 15;
+function boundaryOf(lp) {
+  let i = 0; for (let k = 0; k < LP_SEG.length; k++) if (lp >= LP_SEG[k].min) i = k;
+  if (i > 0 && lp - LP_SEG[i].min <= BOUNDARY_MARGIN) return 'relegation';
+  if (i < LP_SEG.length - 1 && LP_SEG[i + 1].min - lp <= BOUNDARY_MARGIN) return 'promotion';
+  return null;
+}
+function crosslineDelta(lp, delta, won) {
+  const b = boundaryOf(lp);
+  let i = 0; for (let k = 0; k < LP_SEG.length; k++) if (lp >= LP_SEG[k].min) i = k;
+  if (b === 'promotion' && won) return Math.max(delta, LP_SEG[i + 1].min + PROMO_LAND - lp);
+  if (b === 'relegation' && !won) return Math.min(delta, LP_SEG[i].min - RELEG_LAND - lp);
+  return delta;
+}
 // matchType layout: base mode code in the low nibble, FFA "premade seat-pair" bitmask in bits 4..7
 // (bit k set = seats (2k, 2k+1) queued together as a party). The host derives the mask from the
 // mutually-acknowledged party groups at seat time and broadcasts it with the match start payload,
@@ -246,7 +272,9 @@ function reducedStakesPlan(parts, matchType, premadeMask) {
       else factor = RS_STRONG_UPSET_LOSS;                       //   lost an upset = mild penalty
     }
     const adjDelta = Math.round(base * factor + seg.drip);
-    for (const p of u) out[p.steamID] = { adjDelta, flag, normalDelta };
+    // won = top-half finish at the unit's (average) rank -- the same sign line the base uses;
+    // consumed by the series clamp (crosslineDelta) at settle time.
+    for (const p of u) out[p.steamID] = { adjDelta, flag, normalDelta, won: prog >= 0.5 };
   }
   return out;
 }
@@ -295,7 +323,7 @@ function teamLpPlan(parts, matchType, scores, leaverSeats) {
     const normalDelta = Math.round(base / 2 + ownSeg.drip);
     const adjDelta = Math.round(base * factor / 2 + ownSeg.drip);
     if (protectedLoss && normalDelta < 0 && flag === 0) flag = 2;
-    out[p.steamID] = { adjDelta, flag, normalDelta };
+    out[p.steamID] = { adjDelta, flag, normalDelta, won };   // won feeds the series clamp at settle
   }
   return out;
 }
@@ -543,11 +571,17 @@ async function main() {
       if (lpId && appliesLp(matchType)) {   // quick = MMR only; visible LP ladder is ranked-only
         const cur = lp[r.id] == null ? 0 : lp[r.id];
         const rs = rsPlan && rsPlan[r.id];
-        const d = rs ? rs.adjDelta : lpDelta(cur, rankOf[r.id], parts.length);
+        const d0 = rs ? rs.adjDelta : lpDelta(cur, rankOf[r.id], parts.length);
+        // promotion/relegation series clamp: decisive line crossing for the boundary-zone match.
+        //   won: plan-supplied (unit average rank / team outcome), else top-half at own rank.
+        //   PROTECTED (flag 2) keeps its compressed natural loss -- no forced drop.
+        const wonLike = rs ? !!rs.won : ((rankOf[r.id] | 0) <= (parts.length + 1) / 2);
+        const d = (rs && rs.flag === 2) ? d0 : crosslineDelta(cur, d0, wonLike);
         const nv = Math.max(0, Math.min(LP_MAX, cur + d));
         lp[r.id] = nv; changedLp[r.id] = nv;
         if (rs && rs.flag) reveal[r.id] = { matchHash: g[0].d[3] | 0, seed: g[0].d[4] | 0, flag: rs.flag, adjDelta: d, normalDelta: rs.normalDelta };
-        lpLine = ' | pts ' + cur + (d >= 0 ? '+' : '') + d + '->' + nv + (rs && rs.flag ? (' [' + (rs.flag === 1 ? 'UPSET' : 'PROTECTED') + ' normal ' + rs.normalDelta + ']') : '');
+        lpLine = ' | pts ' + cur + (d >= 0 ? '+' : '') + d + '->' + nv + (rs && rs.flag ? (' [' + (rs.flag === 1 ? 'UPSET' : 'PROTECTED') + ' normal ' + rs.normalDelta + ']') : '')
+          + (d !== d0 ? (' [SERIES ' + (wonLike ? 'PROMOTED' : 'RELEGATED') + ' from ' + d0 + ']') : '');
       }
       console.log('  settle ' + c.m + ': ' + plog(r.id) + ' rank' + rankOf[r.id] + ' mu' + r.mu.toFixed(2) + ' sigma' + r.sigma.toFixed(2) + ' -> ' + ts.displayRating(r.mu, r.sigma) + lpLine);
     }
@@ -610,4 +644,4 @@ async function main() {
 if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
-module.exports = { isVoidDisp, voidByConsensus, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, pid, XP_CFG, LEAVER_XP, LP_SEG, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP };
+module.exports = { isVoidDisp, voidByConsensus, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, pid, XP_CFG, LEAVER_XP, LP_SEG, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND };
