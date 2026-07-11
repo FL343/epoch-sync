@@ -17,6 +17,7 @@ const CONCURRENCY = Math.max(1, Number(process.env.CONCURRENCY || 8));
 const pid = (s) => crypto.createHmac('sha256', String(SALT || '')).update(String(s)).digest('hex').slice(0, 16);
 const plog = (s) => pid(s).slice(0, 8);
 
+const START_MAGIC = 0xB2;   // start-attestation record (settle records stay 0xB1; lockstep with the client writer)
 const DISP_NAME = ['finished', 'peers-gone', 'host-left', 'level-begin-timeout', 'migrate-disband', 'user-quit', 'reconnect-failed'];
 const dispName = c => (DISP_NAME[c | 0] || ('disp' + (c | 0)));
 const isVoidDisp = c => (c | 0) >= 2;
@@ -61,6 +62,74 @@ function detectLeavers(g) {
     if (best && bestN * 2 > g.length) leavers.push({ seat, steamID: best });
   }
   return leavers;
+}
+// ---- start-attestation records (magic 0xB2) ----
+// Every client writes a start-type record when level 1 actually begins (same field layout as a
+// settle record with all result fields zeroed, so decodeRoster and the composite group key are
+// reused verbatim). They close the detection blind spot of a match NOBODY settles: absence-based
+// leaver conviction needs a finisher's record as its anchor, so a match where every participant
+// quits (or a coordinated dodge) used to vanish without a trace.
+//
+// Pending state (STARTS_FILE) is required because leaderboard entries carry no timestamp and a
+// writer's later matches overwrite his shard entry: the consensus roster is captured (HMAC pids
+// only, matching the rest of the state) the first time a start group is seen, and judged once the
+// entry is older than STARTS_MATURITY_MS.
+//
+// Verdict at maturity with no consistent settlement: every consensus-roster member who wrote no
+// settle record gets an exit-rate hit (leavers.json -> effectiveLeaverFactor). Deliberately NO LP
+// deduction: with zero finisher testimony an all-absent match cannot be told apart from a
+// migration-failure / crash cascade, so the harsh ranked penalty stays on the finisher-consensus
+// path (detectLeavers). Escalation on top of this signal is trust-graph territory.
+function reconcileStarts(starts, groups, consistentKeys, processed, pending, leavers, now, maturityMs) {
+  const sg = {};
+  for (const r of starts) { const m = r.d[3] + '_' + r.d[4] + '_' + r.d[2]; (sg[m] = sg[m] || []).push(r); }
+  let registered = 0, convicted = 0, cleaned = 0;
+  // 1) register new pending entries (sticky first-seen: shard entries may be overwritten later)
+  for (const m of Object.keys(sg)) {
+    if (processed.has(m) || pending[m]) continue;
+    const bySid = {};   // one vote per distinct writer (a cold-reconnect duplicate collapses)
+    for (const r of sg[m]) bySid[String(r.steamID)] = r;
+    const att = Object.values(bySid);
+    if (att.length < 2) continue;   // a single attestation convicts nobody (mirrors settle consensus)
+    const votes = {};
+    for (const r of att) for (const seatKey of Object.keys(r.roster || {})) {
+      const seat = seatKey | 0, sid = r.roster[seatKey];
+      (votes[seat] = votes[seat] || {})[sid] = (votes[seat][sid] || 0) + 1;
+    }
+    const roster = {}; let n = 0;
+    for (const seatKey of Object.keys(votes)) {
+      let best = null, bestN = 0;
+      for (const sid of Object.keys(votes[seatKey])) if (votes[seatKey][sid] > bestN) { bestN = votes[seatKey][sid]; best = sid; }
+      if (best && bestN * 2 > att.length) { roster[seatKey | 0] = pid(best); n++; }   // strict majority per seat
+    }
+    if (!n) continue;
+    pending[m] = { t0: now, mt: sg[m][0].d[2] | 0, roster, settled: [] };
+    registered++;
+    console.log('  start-pending ' + m + ': ' + att.length + ' attesters, roster ' + n + ' seats');
+  }
+  // 2) upkeep + maturity verdicts for pending entries
+  for (const m of Object.keys(pending)) {
+    if (processed.has(m)) { delete pending[m]; cleaned++; continue; }   // settled (or convicted) since
+    const p = pending[m];
+    // anyone who wrote ANY settle record was present at the end -> exempt. Tracked cumulatively:
+    // a lone settle (e.g. the finishing side of a 2P match) can be overwritten before maturity.
+    if (groups[m]) for (const r of groups[m]) { const h = pid(r.steamID); if (p.settled.indexOf(h) < 0) p.settled.push(h); }
+    if (consistentKeys.has(m)) continue;   // consistent settle group -> the normal pipeline owns this key
+    if (now - (p.t0 || 0) < maturityMs) continue;
+    const hit = [];
+    for (const seat of Object.keys(p.roster)) {
+      const h = p.roster[seat];
+      if (p.settled.indexOf(h) >= 0) continue;
+      leavers[h] = leavers[h] || { leaves: 0, lastMatch: '' };
+      leavers[h].leaves += 1; leavers[h].lastMatch = m;
+      hit.push(h.slice(0, 8));
+    }
+    convicted += hit.length;
+    processed.add(m);   // idempotent: a super-late settlement of a convicted key is skipped as stale
+    delete pending[m];
+    console.log('  start-orphan ' + m + ': started, never settled -> ' + hit.length + ' exit-rate hits (' + hit.join(',') + ')' + (p.settled.length ? ', ' + p.settled.length + ' exempt (wrote a settle record)' : ''));
+  }
+  return { registered, convicted, cleaned };
 }
 async function getJson(url) {
   const r = await fetch(url); const t = await r.text();
@@ -135,6 +204,11 @@ function saveSkill(s) { try { fs.writeFileSync(SKILL_FILE, JSON.stringify(s, nul
 const LEAVERS_FILE = process.env.LEAVERS_FILE || 'leavers.json';
 function loadLeavers() { try { return JSON.parse(fs.readFileSync(LEAVERS_FILE, 'utf8')) || {}; } catch (e) { return {}; } }
 function saveLeavers(s) { try { fs.writeFileSync(LEAVERS_FILE, JSON.stringify(s, null, 0)); } catch (e) { ghWarn('write ' + LEAVERS_FILE + ' failed: ' + (e && e.message)); } }
+// pending start-attestation groups awaiting settlement or maturity (see reconcileStarts)
+const STARTS_FILE = process.env.STARTS_FILE || 'starts.json';
+const STARTS_MATURITY_MS = Number(process.env.STARTS_MATURITY_MS || 2 * 3600 * 1000);   // max match length + reconnect windows, with slack
+function loadStarts() { try { return JSON.parse(fs.readFileSync(STARTS_FILE, 'utf8')) || {}; } catch (e) { return {}; } }
+function saveStarts(s) { try { fs.writeFileSync(STARTS_FILE, JSON.stringify(s, null, 0)); } catch (e) { ghWarn('write ' + STARTS_FILE + ' failed: ' + (e && e.message)); } }
 const LP_LB = process.env.LP_LB;
 const LP_MAX = 9999;
 const LEAVER_LP_PENALTY = Number(process.env.LEAVER_LP_PENALTY || 100);   // ranked leaver authoritative LP deduction (pairs the client optimistic -100)
@@ -424,15 +498,19 @@ async function main() {
         const dispCode = (d.length > 10 + pc && pc >= 1) ? (d[10 + pc] | 0) : 0;
         const roster = decodeRoster(d);
         out.push({ steamID: e.steamID, shard: label, d, dispCode, disp: dispName(dispCode), roster });
+      } else if (d[0] === START_MAGIC && d.length >= 10) {
+        // start attestation: same layout with zeroed result fields -> roster decodes identically
+        out.push({ start: true, steamID: e.steamID, shard: label, d, roster: decodeRoster(d) });
       }
     }
     return out;
   });
+  const starts = [];
   for (const r of shardOut) {
-    if (r.status === 'fulfilled') for (const rec of r.value) recs.push(rec);
+    if (r.status === 'fulfilled') for (const rec of r.value) (rec.start ? starts : recs).push(rec);
     else ghWarn('read shard failed: ' + (r.reason && r.reason.message || r.reason));
   }
-  console.log('records: ' + recs.length);
+  console.log('records: ' + recs.length + (starts.length ? ' (+' + starts.length + ' start attestations)' : ''));
 
   const MAX_SEATS = 8;
   const vecOf = r => { const pc = r.d[8] | 0; return (pc < 1 || pc > MAX_SEATS || r.d.length < 10 + pc) ? ('BAD(pc=' + pc + ')') : JSON.stringify(r.d.slice(10, 10 + pc)); };
@@ -457,17 +535,31 @@ async function main() {
   }
   console.log('reconciled: ' + Object.keys(groups).length + ' (consistent ' + consistent + ' / lone ' + lone + ' / inconsistent ' + flagged + ')');
 
-  if (consistentMatches.length === 0) { console.log('no consistent matches'); return; }
+  // start/settle cross-check runs BEFORE the early returns: the very scenario it exists for
+  // (a match that started and was never settled by anyone) produces no consistent matches at all,
+  // so it must still be tracked, judged and persisted on those paths.
   const processed = loadProcessed();
+  const leavers = loadLeavers(); let leaverHits = 0;
+  const startsPending = loadStarts();
+  const consistentKeys = new Set(consistentMatches.map(c => c.m));
+  const startsRes = reconcileStarts(starts, groups, consistentKeys, processed, startsPending, leavers, Date.now(), STARTS_MATURITY_MS);
+  if (startsRes.registered || startsRes.convicted || startsRes.cleaned || Object.keys(startsPending).length)
+    console.log('starts: ' + Object.keys(startsPending).length + ' pending (+' + startsRes.registered + ' new), ' + startsRes.convicted + ' exit-rate hits, ' + startsRes.cleaned + ' cleaned');
+  const persistStartsSide = () => {
+    if (!APPLY_MMR) { console.log('APPLY_MMR=0 dry-run, nothing written'); return; }
+    saveStarts(startsPending);
+    if (startsRes.convicted) { saveLeavers(leavers); saveProcessed(processed); }
+  };
+
+  if (consistentMatches.length === 0) { console.log('no consistent matches'); persistStartsSide(); return; }
   const fresh = consistentMatches.filter(c => !processed.has(c.m));
   console.log(consistentMatches.length + ' consistent, ' + fresh.length + ' fresh (settled ' + (consistentMatches.length - fresh.length) + ')');
-  if (fresh.length === 0) { console.log('no fresh matches, skip'); return; }
+  if (fresh.length === 0) { console.log('no fresh matches, skip'); persistStartsSide(); return; }
 
   const rankedLb = ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).find(x => String(x.name || x.Name) === RANKED_LB);
   if (!rankedLb) { ghErr('rating board not found (must be pre-created)'); process.exit(1); }
   const rankedId = rankedLb.id || rankedLb.ID;
   const skill = loadSkill();
-  const leavers = loadLeavers(); let leaverHits = 0;
   const lpLb = ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).find(x => String(x.name || x.Name) === LP_LB);
   const lpId = lpLb ? (lpLb.id || lpLb.ID) : null;
   if (!lpId) ghWarn('points board not found (pre-create with onlytrustedwrites) -> skip points this run');
@@ -637,6 +729,7 @@ async function main() {
   saveProcessed(processed);
   saveSkill(skill);
   saveLeavers(leavers);
+  saveStarts(startsPending);
   if (xpId) saveXp(xpState);
   console.log('written: rating ' + rOk + '/' + wRating.length + ', points ' + pOk + '/' + wPoints.length + ', xp ' + xOk + '/' + wXp.length + ', state updated (idempotent)');
 }
@@ -644,4 +737,4 @@ async function main() {
 if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
-module.exports = { isVoidDisp, voidByConsensus, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, pid, XP_CFG, LEAVER_XP, LP_SEG, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND };
+module.exports = { isVoidDisp, voidByConsensus, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, pid, XP_CFG, LEAVER_XP, LP_SEG, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS };

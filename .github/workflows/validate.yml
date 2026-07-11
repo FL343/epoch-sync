@@ -32,7 +32,7 @@ jobs:
       - name: persist
         run: |
           state_files=""
-          for f in processed.json skill.json leavers.json xp.json; do
+          for f in processed.json skill.json leavers.json xp.json starts.json; do
             [ -f "$f" ] && state_files="$state_files $f"
           done
           if [ -n "$state_files" ] && [ -n "$(git status --porcelain -- $state_files)" ]; then

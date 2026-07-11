@@ -30,6 +30,17 @@ matchType's high bits (the match group key contains the full code, so a lone for
 mask only orphans that record): the pair settles at its average placement and average
 tier with one shared delta, and mismatch compensation treats the pair as a single unit.
 
+**Start attestations** close the blind spot of a match nobody settles: each client also
+writes a start-type record (a second magic, zeroed result fields, same roster layout)
+when play actually begins. A start group with two-plus distinct writers and a
+per-seat majority roster is held as pending state; if no consistent settlement appears
+before a maturity window (default 2 h) elapses, every consensus-roster member who wrote
+no settle record takes an exit-rate hit. Deliberately **no points penalty** on this
+path — with zero finisher testimony, a coordinated dodge is indistinguishable from a
+crash/migration-failure cascade, so the harsh deduction stays on the finisher-consensus
+path above. Anyone who wrote any settle record is exempt (remembered across runs, since
+shard entries get overwritten), and lone attestations convict nobody.
+
 It also maintains a separate **cumulative progression ladder** (`XP_LB`, optional): a
 per-game points total that only accrues. Each present record earns points derived from
 its agreed placement, own score, match type, and a once-per-UTC-day first-win bonus;
@@ -46,14 +57,15 @@ absent, so a run is unaffected before it is provisioned.
   protect/reward the weak side) revealed back to the client via points-board detail bytes.
 - `trueskill.js` — TrueSkill (mu/sigma) update + display rating.
 - `test/void-consensus.js`, `test/leaver-absence.js`, `test/lp-penalty.js`,
-  `test/xp-ladder.js`, `test/reduced-stakes.js`, `test/team-rank.js`, `test/team-lp.js`
-  — unit tests for the pure helpers (run one with
+  `test/xp-ladder.js`, `test/reduced-stakes.js`, `test/team-rank.js`, `test/team-lp.js`,
+  `test/start-orphan.js` — unit tests for the pure helpers (run one with
   `node test/<name>.js`; CI runs all of `test/*.js` before each reconcile).
 - `.github/workflows/validate.yml` — scheduled run + state persistence.
 
 State files committed back each run (idempotency): `processed.json`, `skill.json`,
 `leavers.json`, `xp.json` (per-player `{ lastWinDay, games }` for the daily-first bonus
-and the repeat-leaver rate). Player identifiers in state are stored as keyed hashes,
+and the repeat-leaver rate), `starts.json` (pending start attestations awaiting
+settlement or maturity). Player identifiers in state are stored as keyed hashes,
 never raw IDs.
 
 ## Configuration
@@ -62,4 +74,6 @@ All values are injected via environment / Actions secrets — none are committed
 `STEAM_PUBLISHER_KEY`, `APPID`, `LB_PREFIX`, `RANKED_LB`, `LP_LB`, `STATE_SALT`.
 Optional: `XP_LB` (progression ladder board name — XP is skipped if unset),
 `APPLY_MMR=0` (dry-run, no writes), `ALLOW_TEST=1`, `K_FACTOR`,
-`LEAVER_LP_PENALTY` (ranked leaver points deduction, default 100).
+`LEAVER_LP_PENALTY` (ranked leaver points deduction, default 100),
+`STARTS_MATURITY_MS` (start-attestation verdict window, default 2 h),
+`STARTS_FILE` (pending-starts state path, default `starts.json`).
