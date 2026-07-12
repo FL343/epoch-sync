@@ -131,6 +131,120 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
   }
   return { registered, convicted, cleaned };
 }
+// ---- deterministic sanity bounds (B5 tier A: flag-don't-settle) ----
+// Catches the case consensus can't: colluding clients writing IDENTICAL impossible records.
+// Only calibration-free structural/physical bounds live here (generous by design -- a false
+// positive silently unsettles a legit match, so every cap sits far above anything the game
+// can produce). Statistical thresholds (win rates, distribution tightening) are deferred
+// until real-traffic data exists. A flagged match is NOT settled and NOT marked processed:
+// if a bound turns out wrong and is loosened later, still-visible records self-heal.
+const SANITY = {
+  SCORE_CAP: Number(process.env.SANITY_SCORE_CAP || 100000),     // observed finals 4-16k; theoretical vacuum-everything ~30-50k
+  SCORE_FLOOR: Number(process.env.SANITY_SCORE_FLOOR || -50000), // shop overdraft is legal (classic rule) but bounded by shop prices
+  DUR_CAP: Number(process.env.SANITY_DUR_CAP || 7200),           // a 5-level match is ~10-25 min; forced settles can be short, garbage is huge
+  DAILY_CAP: Number(process.env.SANITY_DAILY_CAP || 48),         // matches one account can physically settle per UTC day (~8h of nonstop 10-min matches)
+  MT_ALLOWED: [1, 2, 3, 4],                                      // quick/ranked x brawl/team1; mode2 (5/6) joins when the client gate opens
+};
+const SID_MIN = 0x0110000100000000n, SID_MAX = SID_MIN + (1n << 32n);   // individual-account steamID64 universe base (hex form)
+function sidPlausible(sid) { try { const b = BigInt(sid); return b >= SID_MIN && b <= SID_MAX; } catch (e) { return false; } }
+// g = one consistent match group. Returns [] when sane, else short reason slugs.
+function sanityFlags(g) {
+  const out = [];
+  const d0 = g[0].d, mt = d0[2] | 0, base = baseMt(mt), mask = premadeMaskOf(mt), pc = d0[8] | 0;
+  if (SANITY.MT_ALLOWED.indexOf(base) < 0) out.push('mt');
+  if (base === 3 || base === 4) {
+    if (mask !== 0) out.push('team-mask');            // team codes never carry a premade mask
+    if (pc !== 4) out.push('pc');                     // team brawl is strictly 2v2 seats
+  } else {
+    if (pc < 2 || pc > 4) out.push('pc');             // matchmade lobbies are 2..4 players
+    for (let k = 0; k < 4; k++) if ((mask >> k) & 1) { if (2 * k + 1 >= pc) { out.push('mask-range'); break; } }
+    if (mask > 3) out.push('mask-range');             // pc<=4 -> at most seat pairs (0,1)/(2,3)
+  }
+  const scores = d0.slice(10, 10 + pc);
+  for (const s of scores) if ((s | 0) > SANITY.SCORE_CAP || (s | 0) < SANITY.SCORE_FLOOR) { out.push('score'); break; }
+  const writers = new Set(g.map(r => String(r.steamID)));
+  if (writers.size < g.length) out.push('dup-writer'); // one account can't hold two seats / write twice
+  for (const r of g) {
+    const dur = r.d[9] | 0, seat = r.d[5] | 0;
+    if (dur < 0 || dur > SANITY.DUR_CAP) { out.push('duration'); break; }
+    if (seat < 0 || seat >= pc) { out.push('seat'); break; }
+    const roster = r.roster || {};
+    // the writing account is unforgeable (leaderboard entry owner) -- a roster that puts
+    // somebody else at the writer's own seat is a forged record, not a disagreement.
+    if (roster[seat] != null && String(roster[seat]) !== String(r.steamID)) { out.push('self-seat'); break; }
+    const seen = new Set(); let bad = false;
+    for (const k of Object.keys(roster)) {
+      const sid = String(roster[k]);
+      if (!sidPlausible(sid)) { out.push('sid-range'); bad = true; break; }
+      if (seen.has(sid)) { out.push('dup-sid'); bad = true; break; }
+      seen.add(sid);
+    }
+    if (bad) break;
+  }
+  return out;
+}
+// ---- B6 signal collection (record now, judge after real-traffic calibration) ----
+// Rolling aggregates the future trust layer needs as history from day one: per-player
+// settle/win/void/flag/disp counts + score moments, pairwise co-occurrence (who plays with
+// whom, premade/team together, who places above whom), and a per-UTC-day settle counter that
+// backs the DAILY_CAP rate gate. De-identified (HMAC pids) like every other state file.
+// Nothing here punishes anybody -- flagged/rate-limited matches are simply not settled yet.
+const SIGNALS_FILE = process.env.SIGNALS_FILE || 'signals.json';
+const SIG_PAIR_WINDOW_MS = Number(process.env.SIG_PAIR_WINDOW_MS || 45 * 86400000);
+const SIG_PLAYER_WINDOW_MS = Number(process.env.SIG_PLAYER_WINDOW_MS || 90 * 86400000);
+const SIG_PAIRS_CAP = Number(process.env.SIG_PAIRS_CAP || 200000);
+function loadSignals() { try { const s = JSON.parse(fs.readFileSync(SIGNALS_FILE, 'utf8')) || {}; s.day = s.day || { d: 0, n: {} }; s.players = s.players || {}; s.pairs = s.pairs || {}; s.flagged = s.flagged || {}; return s; } catch (e) { return { day: { d: 0, n: {} }, players: {}, pairs: {}, flagged: {} }; } }
+function pruneSignals(s, now) {
+  for (const k of Object.keys(s.pairs)) if (now - (s.pairs[k].at || 0) > SIG_PAIR_WINDOW_MS) delete s.pairs[k];
+  for (const k of Object.keys(s.players)) if (now - (s.players[k].at || 0) > SIG_PLAYER_WINDOW_MS) delete s.players[k];
+  for (const k of Object.keys(s.flagged)) if (now - (s.flagged[k] || 0) > SIG_PAIR_WINDOW_MS) delete s.flagged[k];
+  const pk = Object.keys(s.pairs);
+  if (pk.length > SIG_PAIRS_CAP) {   // size fuse: same escalation path as skill.json growth -> external storage
+    ghWarn('signals pairs ' + pk.length + ' > cap ' + SIG_PAIRS_CAP + ' -- oldest evicted; plan the move to external state storage');
+    pk.sort((a, b) => (s.pairs[a].at || 0) - (s.pairs[b].at || 0));
+    for (let i = 0; i < pk.length - SIG_PAIRS_CAP; i++) delete s.pairs[pk[i]];
+  }
+}
+function saveSignals(s, now) { try { pruneSignals(s, now); fs.writeFileSync(SIGNALS_FILE, JSON.stringify(s, null, 0)); } catch (e) { ghWarn('write ' + SIGNALS_FILE + ' failed: ' + (e && e.message)); } }
+function sigPlayer(s, h, now) { const p = s.players[h] || (s.players[h] = { g: 0, w: 0, v: 0, f: 0, disp: [0, 0, 0, 0, 0, 0, 0], s1: 0, s2: 0, smax: 0, at: 0 }); p.at = now; return p; }
+// flag once per match key (flagged groups are not processed, so they re-surface every run
+// until their shard entries are overwritten -- the dedup map keeps counters honest).
+function recordFlag(s, g, m, now) {
+  if (s.flagged[m]) return false;
+  s.flagged[m] = now;
+  for (const sid of new Set(g.map(r => String(r.steamID)))) sigPlayer(s, pid(sid), now).f += 1;
+  return true;
+}
+function sigDay(s, now) { const d = Math.floor(now / 86400000); if (s.day.d !== d) s.day = { d, n: {} }; return s.day; }
+function pairKey(a, b) { return a < b ? a + '|' + b : b + '|' + a; }
+// parts = present record-writers (seat+score+steamID); rankOf may be null for VOID groups.
+function recordMatchSignals(s, g, parts, rankOf, matchType, isVoid, now) {
+  const mask = premadeMaskOf(matchType), team = isTeamMt(matchType);
+  const dispOf = {}; for (const r of g) dispOf[String(r.steamID)] = r.dispCode | 0;
+  for (const p of parts) {
+    const h = sigPlayer(s, pid(p.steamID), now);
+    const dc = Math.min(6, Math.max(0, dispOf[String(p.steamID)] | 0));
+    h.disp[dc] += 1;
+    if (isVoid) { h.v += 1; continue; }
+    h.g += 1;
+    if (rankOf && rankOf[p.steamID] === 1) h.w += 1;
+    const sc = p.score | 0;
+    h.s1 += sc; h.s2 += sc * sc; if (sc > h.smax) h.smax = sc;
+  }
+  for (let i = 0; i < parts.length; i++) for (let j = i + 1; j < parts.length; j++) {
+    const A = parts[i], B = parts[j];
+    const ka = pid(A.steamID), kb = pid(B.steamID), k = pairKey(ka, kb);
+    const e = s.pairs[k] || (s.pairs[k] = { n: 0, t: 0, x: 0, at: 0 });
+    e.n += 1; e.at = now;
+    const together = team ? ((A.seat >> 1) === (B.seat >> 1))
+      : (((mask >> (A.seat >> 1)) & 1) === 1 && (A.seat >> 1) === (B.seat >> 1));
+    if (together) e.t += 1;
+    if (!isVoid && rankOf) {   // x counts "lexicographically-first pid placed strictly above the other"
+      const first = ka < kb ? A : B, second = ka < kb ? B : A;
+      if (rankOf[first.steamID] < rankOf[second.steamID]) e.x += 1;
+    }
+  }
+}
 async function getJson(url) {
   const r = await fetch(url); const t = await r.text();
   let j = null; try { j = JSON.parse(t); } catch (e) {}
@@ -517,7 +631,7 @@ async function main() {
   const groups = {};
   for (const r of recs) { const m = r.d[3] + '_' + r.d[4] + '_' + r.d[2]; (groups[m] = groups[m] || []).push(r); }
   let consistent = 0, flagged = 0, lone = 0;
-  const consistentMatches = [];
+  const consistentMatches = [], inconsistentGroups = [];
   for (const m of Object.keys(groups)) {
     const g = groups[m];
     const vecs = g.map(vecOf);
@@ -531,7 +645,7 @@ async function main() {
         + (cons.isVoid ? ' -> consensus VOID, not settled (' + cons.voidVotes + '/' + cons.present + ')'
           : (cons.voidVotes ? ' (VOID votes ' + cons.voidVotes + '/' + cons.present + ' below majority -> settled)' : '')));
     }
-    else { flagged++; ghWarn('match=' + m + ': ' + g.length + ' inconsistent/invalid (suspected forgery): ' + g.map((r, i) => plog(r.steamID) + '@' + r.shard + '=' + vecs[i]).join('  ')); }
+    else { flagged++; inconsistentGroups.push({ m, g }); ghWarn('match=' + m + ': ' + g.length + ' inconsistent/invalid (suspected forgery): ' + g.map((r, i) => plog(r.steamID) + '@' + r.shard + '=' + vecs[i]).join('  ')); }
   }
   console.log('reconciled: ' + Object.keys(groups).length + ' (consistent ' + consistent + ' / lone ' + lone + ' / inconsistent ' + flagged + ')');
 
@@ -542,12 +656,19 @@ async function main() {
   const leavers = loadLeavers(); let leaverHits = 0;
   const startsPending = loadStarts();
   const consistentKeys = new Set(consistentMatches.map(c => c.m));
-  const startsRes = reconcileStarts(starts, groups, consistentKeys, processed, startsPending, leavers, Date.now(), STARTS_MATURITY_MS);
+  const nowMs = Date.now();
+  const startsRes = reconcileStarts(starts, groups, consistentKeys, processed, startsPending, leavers, nowMs, STARTS_MATURITY_MS);
   if (startsRes.registered || startsRes.convicted || startsRes.cleaned || Object.keys(startsPending).length)
     console.log('starts: ' + Object.keys(startsPending).length + ' pending (+' + startsRes.registered + ' new), ' + startsRes.convicted + ' exit-rate hits, ' + startsRes.cleaned + ' cleaned');
+  // B6 signal collection state + forgery-flag counters for the inconsistent groups seen this run
+  // (they are never processed, so they re-surface every run -- recordFlag dedups by match key).
+  const signals = loadSignals();
+  let sigDirty = false;
+  for (const { m, g } of inconsistentGroups) if (recordFlag(signals, g, m, nowMs)) sigDirty = true;
   const persistStartsSide = () => {
     if (!APPLY_MMR) { console.log('APPLY_MMR=0 dry-run, nothing written'); return; }
     saveStarts(startsPending);
+    if (sigDirty) saveSignals(signals, nowMs);
     if (startsRes.convicted) { saveLeavers(leavers); saveProcessed(processed); }
   };
 
@@ -614,6 +735,30 @@ async function main() {
   for (const c of fresh) {
     const g = c.g;
     const matchType = g[0].d[2] | 0;   // 2=ranked; visible LP only moves for ranked (quick = MMR only)
+    // sanity gate (B5 tier A): a consistent-but-impossible match is flagged, not settled, and NOT
+    // marked processed (self-heals if a bound is later loosened). Runs before XP/VOID so garbage
+    // never feeds any ledger output or signal stats beyond the flag counter itself.
+    const sane = sanityFlags(g);
+    if (sane.length) {
+      recordFlag(signals, g, c.m, nowMs); sigDirty = true;
+      ghWarn('match=' + c.m + ': sanity-flagged [' + sane.join(',') + '] -- not settled: ' + g.map(r => plog(r.steamID) + '@' + r.shard).join(' '));
+      continue;
+    }
+    // rate gate: one account can only physically settle so many matches per UTC day. Excess
+    // matches wait (not processed -> they retry after the day rolls over), so a burst of
+    // fabricated records is throttled to DAILY_CAP/day instead of one batch per cron run.
+    const day = sigDay(signals, nowMs);
+    const writerSids = [...new Set(g.map(r => String(r.steamID)))];
+    const over = writerSids.filter(sid => (day.n[pid(sid)] || 0) >= SANITY.DAILY_CAP);
+    if (over.length) {
+      recordFlag(signals, g, c.m, nowMs); sigDirty = true;
+      ghWarn('match=' + c.m + ': rate-limited (' + over.map(plog).join(',') + ' >= ' + SANITY.DAILY_CAP + '/day) -- deferred, not settled');
+      continue;
+    }
+    // every match that passes the gate spends daily budget -- VOID matches included, since they
+    // still credit innocent-participation XP (an uncounted VOID would be a free farming lane).
+    for (const sid of writerSids) day.n[pid(sid)] = (day.n[pid(sid)] || 0) + 1;
+    sigDirty = true;
     const seatToId = {};
     for (const r of g) seatToId[r.d[5] | 0] = r.steamID;
     const pc = g[0].d[8] | 0, scores = g[0].d.slice(10, 10 + pc);
@@ -632,8 +777,13 @@ async function main() {
     // points are credited for BOTH settled AND consensus-VOID matches -- VOID only gates MMR/LP; an innocent victim
     //   still earns participation points (mirrors the client crediting innocent records). per-record class-driven.
     if (xpId) creditXp(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers, today);
-    if (c.void) { console.log('  VOID ' + c.m + ': consensus -> no MMR/points'); processed.add(c.m); voided++; continue; }
+    if (c.void) {
+      recordMatchSignals(signals, g, parts, null, matchType, true, nowMs); sigDirty = true;   // co-presence + void counters (dodge-ring history)
+      console.log('  VOID ' + c.m + ': consensus -> no MMR/points'); processed.add(c.m); voided++; continue;
+    }
     if (parts.length < 2) { processed.add(c.m); continue; }
+    // B6 collection for a real settle: per-player counters + pairwise co-occurrence.
+    recordMatchSignals(signals, g, parts, rankOf, matchType, false, nowMs);
     const leavers0 = detectLeavers(g);   // consensus-absent seats: LP penalty below + §7 teammate shield input
     const tsIn = parts.map(p => { const sk = skill[pid(p.steamID)] || ts.DEFAULTS; return { id: p.steamID, rank: rankOf[p.steamID], mu: sk.mu, sigma: sk.sigma }; });
     let tsOut;
@@ -730,6 +880,7 @@ async function main() {
   saveSkill(skill);
   saveLeavers(leavers);
   saveStarts(startsPending);
+  if (sigDirty) saveSignals(signals, nowMs);
   if (xpId) saveXp(xpState);
   console.log('written: rating ' + rOk + '/' + wRating.length + ', points ' + pOk + '/' + wPoints.length + ', xp ' + xOk + '/' + wXp.length + ', state updated (idempotent)');
 }
@@ -737,4 +888,4 @@ async function main() {
 if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
-module.exports = { isVoidDisp, voidByConsensus, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, pid, XP_CFG, LEAVER_XP, LP_SEG, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS };
+module.exports = { isVoidDisp, voidByConsensus, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, pid, XP_CFG, LEAVER_XP, LP_SEG, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, SANITY, sanityFlags, sidPlausible, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey };

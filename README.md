@@ -30,6 +30,23 @@ matchType's high bits (the match group key contains the full code, so a lone for
 mask only orphans that record): the pair settles at its average placement and average
 tier with one shared delta, and mismatch compensation treats the pair as a single unit.
 
+**Sanity bounds** catch what consensus can't: colluding clients writing *identical*
+impossible records. Only calibration-free structural/physical bounds are enforced —
+score caps far above anything the game can produce, duration bounds, seat/player-count
+ranges, a match-type whitelist, roster plausibility (the writing account is unforgeable,
+so a roster that puts someone else at the writer's own seat is a forgery), and a
+per-account daily settle cap (one account can only physically play so many matches per
+UTC day; excess matches are deferred, not destroyed). A flagged match is not settled and
+not marked processed, so a loosened bound self-heals still-visible records. Statistical
+thresholds (win rates, distribution tightening) wait for real-traffic calibration.
+
+**Signal collection** records — without judging — the rolling aggregates a future trust
+layer needs as history from day one: per-player settle/win/void/flag counts, end-of-match
+disposition distribution, score moments, and pairwise co-occurrence (matches together,
+premade/team together, who places above whom). Windows are pruned on save (pairs 45 d,
+players 90 d inactive) and an entry-count fuse warns when the state should move to
+external storage. De-identified like all other state.
+
 **Start attestations** close the blind spot of a match nobody settles: each client also
 writes a start-type record (a second magic, zeroed result fields, same roster layout)
 when play actually begins. A start group with two-plus distinct writers and a
@@ -58,15 +75,17 @@ absent, so a run is unaffected before it is provisioned.
 - `trueskill.js` — TrueSkill (mu/sigma) update + display rating.
 - `test/void-consensus.js`, `test/leaver-absence.js`, `test/lp-penalty.js`,
   `test/xp-ladder.js`, `test/reduced-stakes.js`, `test/team-rank.js`, `test/team-lp.js`,
-  `test/start-orphan.js` — unit tests for the pure helpers (run one with
+  `test/start-orphan.js`, `test/sanity-bounds.js`, `test/signals-collect.js` — unit tests
+  for the pure helpers (run one with
   `node test/<name>.js`; CI runs all of `test/*.js` before each reconcile).
 - `.github/workflows/validate.yml` — scheduled run + state persistence.
 
 State files committed back each run (idempotency): `processed.json`, `skill.json`,
 `leavers.json`, `xp.json` (per-player `{ lastWinDay, games }` for the daily-first bonus
 and the repeat-leaver rate), `starts.json` (pending start attestations awaiting
-settlement or maturity). Player identifiers in state are stored as keyed hashes,
-never raw IDs.
+settlement or maturity), `signals.json` (rolling per-player/pairwise signal aggregates +
+flag dedup + daily settle counters). Player identifiers in state are stored as keyed
+hashes, never raw IDs.
 
 ## Configuration
 
@@ -76,4 +95,8 @@ Optional: `XP_LB` (progression ladder board name — XP is skipped if unset),
 `APPLY_MMR=0` (dry-run, no writes), `ALLOW_TEST=1`, `K_FACTOR`,
 `LEAVER_LP_PENALTY` (ranked leaver points deduction, default 100),
 `STARTS_MATURITY_MS` (start-attestation verdict window, default 2 h),
-`STARTS_FILE` (pending-starts state path, default `starts.json`).
+`STARTS_FILE` (pending-starts state path, default `starts.json`),
+`SANITY_SCORE_CAP` / `SANITY_SCORE_FLOOR` / `SANITY_DUR_CAP` / `SANITY_DAILY_CAP`
+(sanity bounds; generous defaults, tighten only with real-traffic data),
+`SIGNALS_FILE` / `SIG_PAIR_WINDOW_MS` / `SIG_PLAYER_WINDOW_MS` / `SIG_PAIRS_CAP`
+(signal-collection state path, rolling windows, size fuse).
