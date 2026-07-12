@@ -142,9 +142,18 @@ const SANITY = {
   SCORE_CAP: Number(process.env.SANITY_SCORE_CAP || 100000),     // observed finals 4-16k; theoretical vacuum-everything ~30-50k
   SCORE_FLOOR: Number(process.env.SANITY_SCORE_FLOOR || -50000), // shop overdraft is legal (classic rule) but bounded by shop prices
   DUR_CAP: Number(process.env.SANITY_DUR_CAP || 7200),           // a 5-level match is ~10-25 min; forced settles can be short, garbage is huge
-  DAILY_CAP: Number(process.env.SANITY_DAILY_CAP || 48),         // matches one account can physically settle per UTC day (~8h of nonstop 10-min matches)
+  // minimum REAL time between a match's start attestation being first sighted and its settle
+  // group becoming eligible. This is the cron's OWN wall clock (starts.json t0), not any
+  // client-reported duration -- a speed hack or a forged durationSec cannot move it. A full
+  // match is 8+ min, so legit settles arrive already-aged (worst case one extra run of delay);
+  // a fabricated start+settle batch has to sit out the minimum in pending first.
+  MIN_START_AGE_MS: Number(process.env.SANITY_MIN_START_AGE_MS || 300000),
   MT_ALLOWED: [1, 2, 3, 4],                                      // quick/ranked x brawl/team1; mode2 (5/6) joins when the client gate opens
 };
+// NOTE (extensibility): SCORE_CAP/DUR_CAP/MIN_START_AGE_MS were derived from the game as it is
+// today -- 5 levels per matchmade run, 2-4 players, current item-value scale. A future endless
+// mode, level-count change, or economy rework must re-derive them. The client repo pins these
+// assumptions in its lockstep test so such a change fails loudly there.
 const SID_MIN = 0x0110000100000000n, SID_MAX = SID_MIN + (1n << 32n);   // individual-account steamID64 universe base (hex form)
 function sidPlausible(sid) { try { const b = BigInt(sid); return b >= SID_MIN && b <= SID_MAX; } catch (e) { return false; } }
 // g = one consistent match group. Returns [] when sane, else short reason slugs.
@@ -183,6 +192,10 @@ function sanityFlags(g) {
   }
   return out;
 }
+// pacing gate: true = this settle group must wait (its start attestation is younger than the
+// physical minimum). No pending entry (pre-attestation build, or start overwritten before ever
+// sighted) -> no constraint; that case is recorded as an `ns` signal instead.
+function pacingDefer(pendingEntry, now, minMs) { return !!(pendingEntry && (now - (pendingEntry.t0 || 0)) < minMs); }
 // ---- B6 signal collection (record now, judge after real-traffic calibration) ----
 // Rolling aggregates the future trust layer needs as history from day one: per-player
 // settle/win/void/flag/disp counts + score moments, pairwise co-occurrence (who plays with
@@ -206,7 +219,7 @@ function pruneSignals(s, now) {
   }
 }
 function saveSignals(s, now) { try { pruneSignals(s, now); fs.writeFileSync(SIGNALS_FILE, JSON.stringify(s, null, 0)); } catch (e) { ghWarn('write ' + SIGNALS_FILE + ' failed: ' + (e && e.message)); } }
-function sigPlayer(s, h, now) { const p = s.players[h] || (s.players[h] = { g: 0, w: 0, v: 0, f: 0, disp: [0, 0, 0, 0, 0, 0, 0], s1: 0, s2: 0, smax: 0, at: 0 }); p.at = now; return p; }
+function sigPlayer(s, h, now) { const p = s.players[h] || (s.players[h] = { g: 0, w: 0, v: 0, f: 0, ns: 0, disp: [0, 0, 0, 0, 0, 0, 0], s1: 0, s2: 0, smax: 0, at: 0 }); p.at = now; return p; }
 // flag once per match key (flagged groups are not processed, so they re-surface every run
 // until their shard entries are overwritten -- the dedup map keeps counters honest).
 function recordFlag(s, g, m, now) {
@@ -744,19 +757,20 @@ async function main() {
       ghWarn('match=' + c.m + ': sanity-flagged [' + sane.join(',') + '] -- not settled: ' + g.map(r => plog(r.steamID) + '@' + r.shard).join(' '));
       continue;
     }
-    // rate gate: one account can only physically settle so many matches per UTC day. Excess
-    // matches wait (not processed -> they retry after the day rolls over), so a burst of
-    // fabricated records is throttled to DAILY_CAP/day instead of one batch per cron run.
-    const day = sigDay(signals, nowMs);
-    const writerSids = [...new Set(g.map(r => String(r.steamID)))];
-    const over = writerSids.filter(sid => (day.n[pid(sid)] || 0) >= SANITY.DAILY_CAP);
-    if (over.length) {
-      recordFlag(signals, g, c.m, nowMs); sigDirty = true;
-      ghWarn('match=' + c.m + ': rate-limited (' + over.map(plog).join(',') + ' >= ' + SANITY.DAILY_CAP + '/day) -- deferred, not settled');
+    // pacing gate (replaces the removed per-day cap -- short queue times make any per-day
+    // number guessable-wrong): a match cannot settle before it could physically have been
+    // PLAYED. Not a flag, not suspicion -- just "come back when the time has actually passed";
+    // legit matches arrive already-aged, so this defers at most one run in edge timing.
+    const pend = startsPending[c.m];
+    if (pacingDefer(pend, nowMs, SANITY.MIN_START_AGE_MS)) {
+      console.log('  pacing ' + c.m + ': start attested ' + Math.round((nowMs - (pend.t0 || 0)) / 1000) + 's ago < ' + Math.round(SANITY.MIN_START_AGE_MS / 1000) + 's -- deferred');
       continue;
     }
-    // every match that passes the gate spends daily budget -- VOID matches included, since they
-    // still credit innocent-participation XP (an uncounted VOID would be a free farming lane).
+    // per-UTC-day settle counts are recorded as a pure SIGNAL (no gate): the future judgment
+    // layer marks "suspiciously many matches per day" against real-traffic baselines. VOID
+    // matches count too -- they still credit innocent-participation XP.
+    const day = sigDay(signals, nowMs);
+    const writerSids = [...new Set(g.map(r => String(r.steamID)))];
     for (const sid of writerSids) day.n[pid(sid)] = (day.n[pid(sid)] || 0) + 1;
     sigDirty = true;
     const seatToId = {};
@@ -784,6 +798,10 @@ async function main() {
     if (parts.length < 2) { processed.add(c.m); continue; }
     // B6 collection for a real settle: per-player counters + pairwise co-occurrence.
     recordMatchSignals(signals, g, parts, rankOf, matchType, false, nowMs);
+    // settled with no start attestation ever sighted: legit for pre-attestation builds, so it is
+    // a recorded signal (per-writer ns counter), not a flag -- once every live build attests,
+    // a high ns rate becomes a cheap fabrication tell for the judgment layer.
+    if (!pend) for (const sid of writerSids) sigPlayer(signals, pid(sid), nowMs).ns += 1;
     const leavers0 = detectLeavers(g);   // consensus-absent seats: LP penalty below + §7 teammate shield input
     const tsIn = parts.map(p => { const sk = skill[pid(p.steamID)] || ts.DEFAULTS; return { id: p.steamID, rank: rankOf[p.steamID], mu: sk.mu, sigma: sk.sigma }; });
     let tsOut;
@@ -888,4 +906,4 @@ async function main() {
 if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
-module.exports = { isVoidDisp, voidByConsensus, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, pid, XP_CFG, LEAVER_XP, LP_SEG, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, SANITY, sanityFlags, sidPlausible, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey };
+module.exports = { isVoidDisp, voidByConsensus, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, pid, XP_CFG, LEAVER_XP, LP_SEG, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey };

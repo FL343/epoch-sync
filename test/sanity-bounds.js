@@ -1,7 +1,7 @@
 'use strict';
 // sanityFlags (B5 tier A): calibration-free structural/physical bounds, flag-don't-settle.
 const path = require('path');
-const { sanityFlags, sidPlausible, SANITY } = require(path.join(__dirname, '..', 'validate.js'));
+const { sanityFlags, sidPlausible, pacingDefer, SANITY } = require(path.join(__dirname, '..', 'validate.js'));
 
 let failN = 0;
 const ok = (m) => console.log('  ok    ' + m);
@@ -25,7 +25,7 @@ const grp = (...rs) => rs;
 
 console.log('=== sanityFlags (B5 tier A) ===');
 
-eq('defaults pinned (cap/floor/dur/daily)', [SANITY.SCORE_CAP, SANITY.SCORE_FLOOR, SANITY.DUR_CAP, SANITY.DAILY_CAP], [100000, -50000, 7200, 48]);
+eq('defaults pinned (cap/floor/dur/start-age)', [SANITY.SCORE_CAP, SANITY.SCORE_FLOOR, SANITY.DUR_CAP, SANITY.MIN_START_AGE_MS], [100000, -50000, 7200, 300000]);
 eq('mt whitelist pinned', SANITY.MT_ALLOWED, [1, 2, 3, 4]);
 
 eq('clean 3P quick -> []', sanityFlags(grp(mk(A, 0), mk(B, 1))), []);
@@ -53,6 +53,14 @@ has('implausible sid in roster', sanityFlags(grp(mk(A, 0, { roster: { 0: A, 1: '
 has('same sid on two seats', sanityFlags(grp(mk(A, 0, { roster: { 0: A, 1: A } }), mk(B, 1))), 'dup-sid');
 
 eq('sidPlausible bounds', [sidPlausible(A), sidPlausible('123'), sidPlausible('0'), sidPlausible('99999999999999999999')], [true, false, false, false]);
+
+// pacing gate: settle eligibility needs the start attestation's first sighting to be old enough.
+// Clock = cron's own observation time (starts.json t0), immune to client speed hacks / forged
+// durationSec. No pending entry -> no constraint (pre-attestation builds; recorded as ns signal).
+eq('pacing: no start attestation -> no constraint', pacingDefer(undefined, 1000000, 300000), false);
+eq('pacing: fresh attestation -> defer', pacingDefer({ t0: 900000 }, 1000000, 300000), true);
+eq('pacing: aged attestation -> eligible', pacingDefer({ t0: 600000 }, 1000000, 300000), false);
+eq('pacing: exact boundary -> eligible', pacingDefer({ t0: 700000 }, 1000000, 300000), false);
 
 console.log('=== ' + (failN === 0 ? 'PASS' : 'FAIL') + ' — ' + failN + ' fail (sanity-bounds) ===');
 process.exit(failN === 0 ? 0 : 1);

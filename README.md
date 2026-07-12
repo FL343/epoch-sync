@@ -33,12 +33,17 @@ tier with one shared delta, and mismatch compensation treats the pair as a singl
 **Sanity bounds** catch what consensus can't: colluding clients writing *identical*
 impossible records. Only calibration-free structural/physical bounds are enforced —
 score caps far above anything the game can produce, duration bounds, seat/player-count
-ranges, a match-type whitelist, roster plausibility (the writing account is unforgeable,
-so a roster that puts someone else at the writer's own seat is a forgery), and a
-per-account daily settle cap (one account can only physically play so many matches per
-UTC day; excess matches are deferred, not destroyed). A flagged match is not settled and
-not marked processed, so a loosened bound self-heals still-visible records. Statistical
-thresholds (win rates, distribution tightening) wait for real-traffic calibration.
+ranges, a match-type whitelist, and roster plausibility (the writing account is
+unforgeable, so a roster that puts someone else at the writer's own seat is a forgery).
+A flagged match is not settled and not marked processed, so a loosened bound self-heals
+still-visible records. A **pacing gate** enforces minimum real match time without
+trusting any client-reported duration (speed hacks can't move it): a settle group is
+only eligible once its start attestation was first *sighted* a configurable minimum ago
+— the clock is this job's own observation time. Settles with no attestation ever
+sighted pass unconstrained (pre-attestation builds) but are recorded as an `ns` signal.
+Per-day settle counts are recorded as pure signals — thresholds for "suspiciously many
+matches per day", like all statistical bounds (win rates, distribution tightening),
+wait for real-traffic calibration.
 
 **Signal collection** records — without judging — the rolling aggregates a future trust
 layer needs as history from day one: per-player settle/win/void/flag counts, end-of-match
@@ -96,7 +101,7 @@ Optional: `XP_LB` (progression ladder board name — XP is skipped if unset),
 `LEAVER_LP_PENALTY` (ranked leaver points deduction, default 100),
 `STARTS_MATURITY_MS` (start-attestation verdict window, default 2 h),
 `STARTS_FILE` (pending-starts state path, default `starts.json`),
-`SANITY_SCORE_CAP` / `SANITY_SCORE_FLOOR` / `SANITY_DUR_CAP` / `SANITY_DAILY_CAP`
-(sanity bounds; generous defaults, tighten only with real-traffic data),
+`SANITY_SCORE_CAP` / `SANITY_SCORE_FLOOR` / `SANITY_DUR_CAP` / `SANITY_MIN_START_AGE_MS`
+(sanity bounds + pacing gate; generous defaults, tighten only with real-traffic data),
 `SIGNALS_FILE` / `SIG_PAIR_WINDOW_MS` / `SIG_PLAYER_WINDOW_MS` / `SIG_PAIRS_CAP`
 (signal-collection state path, rolling windows, size fuse).
