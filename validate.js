@@ -372,6 +372,32 @@ const ghErr = m => console.log('::error::' + m);
 // code ahead of a board's creation.
 const STRICT_BOARDS = process.env.STRICT_BOARDS === '1';
 const strictBoard = m => { if (STRICT_BOARDS) { ghErr(m + ' -- STRICT_BOARDS=1 fails instead of degrading'); process.exit(1); } };
+// Per-run counters surfaced as a step summary (numbers only, no identities) -- the at-a-glance
+// dashboard for a repo with issues disabled, and the scale-trigger telemetry (duration /
+// fresh backlog / page-cap hits) that says when to raise CONCURRENCY or split shard reads.
+const RUN = { cap: 0 };
+function writeRunSummary() {
+  const p = process.env.GITHUB_STEP_SUMMARY;
+  if (!p) return;
+  try {
+    const s = (k, d) => (RUN[k] === undefined ? d : RUN[k]);
+    fs.appendFileSync(p, [
+      '### reconcile',
+      '| metric | value |',
+      '|---|---|',
+      '| records / start attestations | ' + s('rec', 0) + ' / ' + s('starts', 0) + ' |',
+      '| consistent / fresh | ' + s('consistent', 0) + ' / ' + s('fresh', 0) + ' |',
+      '| flagged inconsistent / sanity | ' + s('flagged', 0) + ' / ' + s('sanity', 0) + ' |',
+      '| starts pending / exit-rate hits | ' + s('pending', 0) + ' / ' + s('convicted', 0) + ' |',
+      '| reports seen / counted | ' + s('repSeen', 0) + ' / ' + s('repCounted', 0) + ' |',
+      '| trust writes / deletes | ' + s('trustW', 0) + ' / ' + s('trustD', 0) + ' |',
+      '| board writes rating/points/xp | ' + s('writes', '0/0 0/0 0/0') + ' |',
+      '| page-cap hits | ' + RUN.cap + ' |',
+      '| duration | ' + ((Date.now() - (RUN.t0 || Date.now())) / 1000).toFixed(1) + 's |',
+      '',
+    ].join('\n'));
+  } catch (e) {}
+}
 async function postForm(path, params) {
   const body = Object.keys(params).map(k => k + '=' + encodeURIComponent(params[k])).join('&');
   const r = await fetch(BASE + path, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body });
@@ -417,6 +443,7 @@ async function readBoardAll(id, label) {
     for (const e of page0) ents.push(e);
     if (page0.length < PAGE_SIZE) return { ents, complete: true };   // short page = board exhausted
   }
+  RUN.cap++;
   ghWarn(label + ' hit PAGE_CAP=' + PAGE_CAP + ' (' + ents.length + ' entries read, board larger) -- raise PAGE_CAP');
   return { ents, complete: false };
 }
@@ -709,6 +736,7 @@ async function main() {
   if (!LP_LB) missing.push('LP_LB');
   if (!SALT) missing.push('STATE_SALT');
   if (missing.length) { ghErr('missing env: ' + missing.join(', ')); process.exit(1); }
+  RUN.t0 = Date.now();
   console.log('reconcile: start (concurrency ' + CONCURRENCY + ')');
 
   const lr = await getJson(BASE + '/ISteamLeaderboards/GetLeaderboardsForGame/v2/?key=' + KEY + '&appid=' + APPID + '&format=json');
@@ -745,6 +773,7 @@ async function main() {
     else ghWarn('read shard failed: ' + (r.reason && r.reason.message || r.reason));
   }
   console.log('records: ' + recs.length + (starts.length ? ' (+' + starts.length + ' start attestations)' : ''));
+  RUN.rec = recs.length; RUN.starts = starts.length;
 
   const MAX_SEATS = 8;
   const vecOf = r => { const pc = r.d[8] | 0; return (pc < 1 || pc > MAX_SEATS || r.d.length < 10 + pc) ? ('BAD(pc=' + pc + ')') : JSON.stringify(r.d.slice(10, 10 + pc)); };
@@ -768,6 +797,7 @@ async function main() {
     else { flagged++; inconsistentGroups.push({ m, g }); ghWarn('match=' + m + ': ' + g.length + ' inconsistent/invalid (suspected forgery): ' + g.map((r, i) => plog(r.steamID) + '@' + r.shard + '=' + vecs[i]).join('  ')); }
   }
   console.log('reconciled: ' + Object.keys(groups).length + ' (consistent ' + consistent + ' / lone ' + lone + ' / inconsistent ' + flagged + ')');
+  RUN.flagged = flagged;
 
   // start/settle cross-check runs BEFORE the early returns: the very scenario it exists for
   // (a match that started and was never settled by anyone) produces no consistent matches at all,
@@ -780,6 +810,7 @@ async function main() {
   const startsRes = reconcileStarts(starts, groups, consistentKeys, processed, startsPending, leavers, nowMs, STARTS_MATURITY_MS);
   if (startsRes.registered || startsRes.convicted || startsRes.cleaned || Object.keys(startsPending).length)
     console.log('starts: ' + Object.keys(startsPending).length + ' pending (+' + startsRes.registered + ' new), ' + startsRes.convicted + ' exit-rate hits, ' + startsRes.cleaned + ' cleaned');
+  RUN.pending = Object.keys(startsPending).length; RUN.convicted = startsRes.convicted;
   // B6 signal collection state + forgery-flag counters for the inconsistent groups seen this run
   // (they are never processed, so they re-surface every run -- recordFlag dedups by match key).
   const signals = loadSignals();
@@ -798,6 +829,7 @@ async function main() {
     try {
       const rb = await readBoardAll(repLb.id || repLb.ID, 'report box');
       const rres = harvestReports(rb.ents.map(e => ({ steamID: e.steamID, d: decodeDetails(e.detailData) })), signals, nowMs);
+      RUN.repSeen = rres.seen; RUN.repCounted = rres.counted;
       if (rres.seen || rres.bad) {
         if (rres.counted) sigDirty = true;
         for (const t of rres.targets) trustTouched.add(t);
@@ -821,6 +853,7 @@ async function main() {
       const tb = await readBoardAll(tLb.id || tLb.ID, 'trust board');
       for (const e of tb.ents) existing[String(e.steamID)] = e.score | 0;
       const plan = trustPlan(signals, existing, trustTouched, nowMs);
+      RUN.trustW = plan.writes.length; RUN.trustD = plan.deletes.length;
       if (!plan.writes.length && !plan.deletes.length) return;
       console.log('trust: ' + plan.writes.length + ' tier writes [' + plan.writes.map(w => plog(w.sid) + '=' + w.tier).join(' ') + '], ' +
                   plan.deletes.length + ' decayed deletes [' + plan.deletes.map(plog).join(' ') + ']');
@@ -843,10 +876,12 @@ async function main() {
     if (startsRes.convicted) { saveLeavers(leavers); saveProcessed(processed); }
   };
 
-  if (consistentMatches.length === 0) { console.log('no consistent matches'); persistStartsSide(); await maintainTrust(); return; }
+  RUN.consistent = consistentMatches.length;
+  if (consistentMatches.length === 0) { console.log('no consistent matches'); persistStartsSide(); await maintainTrust(); writeRunSummary(); return; }
   const fresh = consistentMatches.filter(c => !processed.has(c.m));
+  RUN.fresh = fresh.length;
   console.log(consistentMatches.length + ' consistent, ' + fresh.length + ' fresh (settled ' + (consistentMatches.length - fresh.length) + ')');
-  if (fresh.length === 0) { console.log('no fresh matches, skip'); persistStartsSide(); await maintainTrust(); return; }
+  if (fresh.length === 0) { console.log('no fresh matches, skip'); persistStartsSide(); await maintainTrust(); writeRunSummary(); return; }
 
   const rankedLb = ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).find(x => String(x.name || x.Name) === RANKED_LB);
   if (!rankedLb) { ghErr('rating board not found (must be pre-created)'); process.exit(1); }
@@ -913,6 +948,7 @@ async function main() {
     if (sane.length) {
       recordFlag(signals, g, c.m, nowMs); sigDirty = true;
       for (const r of g) trustTouched.add(String(r.steamID));   // trust-tier candidates
+      RUN.sanity = (RUN.sanity | 0) + 1;
       ghWarn('match=' + c.m + ': sanity-flagged [' + sane.join(',') + '] -- not settled: ' + g.map(r => plog(r.steamID) + '@' + r.shard).join(' '));
       continue;
     }
@@ -1061,9 +1097,11 @@ async function main() {
   if (xpId) saveXp(xpState);
   await maintainTrust();
   console.log('written: rating ' + rOk + '/' + wRating.length + ', points ' + pOk + '/' + wPoints.length + ', xp ' + xOk + '/' + wXp.length + ', state updated (idempotent)');
+  RUN.writes = rOk + '/' + wRating.length + ' ' + pOk + '/' + wPoints.length + ' ' + xOk + '/' + wXp.length;
+  writeRunSummary();
 }
 
 if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
-module.exports = { isVoidDisp, voidByConsensus, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, pid, XP_CFG, LEAVER_XP, LP_SEG, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB };
+module.exports = { isVoidDisp, voidByConsensus, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, pid, XP_CFG, LEAVER_XP, LP_SEG, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB };

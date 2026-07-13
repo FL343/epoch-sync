@@ -1,0 +1,33 @@
+name: audit
+# Nightly read-only invariant audit: board inventory, foreign-writer probe on the
+# trusted-writes boards (the practical permission-regression check -- the Web API cannot
+# read a board's write configuration, but a misconfig manifests as entries outside the
+# cron's own state closure), shard/report hygiene, scale telemetry. Any violation fails
+# the run -> GitHub's built-in failure e-mail. GitHub throttles schedules on low-activity
+# repos to a few firings a day; for a daily audit that jitter is irrelevant.
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch: {}
+permissions:
+  contents: read
+concurrency:
+  group: audit
+  cancel-in-progress: false
+jobs:
+  audit:
+    if: github.repository == 'FL343/epoch-sync'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: audit
+        env:
+          STEAM_PUBLISHER_KEY: ${{ secrets.STEAM_PUBLISHER_KEY }}
+          APPID: ${{ secrets.APPID }}
+          LB_PREFIX: ${{ secrets.LB_PREFIX }}
+          RANKED_LB: ${{ secrets.RANKED_LB }}
+          LP_LB: ${{ secrets.LP_LB }}
+          XP_LB: ${{ secrets.XP_LB }}
+          STATE_SALT: ${{ secrets.STATE_SALT }}
+        run: node audit.js
