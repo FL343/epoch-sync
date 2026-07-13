@@ -363,6 +363,15 @@ async function getJson(url) {
 }
 const ghWarn = m => console.log('::warning::' + m);
 const ghErr = m => console.log('::error::' + m);
+// Board-resolution gate: past the provisioning phase, a provisioned board vanishing from the
+// listing (deleted / renamed / post-rebuild generation wobble) must FAIL the run instead of
+// silently disabling an authority path -- the soft skip loses that match's points/xp forever
+// (the match is still marked processed) or hides a dead collection surface indefinitely. With
+// STRICT_BOARDS=1 (set in CI) the run errors out; un-processed matches simply settle on a later
+// run once the board is back. Default off keeps the soft skip for local runs and for shipping
+// code ahead of a board's creation.
+const STRICT_BOARDS = process.env.STRICT_BOARDS === '1';
+const strictBoard = m => { if (STRICT_BOARDS) { ghErr(m + ' -- STRICT_BOARDS=1 fails instead of degrading'); process.exit(1); } };
 async function postForm(path, params) {
   const body = Object.keys(params).map(k => k + '=' + encodeURIComponent(params[k])).join('&');
   const r = await fetch(BASE + path, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body });
@@ -796,6 +805,7 @@ async function main() {
       }
     } catch (e) { ghWarn('report box read failed: ' + (e && e.message)); }
   } else if (!repLb) {
+    strictBoard('report board absent');
     console.log('report board absent (pre-create ' + REPORT_LB + ', client-writable) -- skip');
   }
   // trust board upkeep: recompute tiers for touched players + everyone currently ON the
@@ -803,7 +813,7 @@ async function main() {
   // settles). Board absent -> logged skip (code can ship before the board exists).
   const maintainTrust = async () => {
     const tLb = ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).find(x => String(x.name || x.Name) === TRUST_LB);
-    if (!tLb) { console.log('trust board absent (pre-create ' + TRUST_LB + ', trusted-writes) -- skip'); return; }
+    if (!tLb) { strictBoard('trust board absent'); console.log('trust board absent (pre-create ' + TRUST_LB + ', trusted-writes) -- skip'); return; }
     try {
       // Always read (never trust the list's entry-count metadata: it lags behind writes --
       // a stale 0 would skip the read and silently starve decay-deletes for the run).
@@ -844,7 +854,7 @@ async function main() {
   const skill = loadSkill();
   const lpLb = ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).find(x => String(x.name || x.Name) === LP_LB);
   const lpId = lpLb ? (lpLb.id || lpLb.ID) : null;
-  if (!lpId) ghWarn('points board not found (pre-create with onlytrustedwrites) -> skip points this run');
+  if (!lpId) { strictBoard('points board not found'); ghWarn('points board not found (pre-create with onlytrustedwrites) -> skip points this run'); }
   const lp = {}, lpDet = {};   // lpDet = existing detail bytes per player, so an unread reveal survives a later normal-match LP update
   let lpComplete = true;
   if (lpId) {
@@ -855,7 +865,7 @@ async function main() {
   // XP ladder is optional: skip the whole XP path (no board, no state) if XP_LB is unset or the board is missing.
   const xpLb = XP_LB ? ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).find(x => String(x.name || x.Name) === XP_LB) : null;
   const xpId = xpLb ? (xpLb.id || xpLb.ID) : null;
-  if (XP_LB && !xpId) ghWarn('xp board not found (pre-create with onlytrustedwrites) -> skip xp this run');
+  if (XP_LB && !xpId) { strictBoard('xp board not found'); ghWarn('xp board not found (pre-create with onlytrustedwrites) -> skip xp this run'); }
   const xp = {};
   let xpComplete = true;
   if (xpId) {

@@ -12,6 +12,8 @@ jobs:
   reconcile:
     if: github.repository == 'FL343/epoch-sync'
     runs-on: ubuntu-latest
+    # a wedged HTTP call must not hold the concurrency group for the 6h default
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
@@ -28,6 +30,9 @@ jobs:
           LP_LB: ${{ secrets.LP_LB }}
           XP_LB: ${{ secrets.XP_LB }}
           STATE_SALT: ${{ secrets.STATE_SALT }}
+          # all boards are provisioned: a board missing from the listing is a config
+          # regression -- fail loudly (e-mail) instead of silently skipping authority
+          STRICT_BOARDS: '1'
         run: node validate.js
       - name: persist
         run: |
