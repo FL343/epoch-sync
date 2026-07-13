@@ -247,7 +247,7 @@ const REPORT_DAILY_CAP = Number(process.env.REPORT_DAILY_CAP || 20);
 function harvestReports(entries, s, now) {
   const day = sigDay(s, now);
   day.r = day.r || {};
-  const res = { seen: 0, counted: 0, capped: 0, bad: 0 };
+  const res = { seen: 0, counted: 0, capped: 0, bad: 0, targets: [] };
   for (const e of (entries || [])) {
     const rp = String(e.steamID || '');
     const d = e.d || [];
@@ -264,6 +264,7 @@ function harvestReports(entries, s, now) {
       const seenKey = rk + '|' + tk + '|' + reason + '|' + mh;
       if (s.rseen[seenKey]) continue;          // idempotent re-upload of the rolling queue
       s.rseen[seenKey] = now;
+      res.targets.push(target);                // real sid -> trust-tier candidate this run
       res.seen++;
       const dayN = (day.r[rk] | 0);
       if (dayN >= REPORT_DAILY_CAP) { res.capped++; continue; }   // dedup-marked but not counted
@@ -279,6 +280,54 @@ function harvestReports(entries, s, now) {
   return res;
 }
 function pairKey(a, b) { return a < b ? a + '|' + b : b + '|' + a; }
+// ---- trust tier (judgment OUTPUT of recorded signals; still no punishment) ----
+// A bare 0-3 tier per player on an open-read Trusted board (trust_tier). The client
+// matchmaker consumes it as a SORT-ONLY soft-avoid key (never a filter -- single-pool
+// invariant holds). Inputs are deliberately restricted to the high-confidence signals:
+//   f   = forgery-flag involvement (inconsistent/sanity-flagged groups; note an
+//         inconsistent group flags every writer incl. the honest side, hence the
+//         high floors -- repeat involvement is the signal, not one incident)
+//   vur = same-match-VERIFIED unique reporters (a rep edge only counts when the
+//         reporter/target pair actually co-occurred in a match window (signals.pairs)
+//         -- report-bombing from strangers who never played you counts zero)
+// Thresholds are conservative pre-traffic placeholders (expected: ~everyone tier 0 at
+// launch); recalibrate with real distributions at the B5/B6 judgment pass. The 45/90d
+// signal windows make tiers decay on their own (self-healing appeal).
+// Board upkeep: entries exist only for tier>=1 (delete on decay to 0) -> the readable
+// surface stays a handful of coarse tiers, no counts, no reasons.
+const TRUST_LB = process.env.TRUST_LB || 'trust_tier';
+const TRUST_T = { F1: 3, F2: 8, VUR1: 4, VUR2: 10 };
+function verifiedUniqueReporters(s, tp) {
+  let n = 0;
+  for (const k of Object.keys(s.rep || {})) {
+    const i = k.indexOf('>');
+    if (i < 0 || k.slice(i + 1) !== tp) continue;
+    if ((s.pairs || {})[pairKey(k.slice(0, i), tp)]) n++;
+  }
+  return n;
+}
+function trustTierOf(f, vur) {
+  f |= 0; vur |= 0;
+  let t = 0;
+  t += f >= TRUST_T.F2 ? 2 : (f >= TRUST_T.F1 ? 1 : 0);
+  t += vur >= TRUST_T.VUR2 ? 2 : (vur >= TRUST_T.VUR1 ? 1 : 0);
+  return Math.min(3, t);
+}
+// existing = {sid: tier on board}; touched = iterable of real sids seen this run with
+// trust-relevant signals. Union both so decayed players get re-evaluated (and deleted
+// at 0) without any identity leaving the board itself.
+function trustPlan(s, existing, touched, now) {
+  const writes = [], deletes = [];
+  const all = new Set([...Object.keys(existing || {}), ...touched]);
+  for (const sid of all) {
+    const p = pid(sid);
+    const tier = trustTierOf(((s.players || {})[p] || {}).f | 0, verifiedUniqueReporters(s, p));
+    const cur = (existing || {})[sid];
+    if (tier > 0 && tier !== (cur | 0)) writes.push({ sid, tier });
+    else if (tier === 0 && cur != null) deletes.push(sid);
+  }
+  return { writes, deletes };
+}
 // parts = present record-writers (seat+score+steamID); rankOf may be null for VOID groups.
 function recordMatchSignals(s, g, parts, rankOf, matchType, isVoid, now) {
   const mask = premadeMaskOf(matchType), team = isTeamMt(matchType);
@@ -726,7 +775,13 @@ async function main() {
   // (they are never processed, so they re-surface every run -- recordFlag dedups by match key).
   const signals = loadSignals();
   let sigDirty = false;
-  for (const { m, g } of inconsistentGroups) if (recordFlag(signals, g, m, nowMs)) sigDirty = true;
+  // trust-tier candidates seen this run (real sids; signals stay HMAC-keyed -- the only
+  // place real ids persist is the trust board itself, which is the public artifact anyway)
+  const trustTouched = new Set();
+  for (const { m, g } of inconsistentGroups) {
+    if (recordFlag(signals, g, m, nowMs)) sigDirty = true;
+    for (const r of g) trustTouched.add(String(r.steamID));
+  }
   // player reports: harvest the client-written report box into directional edges (record-only).
   // Runs before the no-consistent-matches early returns -- reports arrive with or without settles.
   const repLb = ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).find(x => String(x.name || x.Name) === REPORT_LB);
@@ -736,12 +791,41 @@ async function main() {
       const rres = harvestReports(rb.ents.map(e => ({ steamID: e.steamID, d: decodeDetails(e.detailData) })), signals, nowMs);
       if (rres.seen || rres.bad) {
         if (rres.counted) sigDirty = true;
+        for (const t of rres.targets) trustTouched.add(t);
         console.log('reports: ' + rres.seen + ' new (' + rres.counted + ' counted, ' + rres.capped + ' over daily cap, ' + rres.bad + ' malformed) of ' + rb.ents.length + ' entries');
       }
     } catch (e) { ghWarn('report box read failed: ' + (e && e.message)); }
   } else if (!repLb) {
     console.log('report board absent (pre-create ' + REPORT_LB + ', client-writable) -- skip');
   }
+  // trust board upkeep: recompute tiers for touched players + everyone currently ON the
+  // board (decay/deletion). Runs on every exit path (reports/flags arrive with or without
+  // settles). Board absent -> logged skip (code can ship before the board exists).
+  const maintainTrust = async () => {
+    const tLb = ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).find(x => String(x.name || x.Name) === TRUST_LB);
+    if (!tLb) { console.log('trust board absent (pre-create ' + TRUST_LB + ', trusted-writes) -- skip'); return; }
+    try {
+      // Always read (never trust the list's entry-count metadata: it lags behind writes --
+      // a stale 0 would skip the read and silently starve decay-deletes for the run).
+      const existing = {};
+      const tb = await readBoardAll(tLb.id || tLb.ID, 'trust board');
+      for (const e of tb.ents) existing[String(e.steamID)] = e.score | 0;
+      const plan = trustPlan(signals, existing, trustTouched, nowMs);
+      if (!plan.writes.length && !plan.deletes.length) return;
+      console.log('trust: ' + plan.writes.length + ' tier writes [' + plan.writes.map(w => plog(w.sid) + '=' + w.tier).join(' ') + '], ' +
+                  plan.deletes.length + ' decayed deletes [' + plan.deletes.map(plog).join(' ') + ']');
+      if (!APPLY_MMR) { console.log('trust: dry-run, board untouched'); return; }
+      const tId = tLb.id || tLb.ID;
+      for (const w of plan.writes) {
+        const r = await postForm('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: tId, steamid: w.sid, score: w.tier, scoremethod: 'ForceUpdate', format: 'json' });
+        if (!r.ok) ghWarn('trust write failed ' + plog(w.sid) + ': HTTP ' + r.status);
+      }
+      for (const sid of plan.deletes) {
+        const r = await postForm('/ISteamLeaderboards/DeleteLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: tId, steamid: sid, format: 'json' });
+        if (!r.ok) ghWarn('trust delete failed ' + plog(sid) + ': HTTP ' + r.status);
+      }
+    } catch (e) { ghWarn('trust board upkeep failed: ' + (e && e.message)); }
+  };
   const persistStartsSide = () => {
     if (!APPLY_MMR) { console.log('APPLY_MMR=0 dry-run, nothing written'); return; }
     saveStarts(startsPending);
@@ -749,10 +833,10 @@ async function main() {
     if (startsRes.convicted) { saveLeavers(leavers); saveProcessed(processed); }
   };
 
-  if (consistentMatches.length === 0) { console.log('no consistent matches'); persistStartsSide(); return; }
+  if (consistentMatches.length === 0) { console.log('no consistent matches'); persistStartsSide(); await maintainTrust(); return; }
   const fresh = consistentMatches.filter(c => !processed.has(c.m));
   console.log(consistentMatches.length + ' consistent, ' + fresh.length + ' fresh (settled ' + (consistentMatches.length - fresh.length) + ')');
-  if (fresh.length === 0) { console.log('no fresh matches, skip'); persistStartsSide(); return; }
+  if (fresh.length === 0) { console.log('no fresh matches, skip'); persistStartsSide(); await maintainTrust(); return; }
 
   const rankedLb = ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).find(x => String(x.name || x.Name) === RANKED_LB);
   if (!rankedLb) { ghErr('rating board not found (must be pre-created)'); process.exit(1); }
@@ -818,6 +902,7 @@ async function main() {
     const sane = sanityFlags(g);
     if (sane.length) {
       recordFlag(signals, g, c.m, nowMs); sigDirty = true;
+      for (const r of g) trustTouched.add(String(r.steamID));   // trust-tier candidates
       ghWarn('match=' + c.m + ': sanity-flagged [' + sane.join(',') + '] -- not settled: ' + g.map(r => plog(r.steamID) + '@' + r.shard).join(' '));
       continue;
     }
@@ -964,10 +1049,11 @@ async function main() {
   saveStarts(startsPending);
   if (sigDirty) saveSignals(signals, nowMs);
   if (xpId) saveXp(xpState);
+  await maintainTrust();
   console.log('written: rating ' + rOk + '/' + wRating.length + ', points ' + pOk + '/' + wPoints.length + ', xp ' + xOk + '/' + wXp.length + ', state updated (idempotent)');
 }
 
 if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
-module.exports = { isVoidDisp, voidByConsensus, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, pid, XP_CFG, LEAVER_XP, LP_SEG, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP };
+module.exports = { isVoidDisp, voidByConsensus, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, pid, XP_CFG, LEAVER_XP, LP_SEG, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB };
