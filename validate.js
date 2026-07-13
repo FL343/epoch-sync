@@ -206,11 +206,13 @@ const SIGNALS_FILE = process.env.SIGNALS_FILE || 'signals.json';
 const SIG_PAIR_WINDOW_MS = Number(process.env.SIG_PAIR_WINDOW_MS || 45 * 86400000);
 const SIG_PLAYER_WINDOW_MS = Number(process.env.SIG_PLAYER_WINDOW_MS || 90 * 86400000);
 const SIG_PAIRS_CAP = Number(process.env.SIG_PAIRS_CAP || 200000);
-function loadSignals() { try { const s = JSON.parse(fs.readFileSync(SIGNALS_FILE, 'utf8')) || {}; s.day = s.day || { d: 0, n: {} }; s.players = s.players || {}; s.pairs = s.pairs || {}; s.flagged = s.flagged || {}; return s; } catch (e) { return { day: { d: 0, n: {} }, players: {}, pairs: {}, flagged: {} }; } }
+function loadSignals() { try { const s = JSON.parse(fs.readFileSync(SIGNALS_FILE, 'utf8')) || {}; s.day = s.day || { d: 0, n: {} }; s.players = s.players || {}; s.pairs = s.pairs || {}; s.flagged = s.flagged || {}; s.rep = s.rep || {}; s.rseen = s.rseen || {}; return s; } catch (e) { return { day: { d: 0, n: {} }, players: {}, pairs: {}, flagged: {}, rep: {}, rseen: {} }; } }
 function pruneSignals(s, now) {
   for (const k of Object.keys(s.pairs)) if (now - (s.pairs[k].at || 0) > SIG_PAIR_WINDOW_MS) delete s.pairs[k];
   for (const k of Object.keys(s.players)) if (now - (s.players[k].at || 0) > SIG_PLAYER_WINDOW_MS) delete s.players[k];
   for (const k of Object.keys(s.flagged)) if (now - (s.flagged[k] || 0) > SIG_PAIR_WINDOW_MS) delete s.flagged[k];
+  for (const k of Object.keys(s.rep || {})) if (now - (s.rep[k].at || 0) > SIG_PAIR_WINDOW_MS) delete s.rep[k];
+  for (const k of Object.keys(s.rseen || {})) if (now - (s.rseen[k] || 0) > SIG_PAIR_WINDOW_MS) delete s.rseen[k];
   const pk = Object.keys(s.pairs);
   if (pk.length > SIG_PAIRS_CAP) {   // size fuse: same escalation path as skill.json growth -> external storage
     ghWarn('signals pairs ' + pk.length + ' > cap ' + SIG_PAIRS_CAP + ' -- oldest evicted; plan the move to external state storage');
@@ -229,6 +231,53 @@ function recordFlag(s, g, m, now) {
   return true;
 }
 function sigDay(s, now) { const d = Math.floor(now / 86400000); if (s.day.d !== d) s.day = { d, n: {} }; return s.day; }
+// ---- player reports (client-written report_box board -> directional edges; record-only) ----
+// Reporter identity = the leaderboard entry OWNER (Steam-authenticated write), never a payload
+// field -- a reporter cannot forge someone else's complaints. Targets/reasons/match keys ARE
+// client claims, so everything lands as signals for the future trust layer; nothing punishes.
+// Client packs its rolling queue (<=15) into details: [0xB3, ver<<8|count, (sidLo,sidHi,reason,matchHash)*n].
+// Re-uploads of the same queue are idempotent here (rseen dedup by reporter|target|reason|matchHash).
+// Per-reporter daily counted cap blunts report-bombing: beyond the cap entries are dedup-marked
+// but not counted (mirrors the DAILY_CAP record-only philosophy).
+const REPORT_MAGIC = 0xB3;
+const REPORT_LB = process.env.REPORT_LB || 'report_box';
+const REPORT_REASON_MIN = 1, REPORT_REASON_MAX = 4;
+const REPORT_DAILY_CAP = Number(process.env.REPORT_DAILY_CAP || 20);
+// entries = [{steamID, d}] (d = decoded details ints). Returns {seen, counted, capped, bad}.
+function harvestReports(entries, s, now) {
+  const day = sigDay(s, now);
+  day.r = day.r || {};
+  const res = { seen: 0, counted: 0, capped: 0, bad: 0 };
+  for (const e of (entries || [])) {
+    const rp = String(e.steamID || '');
+    const d = e.d || [];
+    if (!rp || d[0] !== REPORT_MAGIC || d.length < 2) { res.bad++; continue; }
+    const count = d[1] & 0xFF;
+    for (let i = 0; i < count; i++) {
+      const off = 2 + i * 4;
+      if (d.length < off + 4) break;
+      const target = decodeSid(d[off] | 0, d[off + 1] | 0);
+      const reason = d[off + 2] | 0;
+      const mh = d[off + 3] | 0;
+      if (target === '0' || target === rp || reason < REPORT_REASON_MIN || reason > REPORT_REASON_MAX) { res.bad++; continue; }
+      const rk = pid(rp), tk = pid(target);
+      const seenKey = rk + '|' + tk + '|' + reason + '|' + mh;
+      if (s.rseen[seenKey]) continue;          // idempotent re-upload of the rolling queue
+      s.rseen[seenKey] = now;
+      res.seen++;
+      const dayN = (day.r[rk] | 0);
+      if (dayN >= REPORT_DAILY_CAP) { res.capped++; continue; }   // dedup-marked but not counted
+      day.r[rk] = dayN + 1;
+      const ek = rk + '>' + tk;
+      const edge = s.rep[ek] || (s.rep[ek] = { n: 0, m: 0, at: 0 });
+      edge.n += 1; edge.m |= (1 << reason); edge.at = now;
+      const tp = sigPlayer(s, tk, now); tp.ri = (tp.ri | 0) + 1;   // reports received
+      const rpp = sigPlayer(s, rk, now); rpp.ro = (rpp.ro | 0) + 1; // reports filed
+      res.counted++;
+    }
+  }
+  return res;
+}
 function pairKey(a, b) { return a < b ? a + '|' + b : b + '|' + a; }
 // parts = present record-writers (seat+score+steamID); rankOf may be null for VOID groups.
 function recordMatchSignals(s, g, parts, rankOf, matchType, isVoid, now) {
@@ -678,6 +727,21 @@ async function main() {
   const signals = loadSignals();
   let sigDirty = false;
   for (const { m, g } of inconsistentGroups) if (recordFlag(signals, g, m, nowMs)) sigDirty = true;
+  // player reports: harvest the client-written report box into directional edges (record-only).
+  // Runs before the no-consistent-matches early returns -- reports arrive with or without settles.
+  const repLb = ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).find(x => String(x.name || x.Name) === REPORT_LB);
+  if (repLb && (repLb.entries | 0) > 0) {
+    try {
+      const rb = await readBoardAll(repLb.id || repLb.ID, 'report box');
+      const rres = harvestReports(rb.ents.map(e => ({ steamID: e.steamID, d: decodeDetails(e.detailData) })), signals, nowMs);
+      if (rres.seen || rres.bad) {
+        if (rres.counted) sigDirty = true;
+        console.log('reports: ' + rres.seen + ' new (' + rres.counted + ' counted, ' + rres.capped + ' over daily cap, ' + rres.bad + ' malformed) of ' + rb.ents.length + ' entries');
+      }
+    } catch (e) { ghWarn('report box read failed: ' + (e && e.message)); }
+  } else if (!repLb) {
+    console.log('report board absent (pre-create ' + REPORT_LB + ', client-writable) -- skip');
+  }
   const persistStartsSide = () => {
     if (!APPLY_MMR) { console.log('APPLY_MMR=0 dry-run, nothing written'); return; }
     saveStarts(startsPending);
@@ -906,4 +970,4 @@ async function main() {
 if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
-module.exports = { isVoidDisp, voidByConsensus, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, pid, XP_CFG, LEAVER_XP, LP_SEG, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey };
+module.exports = { isVoidDisp, voidByConsensus, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, pid, XP_CFG, LEAVER_XP, LP_SEG, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP };
