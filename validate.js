@@ -475,14 +475,29 @@ const LP_MAX = 9999;
 const LEAVER_LP_PENALTY = Number(process.env.LEAVER_LP_PENALTY || 100);   // ranked leaver authoritative LP deduction (pairs the client optimistic -100)
 // `rs` = mismatch retention coefficient (fraction of the win/loss component applied to EXPECTED outcomes in a
 //   mismatched match) per tier: lower tiers move closer to normal, higher tiers compress hard (protect the top ladder).
+// 7 tiers (2026-07-14): silver/platinum inserted as transition tiers -- narrow bottom (fast first
+//   promotion), wide top. The four legacy tier lines (2000/4000/6000/8000) are unchanged, so every
+//   promotion-series invariant below still holds: band width 2*120=240 < narrowest span 600, and
+//   the largest natural swing (45+5=50) < BOUNDARY_MARGIN. Mirrored by the client ranked-config
+//   LP_SEG + rating-store TIERS (lockstep-pinned by the client test suite).
 const LP_SEG = [
-  { min: 0, win: 45, loss: 15, drip: 5, rs: 0.70 },
-  { min: 2000, win: 35, loss: 20, drip: 3, rs: 0.50 },
-  { min: 4000, win: 28, loss: 25, drip: 2, rs: 0.30 },
-  { min: 6000, win: 22, loss: 22, drip: 1, rs: 0.15 },
-  { min: 8000, win: 20, loss: 20, drip: 0, rs: 0.05 },
+  { min: 0, win: 45, loss: 15, drip: 5, rs: 0.70 },     // bronze (600 wide)
+  { min: 600, win: 40, loss: 17, drip: 4, rs: 0.60 },   // silver
+  { min: 2000, win: 35, loss: 20, drip: 3, rs: 0.50 },  // gold
+  { min: 3000, win: 31, loss: 22, drip: 2, rs: 0.40 },  // platinum
+  { min: 4000, win: 28, loss: 25, drip: 2, rs: 0.30 },  // diamond
+  { min: 6000, win: 22, loss: 22, drip: 1, rs: 0.15 },  // master
+  { min: 8000, win: 20, loss: 20, drip: 0, rs: 0.05 },  // grandmaster (zero-sum top)
 ];
 function lpSeg(lp) { let s = LP_SEG[0]; for (const x of LP_SEG) if (lp >= x.min) s = x; return s; }
+// placement seeding (2026-07-14): a player's FIRST ranked settle starts from a TrueSkill-derived
+//   seed instead of 0. Ranked unlock requires ~15 quick matches, so the pre-match display rating is
+//   already a real skill signal. seed = clamp((display - BASE) * SLOPE, 0, CAP); CAP lands mid-
+//   platinum -- diamond+ must be climbed, and 3200 sits outside both boundary bands (3000+120 /
+//   4000-120). New/weak players (display <= 1000) seed 0 = the old everyone-starts-bronze behavior.
+//   The client mirrors this formula optimistically on its first ranked game (read-back corrects).
+const LP_SEED = { BASE: 1000, SLOPE: 4, CAP: 3200 };
+function seedLp(display) { return Math.max(0, Math.min(LP_SEED.CAP, Math.round(((display | 0) - LP_SEED.BASE) * LP_SEED.SLOPE))); }
 function lpDelta(lp, rank, pc) {
   const seg = lpSeg(lp);
   const p = pc <= 1 ? 0.5 : (pc - 1 - (rank - 1)) / (pc - 1);
@@ -999,6 +1014,31 @@ async function main() {
     if (!pend) for (const sid of writerSids) sigPlayer(signals, pid(sid), nowMs).ns += 1;
     const leavers0 = detectLeavers(g);   // consensus-absent seats: LP penalty below + §7 teammate shield input
     const tsIn = parts.map(p => { const sk = skill[pid(p.steamID)] || ts.DEFAULTS; return { id: p.steamID, rank: rankOf[p.steamID], mu: sk.mu, sigma: sk.sigma }; });
+    // placement seeding: first ranked settle -> seed the lp map itself (recorded in changedLp so a
+    //   bare seed persists), so the plan below, the settle write and the leaver penalty all read one
+    //   consistent base. Leavers seed too (their first ranked appearance may be the leave itself --
+    //   the -100 then applies to the seeded base, not to 0).
+    // seed-settle exemption: players seeded THIS settle skip the promotion/relegation series clamp below -- the seed
+    //   already lands their LP at the display-derived position, and applying crossline in the same
+    //   settle could force a boundary crossing on a player's very first ranked game (silent demote/
+    //   promote before placement has calibrated). Mirrors client results.js (_firstRankedBefore gate);
+    //   lp==null before seeding == the client's rankedGamesPlayed===0, so both ends skip the same settle.
+    const seededNow = new Set();
+    if (lpId && appliesLp(matchType)) {
+      for (const t of tsIn) {
+        if (lp[t.id] == null) {
+          lp[t.id] = seedLp(ts.displayRating(t.mu, t.sigma)); changedLp[t.id] = lp[t.id]; seededNow.add(t.id);
+          console.log('  seed ' + c.m + ': ' + plog(t.id) + ' first ranked settle, display ' + ts.displayRating(t.mu, t.sigma) + ' -> pts ' + lp[t.id]);
+        }
+      }
+      for (const x of leavers0) {
+        if (lp[x.steamID] == null) {
+          const sk = skill[pid(x.steamID)] || ts.DEFAULTS;
+          lp[x.steamID] = seedLp(ts.displayRating(sk.mu, sk.sigma)); changedLp[x.steamID] = lp[x.steamID]; seededNow.add(x.steamID);
+          console.log('  seed ' + c.m + ': ' + plog(x.steamID) + ' (leaver, first ranked) display ' + ts.displayRating(sk.mu, sk.sigma) + ' -> pts ' + lp[x.steamID]);
+        }
+      }
+    }
     let tsOut;
     if (isTeamMt(matchType)) {
       // M3: team modes rate as TWO TEAMS (strength = sum mu, binary outcome) -- the ordinal pairwise
@@ -1031,7 +1071,8 @@ async function main() {
         //   won: plan-supplied (unit average rank / team outcome), else top-half at own rank.
         //   PROTECTED (flag 2) keeps its compressed natural loss -- no forced drop.
         const wonLike = rs ? !!rs.won : ((rankOf[r.id] | 0) <= (parts.length + 1) / 2);
-        const d = (rs && rs.flag === 2) ? d0 : crosslineDelta(cur, d0, wonLike);
+        // PROTECTED (flag 2) keeps natural loss; a seed settle (first ranked) skips the series clamp too.
+        const d = ((rs && rs.flag === 2) || seededNow.has(r.id)) ? d0 : crosslineDelta(cur, d0, wonLike);
         const nv = Math.max(0, Math.min(LP_MAX, cur + d));
         lp[r.id] = nv; changedLp[r.id] = nv;
         if (rs && rs.flag) reveal[r.id] = { matchHash: g[0].d[3] | 0, seed: g[0].d[4] | 0, flag: rs.flag, adjDelta: d, normalDelta: rs.normalDelta };
@@ -1104,4 +1145,4 @@ async function main() {
 if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
-module.exports = { isVoidDisp, voidByConsensus, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, pid, XP_CFG, LEAVER_XP, LP_SEG, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB };
+module.exports = { isVoidDisp, voidByConsensus, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB };

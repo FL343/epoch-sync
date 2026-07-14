@@ -9,12 +9,12 @@ const eq = (label, got, exp) => { const a = JSON.stringify(got), b = JSON.string
 const t = (label, cond) => cond ? ok(label) : bad(label);
 
 console.log('=== not applicable -> null ===');
-eq('quick (matchType 1)', reducedStakesPlan([{ steamID: 'A', mmr: 1000, rank: 1, lp: 1000 }, { steamID: 'B', mmr: 1800, rank: 2, lp: 1000 }], 1), null);
-eq('< 2 players', reducedStakesPlan([{ steamID: 'A', mmr: 1000, rank: 1, lp: 1000 }], 2), null);
-eq('spread <= threshold (200)', reducedStakesPlan([{ steamID: 'A', mmr: 1000, rank: 1, lp: 1000 }, { steamID: 'B', mmr: 1200, rank: 2, lp: 1000 }], 2), null);
+eq('quick (matchType 1)', reducedStakesPlan([{ steamID: 'A', mmr: 1000, rank: 1, lp: 300 }, { steamID: 'B', mmr: 1800, rank: 2, lp: 300 }], 1), null);
+eq('< 2 players', reducedStakesPlan([{ steamID: 'A', mmr: 1000, rank: 1, lp: 300 }], 2), null);
+eq('spread <= threshold (200)', reducedStakesPlan([{ steamID: 'A', mmr: 1000, rank: 1, lp: 300 }, { steamID: 'B', mmr: 1200, rank: 2, lp: 300 }], 2), null);
 
 console.log('=== 2P mismatch, weak loses -> PROTECTED (bronze) ===');
-const p2 = reducedStakesPlan([{ steamID: 'S', mmr: 1600, rank: 1, lp: 1000 }, { steamID: 'W', mmr: 1000, rank: 2, lp: 1000 }], 2);
+const p2 = reducedStakesPlan([{ steamID: 'S', mmr: 1600, rank: 1, lp: 300 }, { steamID: 'W', mmr: 1000, rank: 2, lp: 300 }], 2);
 t('triggered (non-null)', p2 != null);
 eq('weak flag = PROTECTED(2)', p2.W.flag, 2);
 eq('strong flag = none(0)', p2.S.flag, 0);
@@ -23,7 +23,7 @@ t('weak loss compressed (adj less negative than normal)', p2.W.adjDelta > p2.W.n
 t('strong gain compressed (0 < adj < normal)', p2.S.adjDelta > 0 && p2.S.adjDelta < p2.S.normalDelta);
 
 console.log('=== 2P mismatch, weak WINS -> UPSET (full at bonus 1.0) ===');
-const p3 = reducedStakesPlan([{ steamID: 'S', mmr: 1600, rank: 2, lp: 1000 }, { steamID: 'W', mmr: 1000, rank: 1, lp: 1000 }], 2);
+const p3 = reducedStakesPlan([{ steamID: 'S', mmr: 1600, rank: 2, lp: 300 }, { steamID: 'W', mmr: 1000, rank: 1, lp: 300 }], 2);
 eq('weak flag = UPSET(1)', p3.W.flag, 1);
 eq('weak full (adj === normal at bonus 1.0)', p3.W.adjDelta, p3.W.normalDelta);
 eq('strong flag = none(0)', p3.S.flag, 0);
@@ -31,7 +31,7 @@ eq('strong upset-loss mild (FP-safe: -15*0.5+5 -> -2)', p3.S.adjDelta, -2);
 t('strong upset-loss milder than full loss', p3.S.adjDelta > p3.S.normalDelta);
 
 console.log('=== grandmaster strong stomp -> gain crushed (rs 0.05) ===');
-const p4 = reducedStakesPlan([{ steamID: 'G', mmr: 2000, rank: 1, lp: 8500 }, { steamID: 'W', mmr: 1000, rank: 2, lp: 1000 }], 2);
+const p4 = reducedStakesPlan([{ steamID: 'G', mmr: 2000, rank: 1, lp: 8500 }, { steamID: 'W', mmr: 1000, rank: 2, lp: 300 }], 2);
 eq('grandmaster normal gain = 20', p4.G.normalDelta, 20);
 eq('grandmaster crushed gain (20*0.05 -> 1)', p4.G.adjDelta, 1);
 eq('grandmaster flag none', p4.G.flag, 0);
@@ -46,10 +46,10 @@ eq('p2.W uses drip-preserved formula', p2.W.adjDelta, adjCorrect);
 
 console.log('=== 4P FFA mismatch: field-mean split + no false reveal for a net-0 middle ===');
 const p6 = reducedStakesPlan([
-  { steamID: 'A', mmr: 1800, rank: 1, lp: 1000 },
-  { steamID: 'B', mmr: 1700, rank: 2, lp: 1000 },
-  { steamID: 'C', mmr: 1000, rank: 3, lp: 1000 },
-  { steamID: 'D', mmr: 900, rank: 4, lp: 1000 },
+  { steamID: 'A', mmr: 1800, rank: 1, lp: 300 },
+  { steamID: 'B', mmr: 1700, rank: 2, lp: 300 },
+  { steamID: 'C', mmr: 1000, rank: 3, lp: 300 },
+  { steamID: 'D', mmr: 900, rank: 4, lp: 300 },
 ], 2);
 eq('A (top strong) flag none', p6.A.flag, 0);
 eq('B (strong) flag none', p6.B.flag, 0);
