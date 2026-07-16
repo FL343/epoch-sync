@@ -22,7 +22,8 @@ eq('3 timeout -> innocent', dispClassOf(3), 'innocent');
 eq('4 disband -> innocent', dispClassOf(4), 'innocent');
 eq('5 user-quit -> abandoner', dispClassOf(5), 'abandoner');
 eq('6 recon-fail -> innocent', dispClassOf(6), 'innocent');
-eq('unknown 7 -> innocent (conservative)', dispClassOf(7), 'innocent');
+eq('7 kicked (AFK) -> abandoner', dispClassOf(7), 'abandoner');
+eq('unknown 8 -> innocent (conservative)', dispClassOf(8), 'innocent');
 
 // ============================================================
 console.log('=== effectiveLeaverFactor (audit A1: gradient + min-sample gate) ===');

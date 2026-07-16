@@ -18,7 +18,10 @@ const pid = (s) => crypto.createHmac('sha256', String(SALT || '')).update(String
 const plog = (s) => pid(s).slice(0, 8);
 
 const START_MAGIC = 0xB2;   // start-attestation record (settle records stay 0xB1; lockstep with the client writer)
-const DISP_NAME = ['finished', 'peers-gone', 'host-left', 'level-begin-timeout', 'migrate-disband', 'user-quit', 'reconnect-failed'];
+// 'kicked' (7) = removed by the host for in-match inactivity; classed abandoner like user-quit.
+// A kicked player never writes a settle record (they leave mid-match), so the code never appears
+// in a shard in practice -- it exists for client-side exit-signal classing and table lockstep.
+const DISP_NAME = ['finished', 'peers-gone', 'host-left', 'level-begin-timeout', 'migrate-disband', 'user-quit', 'reconnect-failed', 'kicked'];
 const dispName = c => (DISP_NAME[c | 0] || ('disp' + (c | 0)));
 const isVoidDisp = c => (c | 0) >= 2;
 
@@ -715,8 +718,8 @@ function saveXp(s) { try { fs.writeFileSync(XP_FILE, JSON.stringify(s, null, 0))
 const XP_CFG = { base: 100, rankBonus: [80, 45, 20, 0], moneyDivisor: 50, moneyBonusCap: 120, rankedMult: 1.25, dailyFirstWin: 150 };
 // repeat-leaver discount: gradient + minimum-sample gate in one, via min-denominator smoothing. values tunable on real data.
 const LEAVER_XP = { minSample: 20, tiers: [{ maxRate: 0.05, factor: 1.0 }, { maxRate: 0.15, factor: 0.5 }, { maxRate: 1.01, factor: 0.3 }] };
-// per-end disposition -> credit class (lockstep mirror of client table): 0,1 valid / 5 abandoner / else innocent.
-function dispClassOf(code) { const c = code | 0; return (c === 0 || c === 1) ? 'valid' : (c === 5 ? 'abandoner' : 'innocent'); }
+// per-end disposition -> credit class (lockstep mirror of client table): 0,1 valid / 5,7 abandoner / else innocent.
+function dispClassOf(code) { const c = code | 0; return (c === 0 || c === 1) ? 'valid' : ((c === 5 || c === 7) ? 'abandoner' : 'innocent'); }
 // effective leave rate with min-denominator smoothing -> tier factor. leaves/games cumulative per player; a first leave cannot spike to 100%.
 function effectiveLeaverFactor(leaves, games) {
   const total = (leaves | 0) + (games | 0);
