@@ -18,6 +18,17 @@ const pid = (s) => crypto.createHmac('sha256', String(SALT || '')).update(String
 const plog = (s) => pid(s).slice(0, 8);
 
 const START_MAGIC = 0xB2;   // start-attestation record (settle records stay 0xB1; lockstep with the client writer)
+// Abandon-confession record: a voluntarily-leaving (or idle-kicked) client writes a self-signed
+// "I left" record on the way out -- same v3 layout with zeroed results, disp slot 5/7 (lockstep
+// with the client writer). It makes the leaver penalty authoritative WITHOUT finisher consensus,
+// closing the everyone-left hole: a match whose sole survivor writes a lone record never settles,
+// so detectLeavers never runs and the leaver's optimistic deduction was silently reverted by
+// read-back. Trust surface is zero: identity is the leaderboard entry owner and the content only
+// ever hurts that same account (spamming fake confessions just fines yourself into the floor).
+// Reconnect forgiveness mirror: if the confessor later writes a settle record for the same match
+// (came back and finished), the exact deducted amount is refunded and the exit-rate signal is
+// retracted -- the pending entry tracks the amount, never an identity (state stays de-identified).
+const CONFESS_MAGIC = 0xB5;
 // 'kicked' (7) = removed by the host for in-match inactivity; classed abandoner like user-quit.
 // A kicked player never writes a settle record (they leave mid-match), so the code never appears
 // in a shard in practice -- it exists for client-side exit-signal classing and table lockstep.
@@ -83,7 +94,8 @@ function detectLeavers(g) {
 // deduction: with zero finisher testimony an all-absent match cannot be told apart from a
 // migration-failure / crash cascade, so the harsh ranked penalty stays on the finisher-consensus
 // path (detectLeavers). Escalation on top of this signal is trust-graph territory.
-function reconcileStarts(starts, groups, consistentKeys, processed, pending, leavers, now, maturityMs) {
+function reconcileStarts(starts, groups, consistentKeys, processed, pending, leavers, now, maturityMs, confState) {
+  confState = confState || {};
   const sg = {};
   for (const r of starts) { const m = r.d[3] + '_' + r.d[4] + '_' + r.d[2]; (sg[m] = sg[m] || []).push(r); }
   let registered = 0, convicted = 0, cleaned = 0;
@@ -131,6 +143,7 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
     for (const seat of Object.keys(p.roster)) {
       const h = p.roster[seat];
       if (p.settled.indexOf(h) >= 0) continue;
+      if (confState[h + '|' + m]) continue;   // confession already counted this leave (no double exit-rate)
       leavers[h] = leavers[h] || { leaves: 0, lastMatch: '' };
       leavers[h].leaves += 1; leavers[h].lastMatch = m;
       hit.push(h.slice(0, 8));
@@ -419,6 +432,7 @@ function writeRunSummary() {
       '| consistent / fresh | ' + s('consistent', 0) + ' / ' + s('fresh', 0) + ' |',
       '| flagged inconsistent / sanity | ' + s('flagged', 0) + ' / ' + s('sanity', 0) + ' |',
       '| starts pending / exit-rate hits | ' + s('pending', 0) + ' / ' + s('convicted', 0) + ' |',
+      '| confessions seen/penalized/refunded | ' + s('confess', '0/0/0') + ' |',
       '| reports seen / counted | ' + s('repSeen', 0) + ' / ' + s('repCounted', 0) + ' |',
       '| trust writes / deletes | ' + s('trustW', 0) + ' / ' + s('trustD', 0) + ' |',
       '| board writes rating/points/xp | ' + s('writes', '0/0 0/0 0/0') + ' |',
@@ -496,6 +510,84 @@ function saveSkill(s) { try { fs.writeFileSync(SKILL_FILE, JSON.stringify(s, nul
 const LEAVERS_FILE = process.env.LEAVERS_FILE || 'leavers.json';
 function loadLeavers() { try { return JSON.parse(fs.readFileSync(LEAVERS_FILE, 'utf8')) || {}; } catch (e) { return {}; } }
 function saveLeavers(s) { try { fs.writeFileSync(LEAVERS_FILE, JSON.stringify(s, null, 0)); } catch (e) { ghWarn('write ' + LEAVERS_FILE + ' failed: ' + (e && e.message)); } }
+// pending abandon confessions (see reconcileConfessions): "pid|matchKey" -> {t0, mt, ded, ex, refunded, done}
+const CONFESSIONS_FILE = process.env.CONFESSIONS_FILE || 'confessions.json';
+const CONFESS_PRUNE_MS = Number(process.env.CONFESS_PRUNE_MS || 48 * 3600 * 1000);
+function loadConfessions() { try { return JSON.parse(fs.readFileSync(CONFESSIONS_FILE, 'utf8')) || {}; } catch (e) { return {}; } }
+function saveConfessions(s, now) {
+  for (const k of Object.keys(s)) if (now - (s[k].t0 || 0) > CONFESS_PRUNE_MS) delete s[k];
+  try { fs.writeFileSync(CONFESSIONS_FILE, JSON.stringify(s, null, 0)); } catch (e) { ghWarn('write ' + CONFESSIONS_FILE + ' failed: ' + (e && e.message)); }
+}
+// Process abandon confessions (record-writer identity = penalty target; nothing here can touch a
+// third party). Runs BEFORE the no-consistent-matches early returns -- the everyone-left scenario
+// this exists for produces no settle groups at all. Dependencies are injected so tests need no fetch.
+//   confs: [{steamID, m, mt, dispCode}] from this run's shard read (deduped by state key).
+//   groups: this run's settle-record groups (forgiveness probe: confessor wrote a settle record).
+//   opts: { penalty, lpMax, maturityMs, appliesLpFn, seedFor(sid) -> base LP for a first-ranked leaver,
+//           readLp: async(sid) -> {score, details}|null, writeLp: async(sid, score, details) -> ok }
+// Effects per NEW confession on an unprocessed match: exit-rate leaves++ (all matchmade types) and,
+// for ranked, an immediate clamp-aware LP deduction (amount recorded for the refund). A later run
+// that sees the confessor's own settle record for the same match refunds the deduction and retracts
+// the exit signal (first-reconnect forgiveness, client mirror). detectLeavers / start-orphan
+// convictions skip confessed (pid|match) keys so nothing double-counts.
+async function reconcileConfessions(confs, groups, processed, confState, leavers, now, opts) {
+  const res = { seen: 0, penalized: 0, exitHits: 0, refunded: 0, finalized: 0 };
+  const settledBy = (m, p) => !!(groups[m] && groups[m].some(r => pid(String(r.steamID)) === p));
+  const byKey = {};
+  for (const c of (confs || [])) { const p = pid(String(c.steamID)); byKey[p + '|' + c.m] = Object.assign({ p }, c); }
+  // 1) NEW confessions (visible on shards this run)
+  for (const key of Object.keys(byKey)) {
+    const c = byKey[key];
+    res.seen++;
+    if (confState[key]) continue;                                        // upkeep handled below (state is sticky; shard entries get overwritten)
+    if (dispClassOf(c.dispCode) !== 'abandoner') continue;               // only self-harm disp codes count
+    if (processed.has(c.m)) { confState[key] = { t0: now, mt: c.mt | 0, done: 1 }; continue; }   // consensus path already owned this match
+    if (settledBy(c.m, c.p)) { confState[key] = { t0: now, mt: c.mt | 0, done: 1 }; continue; }  // already came back and finished before first sighting
+    const st = confState[key] = { t0: now, mt: c.mt | 0, ded: 0, ex: 1 };
+    leavers[c.p] = leavers[c.p] || { leaves: 0, lastMatch: '' };
+    leavers[c.p].leaves += 1; leavers[c.p].lastMatch = c.m;
+    res.exitHits++;
+    if (opts.appliesLpFn(c.mt | 0) && opts.readLp) {
+      const e = await opts.readLp(String(c.steamID));
+      const base = e ? (e.score | 0) : (opts.seedFor ? opts.seedFor(String(c.steamID)) : 0);
+      const nv = leaverLpPenalty(base, opts.penalty);
+      st.ded = base - nv;
+      const okW = await opts.writeLp(String(c.steamID), nv, e && e.details);
+      if (okW) res.penalized++; else { st.ded = 0; ghWarn('confession LP write failed ' + plog(String(c.steamID))); }
+      console.log('  confess ' + c.m + ': ' + plog(String(c.steamID)) + ' ' + dispName(c.dispCode) + ' pts ' + base + '-' + opts.penalty + '->' + nv + (e ? '' : ' (seeded base)'));
+    } else {
+      console.log('  confess ' + c.m + ': ' + plog(String(c.steamID)) + ' ' + dispName(c.dispCode) + ' exit-rate only (non-ranked)');
+    }
+  }
+  // 2) upkeep for ALL pending state (incl. confessions whose shard entry was since overwritten):
+  //    forgiveness needs the real sid, and it comes from the very thing that triggers it -- the
+  //    confessor's own settle record in this run's groups.
+  for (const key of Object.keys(confState)) {
+    const st = confState[key];
+    if (st.done || st.refunded) continue;
+    const i = key.indexOf('|');
+    const p = key.slice(0, i), m = key.slice(i + 1);
+    const rec = groups[m] && groups[m].find(r => pid(String(r.steamID)) === p);
+    if (rec) {
+      // came back and finished: refund the exact deducted amount + retract the exit signal
+      if (st.ded > 0 && opts.readLp) {
+        const sid = String(rec.steamID);
+        const e = await opts.readLp(sid);
+        const nv = Math.min(opts.lpMax, ((e ? e.score : 0) | 0) + (st.ded | 0));
+        const okW = await opts.writeLp(sid, nv, e && e.details);
+        if (okW) res.refunded++;
+        console.log('  confess-forgive ' + m + ': ' + plog(sid) + ' settled after all, refund +' + st.ded + ' -> ' + nv);
+      } else {
+        console.log('  confess-forgive ' + m + ': ' + plog(p) + ' settled after all (exit signal retracted)');
+      }
+      if (st.ex && leavers[p]) { leavers[p].leaves = Math.max(0, (leavers[p].leaves | 0) - 1); st.ex = 0; }
+      st.refunded = 1;
+      continue;
+    }
+    if (now - (st.t0 || 0) > opts.maturityMs) { st.done = 1; res.finalized++; }   // forgiveness window closed; penalty stands
+  }
+  return res;
+}
 // pending start-attestation groups awaiting settlement or maturity (see reconcileStarts)
 const STARTS_FILE = process.env.STARTS_FILE || 'starts.json';
 const STARTS_MATURITY_MS = Number(process.env.STARTS_MATURITY_MS || 2 * 3600 * 1000);   // max match length + reconnect windows, with slack
@@ -1034,16 +1126,21 @@ async function main() {
       } else if (d[0] === START_MAGIC && d.length >= 10) {
         // start attestation: same layout with zeroed result fields -> roster decodes identically
         out.push({ start: true, steamID: e.steamID, shard: label, d, roster: decodeRoster(d) });
+      } else if (d[0] === CONFESS_MAGIC && d.length >= 10) {
+        // abandon confession: writer identity is the penalty target; disp slot at the v3 offset
+        const pc = d[8] | 0;
+        const dispCode = (d.length > 10 + pc && pc >= 1) ? (d[10 + pc] | 0) : 0;
+        out.push({ confess: true, steamID: e.steamID, shard: label, m: d[3] + '_' + d[4] + '_' + d[2], mt: d[2] | 0, dispCode });
       }
     }
     return out;
   });
-  const starts = [];
+  const starts = [], confessions = [];
   for (const r of shardOut) {
-    if (r.status === 'fulfilled') for (const rec of r.value) (rec.start ? starts : recs).push(rec);
+    if (r.status === 'fulfilled') for (const rec of r.value) (rec.start ? starts : (rec.confess ? confessions : recs)).push(rec);
     else ghWarn('read shard failed: ' + (r.reason && r.reason.message || r.reason));
   }
-  console.log('records: ' + recs.length + (starts.length ? ' (+' + starts.length + ' start attestations)' : ''));
+  console.log('records: ' + recs.length + (starts.length ? ' (+' + starts.length + ' start attestations)' : '') + (confessions.length ? ' (+' + confessions.length + ' abandon confessions)' : ''));
   RUN.rec = recs.length; RUN.starts = starts.length;
 
   const MAX_SEATS = 8;
@@ -1089,12 +1186,38 @@ async function main() {
   const processed = loadProcessed();
   const leavers = loadLeavers(); let leaverHits = 0;
   const startsPending = loadStarts();
+  const confState = loadConfessions();   // loaded before starts so the orphan verdict can skip confessed keys
   const consistentKeys = new Set(consistentMatches.map(c => c.m));
   const nowMs = Date.now();
-  const startsRes = reconcileStarts(starts, groups, consistentKeys, processed, startsPending, leavers, nowMs, STARTS_MATURITY_MS);
+  const startsRes = reconcileStarts(starts, groups, consistentKeys, processed, startsPending, leavers, nowMs, STARTS_MATURITY_MS, confState);
   if (startsRes.registered || startsRes.convicted || startsRes.cleaned || Object.keys(startsPending).length)
     console.log('starts: ' + Object.keys(startsPending).length + ' pending (+' + startsRes.registered + ' new), ' + startsRes.convicted + ' exit-rate hits, ' + startsRes.cleaned + ' cleaned');
   RUN.pending = Object.keys(startsPending).length; RUN.convicted = startsRes.convicted;
+  // abandon confessions: immediate authoritative leaver penalty without finisher consensus.
+  // Runs before the early returns (the everyone-left scenario produces no settle groups at all).
+  let confRes = { seen: 0, penalized: 0, exitHits: 0, refunded: 0, finalized: 0 };
+  if (confessions.length || Object.keys(confState).length) {
+    const lpLb0 = ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).find(x => String(x.name || x.Name) === LP_LB);
+    const lpId0 = lpLb0 ? (lpLb0.id || lpLb0.ID) : null;
+    if (!lpId0) strictBoard('points board absent (confession path)');
+    const skill0 = loadSkill();   // read-only here (first-ranked leaver seeding base)
+    confRes = await reconcileConfessions(confessions, groups, processed, confState, leavers, nowMs, {
+      penalty: LEAVER_LP_PENALTY, lpMax: LP_MAX, maturityMs: STARTS_MATURITY_MS,
+      appliesLpFn: appliesLp,
+      seedFor: (sid) => { const sk = skill0[pid(sid)] || ts.DEFAULTS; return seedLp(ts.displayRating(sk.mu, sk.sigma)); },
+      readLp: lpId0 ? (async (sid) => { const e = await readUserEntry(lpId0, sid, 'points'); return e ? { score: e.score | 0, details: decodeDetails(e.detailData) } : null; }) : null,
+      writeLp: async (sid, score, details) => {
+        if (!APPLY_MMR) { console.log('  (dry-run) confession pts ' + plog(sid) + ' = ' + score); return true; }
+        // preserve an unread mismatch reveal exactly like the settle-path points write does
+        const detailsArr = (details && details.length >= 6 && (details[0] & 0xff) === RS_MAGIC) ? details.slice(0, 6) : null;
+        const r = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: lpId0, steamid: sid, score, scoremethod: 'ForceUpdate', format: 'json' }, detailsArr);
+        return r.ok && !(r.json && r.json.result && r.json.result.result && r.json.result.result !== 1);
+      },
+    });
+    if (confRes.seen || confRes.refunded || confRes.finalized)
+      console.log('confessions: ' + confRes.seen + ' seen, ' + confRes.penalized + ' penalized, ' + confRes.exitHits + ' exit-rate hits, ' + confRes.refunded + ' refunded, ' + confRes.finalized + ' finalized');
+  }
+  RUN.confess = confRes.seen + '/' + confRes.penalized + '/' + confRes.refunded;
   // B6 signal collection state + forgery-flag counters for the inconsistent groups seen this run
   // (they are never processed, so they re-surface every run -- recordFlag dedups by match key).
   const signals = loadSignals();
@@ -1156,8 +1279,10 @@ async function main() {
   const persistStartsSide = () => {
     if (!APPLY_MMR) { console.log('APPLY_MMR=0 dry-run, nothing written'); return; }
     saveStarts(startsPending);
+    saveConfessions(confState, nowMs);
     if (sigDirty) saveSignals(signals, nowMs);
-    if (startsRes.convicted) { saveLeavers(leavers); saveProcessed(processed); }
+    if (startsRes.convicted || confRes.exitHits || confRes.refunded) { saveLeavers(leavers); }
+    if (startsRes.convicted) { saveProcessed(processed); }
   };
 
   RUN.consistent = consistentMatches.length;
@@ -1468,6 +1593,13 @@ async function main() {
       console.log('  settle ' + c.m + ': ' + plog(r.id) + ' rank' + rankOf[r.id] + ' mu' + r.mu.toFixed(2) + ' sigma' + r.sigma.toFixed(2) + ' -> ' + ts.displayRating(r.mu, r.sigma) + lpLine);
     }
     for (const x of leavers0) {
+      // a confession already counted this exact (player, match) leave -- exit-rate AND the LP hit
+      // (immediate at quit time); the consensus conviction would double both. Shield input
+      // (leaverSeats for teamLpPlan) is unaffected: leavers0 itself still lists the seat.
+      if (confState[pid(x.steamID) + '|' + c.m]) {
+        console.log('  leaver ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' already confessed -- consensus conviction skipped');
+        continue;
+      }
       leavers[pid(x.steamID)] = leavers[pid(x.steamID)] || { leaves: 0, lastMatch: '' };
       leavers[pid(x.steamID)].leaves += 1; leavers[pid(x.steamID)].lastMatch = c.m; leaverHits++;
       console.log('  leaver ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' (in roster, no record; total ' + leavers[pid(x.steamID)].leaves + ')');
@@ -1542,6 +1674,7 @@ async function main() {
   if (groupsDirty) saveGroups(groupMem, nowMs);
   saveLeavers(leavers);
   saveStarts(startsPending);
+  saveConfessions(confState, nowMs);
   if (sigDirty) saveSignals(signals, nowMs);
   if (xpId) saveXp(xpState);
   await maintainTrust();
@@ -1554,4 +1687,4 @@ async function main() {
 if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
-module.exports = { isVoidDisp, voidByConsensus, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, groupDecayPlan, GROUP_DECAY };
+module.exports = { isVoidDisp, voidByConsensus, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONFESS_MAGIC, reconcileConfessions, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, groupDecayPlan, GROUP_DECAY };
