@@ -756,7 +756,38 @@ const XP_FILE = process.env.XP_FILE || 'xp.json';
 function loadXp() { try { return JSON.parse(fs.readFileSync(XP_FILE, 'utf8')) || {}; } catch (e) { return {}; } }
 function saveXp(s) { try { fs.writeFileSync(XP_FILE, JSON.stringify(s, null, 0)); } catch (e) { ghWarn('write ' + XP_FILE + ' failed: ' + (e && e.message)); } }
 // per-game point formula -- lockstep mirror of the client config (asserted by the schema-lockstep test).
-const XP_CFG = { base: 100, rankBonus: [80, 45, 20, 0], moneyDivisor: 50, moneyBonusCap: 120, rankedMult: 1.25, dailyFirstWin: 150 };
+const XP_CFG = { base: 100, rankBonus: [80, 45, 20, 0], moneyDivisor: 50, moneyBonusCap: 120, rankedMult: 1.25, dailyFirstWin: 150, progressLevels: 5 };
+// ---- match-progress discount (early-settled matches award partial points) ----
+// A matchmade record carries "levels reached" in the high bits of d[7] (bit 0 stays the legacy
+// win flag; nobody consumes it -- ranks derive from the score vector). A match that ends early
+// because every opponent left settles at progress/levelCount of the full award.
+// Deliberately NOT part of the consistency vector: a forced settle can catch honest ends one
+// level-transition apart (one still in the shop after level N, one already entering N+1), and
+// vector membership would flag that innocent skew as forgery. Instead the settle takes the MIN
+// of the writers' in-domain values: a lone forger cannot inflate anyone's award (min wins), and
+// deflating hurts the forger's own award along with everyone else's. Out-of-domain values are
+// ignored rather than flagged (garbage earns no leverage); all-zero (legacy records) = full.
+function xpProgressFrac(prog) {
+  const n = prog | 0;
+  return (n <= 0 || n >= XP_CFG.progressLevels) ? 1 : n / XP_CFG.progressLevels;
+}
+function matchProgressOf(g) {
+  let prog = 0;
+  for (const r of g) {
+    const p = ((r.d[7] | 0) >> 1);
+    if (p >= 1 && p <= XP_CFG.progressLevels && (prog === 0 || p < prog)) prog = p;
+  }
+  return prog;
+}
+// ---- authoritative career win/loss counters (groundwork for player stat cards) ----
+// The client keeps optimistic local games/wins/losses; the truth accumulates HERE from settled
+// records (mirror of the client recordGame rules: valid + innocent count a game, only valid
+// counts a win or loss; a team-mode win = the winning pair = team rank <= 2; an absent leaver
+// writes no record and counts nothing). Published to the client as xp_ladder DETAIL bytes
+// [CAREER_MAGIC, ver, games, wins, losses] alongside every XP write -- boot read-back overwrites
+// the optimistic counters the same way the XP score itself does.
+const CAREER_MAGIC = 0xCA, CAREER_VER = 1;
+function careerWon(matchType, rank) { return isTeamMt(matchType) ? ((rank | 0) <= 2) : ((rank | 0) === 1); }
 // repeat-leaver discount: gradient + minimum-sample gate in one, via min-denominator smoothing. values tunable on real data.
 const LEAVER_XP = { minSample: 20, tiers: [{ maxRate: 0.05, factor: 1.0 }, { maxRate: 0.15, factor: 0.5 }, { maxRate: 1.01, factor: 0.3 }] };
 // per-end disposition -> credit class (lockstep mirror of client table): 0,1 valid / 5,7 abandoner / else innocent.
@@ -784,8 +815,12 @@ function computeXpGain(cls, rank0, money, isRanked, firstWinToday, factor) {
 }
 // credit authoritative points for one consistent match group (mutates the board map + changedXp + state).
 //   deduped by seat; leaves come from the leaver state; today = UTC day index for the daily-first bonus.
-function creditXp(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers, today) {
+//   progFrac (optional, default 1) = match-progress discount, multiplied INTO the leaver factor so both
+//   repos share the exact rounding expression round(round(xp) * (leaverFactor * progFrac)).
+//   careerDet (optional map) receives per-sid cumulative career detail arrays for the board write.
+function creditXp(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers, today, progFrac, careerDet) {
   const isRanked = appliesLp(matchType);
+  const pf = (progFrac == null ? 1 : progFrac);
   const recBySeat = {};
   for (const r of g) { const s = r.d[5] | 0; if (recBySeat[s] == null) recBySeat[s] = r; }
   for (const seatKey of Object.keys(recBySeat)) {
@@ -796,10 +831,16 @@ function creditXp(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers,
     const rank0 = ((rankOf[sid] || 1) | 0) - 1;   // 0-based for rankBonus index (group rank is 1-based)
     let firstWin = false;
     if (cls === 'valid' && rank0 === 0 && (st.lastWinDay | 0) < today) { firstWin = true; st.lastWinDay = today; }
-    const gain = computeXpGain(cls, rank0, scores[seat] | 0, isRanked, firstWin, factor);
+    const gain = computeXpGain(cls, rank0, scores[seat] | 0, isRanked, firstWin, factor * pf);
     if (gain > 0) { xp[sid] = (xp[sid] | 0) + gain; changedXp[sid] = xp[sid]; }
     if (cls === 'valid') st.games += 1;   // denominator = real finishes (innocent/abandoner don't count; mirrors client window)
-    console.log('  xp ' + plog(sid) + ' ' + cls + ' rank' + (rank0 + 1) + (firstWin ? ' dailyWin' : '') + ' x' + factor + ' +' + gain + ' -> ' + (xp[sid] | 0));
+    // career counters (client recordGame mirror): a leaver writes no record -> counts nothing here,
+    // which is exactly the client's abandoner branch (nothing credited). Cumulative in state, so the
+    // detail write always carries the latest totals even across multiple settles in one run.
+    if (cls === 'valid' || cls === 'innocent') st.cg = (st.cg | 0) + 1;
+    if (cls === 'valid') { if (careerWon(matchType, rankOf[sid])) st.cw = (st.cw | 0) + 1; else st.cl = (st.cl | 0) + 1; }
+    if (careerDet && cls !== 'abandoner') careerDet[sid] = [CAREER_MAGIC, CAREER_VER, st.cg | 0, st.cw | 0, st.cl | 0];
+    console.log('  xp ' + plog(sid) + ' ' + cls + ' rank' + (rank0 + 1) + (firstWin ? ' dailyWin' : '') + ' x' + factor + (pf !== 1 ? ' prog x' + pf : '') + ' +' + gain + ' -> ' + (xp[sid] | 0) + ' career ' + (st.cg | 0) + 'g/' + (st.cw | 0) + 'w/' + (st.cl | 0) + 'l');
   }
 }
 // ===== endless co-op authority (match type 7): depth board + CP wallet; never rating/XP/LP. =====
@@ -1212,7 +1253,7 @@ async function main() {
     console.log('on-demand base reads: ' + need.size + ' players (bulk window incomplete)');
   }
   const today = Math.floor(Date.now() / 86400000);   // UTC day index (matches client lastWinDay) for the daily-first bonus
-  const changed = {}; const changedLp = {}; const changedXp = {}; const changedCp = {}; const changedEndless = {}; const reveal = {}; let settled = 0, voided = 0, settledEndless = 0;
+  const changed = {}; const changedLp = {}; const changedXp = {}; const changedCp = {}; const changedEndless = {}; const reveal = {}; const careerDet = {}; let settled = 0, voided = 0, settledEndless = 0;
   for (const c of fresh) {
     const g = c.g;
     const matchType = g[0].d[2] | 0;   // 2=ranked; visible LP only moves for ranked (quick = MMR only)
@@ -1321,7 +1362,11 @@ async function main() {
     }
     // points are credited for BOTH settled AND consensus-VOID matches -- VOID only gates MMR/LP; an innocent victim
     //   still earns participation points (mirrors the client crediting innocent records). per-record class-driven.
-    if (xpId) creditXp(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers, today);
+    //   Early-settled matches (everyone else left) award progress/levelCount of the points (min-of-writers, see matchProgressOf).
+    const prog = matchProgressOf(g);
+    const progFrac = xpProgressFrac(prog);
+    if (progFrac !== 1) console.log('  progress ' + c.m + ': ' + prog + '/' + XP_CFG.progressLevels + ' levels -> points x' + progFrac);
+    if (xpId) creditXp(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers, today, progFrac, careerDet);
     // CP (the endless-economy wallet) earns from matchmade records on the same credit classes.
     if (cpId) creditCp(g, matchType, rankOf, cp, changedCp);
     if (c.void) {
@@ -1463,10 +1508,12 @@ async function main() {
     return okFlag;
   });
   const wXp = await mapPool(Object.keys(changedXp), CONCURRENCY, async (sid) => {
-    const res = await postForm('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: xpId, steamid: sid, score: changedXp[sid], scoremethod: 'ForceUpdate', format: 'json' });
+    // career details ride every XP write ([CAREER_MAGIC, ver, games, wins, losses] -- the client's
+    // authoritative W/L read-back surface). A sid whose XP changed always has fresh career totals.
+    const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: xpId, steamid: sid, score: changedXp[sid], scoremethod: 'ForceUpdate', format: 'json' }, careerDet[sid] || null);
     const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
     if (!okFlag) ghWarn('write xp ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
-    else console.log('  ok xp ' + plog(sid) + ' = ' + changedXp[sid]);
+    else console.log('  ok xp ' + plog(sid) + ' = ' + changedXp[sid] + (careerDet[sid] ? (' career ' + careerDet[sid][2] + 'g/' + careerDet[sid][3] + 'w/' + careerDet[sid][4] + 'l') : ''));
     return okFlag;
   });
   const wCp = await mapPool(Object.keys(changedCp), CONCURRENCY, async (sid) => {
@@ -1507,4 +1554,4 @@ async function main() {
 if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
-module.exports = { isVoidDisp, voidByConsensus, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, groupDecayPlan, GROUP_DECAY };
+module.exports = { isVoidDisp, voidByConsensus, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, groupDecayPlan, GROUP_DECAY };
