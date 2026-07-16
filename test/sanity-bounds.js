@@ -26,7 +26,7 @@ const grp = (...rs) => rs;
 console.log('=== sanityFlags (B5 tier A) ===');
 
 eq('defaults pinned (cap/floor/dur/start-age)', [SANITY.SCORE_CAP, SANITY.SCORE_FLOOR, SANITY.DUR_CAP, SANITY.MIN_START_AGE_MS], [100000, -50000, 7200, 300000]);
-eq('mt whitelist pinned', SANITY.MT_ALLOWED, [1, 2, 3, 4]);
+eq('mt whitelist pinned', SANITY.MT_ALLOWED, [1, 2, 3, 4, 7]);   // 7 = endless co-op (own settle branch, not the matchmade pipeline)
 
 eq('clean 3P quick -> []', sanityFlags(grp(mk(A, 0), mk(B, 1))), []);
 eq('clean ranked premade mask (mt=34, pc=4) -> []', sanityFlags(grp(mk(A, 0, { mt: 34, pc: 4 }), mk(B, 1, { mt: 34, pc: 4 }))), []);

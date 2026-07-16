@@ -115,6 +115,14 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
     // a lone settle (e.g. the finishing side of a 2P match) can be overwritten before maturity.
     if (groups[m]) for (const r of groups[m]) { const h = pid(r.steamID); if (p.settled.indexOf(h) < 0) p.settled.push(h); }
     if (consistentKeys.has(m)) continue;   // consistent settle group -> the normal pipeline owns this key
+    // endless (type 7): never convicted from an orphaned start. Co-op runs are excluded from the
+    // exit-rate economy by design (client parity), and a legit endless run outlives the matchmade
+    // maturity window many times over -- convicting at 2h would hit players who are still playing.
+    // The entry stays as the pacing anchor for its settle and is pruned on its own long TTL.
+    if (isEndlessMt(p.mt)) {
+      if (now - (p.t0 || 0) > ENDLESS.PENDING_TTL_MS) { delete pending[m]; cleaned++; }
+      continue;
+    }
     if (now - (p.t0 || 0) < maturityMs) continue;
     const hit = [];
     for (const seat of Object.keys(p.roster)) {
@@ -148,12 +156,14 @@ const SANITY = {
   // match is 8+ min, so legit settles arrive already-aged (worst case one extra run of delay);
   // a fabricated start+settle batch has to sit out the minimum in pending first.
   MIN_START_AGE_MS: Number(process.env.SANITY_MIN_START_AGE_MS || 300000),
-  MT_ALLOWED: [1, 2, 3, 4],                                      // quick/ranked x brawl/team1; mode2 (5/6) joins when the client gate opens
+  MT_ALLOWED: [1, 2, 3, 4, 7],                                   // quick/ranked x brawl/team1 + endless co-op; mode2 (5/6) joins when the client gate opens
 };
-// NOTE (extensibility): SCORE_CAP/DUR_CAP/MIN_START_AGE_MS were derived from the game as it is
-// today -- 5 levels per matchmade run, 2-4 players, current item-value scale. A future endless
-// mode, level-count change, or economy rework must re-derive them. The client repo pins these
-// assumptions in its lockstep test so such a change fails loudly there.
+// NOTE (extensibility): SCORE_CAP/DUR_CAP/MIN_START_AGE_MS were derived from the MATCHMADE game
+// as it is today -- 5 levels per matchmade run, 2-4 players, current item-value scale. A level-
+// count change or economy rework must re-derive them. The client repo pins these assumptions in
+// its lockstep test so such a change fails loudly there. Type 7 (endless) deliberately does NOT
+// use these caps: its score cap scales with the claimed depth and its time bound is the
+// depth-scaled pacing gate (see the ENDLESS block), because both grow without bound by design.
 const SID_MIN = 0x0110000100000000n, SID_MAX = SID_MIN + (1n << 32n);   // individual-account steamID64 universe base (hex form)
 function sidPlausible(sid) { try { const b = BigInt(sid); return b >= SID_MIN && b <= SID_MAX; } catch (e) { return false; } }
 // g = one consistent match group. Returns [] when sane, else short reason slugs.
@@ -161,21 +171,38 @@ function sanityFlags(g) {
   const out = [];
   const d0 = g[0].d, mt = d0[2] | 0, base = baseMt(mt), mask = premadeMaskOf(mt), pc = d0[8] | 0;
   if (SANITY.MT_ALLOWED.indexOf(base) < 0) out.push('mt');
+  let scoreCap = SANITY.SCORE_CAP;
   if (base === 3 || base === 4) {
     if (mask !== 0) out.push('team-mask');            // team codes never carry a premade mask
     if (pc !== 4) out.push('pc');                     // team brawl is strictly 2v2 seats
+  } else if (base === ENDLESS.MT) {
+    // endless co-op: exactly 2 seats, never a premade mask, and a well-formed depth tail.
+    if (mask !== 0) out.push('mask');
+    if (pc !== 2) out.push('pc');
+    const t = endlessTail(d0);
+    if (!t) out.push('tail');                         // every real writer appends the tail; absence = malformed/forged
+    else {
+      if (t.startDepth < 0 || t.endDepth < t.startDepth || t.endDepth > ENDLESS.DEPTH_CAP) out.push('depth');
+      if ((t.continuesUsed & ~0xFF) !== 0) out.push('cont');   // only seats 0/1 exist -> only the low two nibbles may be set
+      if (t.tokensCp !== 0) out.push('tokens');                // CP-purchased saves are retired; real clients always write 0
+      // score cap scales with the claimed depth (the global matchmade cap has no meaning on an
+      // unbounded track); the floor stays shared -- shop overdraft is equally legal here.
+      scoreCap = endlessGoalFor(t.endDepth, 2) * ENDLESS.SCORE_MULT;
+    }
   } else {
     if (pc < 2 || pc > 4) out.push('pc');             // matchmade lobbies are 2..4 players
     for (let k = 0; k < 4; k++) if ((mask >> k) & 1) { if (2 * k + 1 >= pc) { out.push('mask-range'); break; } }
     if (mask > 3) out.push('mask-range');             // pc<=4 -> at most seat pairs (0,1)/(2,3)
   }
   const scores = d0.slice(10, 10 + pc);
-  for (const s of scores) if ((s | 0) > SANITY.SCORE_CAP || (s | 0) < SANITY.SCORE_FLOOR) { out.push('score'); break; }
+  for (const s of scores) if ((s | 0) > scoreCap || (s | 0) < SANITY.SCORE_FLOOR) { out.push('score'); break; }
   const writers = new Set(g.map(r => String(r.steamID)));
   if (writers.size < g.length) out.push('dup-writer'); // one account can't hold two seats / write twice
   for (const r of g) {
     const dur = r.d[9] | 0, seat = r.d[5] | 0;
-    if (dur < 0 || dur > SANITY.DUR_CAP) { out.push('duration'); break; }
+    // endless sessions legitimately run for hours (and resume across days) -- no duration cap
+    // there; real elapsed time is enforced by the pacing gate against this job's own clock.
+    if (dur < 0 || (base !== ENDLESS.MT && dur > SANITY.DUR_CAP)) { out.push('duration'); break; }
     if (seat < 0 || seat >= pc) { out.push('seat'); break; }
     const roster = r.roster || {};
     // the writing account is unforgeable (leaderboard entry owner) -- a roster that puts
@@ -392,6 +419,7 @@ function writeRunSummary() {
       '| reports seen / counted | ' + s('repSeen', 0) + ' / ' + s('repCounted', 0) + ' |',
       '| trust writes / deletes | ' + s('trustW', 0) + ' / ' + s('trustD', 0) + ' |',
       '| board writes rating/points/xp | ' + s('writes', '0/0 0/0 0/0') + ' |',
+      '| endless settles / cp+board writes | ' + s('endless', 0) + ' / ' + s('writesEndless', '0/0 0/0') + ' |',
       '| page-cap hits | ' + RUN.cap + ' |',
       '| duration | ' + ((Date.now() - (RUN.t0 || Date.now())) / 1000).toFixed(1) + 's |',
       '',
@@ -730,6 +758,149 @@ function creditXp(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers,
     console.log('  xp ' + plog(sid) + ' ' + cls + ' rank' + (rank0 + 1) + (firstWin ? ' dailyWin' : '') + ' x' + factor + ' +' + gain + ' -> ' + (xp[sid] | 0));
   }
 }
+// ===== endless co-op authority (match type 7): depth board + CP wallet; never rating/XP/LP. =====
+// Type-7 records are a 2-player PvE track. Their settle path only (a) writes the personal-best
+// depth board and (b) debits the CP wallet for continues spent -- every competitive pipeline
+// (TrueSkill, XP, LP, leaver conviction) is skipped by construction. The record layout is the
+// standard v3 record with a 4-int tail appended after the roster:
+//   [11+3pc ..) = [startDepth, endDepth, continuesUsed, tokensCp]   (lockstep with the client writer)
+// The one genuinely new defense is the depth-scaled pacing gate (endlessRequiredMs below): a
+// claimed depth gain cannot settle before the corresponding REAL time has passed on this job's
+// own clock. Consensus residual: always-2P co-op has no honest majority (same acknowledged
+// residual as ranked 2P) -- colluding pairs are bounded by the structural checks + pacing only.
+const CP_LB = process.env.CP_LB || 'cp_bank';
+const ENDLESS_LB = process.env.ENDLESS_LB || 'endless_board';
+const ENDLESS = {
+  MT: 7,
+  // Physical floor per level. The level timer is 60s (lockstep with the client config), but a
+  // fully-cleared level ends early and the between-level screens can be declined in seconds,
+  // so the ENFORCED floor is deliberately half the timer. Generosity is free here: pacing only
+  // DEFERS a settle (plain log, never a flag), so a legit speedrun merely settles a few minutes
+  // later while a fabricated deep run still has to sit out most of the real play time.
+  LEVEL_SECONDS: 60,
+  PACE_FRAC: Number(process.env.ENDLESS_PACE_FRAC || 0.5),
+  DEPTH_CAP: Number(process.env.ENDLESS_DEPTH_CAP || 200000),   // structural domain; keeps packed board keys far inside int32
+  SCORE_MULT: Number(process.env.ENDLESS_SCORE_MULT || 10),     // per-seat score cap = team goal at endDepth x this
+  BOARD_SCALE: 10000, TIEBREAK_DIV: 1000,                       // packed board key: depth major, team score minor
+  PENDING_TTL_MS: Number(process.env.ENDLESS_PENDING_TTL_MS || 30 * 86400000),
+  // goal curve + economy constants: lockstep mirrors of the client config (value-pinned by the
+  // companion repo's schema-lockstep suite; change either side only together).
+  GOAL: { start: 650, addonStart: 275, growEarly: 250, growLate: 50, earlyLevels: 9 },
+  CP: { base: 10, rankBonus: [10, 5, 0, 0], rankedMult: 2.0 },
+  CONTINUE: { base: 20, esc: 1.5 },
+};
+function isEndlessMt(mt) { return baseMt(mt) === ENDLESS.MT; }
+// depth tail decode; null = malformed (missing tail). Start attestations never carry a tail.
+function endlessTail(d) {
+  const pc = d[8] | 0, at = 11 + 3 * pc;
+  if (!d || d.length < at + 4) return null;
+  return { startDepth: d[at] | 0, endDepth: d[at + 1] | 0, continuesUsed: d[at + 2] | 0, tokensCp: d[at + 3] | 0 };
+}
+// cumulative team goal line (client curve mirror): quadratic ramp for the early levels, then
+// near-linear. Used as the depth-scaled score cap -- the global matchmade cap has no meaning here.
+function endlessGoalBase(depth) {
+  const G = ENDLESS.GOAL, dd = Math.max(1, depth | 0);
+  let goal = G.start, addon = G.addonStart;
+  for (let n = 2; n <= dd; n++) { addon += ((n - 1) <= G.earlyLevels) ? G.growEarly : G.growLate; goal += addon; }
+  return goal;
+}
+function endlessGoalFor(depth, pcnt) { return endlessGoalBase(depth) * Math.max(1, pcnt | 0); }
+// per-game CP gain (client formula mirror): flat base + rank bonus (full-credit records only),
+// ranked multiplier; innocent participation earns the base, an abandoner earns nothing. No
+// leaver factor and no daily bonus -- deliberately simple so both repos stay value-identical.
+function endlessCpGain(cls, rank0, isRanked) {
+  if (cls === 'abandoner') return 0;
+  let cp = ENDLESS.CP.base;
+  const rb = ENDLESS.CP.rankBonus;
+  if (cls === 'valid' && rank0 >= 0 && rank0 < rb.length) cp += rb[rank0];
+  if (isRanked) cp = cp * ENDLESS.CP.rankedMult;
+  return Math.max(0, Math.round(cp));
+}
+// price of the n-th continue (1-based) within one session -- an escalating ladder shared by the
+// whole team (whoever pays, the price climbs). Mirror of the client function.
+function endlessContinueCost(n) {
+  const k = Math.max(1, n | 0);
+  return Math.max(0, Math.round(ENDLESS.CONTINUE.base * Math.pow(ENDLESS.CONTINUE.esc, k - 1)));
+}
+// continuesUsed wire format: per-seat counts packed as nibbles (bits 0..3 = seat 0, 4..7 = seat 1).
+const endlessNib = (packed, seat) => ((packed | 0) >> (4 * (seat | 0))) & 0xF;
+// canonical per-seat debit replay. The wire carries per-seat COUNTS, not press order, so the
+// ladder is replayed seat-ascending (seat 0 takes rungs 1..n0, seat 1 the next n1). Exact whenever
+// a single wallet paid (the common case); an interleaved pair can differ from true press order by
+// a few CP -- the client's optimistic deduction is reconciled by read-back either way.
+function endlessDebits(contPacked) {
+  const out = [0, 0];
+  let rung = 1;
+  for (let seat = 0; seat <= 1; seat++) for (let i = 0, n = endlessNib(contPacked, seat); i < n; i++) out[seat] += endlessContinueCost(rung++);
+  return out;
+}
+// board key packing: depth is the primary rank, team score the tiebreak (saturating -- ties above
+// ~10M team score share a rank). Monotone in (depth, score) lexicographic order, so a plain
+// "write when greater" keeps each entry the player's true personal best.
+function packEndlessScore(depth, teamScore) {
+  const tb = Math.max(0, Math.min(ENDLESS.BOARD_SCALE - 1, Math.round((teamScore | 0) / ENDLESS.TIEBREAK_DIV)));
+  return (depth | 0) * ENDLESS.BOARD_SCALE + tb;
+}
+function unpackEndlessScore(score) { const s = score | 0; return { depth: Math.floor(s / ENDLESS.BOARD_SCALE), tiebreak: s % ENDLESS.BOARD_SCALE }; }
+// Depth-scaled pacing: the minimum REAL time (this job's own clock, anchored at the first
+// sighting of the match's start attestation -- or of the settle itself when no attestation was
+// ever sighted) before a claimed depth gain may settle. startDepth is only credited up to the
+// deepest END depth either roster player has previously SETTLED (the chain rule; the board
+// itself is that memory): a resume nobody on the board can vouch for simply earns no time
+// credit and waits out the full span. Induction consequence: reaching depth D requires >=
+// D * LEVEL_SECONDS * PACE_FRAC of wall time across the chain no matter how records are forged,
+// while a legit crash-orphaned save (its run never settled) just settles a little later.
+function endlessRequiredMs(tail, chainMax) {
+  const proven = Math.min(tail.startDepth | 0, Math.max(0, chainMax | 0));
+  return Math.max(0, (tail.endDepth | 0) - proven) * ENDLESS.LEVEL_SECONDS * 1000 * ENDLESS.PACE_FRAC;
+}
+// consensus roster (seat -> sid): detectLeavers' per-seat strict-majority vote, but returning
+// every agreed seat rather than only the absent ones. CP debits target the ROSTER -- writing no
+// record must not dodge a debit the whole lobby witnessed.
+function rosterConsensus(g) {
+  const votes = {};
+  for (const r of g) for (const seatKey of Object.keys(r.roster || {})) {
+    const seat = seatKey | 0, sid = r.roster[seatKey];
+    (votes[seat] = votes[seat] || {})[sid] = (votes[seat][sid] || 0) + 1;
+  }
+  const out = {};
+  for (const seatKey of Object.keys(votes)) {
+    let best = null, bestN = 0;
+    for (const sid of Object.keys(votes[seatKey])) if (votes[seatKey][sid] > bestN) { bestN = votes[seatKey][sid]; best = sid; }
+    if (best && bestN * 2 > g.length) out[seatKey | 0] = best;
+  }
+  return out;
+}
+// B6 signals, endless flavor: pair co-occurrence is real shared-match history (it backs report
+// verification), but win counters and score moments stay matchmade-only -- endless scores live on
+// another scale and would smear that calibration data. `e` = endless settles participated in.
+// Recorded for BOTH roster members (a debited player may have written no record, and the nightly
+// trusted-board closure audit requires every board identity to exist in state).
+function recordEndlessSignals(s, rosterSids, now) {
+  for (const sid of rosterSids) { const h = sigPlayer(s, pid(sid), now); h.e = (h.e | 0) + 1; }
+  for (let i = 0; i < rosterSids.length; i++) for (let j = i + 1; j < rosterSids.length; j++) {
+    const k = pairKey(pid(rosterSids[i]), pid(rosterSids[j]));
+    const e = s.pairs[k] || (s.pairs[k] = { n: 0, t: 0, x: 0, at: 0 });
+    e.n += 1; e.t += 1; e.at = now;   // co-op partners are by definition together
+  }
+}
+// authoritative CP earn for one consistent MATCHMADE group (settled or consensus-VOID -- innocent
+// participation earns like XP does). Endless records are the SPEND side and never pass through
+// here; their debits happen on the endless settle branch.
+function creditCp(g, matchType, rankOf, cp, changedCp) {
+  const isRanked = appliesLp(matchType);
+  const recBySeat = {};
+  for (const r of g) { const s = r.d[5] | 0; if (recBySeat[s] == null) recBySeat[s] = r; }
+  for (const seatKey of Object.keys(recBySeat)) {
+    const r = recBySeat[seatKey], sid = r.steamID;
+    const cls = dispClassOf(r.dispCode);
+    const rank0 = ((rankOf[sid] || 1) | 0) - 1;
+    const gain = endlessCpGain(cls, rank0, isRanked);
+    if (gain > 0) { cp[sid] = (cp[sid] == null ? 0 : cp[sid]) + gain; changedCp[sid] = cp[sid]; }
+    console.log('  cp ' + plog(sid) + ' ' + cls + ' +' + gain + ' -> ' + (cp[sid] | 0));
+  }
+}
+
 function eloDeltas(parts, mmr) {
   const delta = {}; for (const p of parts) delta[p.steamID] = 0;
   for (let i = 0; i < parts.length; i++) for (let j = i + 1; j < parts.length; j++) {
@@ -791,7 +962,20 @@ async function main() {
   RUN.rec = recs.length; RUN.starts = starts.length;
 
   const MAX_SEATS = 8;
-  const vecOf = r => { const pc = r.d[8] | 0; return (pc < 1 || pc > MAX_SEATS || r.d.length < 10 + pc) ? ('BAD(pc=' + pc + ')') : JSON.stringify(r.d.slice(10, 10 + pc)); };
+  // consistency vector: the per-seat score slice, plus (endless only) the 4-int depth tail --
+  // all of it is host-broadcast lockstep fact, so every honest end must agree byte for byte.
+  // A type-7 record without its tail is malformed by construction (every real writer appends it).
+  const vecOf = r => {
+    const pc = r.d[8] | 0;
+    if (pc < 1 || pc > MAX_SEATS || r.d.length < 10 + pc) return 'BAD(pc=' + pc + ')';
+    let v = r.d.slice(10, 10 + pc);
+    if (isEndlessMt(r.d[2] | 0)) {
+      const at = 11 + 3 * pc;
+      if (r.d.length < at + 4) return 'BAD(tail)';
+      v = v.concat(r.d.slice(at, at + 4));
+    }
+    return JSON.stringify(v);
+  };
   const groups = {};
   for (const r of recs) { const m = r.d[3] + '_' + r.d[4] + '_' + r.d[2]; (groups[m] = groups[m] || []).push(r); }
   let consistent = 0, flagged = 0, lone = 0;
@@ -924,6 +1108,29 @@ async function main() {
     for (const e of br.ents) xp[e.steamID] = e.score | 0;
   }
   const xpState = xpId ? loadXp() : {};
+  // CP wallet + endless depth board (both optional like XP: absent = warn-skip locally, hard
+  // fail under STRICT_BOARDS in CI). The endless settle branch refuses to settle while either is
+  // missing -- settling without the debit would let read-back resurrect spent CP.
+  const cpLb = ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).find(x => String(x.name || x.Name) === CP_LB);
+  const cpId = cpLb ? (cpLb.id || cpLb.ID) : null;
+  if (!cpId) { strictBoard('cp board not found'); ghWarn('cp board not found (pre-create ' + CP_LB + ', trusted-writes) -> skip cp this run'); }
+  const cp = {};
+  let cpComplete = true;
+  if (cpId) {
+    const br = await readBoardAll(cpId, 'cp board');
+    cpComplete = br.complete;
+    for (const e of br.ents) cp[e.steamID] = e.score | 0;
+  }
+  const enLb = ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).find(x => String(x.name || x.Name) === ENDLESS_LB);
+  const enId = enLb ? (enLb.id || enLb.ID) : null;
+  if (!enId) { strictBoard('endless board not found'); ghWarn('endless board not found (pre-create ' + ENDLESS_LB + ', trusted-writes) -> skip endless this run'); }
+  const endlessBest = {};   // sid -> packed personal best (also the chain-rule memory)
+  let enComplete = true;
+  if (enId) {
+    const br = await readBoardAll(enId, 'endless board');
+    enComplete = br.complete;
+    for (const e of br.ents) endlessBest[e.steamID] = e.score | 0;
+  }
 
   fresh.sort((a, b) => (a.m < b.m ? -1 : a.m > b.m ? 1 : 0));
   // On-demand base values: when a bulk read hit PAGE_CAP the maps are incomplete -- a settling
@@ -931,7 +1138,7 @@ async function main() {
   // would silently reset his LP/XP. Fetch exactly the players this run settles (record holders +
   // roster members: leaver LP penalty targets roster sids that wrote no record). A missing entry
   // after the targeted read is a genuine new player (base 0 correct).
-  if ((lpId && !lpComplete) || (xpId && !xpComplete)) {
+  if ((lpId && !lpComplete) || (xpId && !xpComplete) || (cpId && !cpComplete) || (enId && !enComplete)) {
     const need = new Set();
     for (const c of fresh) for (const r of c.g) {
       need.add(String(r.steamID));
@@ -946,13 +1153,21 @@ async function main() {
         const e = await readUserEntry(xpId, sid, 'xp');
         if (e) xp[sid] = e.score | 0;
       }
+      if (cpId && !cpComplete && cp[sid] == null) {
+        const e = await readUserEntry(cpId, sid, 'cp');
+        if (e) cp[sid] = e.score | 0;
+      }
+      if (enId && !enComplete && endlessBest[sid] == null) {
+        const e = await readUserEntry(enId, sid, 'endless');
+        if (e) endlessBest[sid] = e.score | 0;
+      }
     });
     const failed = fetched.filter(x => x.status === 'rejected');
     if (failed.length) { ghErr('on-demand base reads failed (' + failed.length + '/' + need.size + ') -- abort run, do NOT settle from base 0'); process.exit(1); }
     console.log('on-demand base reads: ' + need.size + ' players (bulk window incomplete)');
   }
   const today = Math.floor(Date.now() / 86400000);   // UTC day index (matches client lastWinDay) for the daily-first bonus
-  const changed = {}; const changedLp = {}; const changedXp = {}; const reveal = {}; let settled = 0, voided = 0;
+  const changed = {}; const changedLp = {}; const changedXp = {}; const changedCp = {}; const changedEndless = {}; const reveal = {}; let settled = 0, voided = 0, settledEndless = 0;
   for (const c of fresh) {
     const g = c.g;
     const matchType = g[0].d[2] | 0;   // 2=ranked; visible LP only moves for ranked (quick = MMR only)
@@ -965,6 +1180,68 @@ async function main() {
       for (const r of g) trustTouched.add(String(r.steamID));   // trust-tier candidates
       RUN.sanity = (RUN.sanity | 0) + 1;
       ghWarn('match=' + c.m + ': sanity-flagged [' + sane.join(',') + '] -- not settled: ' + g.map(r => plog(r.steamID) + '@' + r.shard).join(' '));
+      continue;
+    }
+    const writerSids = [...new Set(g.map(r => String(r.steamID)))];
+    // ===== endless (type 7): own settle authority -- depth board + CP debit, nothing else. =====
+    // TrueSkill/XP/LP/leaver conviction never see a type-7 group (PvE track, zero career
+    // spillover -- mirrors the client's own isolation). Sits before the generic pacing gate:
+    // endless uses its depth-scaled bound instead of the flat matchmade minimum.
+    if (isEndlessMt(matchType)) {
+      // boards are the debit target AND the chain memory -- without both, settling would mark
+      // the group processed while silently dropping the debit (read-back would resurrect spent
+      // CP). Leave the group fresh; it settles whole once the boards resolve.
+      if (!cpId || !enId) { console.log('  endless ' + c.m + ': cp/endless board unresolved -- left pending'); continue; }
+      const t = endlessTail(g[0].d);   // presence + domains guaranteed by the sanity gate above
+      const roster0 = rosterConsensus(g);
+      const rosterSids = Object.values(roster0).map(String);
+      // chain rule: startDepth credit only up to the deepest end depth either player has settled
+      let chainMax = 0;
+      for (const sid of rosterSids) if (endlessBest[sid] != null) chainMax = Math.max(chainMax, unpackEndlessScore(endlessBest[sid]).depth);
+      let pend7 = startsPending[c.m];
+      if (!pend7) {
+        // no attestation ever sighted (job outage / failed client write): the settle's own first
+        // sighting starts the clock -- identical wall-time cost for a fabricator (an attestation
+        // is free to write), mercy for the legit edge. Recorded as an ns signal like elsewhere.
+        pend7 = startsPending[c.m] = { t0: nowMs, mt: matchType, roster: {}, settled: [], synth: true };
+        for (const sid of writerSids) sigPlayer(signals, pid(sid), nowMs).ns += 1;
+        sigDirty = true;
+      }
+      const reqMs = endlessRequiredMs(t, chainMax);
+      if (nowMs - (pend7.t0 || 0) < reqMs) {
+        console.log('  endless-pacing ' + c.m + ': depth ' + t.startDepth + '->' + t.endDepth + ' (chain ' + chainMax + ') needs ' + Math.round(reqMs / 1000) + 's real time, seen ' + Math.round((nowMs - (pend7.t0 || 0)) / 1000) + 's -- deferred');
+        continue;
+      }
+      const day7 = sigDay(signals, nowMs);
+      for (const sid of writerSids) day7.n[pid(sid)] = (day7.n[pid(sid)] || 0) + 1;
+      recordEndlessSignals(signals, rosterSids.length ? rosterSids : writerSids, nowMs);
+      sigDirty = true;
+      // CP debit per seat (canonical nibble replay). Targets the consensus ROSTER -- writing no
+      // record does not dodge a debit both ends witnessed. Debt is kept (no clamp): clamping
+      // would forgive a forged continue, and a legit balance can only dip negative transiently
+      // when the funding matchmade record settles a run later.
+      const debits = endlessDebits(t.continuesUsed);
+      for (let seat = 0; seat <= 1; seat++) {
+        const sid = roster0[seat] != null ? String(roster0[seat]) : null;
+        if (!sid || !debits[seat]) continue;
+        const cur = cp[sid] == null ? 0 : cp[sid];
+        cp[sid] = cur - debits[seat]; changedCp[sid] = cp[sid];
+        console.log('  endless cp ' + c.m + ': seat ' + seat + ' ' + plog(sid) + ' -' + debits[seat] + ' (' + endlessNib(t.continuesUsed, seat) + ' continues) -> ' + cp[sid]);
+      }
+      // personal-best board write for RECORD WRITERS only (abandoning the run earns no credit);
+      // packed key is lex-monotone in (depth, team score), so "greater = improved" suffices.
+      const teamScore = ((g[0].d[10] | 0) + (g[0].d[11] | 0));
+      if ((t.endDepth | 0) > 0) {
+        const packed = packEndlessScore(t.endDepth, teamScore);
+        for (const sid of writerSids) {
+          if (endlessBest[sid] == null || packed > endlessBest[sid]) {
+            endlessBest[sid] = packed; changedEndless[sid] = { s: packed, ts: teamScore };
+            console.log('  endless best ' + c.m + ': ' + plog(sid) + ' depth ' + t.endDepth + ' team ' + teamScore + ' -> board ' + packed);
+          }
+        }
+      }
+      console.log('  endless settle ' + c.m + ': depth ' + t.startDepth + '->' + t.endDepth + ' team ' + teamScore + (c.void ? ' (void disp majority -- settled anyway: co-op has no outcome to void)' : ''));
+      processed.add(c.m); settledEndless++;
       continue;
     }
     // pacing gate (replaces the removed per-day cap -- short queue times make any per-day
@@ -980,7 +1257,6 @@ async function main() {
     // layer marks "suspiciously many matches per day" against real-traffic baselines. VOID
     // matches count too -- they still credit innocent-participation XP.
     const day = sigDay(signals, nowMs);
-    const writerSids = [...new Set(g.map(r => String(r.steamID)))];
     for (const sid of writerSids) day.n[pid(sid)] = (day.n[pid(sid)] || 0) + 1;
     sigDirty = true;
     const seatToId = {};
@@ -1001,6 +1277,8 @@ async function main() {
     // points are credited for BOTH settled AND consensus-VOID matches -- VOID only gates MMR/LP; an innocent victim
     //   still earns participation points (mirrors the client crediting innocent records). per-record class-driven.
     if (xpId) creditXp(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers, today);
+    // CP (the endless-economy wallet) earns from matchmade records on the same credit classes.
+    if (cpId) creditCp(g, matchType, rankOf, cp, changedCp);
     if (c.void) {
       recordMatchSignals(signals, g, parts, null, matchType, true, nowMs); sigDirty = true;   // co-presence + void counters (dodge-ring history)
       console.log('  VOID ' + c.m + ': consensus -> no MMR/points'); processed.add(c.m); voided++; continue;
@@ -1096,7 +1374,8 @@ async function main() {
     }
     processed.add(c.m); settled++;
   }
-  console.log('settled ' + settled + ', voided ' + voided + ', ' + Object.keys(changed).length + ' players changed, ' + leaverHits + ' leavers');
+  console.log('settled ' + settled + ' (+' + settledEndless + ' endless), voided ' + voided + ', ' + Object.keys(changed).length + ' players changed, ' + leaverHits + ' leavers');
+  RUN.endless = settledEndless;
 
   if (!APPLY_MMR) { console.log('APPLY_MMR=0 dry-run, nothing written'); return; }
   const wRating = await mapPool(Object.keys(changed), CONCURRENCY, async (sid) => {
@@ -1127,9 +1406,27 @@ async function main() {
     else console.log('  ok xp ' + plog(sid) + ' = ' + changedXp[sid]);
     return okFlag;
   });
+  const wCp = await mapPool(Object.keys(changedCp), CONCURRENCY, async (sid) => {
+    const res = await postForm('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: cpId, steamid: sid, score: changedCp[sid], scoremethod: 'ForceUpdate', format: 'json' });
+    const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
+    if (!okFlag) ghWarn('write cp ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
+    else console.log('  ok cp ' + plog(sid) + ' = ' + changedCp[sid]);
+    return okFlag;
+  });
+  // details carry the exact best-run team score (the packed tiebreak is /1000-saturated).
+  const wEndless = await mapPool(Object.keys(changedEndless), CONCURRENCY, async (sid) => {
+    const w = changedEndless[sid];
+    const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: enId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, [w.ts | 0]);
+    const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
+    if (!okFlag) ghWarn('write endless ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
+    else console.log('  ok endless ' + plog(sid) + ' = ' + w.s);
+    return okFlag;
+  });
   const rOk = wRating.filter(x => x.status === 'fulfilled' && x.value).length;
   const pOk = wPoints.filter(x => x.status === 'fulfilled' && x.value).length;
   const xOk = wXp.filter(x => x.status === 'fulfilled' && x.value).length;
+  const cOk = wCp.filter(x => x.status === 'fulfilled' && x.value).length;
+  const eOk = wEndless.filter(x => x.status === 'fulfilled' && x.value).length;
   saveProcessed(processed);
   saveSkill(skill);
   saveLeavers(leavers);
@@ -1137,12 +1434,13 @@ async function main() {
   if (sigDirty) saveSignals(signals, nowMs);
   if (xpId) saveXp(xpState);
   await maintainTrust();
-  console.log('written: rating ' + rOk + '/' + wRating.length + ', points ' + pOk + '/' + wPoints.length + ', xp ' + xOk + '/' + wXp.length + ', state updated (idempotent)');
+  console.log('written: rating ' + rOk + '/' + wRating.length + ', points ' + pOk + '/' + wPoints.length + ', xp ' + xOk + '/' + wXp.length + ', cp ' + cOk + '/' + wCp.length + ', endless ' + eOk + '/' + wEndless.length + ', state updated (idempotent)');
   RUN.writes = rOk + '/' + wRating.length + ' ' + pOk + '/' + wPoints.length + ' ' + xOk + '/' + wXp.length;
+  RUN.writesEndless = cOk + '/' + wCp.length + ' ' + eOk + '/' + wEndless.length;
   writeRunSummary();
 }
 
 if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
-module.exports = { isVoidDisp, voidByConsensus, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB };
+module.exports = { isVoidDisp, voidByConsensus, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB };

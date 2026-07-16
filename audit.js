@@ -17,7 +17,7 @@
 // Output discipline (public logs): generic board labels + 8-hex pseudonyms + counts.
 // Never board names from env, never raw steamIDs, never key material.
 const fs = require('fs');
-const { readBoardAll, pid, decodeDetails, getJson, BASE, TRUST_LB, REPORT_LB, START_MAGIC, REPORT_MAGIC } = require('./validate.js');
+const { readBoardAll, pid, decodeDetails, getJson, BASE, TRUST_LB, REPORT_LB, START_MAGIC, REPORT_MAGIC, CP_LB, ENDLESS_LB } = require('./validate.js');
 
 const KEY = process.env.STEAM_PUBLISHER_KEY;
 const APPID = Number(process.env.APPID);
@@ -70,7 +70,7 @@ async function main() {
   for (const b of all) byName[String(b.name || b.Name)] = { id: b.id || b.ID, entries: b.entries | 0 };
 
   // 1) inventory
-  const want = [[RANKED_LB, 'rating'], [LP_LB, 'points'], [TRUST_LB, 'trust'], [REPORT_LB, 'report']];
+  const want = [[RANKED_LB, 'rating'], [LP_LB, 'points'], [TRUST_LB, 'trust'], [REPORT_LB, 'report'], [CP_LB, 'cp'], [ENDLESS_LB, 'endless']];
   if (XP_LB) want.push([XP_LB, 'xp']);
   for (const [name, label] of want) if (!byName[name]) violations.push(label + ' board missing from listing');
   const shardBoards = all.filter(b => { const n = String(b.name || b.Name); return n.indexOf(PREFIX) === 0 && n.indexOf('test') < 0; });
@@ -85,7 +85,10 @@ async function main() {
     signals: loadJson(process.env.SIGNALS_FILE || 'signals.json', {}),
   };
   const trusted = {};
-  const trustedWant = [[RANKED_LB, 'rating'], [LP_LB, 'points'], [TRUST_LB, 'trust']];
+  // cp/endless entries hash into the closure via signals.players: the settle path records an
+  // endless participation signal for every roster member (including debited non-writers), and
+  // every CP-credited player is a settled matchmade participant.
+  const trustedWant = [[RANKED_LB, 'rating'], [LP_LB, 'points'], [TRUST_LB, 'trust'], [CP_LB, 'cp'], [ENDLESS_LB, 'endless']];
   if (XP_LB) trustedWant.push([XP_LB, 'xp']);
   for (const [name, label] of trustedWant) {
     if (!byName[name]) continue;
