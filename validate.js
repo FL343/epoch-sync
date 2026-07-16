@@ -501,6 +501,47 @@ const STARTS_FILE = process.env.STARTS_FILE || 'starts.json';
 const STARTS_MATURITY_MS = Number(process.env.STARTS_MATURITY_MS || 2 * 3600 * 1000);   // max match length + reconnect windows, with slack
 function loadStarts() { try { return JSON.parse(fs.readFileSync(STARTS_FILE, 'utf8')) || {}; } catch (e) { return {}; } }
 function saveStarts(s) { try { fs.writeFileSync(STARTS_FILE, JSON.stringify(s, null, 0)); } catch (e) { ghWarn('write ' + STARTS_FILE + ' failed: ' + (e && e.message)); } }
+// ============================================================
+// repeat-group rating decay (retention R1): consecutive matches against MOSTLY THE SAME people
+// update TrueSkill with a decaying weight x1 / x0.5 / x0.25 / x0 (1st/2nd/3rd/4th+ in a row).
+// Why: rematch rooms keep a table together on purpose -- great for retention, but a closed loop
+// could farm rating in either direction (win-trade up, or throw down to smurf). The decay seals
+// both directions symmetrically while leaving XP/CP/points untouched (real play is not zero-sum).
+// Group identity is derived from the cron's own processing history (roster consensus incl.
+// leavers), so the client declares nothing and cannot fake "fresh opponents" -- appearing with
+// the same people IS the signal. A group counts as "the same" when at least REPEAT_FRAC of a
+// player's opponents repeat from their previous match; more than half replaced resets the streak
+// (the user's blood-change rule). TTL keeps this a session-scoped memory, not a social graph.
+// State updates only on real settles (VOID/endless don't advance or reset a streak).
+const GROUP_DECAY = { WEIGHTS: [1, 0.5, 0.25, 0], REPEAT_FRAC: 0.5, TTL_MS: 2 * 3600 * 1000, PRUNE_MS: 48 * 3600 * 1000 };
+const GROUPS_FILE = process.env.GROUPS_FILE || 'groups.json';
+function loadGroups() { try { return JSON.parse(fs.readFileSync(GROUPS_FILE, 'utf8')) || {}; } catch (e) { return {}; } }
+function saveGroups(g, nowMs) {
+  for (const p of Object.keys(g)) if (nowMs - (g[p].at || 0) > GROUP_DECAY.PRUNE_MS) delete g[p];
+  try { fs.writeFileSync(GROUPS_FILE, JSON.stringify(g, null, 0)); } catch (e) { ghWarn('write ' + GROUPS_FILE + ' failed: ' + (e && e.message)); }
+}
+// Pure: advance every roster member's streak memory and return their update weight.
+// rosterPids = de-identified pids of everyone seated in the match (writers + consensus leavers --
+// leavers advance their memory too, so leaving is not a streak-laundering trick). Mutates `groups`.
+function groupDecayPlan(groups, rosterPids, nowMs) {
+  const out = {};
+  const uniq = [...new Set(rosterPids)];
+  const prevSnap = {};   // read prev BEFORE writing: two members of one match must not see this match's own write
+  for (const p of uniq) prevSnap[p] = groups[p];
+  for (const p of uniq) {
+    const others = uniq.filter(x => x !== p).sort();
+    const prev = prevSnap[p];
+    let k = 1;
+    if (prev && (nowMs - (prev.at || 0)) <= GROUP_DECAY.TTL_MS && Array.isArray(prev.r) && others.length) {
+      const set = new Set(prev.r);
+      const overlap = others.filter(x => set.has(x)).length;
+      if (overlap / others.length >= GROUP_DECAY.REPEAT_FRAC) k = ((prev.k | 0) || 1) + 1;
+    }
+    groups[p] = { r: others, k, at: nowMs };
+    out[p] = { k, w: GROUP_DECAY.WEIGHTS[Math.min(k - 1, GROUP_DECAY.WEIGHTS.length - 1)] };
+  }
+  return out;
+}
 const LP_LB = process.env.LP_LB;
 const LP_MAX = 9999;
 const LEAVER_LP_PENALTY = Number(process.env.LEAVER_LP_PENALTY || 100);   // ranked leaver authoritative LP deduction (pairs the client optimistic -100)
@@ -1089,6 +1130,7 @@ async function main() {
   if (!rankedLb) { ghErr('rating board not found (must be pre-created)'); process.exit(1); }
   const rankedId = rankedLb.id || rankedLb.ID;
   const skill = loadSkill();
+  const groupMem = loadGroups(); let groupsDirty = false;   // repeat-group decay memory (see GROUP_DECAY)
   const lpLb = ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).find(x => String(x.name || x.Name) === LP_LB);
   const lpId = lpLb ? (lpLb.id || lpLb.ID) : null;
   if (!lpId) { strictBoard('points board not found'); ghWarn('points board not found (pre-create with onlytrustedwrites) -> skip points this run'); }
@@ -1320,6 +1362,12 @@ async function main() {
         }
       }
     }
+    // repeat-group decay: advance streak memory for the WHOLE consensus roster (writers + leavers)
+    //   and fetch each rated player's update weight. Applied to the TrueSkill delta below;
+    //   points/XP/CP untouched (real play is not zero-sum -- only rating farming is sealed).
+    const gPlan = groupDecayPlan(groupMem,
+      parts.map(p => pid(p.steamID)).concat(leavers0.map(x => pid(x.steamID))), nowMs);
+    groupsDirty = true;
     let tsOut;
     if (isTeamMt(matchType)) {
       // M3: team modes rate as TWO TEAMS (strength = sum mu, binary outcome) -- the ordinal pairwise
@@ -1341,6 +1389,18 @@ async function main() {
       ? teamLpPlan(planIn, matchType, scores, leavers0.map(x => x.seat))
       : reducedStakesPlan(planIn, matchType, premadeMaskOf(matchType));
     for (const r of tsOut) {
+      // repeat-group decay: blend the update toward the pre-match rating by the streak weight
+      //   (w=1 full, w=0 frozen). Blending sigma the same way keeps a frozen player's uncertainty
+      //   frozen too (a x0 match teaches the ladder nothing about them).
+      const gp = gPlan[pid(r.id)];
+      if (gp && gp.w < 1) {
+        const pre = tsIn.find(t => t.id === r.id);
+        if (pre) {
+          r.mu = pre.mu + (r.mu - pre.mu) * gp.w;
+          r.sigma = pre.sigma + (r.sigma - pre.sigma) * gp.w;
+        }
+        console.log('  group-decay ' + c.m + ': ' + plog(r.id) + ' repeat-group streak ' + gp.k + ' -> rating weight x' + gp.w);
+      }
       skill[pid(r.id)] = { mu: r.mu, sigma: r.sigma };
       changed[r.id] = { mu: r.mu, sigma: r.sigma };
       let lpLine = '';
@@ -1432,6 +1492,7 @@ async function main() {
   const eOk = wEndless.filter(x => x.status === 'fulfilled' && x.value).length;
   saveProcessed(processed);
   saveSkill(skill);
+  if (groupsDirty) saveGroups(groupMem, nowMs);
   saveLeavers(leavers);
   saveStarts(startsPending);
   if (sigDirty) saveSignals(signals, nowMs);
@@ -1446,4 +1507,4 @@ async function main() {
 if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
-module.exports = { isVoidDisp, voidByConsensus, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB };
+module.exports = { isVoidDisp, voidByConsensus, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, groupDecayPlan, GROUP_DECAY };

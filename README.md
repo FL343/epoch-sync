@@ -89,8 +89,10 @@ State files committed back each run (idempotency): `processed.json`, `skill.json
 `leavers.json`, `xp.json` (per-player `{ lastWinDay, games }` for the daily-first bonus
 and the repeat-leaver rate), `starts.json` (pending start attestations awaiting
 settlement or maturity), `signals.json` (rolling per-player/pairwise signal aggregates +
-flag dedup + daily settle counters). Player identifiers in state are stored as keyed
-hashes, never raw IDs.
+flag dedup + daily settle counters), `groups.json` (per-player recent-opponents memory for
+the repeat-group rating decay — consecutive matches against mostly the same people update
+TrueSkill at x1/x0.5/x0.25/x0; TTL-scoped, points/XP untouched). Player identifiers in
+state are stored as keyed hashes, never raw IDs.
 
 ## Configuration
 
@@ -104,4 +106,5 @@ Optional: `XP_LB` (progression ladder board name — XP is skipped if unset),
 `SANITY_SCORE_CAP` / `SANITY_SCORE_FLOOR` / `SANITY_DUR_CAP` / `SANITY_MIN_START_AGE_MS`
 (sanity bounds + pacing gate; generous defaults, tighten only with real-traffic data),
 `SIGNALS_FILE` / `SIG_PAIR_WINDOW_MS` / `SIG_PLAYER_WINDOW_MS` / `SIG_PAIRS_CAP`
-(signal-collection state path, rolling windows, size fuse).
+(signal-collection state path, rolling windows, size fuse),
+`GROUPS_FILE` (repeat-group decay state path, default `groups.json`).
