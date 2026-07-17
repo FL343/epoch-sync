@@ -70,6 +70,14 @@ async function main() {
   for (const b of all) byName[String(b.name || b.Name)] = { id: b.id || b.ID, entries: b.entries | 0 };
 
   // 1) inventory
+  // Phase-2 seam (not implemented in v1): a client-writable snapshot-mirror board exists as a
+  // disaster backup (client optimistic values; never consumed by the reconcile loop). Once real
+  // traffic calibrates thresholds, this audit is the natural place to read it and record a
+  // per-player mirror-vs-authoritative drift signal (record-only, like the other signals; wide
+  // bounds -- legitimate drift includes the 5-min pre-correction window, menu credits and
+  // multi-device last-writer). Until then the mirror board is deliberately NOT in the inventory
+  // or trusted-closure lists below: it is client-writable by design, so foreign-writer logic
+  // does not apply and its absence should not fail the audit.
   const want = [[RANKED_LB, 'rating'], [LP_LB, 'points'], [TRUST_LB, 'trust'], [REPORT_LB, 'report'], [CP_LB, 'cp'], [ENDLESS_LB, 'endless']];
   if (XP_LB) want.push([XP_LB, 'xp']);
   for (const [name, label] of want) if (!byName[name]) violations.push(label + ' board missing from listing');
