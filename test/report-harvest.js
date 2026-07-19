@@ -98,5 +98,26 @@ console.log('=== report harvest (record-only) ===');
   eq('rseen pruned after window', Object.keys(s.rseen).length, 0);
 }
 
+console.log('=== L5 (2026-07-19 audit): rseen mint-after-cap + size fuse ===');
+{ // capped entries mint NO dedup key (attacker-chosen matchHash can't grow rseen past the cap)
+  const s = fresh();
+  const reports = [];
+  for (let i = 0; i < 5; i++) reports.push({ t: T1, r: 1, m: 2000 + i });
+  harvestReports([{ steamID: R1, d: pack(reports) }], s, 1000);
+  eq('only counted reports minted rseen keys (3 of 5)', Object.keys(s.rseen).length, 3);
+  // deferred, not destroyed: next UTC day the same queue re-upload counts the 2 capped ones
+  const res2 = harvestReports([{ steamID: R1, d: pack(reports) }], s, 1000 + DAY);
+  eq('capped reports retry next day and count', [res2.seen, res2.counted], [2, 2]);
+  eq('now all 5 minted', Object.keys(s.rseen).length, 5);
+}
+{ // size fuse: rseen beyond SIG_PAIRS_CAP evicts oldest (mirror of the pairs fuse)
+  const s = fresh();
+  const CAP = 200000;   // SIG_PAIRS_CAP default
+  for (let i = 0; i < CAP + 10; i++) s.rseen['k' + i] = 1000 + i;   // oldest = lowest ts
+  pruneSignals(s, 2000);   // within window (no age pruning), only the fuse fires
+  eq('rseen fuse: evicted down to cap', Object.keys(s.rseen).length, CAP);
+  eq('oldest evicted first', [s.rseen['k0'], s.rseen['k9'], !!s.rseen['k10']], [undefined, undefined, true]);
+}
+
 console.log(failN ? ('=== FAIL (' + failN + ') ===') : '=== report-harvest: ALL PASS ===');
 process.exit(failN ? 1 : 0);

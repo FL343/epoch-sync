@@ -95,13 +95,16 @@ const conf = (sid, m, mt, dispCode) => ({ steamID: sid, m, mt, dispCode: dispCod
   }
 
   console.log('=== reconnect forgiveness (refund + retraction) ===');
+  // H3 hardening (2026-07-19 audit): absolution requires the confessor's record inside a
+  // CONSISTENT settle group (opts.consistentKeys) with a non-abandoner disp -- fixtures pass
+  // the key set the caller computes for real; negative cases below pin the lone/divergent deny.
   {
     const board = { [A]: 2000 }, st = {}, leavers = {};
-    const opts = mkOpts(board);
+    const opts = mkOpts(board, { consistentKeys: new Set(['mA_1_2']) });
     await reconcileConfessions([conf(A, 'mA_1_2', 2)], {}, new Set(), st, leavers, NOW, opts);
     eq('penalized first', board[A], 1900);
-    // later run: his own settle record for the same match appears (came back and finished)
-    const groups = { 'mA_1_2': [{ steamID: A, d: [] }] };
+    // later run: his own settle record for the same match appears in a CONSISTENT group (came back and finished)
+    const groups = { 'mA_1_2': [{ steamID: A, d: [], dispCode: 0 }, { steamID: B, d: [], dispCode: 0 }] };
     const r2 = await reconcileConfessions([conf(A, 'mA_1_2', 2)], groups, new Set(), st, leavers, NOW + 600000, opts);
     eq('refund: exact deducted amount returned', [board[A], r2.refunded], [2000, 1]);
     eq('exit signal retracted', leavers[pid(A)].leaves, 0);
@@ -111,17 +114,49 @@ const conf = (sid, m, mt, dispCode) => ({ steamID: sid, m, mt, dispCode: dispCod
   {
     // clamp-aware refund: base 60 -> 0 (ded 60); refund returns exactly 60, not the nominal 100
     const board = { [A]: 60 }, st = {}, leavers = {};
-    const opts = mkOpts(board);
+    const opts = mkOpts(board, { consistentKeys: new Set(['mB_1_2']) });
     await reconcileConfessions([conf(A, 'mB_1_2', 2)], {}, new Set(), st, leavers, NOW, opts);
-    await reconcileConfessions([], { 'mB_1_2': [{ steamID: A, d: [] }] }, new Set(), st, leavers, NOW + 600000, opts);
+    await reconcileConfessions([], { 'mB_1_2': [{ steamID: A, d: [], dispCode: 0 }, { steamID: B, d: [], dispCode: 0 }] }, new Set(), st, leavers, NOW + 600000, opts);
     eq('clamped deduction refunds the REAL amount (60), no free LP', board[A], 60);
   }
   {
     // settle record already visible at FIRST sighting (fast reconnect+finish before cron ever saw the confession)
     const board = { [A]: 2000 }, st = {}, leavers = {};
-    const groups = { 'mC_1_2': [{ steamID: A, d: [] }] };
-    const r = await reconcileConfessions([conf(A, 'mC_1_2', 2)], groups, new Set(), st, leavers, NOW, mkOpts(board));
+    const groups = { 'mC_1_2': [{ steamID: A, d: [], dispCode: 0 }, { steamID: B, d: [], dispCode: 0 }] };
+    const r = await reconcileConfessions([conf(A, 'mC_1_2', 2)], groups, new Set(), st, leavers, NOW,
+      mkOpts(board, { consistentKeys: new Set(['mC_1_2']) }));
     eq('settled-before-first-sighting: nothing applied at all', [board[A], r.exitHits, r.penalized], [2000, 0, 0]);
+  }
+
+  console.log('=== H3: lone/divergent/abandoner records buy NO absolution ===');
+  {
+    // lone 0xB1 (any client can upload one for its own seat): match key NOT in consistentKeys
+    const board = { [A]: 2000 }, st = {}, leavers = {};
+    const opts = mkOpts(board);   // no consistentKeys at all
+    await reconcileConfessions([conf(A, 'mD_1_2', 2)], {}, new Set(), st, leavers, NOW, opts);
+    eq('penalized', board[A], 1900);
+    const loneGroups = { 'mD_1_2': [{ steamID: A, d: [], dispCode: 0 }] };
+    const r2 = await reconcileConfessions([conf(A, 'mD_1_2', 2)], loneGroups, new Set(), st, leavers, NOW + 600000, opts);
+    eq('lone garbage record: NO refund, penalty stands', [board[A], r2.refunded], [1900, 0]);
+    eq('exit signal NOT retracted', leavers[pid(A)].leaves, 1);
+  }
+  {
+    // record exists but the group is divergent (flagged, not in consistentKeys) -> deny
+    const board = { [A]: 2000 }, st = {}, leavers = {};
+    const opts = mkOpts(board, { consistentKeys: new Set() });
+    await reconcileConfessions([conf(A, 'mE_1_2', 2)], {}, new Set(), st, leavers, NOW, opts);
+    const divGroups = { 'mE_1_2': [{ steamID: A, d: [], dispCode: 0 }, { steamID: B, d: [], dispCode: 0 }] };
+    const r2 = await reconcileConfessions([], divGroups, new Set(), st, leavers, NOW + 600000, opts);
+    eq('divergent (flagged) group: NO refund', [board[A], r2.refunded], [1900, 0]);
+  }
+  {
+    // consistent group but the confessor's OWN record is abandoner-disp (came back, quit again) -> deny
+    const board = { [A]: 2000 }, st = {}, leavers = {};
+    const opts = mkOpts(board, { consistentKeys: new Set(['mF_1_2']) });
+    await reconcileConfessions([conf(A, 'mF_1_2', 2)], {}, new Set(), st, leavers, NOW, opts);
+    const gr = { 'mF_1_2': [{ steamID: A, d: [], dispCode: 5 }, { steamID: B, d: [], dispCode: 0 }] };
+    const r2 = await reconcileConfessions([], gr, new Set(), st, leavers, NOW + 600000, opts);
+    eq('own record abandoner-disp in a consistent group: NO refund (LP3 mirror)', [board[A], r2.refunded], [1900, 0]);
   }
 
   console.log('=== self-spam is pure self-harm ===');

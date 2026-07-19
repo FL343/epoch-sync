@@ -146,5 +146,26 @@ eq('rosterConsensus split vote -> seat dropped', rosterConsensus(grp(mk7(A, 0, {
   eq('type-7 keys never marked processed by the orphan path', processed.has('m7'), false);
 }
 
+// -- M3 (2026-07-19 audit): zero-tail abstention -- a cold reconnector who lands straight on
+//    results carries an all-zero tail with honest scores; the strict byte-equal vector used to
+//    flag the whole group forged (never settles). Abstention: scores strict, non-zero tails
+//    strict, all-zero = no claim; canonical (non-zero) record keys the settle. --
+{
+  const { endlessAbstention } = v;
+  const host = mk7(A, 0, { startDepth: 0, endDepth: 6, cont: 0x21, tokens: 0 });
+  const zero = mk7(B, 1, { startDepth: 0, endDepth: 0, cont: 0, tokens: 0 });
+  let r = endlessAbstention([zero, host], 8);
+  eq('zero-tail abstains: consistent, canon = non-zero record', [r.same, r.canonIdx], [true, 1]);
+  r = endlessAbstention([host, zero], 8);
+  eq('order agnostic (canon already at 0)', [r.same, r.canonIdx], [true, 0]);
+  const forged = mk7(B, 1, { startDepth: 0, endDepth: 9, cont: 0, tokens: 0 });
+  eq('fabricated NON-zero tail stays inconsistent (flags as before)', endlessAbstention([host, forged], 8).same, false);
+  const badScore = mk7(B, 1, { scores: [4000, 9999], startDepth: 0, endDepth: 0, cont: 0, tokens: 0 });
+  eq('score divergence never excused by abstention', endlessAbstention([host, badScore], 8).same, false);
+  const zero2 = mk7(A, 0, { startDepth: 0, endDepth: 0, cont: 0, tokens: 0 });
+  eq('all-zero group: consistent at depth 0 (no entry/debit downstream)', endlessAbstention([zero2, zero], 8), { same: true, canonIdx: 0 });
+  eq('missing tail stays malformed/inconsistent', endlessAbstention([host, mk7(B, 1, { noTail: true })], 8).same, false);
+}
+
 console.log('=== ' + (failN === 0 ? 'PASS' : 'FAIL') + ' — ' + failN + ' fail (endless-settle) ===');
 process.exit(failN === 0 ? 0 : 1);

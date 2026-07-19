@@ -262,6 +262,14 @@ function pruneSignals(s, now) {
     pk.sort((a, b) => (s.pairs[a].at || 0) - (s.pairs[b].at || 0));
     for (let i = 0; i < pk.length - SIG_PAIRS_CAP; i++) delete s.pairs[pk[i]];
   }
+  // rseen shares the fuse (2026-07-19 audit L5): its keys embed an attacker-chosen matchHash, so
+  // unlike pairs (bounded by real co-play) it can be grown deliberately -- evict oldest past cap.
+  const rk = Object.keys(s.rseen || {});
+  if (rk.length > SIG_PAIRS_CAP) {
+    ghWarn('signals rseen ' + rk.length + ' > cap ' + SIG_PAIRS_CAP + ' -- oldest evicted; plan the move to external state storage');
+    rk.sort((a, b) => (s.rseen[a] || 0) - (s.rseen[b] || 0));
+    for (let i = 0; i < rk.length - SIG_PAIRS_CAP; i++) delete s.rseen[rk[i]];
+  }
 }
 function saveSignals(s, now) { try { pruneSignals(s, now); fs.writeFileSync(SIGNALS_FILE, JSON.stringify(s, null, 0)); } catch (e) { ghWarn('write ' + SIGNALS_FILE + ' failed: ' + (e && e.message)); } }
 function sigPlayer(s, h, now) { const p = s.players[h] || (s.players[h] = { g: 0, w: 0, v: 0, f: 0, ns: 0, disp: [0, 0, 0, 0, 0, 0, 0], s1: 0, s2: 0, smax: 0, at: 0 }); p.at = now; return p; }
@@ -306,11 +314,15 @@ function harvestReports(entries, s, now) {
       const rk = pid(rp), tk = pid(target);
       const seenKey = rk + '|' + tk + '|' + reason + '|' + mh;
       if (s.rseen[seenKey]) continue;          // idempotent re-upload of the rolling queue
-      s.rseen[seenKey] = now;
       res.targets.push(target);                // real sid -> trust-tier candidate this run
       res.seen++;
       const dayN = (day.r[rk] | 0);
-      if (dayN >= REPORT_DAILY_CAP) { res.capped++; continue; }   // dedup-marked but not counted
+      // dedup keys are minted only for COUNTED reports (2026-07-19 audit L5): minting before the
+      // cap let an attacker (free 32-bit matchHash per entry) grow rseen without bound while the
+      // cap suppressed the count anyway. A capped report is deferred, not destroyed -- it retries
+      // a later run/day until it lands under the cap and mints its key then.
+      if (dayN >= REPORT_DAILY_CAP) { res.capped++; continue; }
+      s.rseen[seenKey] = now;
       day.r[rk] = dayN + 1;
       const ek = rk + '>' + tk;
       const edge = s.rep[ek] || (s.rep[ek] = { n: 0, m: 0, at: 0 });
@@ -532,7 +544,21 @@ function saveConfessions(s, now) {
 // convictions skip confessed (pid|match) keys so nothing double-counts.
 async function reconcileConfessions(confs, groups, processed, confState, leavers, now, opts) {
   const res = { seen: 0, penalized: 0, exitHits: 0, refunded: 0, finalized: 0 };
-  const settledBy = (m, p) => !!(groups[m] && groups[m].some(r => pid(String(r.steamID)) === p));
+  // absolution probe (2026-07-19 audit H3): "came back and finished" must mean a record inside a
+  // CONSISTENT settle group (>=2 distinct writers, identical consistency vectors) whose own disp
+  // is non-abandoner. The old any-record probe accepted a lone or divergent 0xB1 -- which any
+  // client can upload for its own roster seat with a garbage score vector -- letting a ranked
+  // leaver cancel his authoritative -100 (and retract the exit signal) unilaterally. A forged
+  // divergent record now just flags the group (existing K1 path) and the penalty stands; the
+  // legit reconnect-and-finish case is exactly a consistent group containing the confessor.
+  // opts.consistentKeys = this run's consistent-group match keys (caller computes them anyway).
+  const ck = opts.consistentKeys || new Set();
+  const settleRec = (m, p) => {
+    if (!ck.has(m) || !groups[m]) return null;
+    const rec = groups[m].find(r => pid(String(r.steamID)) === p);
+    return (rec && dispClassOf(rec.dispCode) !== 'abandoner') ? rec : null;
+  };
+  const settledBy = (m, p) => !!settleRec(m, p);
   const byKey = {};
   for (const c of (confs || [])) { const p = pid(String(c.steamID)); byKey[p + '|' + c.m] = Object.assign({ p }, c); }
   // 1) NEW confessions (visible on shards this run)
@@ -567,7 +593,7 @@ async function reconcileConfessions(confs, groups, processed, confState, leavers
     if (st.done || st.refunded) continue;
     const i = key.indexOf('|');
     const p = key.slice(0, i), m = key.slice(i + 1);
-    const rec = groups[m] && groups[m].find(r => pid(String(r.steamID)) === p);
+    const rec = settleRec(m, p);   // hardened probe (consistent group + non-abandoner disp); lone/divergent records refund nothing
     if (rec) {
       // came back and finished: refund the exact deducted amount + retract the exit signal
       if (st.ded > 0 && opts.readLp) {
@@ -922,7 +948,12 @@ function creditXp(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers,
     const factor = effectiveLeaverFactor((leavers[p] && leavers[p].leaves) || 0, st.games);
     const rank0 = ((rankOf[sid] || 1) | 0) - 1;   // 0-based for rankBonus index (group rank is 1-based)
     let firstWin = false;
-    if (cls === 'valid' && rank0 === 0 && (st.lastWinDay | 0) < today) { firstWin = true; st.lastWinDay = today; }
+    // daily-first qualification (2026-07-19 audit M7) = the same "won" predicate as the career
+    // counters (careerWon: FFA rank 1 / team modes winning pair rank<=2). The old rank0===0 check
+    // excluded the rank-2 member of a winning pair while the client grants both winners (results.js
+    // team win = team outcome) -- one predicate, three consumers (career wins, first-win, client
+    // opts.win) now agree. FFA behavior unchanged (careerWon === rank 1 there).
+    if (cls === 'valid' && careerWon(matchType, rankOf[sid]) && (st.lastWinDay | 0) < today) { firstWin = true; st.lastWinDay = today; }
     const gain = computeXpGain(cls, rank0, scores[seat] | 0, isRanked, firstWin, factor * pf);
     if (gain > 0) { xp[sid] = (xp[sid] | 0) + gain; changedXp[sid] = xp[sid]; }
     if (cls === 'valid') st.games += 1;   // denominator = real finishes (innocent/abandoner don't count; mirrors client window)
@@ -972,6 +1003,27 @@ function endlessTail(d) {
   const pc = d[8] | 0, at = 11 + 3 * pc;
   if (!d || d.length < at + 4) return null;
   return { startDepth: d[at] | 0, endDepth: d[at + 1] | 0, continuesUsed: d[at + 2] | 0, tokensCp: d[at + 3] | 0 };
+}
+// zero-tail abstention (2026-07-19 audit M3): a cold reconnector who lands straight on results
+// never saw a verdict frame -- his GAME.endless is all zeros, so his record carries a legitimate
+// all-zero depth tail while his score slice matches everyone (the strict byte-equal vector used
+// to flag that honest skew as forgery and the run never settled). Consistency for an endless
+// group therefore splits: scores must match EVERY writer; an all-zero tail is "no claim";
+// non-zero tails must match each other. Returns { same, canonIdx } -- canonIdx = a record
+// carrying the agreed non-zero tail (caller rotates it to g[0] so the sanity depth-scaled score
+// cap, the settle's tail read and the log all see the canonical view), 0 when every writer
+// abstained (settles at depth 0: no board entry, no debits -- same outcome as never playing).
+// Zero buys a cheater nothing: with >=1 honest writer the run settles on the real tail incl.
+// the abstainer's own continue debits, and a fabricated NON-zero tail still flags the group.
+function endlessAbstention(g, maxSeats) {
+  const sv = g.map(r => { const pc = r.d[8] | 0; return (pc >= 1 && pc <= (maxSeats | 0) && r.d.length >= 10 + pc) ? JSON.stringify(r.d.slice(10, 10 + pc)) : 'BAD'; });
+  if (!sv.every(v => v === sv[0] && v !== 'BAD')) return { same: false, canonIdx: 0 };
+  const tv = g.map(r => { const pc = r.d[8] | 0, at = 11 + 3 * pc; return r.d.length >= at + 4 ? JSON.stringify(r.d.slice(at, at + 4)) : 'BAD'; });
+  if (tv.some(t => t === 'BAD')) return { same: false, canonIdx: 0 };
+  const ZERO = JSON.stringify([0, 0, 0, 0]);
+  const nz = tv.filter(t => t !== ZERO);
+  if (!nz.every(t => t === nz[0])) return { same: false, canonIdx: 0 };
+  return { same: true, canonIdx: Math.max(0, tv.findIndex(t => t !== ZERO)) };
 }
 // cumulative team goal line (client curve mirror): quadratic ramp for the early levels, then
 // near-linear. Used as the depth-scaled score cap -- the global matchmade cap has no meaning here.
@@ -1165,7 +1217,19 @@ async function main() {
   for (const m of Object.keys(groups)) {
     const g = groups[m];
     const vecs = g.map(vecOf);
-    const same = vecs.every(v => v === vecs[0] && v.indexOf('BAD') !== 0);
+    let same = vecs.every(v => v === vecs[0] && v.indexOf('BAD') !== 0);
+    // M3 (2026-07-19 audit): endless groups get a second chance under zero-tail abstention --
+    // scores identical + non-zero tails identical + all-zero tails abstaining. The canonical
+    // (non-zero-tail) record is rotated to g[0]: sanity's depth-scaled score cap, the settle's
+    // endlessTail(g[0]) read and the board write all key off g[0] by convention.
+    if (!same && g.length >= 2 && isEndlessMt(g[0].d[2] | 0)) {
+      const ab = endlessAbstention(g, MAX_SEATS);
+      if (ab.same) {
+        same = true;
+        if (ab.canonIdx > 0) { const c0 = g[ab.canonIdx]; g.splice(ab.canonIdx, 1); g.unshift(c0); }
+        console.log('  match=' + m + ': endless zero-tail abstention -> canonical tail from ' + plog(g[0].steamID));
+      }
+    }
     if (g.length < 2) { lone++; console.log('  match=' + m + ': lone(' + g.length + ')'); }
     else if (same) {
       consistent++;
@@ -1204,6 +1268,7 @@ async function main() {
     confRes = await reconcileConfessions(confessions, groups, processed, confState, leavers, nowMs, {
       penalty: LEAVER_LP_PENALTY, lpMax: LP_MAX, maturityMs: STARTS_MATURITY_MS,
       appliesLpFn: appliesLp,
+      consistentKeys,   // absolution probe only trusts consistent settle groups (a lone/divergent 0xB1 cancels nothing)
       seedFor: (sid) => { const sk = skill0[pid(sid)] || ts.DEFAULTS; return seedLp(ts.displayRating(sk.mu, sk.sigma)); },
       readLp: lpId0 ? (async (sid) => { const e = await readUserEntry(lpId0, sid, 'points'); return e ? { score: e.score | 0, details: decodeDetails(e.detailData) } : null; }) : null,
       writeLp: async (sid, score, details) => {
@@ -1515,7 +1580,9 @@ async function main() {
     //   already lands their LP at the display-derived position, and applying crossline in the same
     //   settle could force a boundary crossing on a player's very first ranked game (silent demote/
     //   promote before placement has calibrated). Mirrors client results.js (_firstRankedBefore gate);
-    //   lp==null before seeding == the client's rankedGamesPlayed===0, so both ends skip the same settle.
+    //   lp==null before seeding == the client's !lpSeeded flag (2026-07-19 audit L3: the client gate
+    //   moved off rankedGamesPlayed===0 -- a VOID first match now seeds NEITHER end, keeping the
+    //   crossline skip aligned settle for settle), so both ends skip the same settle.
     const seededNow = new Set();
     if (lpId && appliesLp(matchType)) {
       for (const t of tsIn) {
@@ -1687,4 +1754,4 @@ async function main() {
 if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
-module.exports = { isVoidDisp, voidByConsensus, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONFESS_MAGIC, reconcileConfessions, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, groupDecayPlan, GROUP_DECAY };
+module.exports = { isVoidDisp, voidByConsensus, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONFESS_MAGIC, reconcileConfessions, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, groupDecayPlan, GROUP_DECAY };

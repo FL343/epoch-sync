@@ -60,14 +60,17 @@ const TODAY = 20000;
   const rankOf = { [A]: 3, [B]: 4, [C]: 1, [D]: 2 };   // what main() feeds after the teamRankOf overwrite
   const xp = {}, changedXp = {}, xpState = {}, leavers = {};
   creditXp(g, 3, scores, rankOf, xp, changedXp, xpState, leavers, TODAY);
-  // type 3 = quick class: NO ranked multiplier; daily-first goes to the team-rank-1 player (C)
+  // type 3 = quick class: NO ranked multiplier; daily-first goes to BOTH winners (2026-07-19 audit
+  // M7: qualification = careerWon = winning pair rank<=2, one predicate with career wins and the
+  // client's opts.win -- the old rank1-only check stranded the rank-2 winner's optimistic bonus
+  // for read-back to claw back).
   const expC = computeXpGain('valid', 0, 95, false, true, 1);    // rank1 + daily first win
-  const expD = computeXpGain('valid', 1, 60, false, false, 1);
+  const expD = computeXpGain('valid', 1, 60, false, true, 1);    // rank2 WINNER: daily first too (M7)
   const expA = computeXpGain('valid', 2, 100, false, false, 1);  // top scorer, but team lost -> rank3 bonus
   const expB = computeXpGain('valid', 3, 40, false, false, 1);
   eq('team-rank-1 (C) gets rank1 bonus + daily first win', xp[C], expC);
   eq('losing top scorer (A) gets rank3 bonus (not rank1)', xp[A], expA);
-  eq('remaining seats credited by team rank', [xp[D], xp[B]], [expD, expB]);
+  eq('remaining seats: rank2 winner gets daily-first (M7), losers by team rank', [xp[D], xp[B]], [expD, expB]);
   // quick class: recompute C with the ranked multiplier and confirm it differs (i.e. type 3 did NOT apply it)
   const expCRanked = computeXpGain('valid', 0, 95, true, true, 1);
   if (expCRanked !== expC) ok('type 3 skipped the ranked multiplier (quick class confirmed)');
