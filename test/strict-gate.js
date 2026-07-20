@@ -3,6 +3,12 @@
 // run instead of soft-skipping; with it off, legacy skip behavior is unchanged. Runs validate.js
 // as a child process with a stubbed global fetch (listing endpoint only) and state files pointed
 // at a temp dir -- no network, no side effects on real state.
+//
+// State isolation is structural, not a hand-kept list: every *_FILE env var is scanned from the
+// validate.js source and redirected, and the child runs with cwd inside the temp dir so relative
+// defaults can never resolve to the repo checkout. A hand-kept list once missed CONFESSIONS_FILE:
+// the first real pending confession in the repo's committed state made the confession-path board
+// gate trip ahead of the report gate, turning this test red and stalling the production cron.
 const { spawnSync } = require('child_process');
 const fs = require('fs'), path = require('path'), os = require('os');
 
@@ -13,19 +19,27 @@ fs.writeFileSync(stub, [
   'global.fetch = async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ response: { leaderboards: LIST } }) });',
 ].join('\n'));
 
+const VALIDATE = path.join(__dirname, '..', 'validate.js');
+const FILE_VARS = Array.from(new Set(
+  Array.from(fs.readFileSync(VALIDATE, 'utf8').matchAll(/process\.env\.([A-Z0-9_]+_FILE)\b/g), m => m[1])
+));
+
 function run(extraEnv) {
+  const stateEnv = {};
+  for (const v of FILE_VARS) stateEnv[v] = path.join(dir, v.toLowerCase() + '.json');
   const env = Object.assign({}, process.env, {
     STEAM_PUBLISHER_KEY: 'k', APPID: '1', LB_PREFIX: 'shard_', RANKED_LB: 'r', LP_LB: 'p', STATE_SALT: 's',
-    PROCESSED_FILE: path.join(dir, 'processed.json'), SKILL_FILE: path.join(dir, 'skill.json'),
-    LEAVERS_FILE: path.join(dir, 'leavers.json'), STARTS_FILE: path.join(dir, 'starts.json'),
-    SIGNALS_FILE: path.join(dir, 'signals.json'), XP_FILE: path.join(dir, 'xp.json'),
-  }, extraEnv);
-  const r = spawnSync(process.execPath, ['-r', stub, path.join(__dirname, '..', 'validate.js')], { env, encoding: 'utf8' });
+  }, stateEnv, extraEnv);
+  const r = spawnSync(process.execPath, ['-r', stub, VALIDATE], { env, encoding: 'utf8', cwd: dir });
   return { code: r.status, out: (r.stdout || '') + (r.stderr || '') };
 }
 
 let n = 0;
 function ok(cond, msg) { n++; if (!cond) { console.error('FAIL ' + msg); process.exit(1); } console.log('ok ' + n + ' ' + msg); }
+
+// Tripwire: the scan must keep seeing at least the eight state files known today; a refactor
+// that breaks the pattern would silently degrade isolation back to cwd-only.
+ok(FILE_VARS.length >= 8, 'state-file scan found ' + FILE_VARS.length + ' *_FILE vars (>= 8)');
 
 // 1) strict on, report board absent -> hard fail (trips before any state write)
 let r = run({ STRICT_BOARDS: '1', STUB_BOARDS: '[]' });
