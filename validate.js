@@ -99,6 +99,7 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
   const sg = {};
   for (const r of starts) { const m = r.d[3] + '_' + r.d[4] + '_' + r.d[2]; (sg[m] = sg[m] || []).push(r); }
   let registered = 0, convicted = 0, cleaned = 0;
+  const consoledSids = [];   // interrupted-match consolation: real sids of still-visible settle writers at verdict time (in-memory only, never persisted -- state stays HMAC-keyed)
   // 1) register new pending entries (sticky first-seen: shard entries may be overwritten later)
   for (const m of Object.keys(sg)) {
     if (processed.has(m) || pending[m]) continue;
@@ -148,12 +149,26 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
       leavers[h].leaves += 1; leavers[h].lastMatch = m;
       hit.push(h.slice(0, 8));
     }
+    // interrupted-match consolation: whoever wrote a settle record for this key and is STILL
+    // visible on their shard at verdict time gets the flat CONSOLATION_XP credit (caller writes
+    // the board -- real sids are only available from the live records; a writer rotated off
+    // their shard within the maturity window keeps the exit-rate exemption via p.settled but
+    // forfeits the symbolic credit). Structurally-impossible lone records (sanity bounds) and
+    // roster outsiders earn nothing.
+    if (groups[m]) for (const r of groups[m]) {
+      const s = String(r.steamID);
+      if (consoledSids.indexOf(s) >= 0) continue;
+      const h = pid(s);
+      if (!Object.keys(p.roster).some((seat) => p.roster[seat] === h)) continue;   // not on the attested roster
+      if (sanityFlags([r]).length) continue;
+      consoledSids.push(s);
+    }
     convicted += hit.length;
     processed.add(m);   // idempotent: a super-late settlement of a convicted key is skipped as stale
     delete pending[m];
     console.log('  start-orphan ' + m + ': started, never settled -> ' + hit.length + ' exit-rate hits (' + hit.join(',') + ')' + (p.settled.length ? ', ' + p.settled.length + ' exempt (wrote a settle record)' : ''));
   }
-  return { registered, convicted, cleaned };
+  return { registered, convicted, cleaned, consoledSids };
 }
 // ---- deterministic sanity bounds (B5 tier A: flag-don't-settle) ----
 // Catches the case consensus can't: colluding clients writing IDENTICAL impossible records.
@@ -617,6 +632,14 @@ async function reconcileConfessions(confs, groups, processed, confState, leavers
 // pending start-attestation groups awaiting settlement or maturity (see reconcileStarts)
 const STARTS_FILE = process.env.STARTS_FILE || 'starts.json';
 const STARTS_MATURITY_MS = Number(process.env.STARTS_MATURITY_MS || 2 * 3600 * 1000);   // max match length + reconnect windows, with slack
+// flat XP credit for the innocent survivor of an interrupted match (the sole player left after
+// everyone else quit, who stayed to the forced settle and wrote a lone record). Lone records can
+// never settle (consensus needs 2+ writers), so the normal XP pipeline can never pay them -- this
+// is the only authoritative credit such a match produces. Flat and small on purpose: score/progress
+// claims in a lone record are unverifiable, and forging the credit (a second account to co-attest
+// the start, a burned exit-rate on it, a 2h maturity wait) earns far less than honest play.
+// Competitive values (LP/MMR) never move here. Client mirrors the same constant (lockstep-pinned).
+const CONSOLATION_XP = Number(process.env.CONSOLATION_XP || 50);
 function loadStarts() { try { return JSON.parse(fs.readFileSync(STARTS_FILE, 'utf8')) || {}; } catch (e) { return {}; } }
 function saveStarts(s) { try { fs.writeFileSync(STARTS_FILE, JSON.stringify(s, null, 0)); } catch (e) { ghWarn('write ' + STARTS_FILE + ' failed: ' + (e && e.message)); } }
 // ============================================================
@@ -1257,6 +1280,32 @@ async function main() {
   if (startsRes.registered || startsRes.convicted || startsRes.cleaned || Object.keys(startsPending).length)
     console.log('starts: ' + Object.keys(startsPending).length + ' pending (+' + startsRes.registered + ' new), ' + startsRes.convicted + ' exit-rate hits, ' + startsRes.cleaned + ' cleaned');
   RUN.pending = Object.keys(startsPending).length; RUN.convicted = startsRes.convicted;
+  // interrupted-match consolation: the matured-orphan verdict just identified survivors who stayed
+  // to the forced settle of a match nobody could ever settle (lone records). Pay the flat credit
+  // inline (same pre-early-return pattern as the confession LP writes -- the everyone-left scenario
+  // produces no consistent settle groups, so the main XP pipeline never runs on this path). The
+  // write preserves the entry's existing details verbatim (career 0xCA payload must survive).
+  // One-shot by design (rides the processed gate); a failed write is logged and forfeited.
+  let consoledN = 0;
+  if (startsRes.consoledSids && startsRes.consoledSids.length && XP_LB) {
+    const xpLb0 = ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).find(x => String(x.name || x.Name) === XP_LB);
+    const xpId0 = xpLb0 ? (xpLb0.id || xpLb0.ID) : null;
+    if (!xpId0) ghWarn('xp board absent (consolation path) -> ' + startsRes.consoledSids.length + ' credits forfeited');
+    else for (const sid of startsRes.consoledSids) {
+      try {
+        const e = await readUserEntry(xpId0, sid, 'xp');
+        const next = (e ? (e.score | 0) : 0) + CONSOLATION_XP;
+        const det = e ? decodeDetails(e.detailData) : null;
+        if (!APPLY_MMR) { console.log('  (dry-run) consolation xp ' + plog(sid) + ' = ' + next); consoledN++; continue; }
+        const r = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: xpId0, steamid: sid, score: next, scoremethod: 'ForceUpdate', format: 'json' }, (det && det.length) ? det : null);
+        if (r.ok && !(r.json && r.json.result && r.json.result.result && r.json.result.result !== 1)) { consoledN++; console.log('  consolation xp ' + plog(sid) + ' +' + CONSOLATION_XP + ' -> ' + next); }
+        else ghWarn('consolation xp write failed for ' + plog(sid));
+      } catch (err) { ghWarn('consolation xp error for ' + plog(sid) + ': ' + (err && err.message)); }
+    }
+  } else if (startsRes.consoledSids && startsRes.consoledSids.length && !XP_LB) {
+    console.log('  consolation: XP_LB unset -> ' + startsRes.consoledSids.length + ' credits skipped');
+  }
+  RUN.consoled = consoledN;
   // abandon confessions: immediate authoritative leaver penalty without finisher consensus.
   // Runs before the early returns (the everyone-left scenario produces no settle groups at all).
   let confRes = { seen: 0, penalized: 0, exitHits: 0, refunded: 0, finalized: 0 };
@@ -1754,4 +1803,4 @@ async function main() {
 if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
-module.exports = { isVoidDisp, voidByConsensus, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONFESS_MAGIC, reconcileConfessions, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, groupDecayPlan, GROUP_DECAY };
+module.exports = { isVoidDisp, voidByConsensus, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, CONFESS_MAGIC, reconcileConfessions, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, groupDecayPlan, GROUP_DECAY };

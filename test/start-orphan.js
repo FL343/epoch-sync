@@ -1,7 +1,7 @@
 'use strict';
 // reconcileStarts: start-attestation (0xB2) pending tracking + all-absent maturity verdicts.
 const path = require('path');
-const { reconcileStarts, pid, START_MAGIC } = require(path.join(__dirname, '..', 'validate.js'));
+const { reconcileStarts, pid, START_MAGIC, CONSOLATION_XP } = require(path.join(__dirname, '..', 'validate.js'));
 
 let failN = 0;
 const ok = (m) => console.log('  ok    ' + m);
@@ -100,6 +100,52 @@ console.log('=== reconcileStarts (B7 start/settle cross-check) ===');
 }
 { // START_MAGIC pinned (client writer lockstep is asserted from the mvp side test)
   eq('START_MAGIC = 0xB2', START_MAGIC, 0xB2);
+}
+
+// ---- interrupted-match consolation (flat XP for the innocent survivor of a never-settled match) ----
+// a sanity-clean settle record shape (mt=2 pc=2, in-cap scores, sane duration, self-seat honest)
+const mkRich = (writer, seat) => { const d = []; d[2] = 2; d[5] = seat | 0; d[8] = 2; d[9] = 300; d[10] = 1200; d[11] = 800; return { steamID: writer, d, roster: { 0: A, 1: B } }; };
+
+{ // live sanity-clean settle writer at verdict time -> consoled; the quitter is still convicted
+  const pending = { [KEY]: { t0: 0, mt: 2, roster: { 0: pid(A), 1: pid(B) }, settled: [] } };
+  const leavers = {};
+  const r = reconcileStarts([], { [KEY]: [mkRich(A, 0)] }, new Set(), new Set(), pending, leavers, MAT + 1, MAT);
+  eq('consolation: live lone writer credited (real sid)', r.consoledSids, [A]);
+  eq('quitter still convicted', r.convicted, 1);
+  eq('quitter B hit', leavers[pid(B)].leaves, 1);
+}
+{ // overwritten writer: exemption survives via settled[] memory, but the credit is forfeited (pid is one-way)
+  const pending = { [KEY]: { t0: 0, mt: 2, roster: { 0: pid(A), 1: pid(B) }, settled: [pid(A)] } };
+  const leavers = {};
+  const r = reconcileStarts([], {}, new Set(), new Set(), pending, leavers, MAT + 1, MAT);
+  eq('no live record -> no credit', r.consoledSids, []);
+  eq('A still exempt from exit-rate', leavers[pid(A)], undefined);
+}
+{ // sanity-flagged lone record earns nothing (structurally impossible score)
+  const dBad = []; dBad[2] = 2; dBad[5] = 0; dBad[8] = 2; dBad[9] = 300; dBad[10] = 999999; dBad[11] = 0;
+  const pending = { [KEY]: { t0: 0, mt: 2, roster: { 0: pid(A), 1: pid(B) }, settled: [] } };
+  const r = reconcileStarts([], { [KEY]: [{ steamID: A, d: dBad, roster: {} }] }, new Set(), new Set(), pending, {}, MAT + 1, MAT);
+  eq('sanity-flagged record -> no credit', r.consoledSids, []);
+}
+{ // a writer outside the attested roster earns nothing (consolation is for the people who provably started)
+  const K2 = '222_7_2';
+  const pending = { [K2]: { t0: 0, mt: 2, roster: { 0: pid(A), 1: pid(B) }, settled: [] } };
+  const r = reconcileStarts([], { [K2]: [mkRich(X, 0)] }, new Set(), new Set(), pending, {}, MAT + 1, MAT);
+  eq('roster outsider -> no credit', r.consoledSids, []);
+}
+{ // consistent settle group owns the key: no consolation (the normal XP pipeline pays there)
+  const pending = { [KEY]: { t0: 0, mt: 2, roster: { 0: pid(A), 1: pid(B) }, settled: [] } };
+  const r = reconcileStarts([], { [KEY]: [mkRich(A, 0), mkRich(B, 1)] }, new Set([KEY]), new Set(), pending, {}, MAT + 1, MAT);
+  eq('consistent key -> no consolation', r.consoledSids, []);
+}
+{ // two inconsistent-but-sane writers of a dead match: both stayed to the end, both consoled once
+  const pending = { [KEY]: { t0: 0, mt: 2, roster: { 0: pid(A), 1: pid(B) }, settled: [] } };
+  const r = reconcileStarts([], { [KEY]: [mkRich(A, 0), mkRich(B, 1)] }, new Set(), new Set(), pending, {}, MAT + 1, MAT);
+  eq('both live writers consoled', r.consoledSids, [A, B]);
+  eq('nobody convicted (both wrote)', r.convicted, 0);
+}
+{ // constant pinned (client optimistic mirror + lockstep test read this export)
+  eq('CONSOLATION_XP = 50', CONSOLATION_XP, 50);
 }
 
 console.log('=== ' + (failN === 0 ? 'PASS' : 'FAIL') + ' — ' + failN + ' fail (start-orphan) ===');
