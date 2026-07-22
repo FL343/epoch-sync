@@ -17,11 +17,29 @@ jobs:
     permissions:
       contents: write
     steps:
+      # Yield gate: while the external monitor reports a fallback actively settling
+      # (flag fresh), skip this run so a stale-state run cannot double-settle matches
+      # the fallback already handled. Fail-open: monitor unreachable = proceed.
+      - name: gate
+        id: gate
+        env:
+          FLAG_URL: ${{ secrets.FLAG_URL }}
+        run: |
+          y=false
+          if [ -n "$FLAG_URL" ]; then
+            resp=$(curl -fsS --max-time 5 "$FLAG_URL/flag" 2>/dev/null || true)
+            case "$resp" in *'"active":true'*) y=true;; esac
+          fi
+          echo "yield=$y" >> "$GITHUB_OUTPUT"
+          if [ "$y" = true ]; then echo "fallback active - yielding this run"; fi
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        if: steps.gate.outputs.yield != 'true'
       - name: test
+        if: steps.gate.outputs.yield != 'true'
         run: |
           for f in test/*.js; do echo "== $f =="; node "$f" || exit 1; done
       - name: run
+        if: steps.gate.outputs.yield != 'true'
         env:
           STEAM_PUBLISHER_KEY: ${{ secrets.STEAM_PUBLISHER_KEY }}
           APPID: ${{ secrets.APPID }}
@@ -35,6 +53,7 @@ jobs:
           STRICT_BOARDS: '1'
         run: node validate.js
       - name: persist
+        if: steps.gate.outputs.yield != 'true'
         run: |
           state_files=""
           for f in processed.json skill.json leavers.json xp.json starts.json signals.json groups.json confessions.json; do
@@ -54,6 +73,7 @@ jobs:
             echo "no state change"
           fi
       - name: heartbeat
+        if: steps.gate.outputs.yield != 'true'
         run: |
           last=$(git log -1 --format=%ct)
           now=$(date +%s)
@@ -69,3 +89,23 @@ jobs:
           else
             echo "heartbeat not due (age ${age}d)"
           fi
+      # Offsite state replica: push the exact post-persist HEAD to a write-enabled
+      # replica so a disaster-recovery pipeline always has state <=1 run stale.
+      # Best-effort: a replica outage must not fail production runs; sustained drift
+      # is caught by the replica side's weekly freshness check.
+      - name: replicate
+        if: steps.gate.outputs.yield != 'true'
+        env:
+          MIRROR_URL: ${{ secrets.MIRROR_URL }}
+          MIRROR_SSH_KEY: ${{ secrets.MIRROR_SSH_KEY }}
+          MIRROR_KNOWN_HOSTS: ${{ secrets.MIRROR_KNOWN_HOSTS }}
+        run: |
+          if [ -z "$MIRROR_URL" ]; then echo "replica not configured - skip"; exit 0; fi
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "$MIRROR_KNOWN_HOSTS" > "$HOME/.ssh/replica_known_hosts"
+          printf '%s\n' "$MIRROR_SSH_KEY" > "$HOME/.ssh/replica_key"
+          chmod 600 "$HOME/.ssh/replica_key"
+          export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/replica_key -o UserKnownHostsFile=$HOME/.ssh/replica_known_hosts -o IdentitiesOnly=yes"
+          git push --force --quiet "$MIRROR_URL" HEAD:main \
+            && echo "replica updated" \
+            || echo "::warning::replica push failed (replica stale; weekly drift check will flag if sustained)"
