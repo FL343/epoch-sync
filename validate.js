@@ -426,10 +426,27 @@ function recordMatchSignals(s, g, parts, rankOf, matchType, isVoid, now) {
     }
   }
 }
+// Reads retry transient faults (network errors / 5xx) twice with backoff before giving
+// up: the storefront occasionally throws a one-off 5xx (observed 2026-07-28: a single
+// GetLeaderboardsForGame HTTP 502 failed the whole run) and reads are idempotent, so a
+// blip should cost seconds, not a full cycle plus a failure e-mail. 4xx are semantic
+// (bad key / missing board) and still surface immediately. Writes (postForm*) keep
+// single-shot behavior — a mid-write failure self-heals next run via unprocessed state.
 async function getJson(url) {
-  const r = await fetch(url); const t = await r.text();
-  let j = null; try { j = JSON.parse(t); } catch (e) {}
-  return { status: r.status, ok: r.ok, json: j, text: t };
+  for (let attempt = 0; ; attempt++) {
+    let r, t;
+    try {
+      r = await fetch(url); t = await r.text();
+    } catch (e) {
+      if (attempt >= 2) throw e;
+      await new Promise(res => setTimeout(res, 8000 * (attempt + 1))); continue;
+    }
+    if (r.status >= 500 && attempt < 2) {
+      await new Promise(res => setTimeout(res, 8000 * (attempt + 1))); continue;
+    }
+    let j = null; try { j = JSON.parse(t); } catch (e) {}
+    return { status: r.status, ok: r.ok, json: j, text: t };
+  }
 }
 const ghWarn = m => console.log('::warning::' + m);
 const ghErr = m => console.log('::error::' + m);
