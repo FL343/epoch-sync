@@ -914,7 +914,34 @@ const XP_FILE = process.env.XP_FILE || 'xp.json';
 function loadXp() { try { return JSON.parse(fs.readFileSync(XP_FILE, 'utf8')) || {}; } catch (e) { return {}; } }
 function saveXp(s) { try { fs.writeFileSync(XP_FILE, JSON.stringify(s, null, 0)); } catch (e) { ghWarn('write ' + XP_FILE + ' failed: ' + (e && e.message)); } }
 // per-game point formula -- lockstep mirror of the client config (asserted by the schema-lockstep test).
-const XP_CFG = { base: 100, rankBonus: [80, 45, 20, 0], moneyDivisor: 50, moneyBonusCap: 120, rankedMult: 1.25, dailyFirstWin: 150, progressLevels: 5 };
+// boosts = permanent account-level point multiplier milestones ([level, +pct], ascending; the
+// highest tier at-or-below the player's level applies -- tiers are absolute, not additive).
+// curve = the level-cost function (mirror of the client progression curve): the first fastLevels
+// of every century cost fastCost, the rest normalCost, all scaled by (1 + centuryGrowth * century).
+const XP_CFG = {
+  base: 100, rankBonus: [80, 45, 20, 0], moneyDivisor: 50, moneyBonusCap: 120, rankedMult: 1.25, dailyFirstWin: 150, progressLevels: 5,
+  boosts: [[5, 5], [12, 10], [25, 15], [40, 20], [60, 25], [90, 30]],
+  curve: { fastLevels: 10, fastCost: 300, normalCost: 700, centuryGrowth: 0.1 },
+};
+// ---- permanent level-derived boost (client optimistic mirror; THIS side is the truth) ----
+// The player's level is derived from their own cumulative points ON THIS BOARD, taken BEFORE the
+// current match credits (no intra-match feedback loop; a milestone crossed by this game's gain
+// starts paying from the next game). Zero new state: level is a pure function of the board value.
+function xpLevelCost(level) {
+  const L = Math.max(0, level | 0), c = XP_CFG.curve;
+  const base = (L % 100) < c.fastLevels ? c.fastCost : c.normalCost;
+  return Math.max(1, Math.round(base * (1 + c.centuryGrowth * Math.floor(L / 100))));
+}
+function xpLevelOf(totalXp) {
+  let level = 0, rem = Math.max(0, totalXp | 0), guard = 0;
+  while (guard++ < 100000) { const need = xpLevelCost(level); if (rem < need) break; rem -= need; level++; }
+  return level;
+}
+function xpBoostMult(level) {
+  let pct = 0;
+  for (const b of XP_CFG.boosts) if ((level | 0) >= b[0]) pct = b[1];
+  return 1 + pct / 100;
+}
 // ---- match-progress discount (early-settled matches award partial points) ----
 // A matchmade record carries "levels reached" in the high bits of d[7] (bit 0 stays the legacy
 // win flag; nobody consumes it -- ranks derive from the score vector). A match that ends early
@@ -959,7 +986,10 @@ function effectiveLeaverFactor(leaves, games) {
 }
 // per-record point gain, mirroring the client per-game formula + credit rules. rank0 = 0-based; factor = repeat-leaver discount.
 //   valid = full (rank + money + ranked x + daily-first); innocent = base only; abandoner = 0.
-function computeXpGain(cls, rank0, money, isRanked, firstWinToday, factor) {
+//   boostMult = permanent level boost, applied as the LAST step inside the per-game formula
+//   (covers the daily-first bonus too) so the inner round matches the client expression exactly;
+//   the outer round(round(xp) * factor) leaver/progress expression is unchanged.
+function computeXpGain(cls, rank0, money, isRanked, firstWinToday, factor, boostMult) {
   if (cls === 'abandoner') return 0;
   let xp = XP_CFG.base;
   if (cls === 'valid') {
@@ -969,6 +999,7 @@ function computeXpGain(cls, rank0, money, isRanked, firstWinToday, factor) {
   }
   if (isRanked) xp = xp * XP_CFG.rankedMult;
   if (cls === 'valid' && firstWinToday) xp += XP_CFG.dailyFirstWin;
+  xp = xp * (boostMult == null ? 1 : boostMult);
   return Math.max(0, Math.round(Math.round(xp) * (factor == null ? 1 : factor)));
 }
 // credit authoritative points for one consistent match group (mutates the board map + changedXp + state).
@@ -994,7 +1025,8 @@ function creditXp(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers,
     // team win = team outcome) -- one predicate, three consumers (career wins, first-win, client
     // opts.win) now agree. FFA behavior unchanged (careerWon === rank 1 there).
     if (cls === 'valid' && careerWon(matchType, rankOf[sid]) && (st.lastWinDay | 0) < today) { firstWin = true; st.lastWinDay = today; }
-    const gain = computeXpGain(cls, rank0, scores[seat] | 0, isRanked, firstWin, factor * pf);
+    const bm = xpBoostMult(xpLevelOf(xp[sid] | 0));   // pre-credit board value -> level -> permanent boost
+    const gain = computeXpGain(cls, rank0, scores[seat] | 0, isRanked, firstWin, factor * pf, bm);
     if (gain > 0) { xp[sid] = (xp[sid] | 0) + gain; changedXp[sid] = xp[sid]; }
     if (cls === 'valid') st.games += 1;   // denominator = real finishes (innocent/abandoner don't count; mirrors client window)
     // career counters (client recordGame mirror): a leaver writes no record -> counts nothing here,
@@ -1003,7 +1035,7 @@ function creditXp(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers,
     if (cls === 'valid' || cls === 'innocent') st.cg = (st.cg | 0) + 1;
     if (cls === 'valid') { if (careerWon(matchType, rankOf[sid])) st.cw = (st.cw | 0) + 1; else st.cl = (st.cl | 0) + 1; }
     if (careerDet && cls !== 'abandoner') careerDet[sid] = [CAREER_MAGIC, CAREER_VER, st.cg | 0, st.cw | 0, st.cl | 0];
-    console.log('  xp ' + plog(sid) + ' ' + cls + ' rank' + (rank0 + 1) + (firstWin ? ' dailyWin' : '') + ' x' + factor + (pf !== 1 ? ' prog x' + pf : '') + ' +' + gain + ' -> ' + (xp[sid] | 0) + ' career ' + (st.cg | 0) + 'g/' + (st.cw | 0) + 'w/' + (st.cl | 0) + 'l');
+    console.log('  xp ' + plog(sid) + ' ' + cls + ' rank' + (rank0 + 1) + (firstWin ? ' dailyWin' : '') + ' x' + factor + (pf !== 1 ? ' prog x' + pf : '') + (bm !== 1 ? ' boost x' + bm : '') + ' +' + gain + ' -> ' + (xp[sid] | 0) + ' career ' + (st.cg | 0) + 'g/' + (st.cw | 0) + 'w/' + (st.cl | 0) + 'l');
   }
 }
 // ===== endless co-op authority (match type 7): depth board + CP wallet; never rating/XP/LP. =====
@@ -1820,4 +1852,4 @@ async function main() {
 if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
-module.exports = { isVoidDisp, voidByConsensus, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, CONFESS_MAGIC, reconcileConfessions, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, groupDecayPlan, GROUP_DECAY };
+module.exports = { isVoidDisp, voidByConsensus, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, CONFESS_MAGIC, reconcileConfessions, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, groupDecayPlan, GROUP_DECAY };

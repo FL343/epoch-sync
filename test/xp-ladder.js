@@ -5,7 +5,7 @@
 //   node test/xp-ladder.js
 process.env.STATE_SALT = process.env.STATE_SALT || 'test-salt';   // pid() needs a salt; any deterministic value
 const path = require('path');
-const { dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, pid, XP_CFG, LEAVER_XP } = require(path.join(__dirname, '..', 'validate.js'));
+const { dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, pid, XP_CFG, LEAVER_XP, xpLevelCost, xpLevelOf, xpBoostMult } = require(path.join(__dirname, '..', 'validate.js'));
 
 let failN = 0;
 const ok = (m) => console.log('  ok    ' + m);
@@ -125,6 +125,57 @@ const TODAY = 20000;
   const g = [mkRec(0, 0, A), mkRec(0, 0, A)];   // duplicate seat0
   creditXp(g, 1, [100, 0], { [A]: 1 }, xp, changedXp, xpState, leavers, TODAY);
   eq('duplicate seat credited once (games=1 not 2)', xpState[pid(A)].games, 1);
+}
+
+// ============================================================
+console.log('=== level curve mirror + permanent boost (client lockstep) ===');
+const CV = XP_CFG.curve;
+eq('level 0 cost = fastCost', xpLevelCost(0), CV.fastCost);
+eq('level 9 cost = fastCost (fast zone end)', xpLevelCost(9), CV.fastCost);
+eq('level 10 cost = normalCost', xpLevelCost(10), CV.normalCost);
+eq('level 100 cost = fastCost * (1+growth)', xpLevelCost(100), Math.round(CV.fastCost * (1 + CV.centuryGrowth)));
+eq('0 points -> level 0', xpLevelOf(0), 0);
+eq('one level short of the boundary', xpLevelOf(CV.fastCost - 1), 0);
+eq('exactly fastCost -> level 1', xpLevelOf(CV.fastCost), 1);
+{
+  // cumulative sum round-trips: sum of costs 0..N-1 lands exactly on level N
+  let acc = 0; for (let i = 0; i < 25; i++) acc += xpLevelCost(i);
+  eq('sum(cost 0..24) -> level 25', xpLevelOf(acc), 25);
+  eq('one point short -> level 24', xpLevelOf(acc - 1), 24);
+  let acc100 = 0; for (let i = 0; i < 100; i++) acc100 += xpLevelCost(i);
+  eq('century boundary: sum(cost 0..99) -> level 100', xpLevelOf(acc100), 100);
+}
+assert('huge value terminates (guard)', xpLevelOf(10000000) > 0);
+// boost tiers: highest at-or-below level, absolute not additive
+eq('level 0 -> x1', xpBoostMult(0), 1);
+eq('level 4 -> x1 (below first tier)', xpBoostMult(4), 1);
+eq('level 5 -> x1.05', xpBoostMult(5), 1 + 5 / 100);
+eq('level 11 -> still x1.05', xpBoostMult(11), 1 + 5 / 100);
+eq('level 12 -> x1.10', xpBoostMult(12), 1 + 10 / 100);
+eq('level 40 -> x1.20 (absolute, not 5+10+15+20)', xpBoostMult(40), 1 + 20 / 100);
+eq('level 90 -> x1.30 cap', xpBoostMult(90), 1 + 30 / 100);
+eq('level 500 -> stays x1.30', xpBoostMult(500), 1 + 30 / 100);
+assert('boost table ascending in level and pct', XP_CFG.boosts.every((b, i) => i === 0 || (b[0] > XP_CFG.boosts[i - 1][0] && b[1] > XP_CFG.boosts[i - 1][1])));
+// formula placement: boost multiplies INSIDE the per-game round (covers daily-first), outer factor round unchanged
+eq('boost x1.05 on base', computeXpGain('valid', 3, 0, false, false, 1, 1.05), Math.round(B * 1.05));
+eq('boost covers daily-first (round((base+rank0+daily)*1.3))', computeXpGain('valid', 0, 0, false, true, 1, 1.3), Math.round((B + XP_CFG.rankBonus[0] + XP_CFG.dailyFirstWin) * 1.3));
+eq('boost + leaver factor: round(round(raw*bm)*factor)', computeXpGain('valid', 3, 0, false, false, 0.3, 1.2), Math.round(Math.round(B * 1.2) * 0.3));
+eq('boostMult=null defaults to 1', computeXpGain('valid', 3, 0, false, false, 1, null), B);
+eq('abandoner stays 0 with boost', computeXpGain('abandoner', 0, 0, false, false, 1, 1.3), 0);
+
+// creditXp derives the boost from the PRE-credit board value
+{
+  const xp = { [A]: 1500, [BB]: 1499 };   // A = exactly level 5 (5*fastCost) -> x1.05; BB = one short -> x1
+  const changedXp = {}, xpState = {}, leavers = {};
+  const scores = [0, 0], rankOf = { [A]: 2, [BB]: 1 };   // nobody wins rank1=BB? give BB rank1 but no daily needed
+  // use rank2/rank1 with no money so expected values are clean; BB rank1 gets daily
+  creditXp([mkRec(0, 0, A), mkRec(1, 0, BB)], 1, scores, rankOf, xp, changedXp, xpState, leavers, TODAY);
+  eq('at-milestone player boosted x1.05 (pre-credit level 5)', xp[A], 1500 + Math.round((B + XP_CFG.rankBonus[1]) * 1.05));
+  eq('one-point-short player NOT boosted (pre-credit level 4)', xp[BB], 1499 + B + XP_CFG.rankBonus[0] + XP_CFG.dailyFirstWin);
+  // the gain itself crossed the milestone for BB -- next credit pays boosted
+  const before2 = xp[BB];
+  creditXp([mkRec(0, 0, A), mkRec(1, 0, BB)], 1, scores, rankOf, xp, changedXp, xpState, leavers, TODAY);
+  eq('milestone crossed by previous gain -> NEXT game boosted', xp[BB] - before2, Math.round((B + XP_CFG.rankBonus[0]) * 1.05));
 }
 
 console.log('=== ' + (failN === 0 ? 'PASS' : 'FAIL') + ' — ' + failN + ' fail (XP ladder helpers + creditXp) ===');
