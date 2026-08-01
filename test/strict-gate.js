@@ -55,6 +55,12 @@ ok(r.out.indexOf('::error::trust board absent') >= 0, 'strict: trust gate messag
 r = run({ STUB_BOARDS: '[]' });
 ok(r.code === 0, 'default: soft skip exits 0 (got ' + r.code + ')');
 ok(r.out.indexOf('report board absent') >= 0, 'default: skip is still logged');
+ok(r.out.indexOf('redeem boards absent') >= 0, 'default: redeem skip is still logged');
 ok(r.out.indexOf('::error::') < 0, 'default: no error annotation');
+
+// 4) strict on, report + trust present but redeem/grant boards absent -> redeem gate trips
+r = run({ STRICT_BOARDS: '1', STUB_BOARDS: JSON.stringify([{ name: 'report_box', id: 9, entries: 0 }, { name: 'trust_tier', id: 10, entries: 0 }]) });
+ok(r.code === 1, 'strict: missing redeem/grant boards exits 1 (got ' + r.code + ')');
+ok(r.out.indexOf('::error::redeem/grant board absent') >= 0, 'strict: redeem gate message emitted');
 
 console.log('strict-gate: all ' + n + ' assertions passed');

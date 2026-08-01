@@ -1120,6 +1120,56 @@ const ENDLESS = {
   CP: { base: 10, rankBonus: [10, 5, 0, 0], rankedMult: 2.0 },
   CONTINUE: { base: 20, esc: 1.5 },
 };
+// ---- redeem channel (client-written want bitmaps -> wallet debit -> trusted entitlement bitmap) ----
+// The redeem box carries per-player "want" bitmaps (details [0xCE|ver<<8, tMin, w0, w1], entry
+// owner = Steam-authenticated claimant, so nobody can spend anyone else's wallet). The grant box
+// is the trusted entitlement bitmap this job writes ([0xCF|ver<<8, tMin, w0, w1]). Idempotency
+// needs no state file: an entitlement bit, once set, is skipped forever -- stale or replayed
+// wants are harmless, and a want the wallet cannot cover stays on the box and auto-completes
+// when the balance catches up (client optimism leads authority by a few minutes by design).
+// Debit atomicity: the grant write goes FIRST and the wallet debit only follows a successful
+// grant write. grant-ok + debit-fail undercharges once and cannot loop (the set bit blocks
+// re-processing); grant-fail defers the item wholesale to a later run.
+// Catalog is value-locked with the client registry (companion lockstep suite): bit -> price,
+// plus an optional points-ladder floor gate (met on THIS season's ladder or any archived one).
+const REDEEM_LB = process.env.REDEEM_LB || 'redeem_box';
+const GRANT_LB = process.env.GRANT_LB || 'grant_box';
+const REDEEM_MAGIC = 0xCE, GRANT_MAGIC = 0xCF, GRANT_VER = 1;
+const GRANT_WORDS = 2;
+const REDEEM_CATALOG = {
+  0: { cp: 3000, gateLp: 2000 },
+  1: { cp: 1500 },
+  2: { cp: 1500 },
+  3: { cp: 1000 },
+  4: { cp: 800 },
+};
+function decodeRedeemWant(d) {
+  if (!d || ((d[0] | 0) & 0xff) !== REDEEM_MAGIC || d.length < 4) return null;
+  return [d[2] | 0, d[3] | 0];
+}
+function decodeGrantMask(d) {
+  if (!d || ((d[0] | 0) & 0xff) !== GRANT_MAGIC || d.length < 4) return null;
+  return [d[2] | 0, d[3] | 0];
+}
+function grantBit(words, bit) { return ((words[(bit / 32) | 0] | 0) >>> (bit & 31)) & 1; }
+function setGrantBit(words, bit) { words[(bit / 32) | 0] = (words[(bit / 32) | 0] | 0) | (1 << (bit & 31)); }
+function popcountWords(words) { let n = 0; for (let i = 0; i < words.length; i++) { let w = words[i] | 0; while (w) { n += w & 1; w >>>= 1; } } return n; }
+// Pure plan: pick grantable bits in ascending order while funds last. A cheaper later item may
+// still land when an earlier one is unaffordable (deterministic greedy; matches the client's
+// per-item optimistic debits). gateOkByBit carries pre-resolved ladder-gate verdicts.
+function redeemPlan(want, granted, balance, gateOkByBit) {
+  const bits = [];
+  let bal = balance | 0;
+  for (let bit = 0; bit < GRANT_WORDS * 32; bit++) {
+    if (!grantBit(want, bit) || grantBit(granted, bit)) continue;
+    const it = REDEEM_CATALOG[bit];
+    if (!it) continue;                                   // unknown bit (newer client) -> defer
+    if (it.gateLp && !(gateOkByBit && gateOkByBit[bit])) continue;
+    if (bal < (it.cp | 0)) continue;
+    bits.push(bit); bal -= it.cp | 0;
+  }
+  return { bits, balance: bal };
+}
 function isEndlessMt(mt) { return baseMt(mt) === ENDLESS.MT; }
 // depth tail decode; null = malformed (missing tail). Start attestations never carry a tail.
 function endlessTail(d) {
@@ -1517,13 +1567,115 @@ async function main() {
     if (startsRes.convicted || confRes.exitHits || confRes.refunded) { saveLeavers(leavers); }
     if (startsRes.convicted) { saveProcessed(processed); }
   };
+  // ladder-floor gate for gated catalog items: met on THIS season's ladder, else on any
+  // archived season ladder (found-only -- never creates archives; a soft-reset can park a
+  // qualifying player below the floor, the archive keeps his proof).
+  const ladderGateOk = async (sid, minLp) => {
+    try {
+      if (lpBoardId) {
+        const e = await readUserEntry(lpBoardId, sid, 'ladder gate');
+        if (e && (e.score | 0) >= minLp) return true;
+      }
+      for (let s = seasonId - 1; s >= 0; s--) {
+        const alb = ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).find(x => String(x.name || x.Name) === seasonBoardName(LP_LB, s));
+        if (!alb) continue;
+        const e = await readUserEntry(alb.id || alb.ID, sid, 'ladder gate s' + s);
+        if (e && (e.score | 0) >= minLp) return true;
+      }
+    } catch (e) { ghWarn('ladder gate read failed ' + plog(sid) + ': ' + (e && e.message)); }
+    return false;
+  };
+  // redeem channel: settle client want-bitmaps into wallet debits + entitlement bits. Runs on
+  // every exit path (wants arrive with or without settles, same rationale as reports/trust).
+  // cpVals = in-memory post-settle balances on the main path (fresh -- avoids the read-lag on
+  // just-written scores); null on the settle-free paths -> targeted reads per claimant.
+  const processRedeems = async (cpVals) => {
+    const list = (lr.json && lr.json.response && lr.json.response.leaderboards) || [];
+    // Freshly created boards lag the listing for a long time -> resolve by name via
+    // find-or-create (idempotent: same name always returns the same id) so this phase can
+    // never soft-skip (or STRICT-fail) on listing lag alone.
+    const resolveBoxBoard = async (name, trustedFlag) => {
+      const found = list.find(x => String(x.name || x.Name) === name);
+      if (found) return found.id || found.ID;
+      const res = await postForm('/ISteamLeaderboards/FindOrCreateLeaderboard/v2/', {
+        key: KEY, appid: APPID, name, sortmethod: 'Descending', displaytype: 'Numeric',
+        createifnotfound: 1, onlytrustedwrites: trustedFlag ? 1 : 0, onlyfriendsreads: 0, format: 'json',
+      });
+      const lb = (res.json && res.json.result && res.json.result.leaderboard) || (res.json && res.json.leaderboard) || null;
+      const id = lb && (lb.leaderBoardID || lb.leaderboardID || lb.id || lb.ID);
+      if (res.ok && id) { console.log('box board resolved via find-or-create: ' + name + ' id=' + id); return id; }
+      return null;
+    };
+    const rdId0 = await resolveBoxBoard(REDEEM_LB, false);
+    const gtId0 = await resolveBoxBoard(GRANT_LB, true);
+    if (!rdId0 || !gtId0) {
+      strictBoard('redeem/grant board absent');
+      console.log('redeem boards absent (pre-create ' + REDEEM_LB + ' client-writable + ' + GRANT_LB + ' trusted) -- skip');
+      return;
+    }
+    const rdLb = { id: rdId0 }, gtLb = { id: gtId0 };
+    const cpLbF = list.find(x => String(x.name || x.Name) === CP_LB);
+    const cpIdF = cpLbF ? (cpLbF.id || cpLbF.ID) : null;
+    if (!cpIdF) { strictBoard('wallet board absent (redeem path)'); console.log('wallet board absent -- redeem skip'); return; }
+    try {
+      // Always read (trust-board lesson: the listing's entry-count metadata lags -- a stale 0
+      // would starve fresh wants for the run).
+      const rb = await readBoardAll(rdLb.id || rdLb.ID, 'redeem box');
+      const wants = rb.ents
+        .map(e => ({ sid: String(e.steamID), want: decodeRedeemWant(decodeDetails(e.detailData)) }))
+        .filter(x => x.want && ((x.want[0] | 0) !== 0 || (x.want[1] | 0) !== 0));
+      if (!wants.length) return;
+      const gb = await readBoardAll(gtLb.id || gtLb.ID, 'grant box');
+      const grantedBy = {};
+      for (const e of gb.ents) {
+        const m = decodeGrantMask(decodeDetails(e.detailData));
+        if (m) grantedBy[String(e.steamID)] = m;
+      }
+      let nBits = 0, nPlayers = 0;
+      for (const w of wants) {
+        const granted = grantedBy[w.sid] || [0, 0];
+        let anyNew = false;
+        for (let bit = 0; bit < GRANT_WORDS * 32; bit++) {
+          if (grantBit(w.want, bit) && !grantBit(granted, bit) && REDEEM_CATALOG[bit]) { anyNew = true; break; }
+        }
+        if (!anyNew) continue;
+        let bal;
+        if (cpVals && cpVals[w.sid] != null) bal = cpVals[w.sid] | 0;
+        else { const e = await readUserEntry(cpIdF, w.sid, 'wallet'); bal = e ? (e.score | 0) : 0; }
+        const gateOkByBit = {};
+        for (const bitStr of Object.keys(REDEEM_CATALOG)) {
+          const bit = bitStr | 0, it = REDEEM_CATALOG[bit];
+          if (!it.gateLp || !grantBit(w.want, bit) || grantBit(granted, bit)) continue;
+          gateOkByBit[bit] = await ladderGateOk(w.sid, it.gateLp | 0);
+        }
+        const plan = redeemPlan(w.want, granted, bal, gateOkByBit);
+        if (!plan.bits.length) { console.log('  redeem ' + plog(w.sid) + ': wants pending, nothing grantable (funds/gate)'); continue; }
+        if (!APPLY_MMR) { console.log('  redeem ' + plog(w.sid) + ': dry-run, would grant bits [' + plan.bits.join(' ') + '] debit -' + (bal - plan.balance)); continue; }
+        const newMask = granted.slice();
+        while (newMask.length < GRANT_WORDS) newMask.push(0);
+        for (const b of plan.bits) setGrantBit(newMask, b);
+        const det = [(GRANT_MAGIC | (GRANT_VER << 8)) | 0, Math.floor(nowMs / 60000) | 0, newMask[0] | 0, newMask[1] | 0];
+        const gw = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: gtLb.id || gtLb.ID, steamid: w.sid, score: popcountWords(newMask), scoremethod: 'ForceUpdate', format: 'json' }, det);
+        const gOk = gw.ok && !(gw.json && gw.json.result && gw.json.result.result && gw.json.result.result !== 1);
+        if (!gOk) { ghWarn('grant write failed ' + plog(w.sid) + ': HTTP ' + gw.status + ' (deferred, no debit)'); continue; }
+        grantedBy[w.sid] = newMask;
+        nBits += plan.bits.length; nPlayers++;
+        const dw = await postForm('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: cpIdF, steamid: w.sid, score: plan.balance, scoremethod: 'ForceUpdate', format: 'json' });
+        const dOk = dw.ok && !(dw.json && dw.json.result && dw.json.result.result && dw.json.result.result !== 1);
+        if (!dOk) ghWarn('wallet debit failed ' + plog(w.sid) + ': HTTP ' + dw.status + ' (bits granted -- one-shot undercharge, cannot loop)');
+        else if (cpVals) cpVals[w.sid] = plan.balance;
+        console.log('  redeem ' + plog(w.sid) + ': granted bits [' + plan.bits.join(' ') + '] debit -' + (bal - plan.balance) + ' -> ' + plan.balance + (dOk ? '' : ' (debit failed)'));
+      }
+      if (nPlayers) { RUN.redeems = nPlayers + 'p/' + nBits + 'b'; console.log('redeems: ' + nBits + ' bits across ' + nPlayers + ' players'); }
+    } catch (e) { ghWarn('redeem channel failed: ' + (e && e.message)); }
+  };
 
   RUN.consistent = consistentMatches.length;
-  if (consistentMatches.length === 0) { console.log('no consistent matches'); persistStartsSide(); await maintainTrust(); writeRunSummary(); return; }
+  if (consistentMatches.length === 0) { console.log('no consistent matches'); persistStartsSide(); await maintainTrust(); await processRedeems(null); writeRunSummary(); return; }
   const fresh = consistentMatches.filter(c => !processed.has(c.m));
   RUN.fresh = fresh.length;
   console.log(consistentMatches.length + ' consistent, ' + fresh.length + ' fresh (settled ' + (consistentMatches.length - fresh.length) + ')');
-  if (fresh.length === 0) { console.log('no fresh matches, skip'); persistStartsSide(); await maintainTrust(); writeRunSummary(); return; }
+  if (fresh.length === 0) { console.log('no fresh matches, skip'); persistStartsSide(); await maintainTrust(); await processRedeems(null); writeRunSummary(); return; }
 
   const rankedLb = ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).find(x => String(x.name || x.Name) === RANKED_LB);
   if (!rankedLb) { ghErr('rating board not found (must be pre-created)'); process.exit(1); }
@@ -1953,6 +2105,9 @@ async function main() {
   if (sigDirty) saveSignals(signals, nowMs);
   if (xpId) saveXp(xpState);
   await maintainTrust();
+  // redeem channel last: wallet debits base on the in-memory post-settle balances just written
+  // above (passing the map avoids re-reading scores that global reads may still serve stale).
+  await processRedeems(cp);
   console.log('written: rating ' + rOk + '/' + wRating.length + ', points ' + pOk + '/' + wPoints.length + ', xp ' + xOk + '/' + wXp.length + ', cp ' + cOk + '/' + wCp.length + ', endless ' + eOk + '/' + wEndless.length + (wEndlessSeason.length ? (' (+season ' + esOk + '/' + wEndlessSeason.length + ')') : '') + ', state updated (idempotent)');
   RUN.writes = rOk + '/' + wRating.length + ' ' + pOk + '/' + wPoints.length + ' ' + xOk + '/' + wXp.length;
   RUN.writesEndless = cOk + '/' + wCp.length + ' ' + eOk + '/' + wEndless.length + (wEndlessSeason.length ? ('+' + esOk + '/' + wEndlessSeason.length) : '');
@@ -1962,4 +2117,4 @@ async function main() {
 if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
-module.exports = { isVoidDisp, voidByConsensus, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, CONFESS_MAGIC, reconcileConfessions, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard };
+module.exports = { isVoidDisp, voidByConsensus, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, CONFESS_MAGIC, reconcileConfessions, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan };

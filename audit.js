@@ -17,7 +17,7 @@
 // Output discipline (public logs): generic board labels + 8-hex pseudonyms + counts.
 // Never board names from env, never raw steamIDs, never key material.
 const fs = require('fs');
-const { readBoardAll, pid, decodeDetails, getJson, BASE, TRUST_LB, REPORT_LB, START_MAGIC, REPORT_MAGIC, CP_LB, ENDLESS_LB } = require('./validate.js');
+const { readBoardAll, pid, decodeDetails, getJson, BASE, TRUST_LB, REPORT_LB, START_MAGIC, REPORT_MAGIC, CP_LB, ENDLESS_LB, REDEEM_LB, GRANT_LB } = require('./validate.js');
 
 const KEY = process.env.STEAM_PUBLISHER_KEY;
 const APPID = Number(process.env.APPID);
@@ -78,7 +78,7 @@ async function main() {
   // multi-device last-writer). Until then the mirror board is deliberately NOT in the inventory
   // or trusted-closure lists below: it is client-writable by design, so foreign-writer logic
   // does not apply and its absence should not fail the audit.
-  const want = [[RANKED_LB, 'rating'], [LP_LB, 'points'], [TRUST_LB, 'trust'], [REPORT_LB, 'report'], [CP_LB, 'cp'], [ENDLESS_LB, 'endless']];
+  const want = [[RANKED_LB, 'rating'], [LP_LB, 'points'], [TRUST_LB, 'trust'], [REPORT_LB, 'report'], [CP_LB, 'cp'], [ENDLESS_LB, 'endless'], [REDEEM_LB, 'redeem'], [GRANT_LB, 'grant']];
   if (XP_LB) want.push([XP_LB, 'xp']);
   for (const [name, label] of want) if (!byName[name]) violations.push(label + ' board missing from listing');
   const shardBoards = all.filter(b => { const n = String(b.name || b.Name); return n.indexOf(PREFIX) === 0 && n.indexOf('test') < 0; });
@@ -96,7 +96,10 @@ async function main() {
   // cp/endless entries hash into the closure via signals.players: the settle path records an
   // endless participation signal for every roster member (including debited non-writers), and
   // every CP-credited player is a settled matchmade participant.
-  const trustedWant = [[RANKED_LB, 'rating'], [LP_LB, 'points'], [TRUST_LB, 'trust'], [CP_LB, 'cp'], [ENDLESS_LB, 'endless']];
+  // grant entries hash into the closure the same way cp does: a granted player necessarily had
+  // wallet balance, i.e. settled matchmade participation. The redeem box itself is client-
+  // writable by design (like report/mirror) and is inventory-only above.
+  const trustedWant = [[RANKED_LB, 'rating'], [LP_LB, 'points'], [TRUST_LB, 'trust'], [CP_LB, 'cp'], [ENDLESS_LB, 'endless'], [GRANT_LB, 'grant']];
   if (XP_LB) trustedWant.push([XP_LB, 'xp']);
   // seasonal ladders (`<base>_s<N>`, cron-created trusted boards): audit them like their base
   // boards -- the foreign-writer closure applies identically. Discovered from the listing so a
