@@ -728,6 +728,57 @@ function lpSeg(lp) { let s = LP_SEG[0]; for (const x of LP_SEG) if (lp >= x.min)
 //   The client mirrors this formula optimistically on its first ranked game (read-back corrects).
 const LP_SEED = { BASE: 1000, SLOPE: 4, CAP: 3200 };
 function seedLp(display) { return Math.max(0, Math.min(LP_SEED.CAP, Math.round(((display | 0) - LP_SEED.BASE) * LP_SEED.SLOPE))); }
+// ===== seasonal points ladder (2026-08-01). =====
+// The season clock is a lookup TABLE, not a formula -- changing seasons means appending a row
+// here (and shipping the mirrored client table; the pair is lockstep-pinned by the companion
+// repo's schema test). id 0 = preseason (dev period + post-launch warmup): points settle into
+// the BASE board. From season 1 on each season settles into its own auto-created board
+// `<base>_s<id>`; the previous season's board becomes a free archive. Only visible points and
+// the seasonal endless board reset between seasons -- rating (mu/sigma), xp, career counters,
+// exit-rate state and the wallet all carry over. The lifetime endless board never resets.
+const SEASONS = [
+  { id: 1, start: Date.UTC(2026, 11, 1) },   // season 1 opens (preseason before this)
+  { id: 2, start: Date.UTC(2027, 2, 1) },    // quarterly boundaries from here on
+];
+// SEASON_NOW: ISO override of "now" for the season clock (synthetic e2e only; production unset).
+const SEASON_NOW_MS = process.env.SEASON_NOW ? Date.parse(process.env.SEASON_NOW) : null;
+function seasonNowMs() { return (SEASON_NOW_MS != null && isFinite(SEASON_NOW_MS)) ? SEASON_NOW_MS : Date.now(); }
+function seasonAt(nowMs) { let id = 0; for (const s of SEASONS) if (nowMs >= s.start) id = s.id; return id; }
+function seasonBoardName(base, id) { return (id | 0) >= 1 ? base + '_s' + (id | 0) : String(base); }
+// Soft-reset landing per tier index (design-locked): null = keep in place (bottom tiers),
+// else land at the target (min() guards against a mis-edited table ever RAISING points).
+const SOFT_RESET = [null, null, 1200, 2000, 3000, 4000, 5000];
+function softResetLp(lp) {
+  let i = 0; for (let k = 0; k < LP_SEG.length; k++) if ((lp | 0) >= LP_SEG[k].min) i = k;
+  const t = SOFT_RESET[i];
+  return t == null ? (lp | 0) : Math.min(lp | 0, t | 0);
+}
+// Lazy season seeding priority: an entry on the IMMEDIATELY previous season's board wins
+// (soft reset of last season's finish); absent there = sat the season out (or brand new) ->
+// fall back to the display-derived placement seed. Applied at a player's first settle of the
+// new season -- no boundary-time bulk migration ever runs.
+function seasonSeedLp(prevScore, display) {
+  return prevScore != null ? softResetLp(prevScore | 0) : seedLp(display);
+}
+// Resolve the season board for `base` from the run's board listing. From season 1 on a missing
+// board is auto-created (trusted writes, global reads -- the exact shape the ops tool provisions;
+// FindOrCreate is idempotent so a listing-generation lag just re-finds it).
+async function resolveSeasonBoard(lr, base, id) {
+  const name = seasonBoardName(base, id);
+  const found = ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).find(x => String(x.name || x.Name) === name);
+  if (found) return { name, id: found.id || found.ID };
+  if ((id | 0) >= 1) {
+    const res = await postForm('/ISteamLeaderboards/FindOrCreateLeaderboard/v2/', {
+      key: KEY, appid: APPID, name, sortmethod: 'Descending', displaytype: 'Numeric',
+      createifnotfound: 1, onlytrustedwrites: 1, onlyfriendsreads: 0, format: 'json',
+    });
+    const lb = (res.json && res.json.result && res.json.result.leaderboard) || (res.json && res.json.leaderboard) || null;
+    const newId = lb && (lb.leaderBoardID || lb.leaderboardID || lb.id || lb.ID);
+    if (res.ok && newId) { console.log('season board created: ' + name + ' id=' + newId); return { name, id: newId }; }
+    ghWarn('season board create failed: ' + name + ' HTTP ' + res.status + ' ' + String(res.text).slice(0, 120));
+  }
+  return { name, id: null };
+}
 function lpDelta(lp, rank, pc) {
   const seg = lpSeg(lp);
   const p = pc <= 1 ? 0.5 : (pc - 1 - (rank - 1)) / (pc - 1);
@@ -1229,6 +1280,16 @@ async function main() {
   const lr = await getJson(BASE + '/ISteamLeaderboards/GetLeaderboardsForGame/v2/?key=' + KEY + '&appid=' + APPID + '&format=json');
   if (lr.status === 403) { ghErr('403 (key has no access)'); process.exit(1); }
   if (!lr.ok) { ghErr('GetLeaderboardsForGame HTTP ' + lr.status); process.exit(1); }
+  // seasonal points target (see SEASONS): resolved once per run; the previous season's board
+  // (if any) is the lazy soft-reset source and is never created, only found.
+  const seasonId = seasonAt(seasonNowMs());
+  const lpCur = await resolveSeasonBoard(lr, LP_LB, seasonId);
+  const lpBoardId = lpCur.id;
+  const prevLpLb = seasonId >= 1
+    ? ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).find(x => String(x.name || x.Name) === seasonBoardName(LP_LB, seasonId - 1))
+    : null;
+  const prevLpId = prevLpLb ? (prevLpLb.id || prevLpLb.ID) : null;
+  if (seasonId > 0) console.log('season ' + seasonId + ': points -> ' + lpCur.name + (prevLpId ? (' (soft-reset source ' + seasonBoardName(LP_LB, seasonId - 1) + ')') : ' (no previous-season board)'));
   const ALLOW_TEST = process.env.ALLOW_TEST === '1';
   const shards = ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).filter(x => { const n = String(x.name || x.Name); return n.indexOf(PREFIX) === 0 && (ALLOW_TEST || n.indexOf('test') < 0); });
   console.log('shards: ' + shards.length);
@@ -1359,8 +1420,7 @@ async function main() {
   // Runs before the early returns (the everyone-left scenario produces no settle groups at all).
   let confRes = { seen: 0, penalized: 0, exitHits: 0, refunded: 0, finalized: 0 };
   if (confessions.length || Object.keys(confState).length) {
-    const lpLb0 = ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).find(x => String(x.name || x.Name) === LP_LB);
-    const lpId0 = lpLb0 ? (lpLb0.id || lpLb0.ID) : null;
+    const lpId0 = lpBoardId;   // season-resolved (see top of main)
     if (!lpId0) strictBoard('points board absent (confession path)');
     const skill0 = loadSkill();   // read-only here (first-ranked leaver seeding base)
     confRes = await reconcileConfessions(confessions, groups, processed, confState, leavers, nowMs, {
@@ -1368,7 +1428,17 @@ async function main() {
       appliesLpFn: appliesLp,
       consistentKeys,   // absolution probe only trusts consistent settle groups (a lone/divergent 0xB1 cancels nothing)
       seedFor: (sid) => { const sk = skill0[pid(sid)] || ts.DEFAULTS; return seedLp(ts.displayRating(sk.mu, sk.sigma)); },
-      readLp: lpId0 ? (async (sid) => { const e = await readUserEntry(lpId0, sid, 'points'); return e ? { score: e.score | 0, details: decodeDetails(e.detailData) } : null; }) : null,
+      readLp: lpId0 ? (async (sid) => {
+        const e = await readUserEntry(lpId0, sid, 'points');
+        if (e) return { score: e.score | 0, details: decodeDetails(e.detailData) };
+        // lazy season-seed parity with the settle path: absent from the current season board ->
+        // a previous-season entry soft-resets into the penalty base; none -> null (seedFor applies).
+        if (prevLpId) {
+          const pe = await readUserEntry(prevLpId, sid, 'prev points');
+          if (pe) return { score: softResetLp(pe.score | 0), details: null };
+        }
+        return null;
+      }) : null,
       writeLp: async (sid, score, details) => {
         if (!APPLY_MMR) { console.log('  (dry-run) confession pts ' + plog(sid) + ' = ' + score); return true; }
         // preserve an unread mismatch reveal exactly like the settle-path points write does
@@ -1460,8 +1530,7 @@ async function main() {
   const rankedId = rankedLb.id || rankedLb.ID;
   const skill = loadSkill();
   const groupMem = loadGroups(); let groupsDirty = false;   // repeat-group decay memory (see GROUP_DECAY)
-  const lpLb = ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).find(x => String(x.name || x.Name) === LP_LB);
-  const lpId = lpLb ? (lpLb.id || lpLb.ID) : null;
+  const lpId = lpBoardId;   // season-resolved once at the top of main (auto-created from season 1 on)
   if (!lpId) { strictBoard('points board not found'); ghWarn('points board not found (pre-create with onlytrustedwrites) -> skip points this run'); }
   const lp = {}, lpDet = {};   // lpDet = existing detail bytes per player, so an unread reveal survives a later normal-match LP update
   let lpComplete = true;
@@ -1505,6 +1574,18 @@ async function main() {
     enComplete = br.complete;
     for (const e of br.ents) endlessBest[e.steamID] = e.score | 0;
   }
+  // seasonal endless board (season >= 1): per-season depth ladder, double-written next to the
+  // lifetime board. The LIFETIME board stays the chain memory and pacing anchor and never resets.
+  const enSeason = seasonId >= 1 ? await resolveSeasonBoard(lr, ENDLESS_LB, seasonId) : { name: null, id: null };
+  const enSeasonId = enSeason.id;
+  if (seasonId >= 1 && enId && !enSeasonId) { strictBoard('seasonal endless board not found'); ghWarn('seasonal endless board unresolved -> endless groups left pending'); }
+  const endlessSeasonBest = {};
+  let enSeasonComplete = true;
+  if (enSeasonId) {
+    const br = await readBoardAll(enSeasonId, 'seasonal endless board');
+    enSeasonComplete = br.complete;
+    for (const e of br.ents) endlessSeasonBest[e.steamID] = e.score | 0;
+  }
 
   fresh.sort((a, b) => (a.m < b.m ? -1 : a.m > b.m ? 1 : 0));
   // On-demand base values: when a bulk read hit PAGE_CAP the maps are incomplete -- a settling
@@ -1512,7 +1593,7 @@ async function main() {
   // would silently reset his LP/XP. Fetch exactly the players this run settles (record holders +
   // roster members: leaver LP penalty targets roster sids that wrote no record). A missing entry
   // after the targeted read is a genuine new player (base 0 correct).
-  if ((lpId && !lpComplete) || (xpId && !xpComplete) || (cpId && !cpComplete) || (enId && !enComplete)) {
+  if ((lpId && !lpComplete) || (xpId && !xpComplete) || (cpId && !cpComplete) || (enId && !enComplete) || (enSeasonId && !enSeasonComplete)) {
     const need = new Set();
     for (const c of fresh) for (const r of c.g) {
       need.add(String(r.steamID));
@@ -1535,13 +1616,17 @@ async function main() {
         const e = await readUserEntry(enId, sid, 'endless');
         if (e) endlessBest[sid] = e.score | 0;
       }
+      if (enSeasonId && !enSeasonComplete && endlessSeasonBest[sid] == null) {
+        const e = await readUserEntry(enSeasonId, sid, 'seasonal endless');
+        if (e) endlessSeasonBest[sid] = e.score | 0;
+      }
     });
     const failed = fetched.filter(x => x.status === 'rejected');
     if (failed.length) { ghErr('on-demand base reads failed (' + failed.length + '/' + need.size + ') -- abort run, do NOT settle from base 0'); process.exit(1); }
     console.log('on-demand base reads: ' + need.size + ' players (bulk window incomplete)');
   }
   const today = Math.floor(Date.now() / 86400000);   // UTC day index (matches client lastWinDay) for the daily-first bonus
-  const changed = {}; const changedLp = {}; const changedXp = {}; const changedCp = {}; const changedEndless = {}; const reveal = {}; const careerDet = {}; let settled = 0, voided = 0, settledEndless = 0;
+  const changed = {}; const changedLp = {}; const changedXp = {}; const changedCp = {}; const changedEndless = {}; const changedEndlessSeason = {}; const reveal = {}; const careerDet = {}; let settled = 0, voided = 0, settledEndless = 0;
   for (const c of fresh) {
     const g = c.g;
     const matchType = g[0].d[2] | 0;   // 2=ranked; visible LP only moves for ranked (quick = MMR only)
@@ -1565,7 +1650,7 @@ async function main() {
       // boards are the debit target AND the chain memory -- without both, settling would mark
       // the group processed while silently dropping the debit (read-back would resurrect spent
       // CP). Leave the group fresh; it settles whole once the boards resolve.
-      if (!cpId || !enId) { console.log('  endless ' + c.m + ': cp/endless board unresolved -- left pending'); continue; }
+      if (!cpId || !enId || (seasonId >= 1 && !enSeasonId)) { console.log('  endless ' + c.m + ': cp/endless/seasonal board unresolved -- left pending'); continue; }
       const t = endlessTail(g[0].d);   // presence + domains guaranteed by the sanity gate above
       const roster0 = rosterConsensus(g);
       const rosterSids = Object.values(roster0).map(String);
@@ -1611,6 +1696,12 @@ async function main() {
           if (endlessBest[sid] == null || packed > endlessBest[sid]) {
             endlessBest[sid] = packed; changedEndless[sid] = { s: packed, ts: teamScore };
             console.log('  endless best ' + c.m + ': ' + plog(sid) + ' depth ' + t.endDepth + ' team ' + teamScore + ' -> board ' + packed);
+          }
+          // seasonal double-write: same improved-best rule against the season board's own base
+          // (fresh each season = the per-season "dig it again" ladder).
+          if (enSeasonId && (endlessSeasonBest[sid] == null || packed > endlessSeasonBest[sid])) {
+            endlessSeasonBest[sid] = packed; changedEndlessSeason[sid] = { s: packed, ts: teamScore };
+            console.log('  endless season best ' + c.m + ': ' + plog(sid) + ' depth ' + t.endDepth + ' -> board ' + packed);
           }
         }
       }
@@ -1683,17 +1774,27 @@ async function main() {
     //   crossline skip aligned settle for settle), so both ends skip the same settle.
     const seededNow = new Set();
     if (lpId && appliesLp(matchType)) {
-      for (const t of tsIn) {
-        if (lp[t.id] == null) {
-          lp[t.id] = seedLp(ts.displayRating(t.mu, t.sigma)); changedLp[t.id] = lp[t.id]; seededNow.add(t.id);
-          console.log('  seed ' + c.m + ': ' + plog(t.id) + ' first ranked settle, display ' + ts.displayRating(t.mu, t.sigma) + ' -> pts ' + lp[t.id]);
+      // lazy season seed (first settle this season): previous-season entry soft-resets in, else
+      // display-derived placement seed (seasonSeedLp priority). A prev-board read FAILURE aborts
+      // the run -- seeding blind would silently discard last season's finish (same "never settle
+      // from base 0" discipline as the on-demand reads). Absent entry = null = legit fallback.
+      const seedOne = async (sid, mu, sigma, tag) => {
+        let prevE = null;
+        if (prevLpId) {
+          try { prevE = await readUserEntry(prevLpId, sid, 'prev points'); }
+          catch (err) { ghErr('prev-season base read failed for ' + plog(sid) + ' -- abort run, do NOT seed blind: ' + (err && err.message)); process.exit(1); }
         }
-      }
+        const disp = ts.displayRating(mu, sigma);
+        lp[sid] = seasonSeedLp(prevE ? (prevE.score | 0) : null, disp);
+        changedLp[sid] = lp[sid]; seededNow.add(sid);
+        console.log('  seed ' + c.m + ': ' + plog(sid) + ' ' + tag +
+          (prevE ? (', soft-reset from ' + (prevE.score | 0)) : (', display ' + disp)) + ' -> pts ' + lp[sid]);
+      };
+      for (const t of tsIn) if (lp[t.id] == null) await seedOne(t.id, t.mu, t.sigma, 'first settle this season');
       for (const x of leavers0) {
         if (lp[x.steamID] == null) {
           const sk = skill[pid(x.steamID)] || ts.DEFAULTS;
-          lp[x.steamID] = seedLp(ts.displayRating(sk.mu, sk.sigma)); changedLp[x.steamID] = lp[x.steamID]; seededNow.add(x.steamID);
-          console.log('  seed ' + c.m + ': ' + plog(x.steamID) + ' (leaver, first ranked) display ' + ts.displayRating(sk.mu, sk.sigma) + ' -> pts ' + lp[x.steamID]);
+          await seedOne(x.steamID, sk.mu, sk.sigma, 'leaver, first settle this season');
         }
       }
     }
@@ -1829,11 +1930,20 @@ async function main() {
     else console.log('  ok endless ' + plog(sid) + ' = ' + w.s);
     return okFlag;
   });
+  const wEndlessSeason = await mapPool(Object.keys(changedEndlessSeason), CONCURRENCY, async (sid) => {
+    const w = changedEndlessSeason[sid];
+    const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: enSeasonId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, [w.ts | 0]);
+    const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
+    if (!okFlag) ghWarn('write seasonal endless ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
+    else console.log('  ok endless season ' + plog(sid) + ' = ' + w.s);
+    return okFlag;
+  });
   const rOk = wRating.filter(x => x.status === 'fulfilled' && x.value).length;
   const pOk = wPoints.filter(x => x.status === 'fulfilled' && x.value).length;
   const xOk = wXp.filter(x => x.status === 'fulfilled' && x.value).length;
   const cOk = wCp.filter(x => x.status === 'fulfilled' && x.value).length;
   const eOk = wEndless.filter(x => x.status === 'fulfilled' && x.value).length;
+  const esOk = wEndlessSeason.filter(x => x.status === 'fulfilled' && x.value).length;
   saveProcessed(processed);
   saveSkill(skill);
   if (groupsDirty) saveGroups(groupMem, nowMs);
@@ -1843,13 +1953,13 @@ async function main() {
   if (sigDirty) saveSignals(signals, nowMs);
   if (xpId) saveXp(xpState);
   await maintainTrust();
-  console.log('written: rating ' + rOk + '/' + wRating.length + ', points ' + pOk + '/' + wPoints.length + ', xp ' + xOk + '/' + wXp.length + ', cp ' + cOk + '/' + wCp.length + ', endless ' + eOk + '/' + wEndless.length + ', state updated (idempotent)');
+  console.log('written: rating ' + rOk + '/' + wRating.length + ', points ' + pOk + '/' + wPoints.length + ', xp ' + xOk + '/' + wXp.length + ', cp ' + cOk + '/' + wCp.length + ', endless ' + eOk + '/' + wEndless.length + (wEndlessSeason.length ? (' (+season ' + esOk + '/' + wEndlessSeason.length + ')') : '') + ', state updated (idempotent)');
   RUN.writes = rOk + '/' + wRating.length + ' ' + pOk + '/' + wPoints.length + ' ' + xOk + '/' + wXp.length;
-  RUN.writesEndless = cOk + '/' + wCp.length + ' ' + eOk + '/' + wEndless.length;
+  RUN.writesEndless = cOk + '/' + wCp.length + ' ' + eOk + '/' + wEndless.length + (wEndlessSeason.length ? ('+' + esOk + '/' + wEndlessSeason.length) : '');
   writeRunSummary();
 }
 
 if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
-module.exports = { isVoidDisp, voidByConsensus, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, CONFESS_MAGIC, reconcileConfessions, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, groupDecayPlan, GROUP_DECAY };
+module.exports = { isVoidDisp, voidByConsensus, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, CONFESS_MAGIC, reconcileConfessions, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard };

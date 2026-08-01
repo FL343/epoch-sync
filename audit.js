@@ -98,6 +98,15 @@ async function main() {
   // every CP-credited player is a settled matchmade participant.
   const trustedWant = [[RANKED_LB, 'rating'], [LP_LB, 'points'], [TRUST_LB, 'trust'], [CP_LB, 'cp'], [ENDLESS_LB, 'endless']];
   if (XP_LB) trustedWant.push([XP_LB, 'xp']);
+  // seasonal ladders (`<base>_s<N>`, cron-created trusted boards): audit them like their base
+  // boards -- the foreign-writer closure applies identically. Discovered from the listing so a
+  // new season needs no audit change; test boards are excluded as everywhere else.
+  for (const b of all) {
+    const n = String(b.name || b.Name);
+    if (n.indexOf('test') >= 0) continue;
+    if (n.indexOf(LP_LB + '_s') === 0) trustedWant.push([n, 'points_' + n.slice(LP_LB.length + 1)]);
+    else if (n.indexOf(ENDLESS_LB + '_s') === 0) trustedWant.push([n, 'endless_' + n.slice(ENDLESS_LB.length + 1)]);
+  }
   for (const [name, label] of trustedWant) {
     if (!byName[name]) continue;
     const br = await readBoardAll(byName[name].id, label + ' board');
