@@ -26,7 +26,7 @@ const grp = (...rs) => rs;
 console.log('=== sanityFlags (B5 tier A) ===');
 
 eq('defaults pinned (cap/floor/dur/start-age)', [SANITY.SCORE_CAP, SANITY.SCORE_FLOOR, SANITY.DUR_CAP, SANITY.MIN_START_AGE_MS], [100000, -50000, 7200, 300000]);
-eq('mt whitelist pinned', SANITY.MT_ALLOWED, [1, 2, 3, 4, 7]);   // 7 = endless co-op (own settle branch, not the matchmade pipeline)
+eq('mt whitelist pinned', SANITY.MT_ALLOWED, [1, 2, 3, 4, 5, 6, 7]);   // 5/6 = mode 2 (sub-score outcome, see team2-settle.js); 7 = endless co-op (own settle branch)
 
 eq('clean 3P quick -> []', sanityFlags(grp(mk(A, 0), mk(B, 1))), []);
 eq('clean ranked premade mask (mt=34, pc=4) -> []', sanityFlags(grp(mk(A, 0, { mt: 34, pc: 4 }), mk(B, 1, { mt: 34, pc: 4 }))), []);
@@ -34,7 +34,7 @@ eq('clean team (mt=4, pc=4) -> []', sanityFlags(grp(mk(A, 0, { mt: 4, pc: 4 }), 
 eq('shop overdraft score -100 legal', sanityFlags(grp(mk(A, 0, { scores: [-100, 50, 60] }), mk(B, 1, { scores: [-100, 50, 60] }))), []);
 
 has('mt=0 (private, never client-reported)', sanityFlags(grp(mk(A, 0, { mt: 0 }), mk(B, 1, { mt: 0 }))), 'mt');
-has('mt=5 (mode2 not open yet)', sanityFlags(grp(mk(A, 0, { mt: 5 }), mk(B, 1, { mt: 5 }))), 'mt');
+has('mt=8 (unassigned code)', sanityFlags(grp(mk(A, 0, { mt: 8 }), mk(B, 1, { mt: 8 }))), 'mt');
 has('team code carrying mask (3|1<<4)', sanityFlags(grp(mk(A, 0, { mt: 19, pc: 4 }), mk(B, 1, { mt: 19, pc: 4 }))), 'team-mask');
 has('team pc!=4', sanityFlags(grp(mk(A, 0, { mt: 3, pc: 3 }), mk(B, 1, { mt: 3, pc: 3 }))), 'pc');
 has('ffa pc=1', sanityFlags(grp(mk(A, 0, { pc: 1, scores: [10] }), mk(B, 0, { pc: 1, scores: [10] }))), 'pc');

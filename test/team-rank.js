@@ -17,11 +17,11 @@ const eq = (label, got, exp) => { const a = JSON.stringify(got), b = JSON.string
 console.log('=== match-type classification ===');
 eq('isTeamMt: 1/2 (FFA) false', [isTeamMt(1), isTeamMt(2)], [false, false]);
 eq('isTeamMt: 3/4 (team mode 1) true', [isTeamMt(3), isTeamMt(4)], [true, true]);
-eq('isTeamMt: 5/6 (mode 2, reserved) false until it ships', [isTeamMt(5), isTeamMt(6)], [false, false]);
+eq('isTeamMt: 5/6 (mode 2) true since the mode-2 gate opened', [isTeamMt(5), isTeamMt(6)], [true, true]);
 eq('appliesLp: 3 (quick team) false -- quick never moves LP', appliesLp(3), false);
 eq('appliesLp: 4 (ranked team) TRUE -- flipped in the same change as the halved team-LP path (teamLpPlan)', appliesLp(4), true);
 eq('appliesLp: 2 (ranked FFA) still true', appliesLp(2), true);
-eq('appliesLp: 5/6 (mode 2, reserved) false until mode 2 ships its own LP rules', [appliesLp(5), appliesLp(6)], [false, false]);
+eq('appliesLp: 5 false (quick mode-2, no LP) / 6 TRUE -- flipped with the sub-score teamLpPlan route (see team2-settle.js)', [appliesLp(5), appliesLp(6)], [false, true]);
 // premade-mask codes (base mode in the low nibble, premade seat-pair mask in bits 4..7):
 // the mask must not change any classification -- only the FFA settle pass consumes it
 eq('appliesLp: masked ranked FFA (0x12/0x22/0x32) still true', [appliesLp(0x12), appliesLp(0x22), appliesLp(0x32)], [true, true, true]);

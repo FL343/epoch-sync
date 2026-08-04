@@ -187,11 +187,18 @@ const SANITY = {
   // match is 8+ min, so legit settles arrive already-aged (worst case one extra run of delay);
   // a fabricated start+settle batch has to sit out the minimum in pending first.
   MIN_START_AGE_MS: Number(process.env.SANITY_MIN_START_AGE_MS || 300000),
-  MT_ALLOWED: [1, 2, 3, 4, 7],                                   // quick/ranked x brawl/team1 + endless co-op; mode2 (5/6) joins when the client gate opens
+  MT_ALLOWED: [1, 2, 3, 4, 5, 6, 7],                             // quick/ranked x brawl/team1/mode2 + endless co-op (5/6 joined with the mode-2 client gate)
 };
+// Mode-2 (base 5/6) score headroom: the mid-run gamble round can at most triple a player's bank
+// (max table multiplier x3, bet bounded by own coins), so the generous global cap gets the same
+// x3 headroom -- without it a legit vacuum-everything run through the gamble could brush the cap.
+// The client repo pins its gamble table's max multiplier against this factor in its lockstep test.
+const TEAM2 = { SCORE_MULT: Number(process.env.TEAM2_SCORE_MULT || 3) };
 // NOTE (extensibility): SCORE_CAP/DUR_CAP/MIN_START_AGE_MS were derived from the MATCHMADE game
 // as it is today -- 5 levels per matchmade run, 2-4 players, current item-value scale. A level-
-// count change or economy rework must re-derive them. The client repo pins these assumptions in
+// count change or economy rework must re-derive them. Mode-2 (5/6) keeps the same duration cap
+// (5 rounds + gamble + at most one sudden-death level is the same order of play time) but takes a
+// x3 score headroom for the gamble round (TEAM2 above). The client repo pins these assumptions in
 // its lockstep test so such a change fails loudly there. Type 7 (endless) deliberately does NOT
 // use these caps: its score cap scales with the claimed depth and its time bound is the
 // depth-scaled pacing gate (see the ENDLESS block), because both grow without bound by design.
@@ -203,9 +210,17 @@ function sanityFlags(g) {
   const d0 = g[0].d, mt = d0[2] | 0, base = baseMt(mt), mask = premadeMaskOf(mt), pc = d0[8] | 0;
   if (SANITY.MT_ALLOWED.indexOf(base) < 0) out.push('mt');
   let scoreCap = SANITY.SCORE_CAP;
-  if (base === 3 || base === 4) {
+  if (base === 3 || base === 4 || base === 5 || base === 6) {
     if (mask !== 0) out.push('team-mask');            // team codes never carry a premade mask
-    if (pc !== 4) out.push('pc');                     // team brawl is strictly 2v2 seats
+    if (pc !== 4) out.push('pc');                     // team modes are strictly 2v2 seats
+    if (base === 5 || base === 6) {
+      scoreCap = SANITY.SCORE_CAP * TEAM2.SCORE_MULT; // gamble-round variance headroom (see TEAM2)
+      // sub-score outcome must be derivable: every present writer's rank claim implies the same
+      // winner (rank is host-broadcast lockstep fact, exactly like the score vector) -- a conflict
+      // is forgery evidence and money must NOT decide as a fallback, so the group is flagged
+      // (not settled, not processed) like any other impossible-but-consistent record.
+      if (team2WinTeamOf(g) == null) out.push('rank-conflict');
+    }
   } else if (base === ENDLESS.MT) {
     // endless co-op: exactly 2 seats, never a premade mask, and a well-formed depth tail.
     if (mask !== 0) out.push('mask');
@@ -822,12 +837,19 @@ function crosslineDelta(lp, delta, won) {
 function baseMt(mt) { return (mt | 0) & 0xF; }
 function premadeMaskOf(mt) { return ((mt | 0) >> 4) & 0xF; }
 // visible points move for ranked matches only; quick classes update the hidden rating.
-// base 4 (ranked team-brawl) flips on HERE, in the same change that ships the halved team-LP path
+// base 6 (ranked mode 2) flips on HERE, in the same change that routes mode-2 groups through the
+// halved team-LP path with a sub-score-derived outcome (teamLpPlan winTeamOverride below) -- the
+// same red line as base 4: a team code must never reach the individual full-stakes LP path.
+// base 4 (ranked team-brawl) flipped HERE earlier, in the same change that shipped the halved team-LP path
 // (teamLpPlan below) -- the plan's red line: a type-4 record must never reach the individual
 // full-stakes LP path. Base 6 (ranked mode 2) stays false until mode 2 ships its own LP rules (M5).
-function appliesLp(mt) { const b = baseMt(mt); return b === 2 || b === 4; }
-// team match types: 3/4 = quick/ranked team-brawl (mode 1); 5/6 reserved for mode 2.
-function isTeamMt(mt) { const b = baseMt(mt); return b === 3 || b === 4; }
+function appliesLp(mt) { const b = baseMt(mt); return b === 2 || b === 4 || b === 6; }
+// team match types: 3/4 = quick/ranked team-brawl (mode 1); 5/6 = quick/ranked mode 2 (true 2v2).
+function isTeamMt(mt) { const b = baseMt(mt); return b === 3 || b === 4 || b === 5 || b === 6; }
+// mode-2 subset: the outcome is a SUB-SCORE race (round points incl. a gamble round), not money --
+// a team can win the match holding less gold, so money must never cross-check rank for these codes
+// (teamRankOf's money-sum overwrite stays 3/4-only; 5/6 derive the winner from rank claims below).
+function isSubScoreMt(mt) { const b = baseMt(mt); return b === 5 || b === 6; }
 // team matches rank by the fixed seat convention instead of raw score order: seats (0,1) = team A,
 // (2,3) = team B; the winning pair (higher seat-pair total, tie -> team A) takes ranks {1,2} ordered
 // by own score (tie -> lower seat), the losing pair takes {3,4}. Derived from the consistent score
@@ -847,6 +869,42 @@ function teamRankOf(parts) {
   });
   const rankOf = {};
   for (let i = 0; i < order.length; i++) rankOf[order[i].steamID] = i + 1;
+  return rankOf;
+}
+// ---- mode-2 (base 5/6) outcome derivation: rank claims, never money ----
+// The record layout has no sub-score field, so the winner is derived from the writers' own rank
+// claims: seats (0,1) = team A, (2,3) = team B, and a claimed rank <= 2 means "my team won" under
+// the fixed {1,2}v{3,4} convention. Rank is host-broadcast lockstep fact exactly like the score
+// vector, so every honest end implies the same winner; unanimity is required and a conflict (or an
+// out-of-domain claim) returns null -> the group is sanity-flagged, not settled (see sanityFlags).
+// With only one team's writers present their agreed claim decides -- the same trust level as the
+// score vector itself (what present writers agree on), and the absent side is already in the
+// leaver-conviction pipeline.
+function team2WinTeamOf(g) {
+  let win = null;
+  for (const r of g) {
+    const seat = r.d[5] | 0, rank = r.d[6] | 0;
+    if (rank < 1 || rank > 4) return null;
+    const w = (rank <= 2) ? ((seat >> 1) & 1) : (((seat >> 1) & 1) ^ 1);
+    if (win == null) win = w;
+    else if (win !== w) return null;
+  }
+  return win;
+}
+// rank assignment for a derived mode-2 outcome: the winning team takes the {1,2} block, the losing
+// team {3,4}, ordered inside each block by own score (tie -> lower seat) -- the client's display
+// convention. Fixed block offsets (not dense present-only ranks) so absent seats keep the
+// convention: a lone present winner stays rank 1 and the losing pair stays {3,4} (careerWon and
+// rank bonuses never collapse to money order).
+function team2RankOf(parts, winTeam) {
+  if (winTeam == null || !parts || !parts.length) return null;
+  const rankOf = {};
+  for (const b of [0, 1]) {   // b: 0 = winning block, 1 = losing block
+    const members = parts
+      .filter(p => ((((p.seat | 0) >> 1) & 1) === (winTeam | 0)) === (b === 0))
+      .sort((x, y) => ((y.score | 0) !== (x.score | 0)) ? (y.score | 0) - (x.score | 0) : (x.seat | 0) - (y.seat | 0));
+    for (let i = 0; i < members.length; i++) rankOf[members[i].steamID] = b * 2 + i + 1;
+  }
   return rankOf;
 }
 // clamp-aware authoritative leaver deduction (never below 0)
@@ -919,13 +977,18 @@ function reducedStakesPlan(parts, matchType, premadeMask) {
 //   §7 abandoned-teammate shield: a present member whose teammate was convicted absent gets his loss
 //   compressed by his own tier's rs (min with any mismatch factor) and a PROTECTED reveal on a real net loss.
 //   parts: [{ steamID, seat, mmr, lp }] (present ends only); scores: full 4-seat frozen vector;
-//   leaverSeats: consensus-absent seats. Returns { [steamID]: { adjDelta, flag, normalDelta } } or null. =====
-function teamLpPlan(parts, matchType, scores, leaverSeats) {
+//   leaverSeats: consensus-absent seats. winTeamOverride (mode-2 only): the sub-score-derived
+//   outcome from team2WinTeamOf -- money must never decide a base-5/6 match, so the caller passes
+//   the claims-derived winner and the money comparison below stays a 3/4-only fallback.
+//   Returns { [steamID]: { adjDelta, flag, normalDelta } } or null. =====
+function teamLpPlan(parts, matchType, scores, leaverSeats, winTeamOverride) {
   if (!appliesLp(matchType) || !isTeamMt(matchType)) return null;
   if (!parts || !parts.length || !scores || scores.length < 4) return null;
   const teamOf = s => ((s | 0) >> 1) & 1;
   const aTotal = (scores[0] | 0) + (scores[1] | 0), bTotal = (scores[2] | 0) + (scores[3] | 0);
-  const winTeam = bTotal > aTotal ? 1 : 0;   // tie -> team A (mirrors teamRankOf / the client rule)
+  const winTeam = (winTeamOverride == null)
+    ? (bTotal > aTotal ? 1 : 0)              // tie -> team A (mirrors teamRankOf / the client rule)
+    : (winTeamOverride | 0);
   // team aggregates over PRESENT members (an absent leaver has no record: not averaged in)
   const agg = [{ n: 0, lp: 0, mmr: 0 }, { n: 0, lp: 0, mmr: 0 }];
   for (const p of parts) { const t = teamOf(p.seat); agg[t].n++; agg[t].lp += p.lp | 0; agg[t].mmr += p.mmr | 0; }
@@ -1885,10 +1948,13 @@ async function main() {
     let rank = 1; const rankOf = {};
     for (let i = 0; i < sorted.length; i++) { if (i > 0 && sorted[i].score < sorted[i - 1].score) rank = i + 1; sorted[i].rank = rank; rankOf[sorted[i].steamID] = rank; }
     // team modes: overwrite with the team-convention ranks BEFORE XP/TrueSkill so both consume the
-    // same ordering the client showed optimistically (winning pair {1,2}); falls back to raw score
-    // order when a seat is missing (teamRankOf returns null).
+    // same ordering the client showed optimistically (winning pair {1,2}); mode 1 falls back to raw
+    // score order when a seat is missing (teamRankOf returns null). Mode 2 (base 5/6) derives the
+    // winner from the writers' rank claims, never money (sanity already rejected any conflict, so
+    // t2Win is non-null on every group that reaches here).
+    const t2Win = isSubScoreMt(matchType) ? team2WinTeamOf(g) : null;
     if (isTeamMt(matchType)) {
-      const tr = teamRankOf(parts);
+      const tr = isSubScoreMt(matchType) ? team2RankOf(parts, t2Win) : teamRankOf(parts);
       if (tr) { for (const p of parts) rankOf[p.steamID] = tr[p.steamID]; for (const s of sorted) s.rank = tr[s.steamID]; }
     }
     // points are credited for BOTH settled AND consensus-VOID matches -- VOID only gates MMR/LP; an innocent victim
@@ -1960,7 +2026,9 @@ async function main() {
     if (isTeamMt(matchType)) {
       // M3: team modes rate as TWO TEAMS (strength = sum mu, binary outcome) -- the ordinal pairwise
       // update would also transfer rating between TEAMMATES (rank 1 vs rank 2), which team play must not.
-      const winTeam = ((scores[2] | 0) + (scores[3] | 0)) > ((scores[0] | 0) + (scores[1] | 0)) ? 1 : 0;
+      // Mode 2: the binary outcome comes from the sub-score-derived winner, never the money sums.
+      const winTeam = (t2Win != null) ? t2Win
+        : (((scores[2] | 0) + (scores[3] | 0)) > ((scores[0] | 0) + (scores[1] | 0)) ? 1 : 0);
       const sides = [[], []];
       for (let i = 0; i < parts.length; i++) sides[(parts[i].seat >> 1) & 1].push(tsIn[i]);
       tsOut = (sides[0].length && sides[1].length)
@@ -1974,7 +2042,7 @@ async function main() {
     //   matchType mask settle at their average rank -- design line 66; solos = original formula).
     const planIn = tsIn.map((t, i) => ({ steamID: t.id, seat: parts[i].seat | 0, mmr: ts.displayRating(t.mu, t.sigma), rank: t.rank, lp: (lp[t.id] == null ? 0 : lp[t.id]) }));
     const rsPlan = isTeamMt(matchType)
-      ? teamLpPlan(planIn, matchType, scores, leavers0.map(x => x.seat))
+      ? teamLpPlan(planIn, matchType, scores, leavers0.map(x => x.seat), t2Win)
       : reducedStakesPlan(planIn, matchType, premadeMaskOf(matchType));
     for (const r of tsOut) {
       // repeat-group decay: blend the update toward the pre-match rating by the streak weight
@@ -2117,4 +2185,4 @@ async function main() {
 if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
-module.exports = { isVoidDisp, voidByConsensus, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, CONFESS_MAGIC, reconcileConfessions, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan };
+module.exports = { isVoidDisp, voidByConsensus, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, CONFESS_MAGIC, reconcileConfessions, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan };
