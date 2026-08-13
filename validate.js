@@ -778,22 +778,30 @@ function softResetLp(lp) {
 function seasonSeedLp(prevScore, display) {
   return prevScore != null ? softResetLp(prevScore | 0) : seedLp(display);
 }
+// Find-or-create a trusted-writes board by name. Idempotent (same name always returns the same
+// id) and immune to the listing-generation lag that can hide a fresh board from
+// GetLeaderboardsForGame for over an hour -- the canonical bypass for any by-name resolution
+// that must not wait out that lag. Returns the id or null (failure -> warn).
+async function findOrCreateBoard(name) {
+  const res = await postForm('/ISteamLeaderboards/FindOrCreateLeaderboard/v2/', {
+    key: KEY, appid: APPID, name, sortmethod: 'Descending', displaytype: 'Numeric',
+    createifnotfound: 1, onlytrustedwrites: 1, onlyfriendsreads: 0, format: 'json',
+  });
+  const lb = (res.json && res.json.result && res.json.result.leaderboard) || (res.json && res.json.leaderboard) || null;
+  const id = lb && (lb.leaderBoardID || lb.leaderboardID || lb.id || lb.ID);
+  if (res.ok && id) return id;
+  ghWarn('board find-or-create failed: ' + name + ' HTTP ' + res.status + ' ' + String(res.text).slice(0, 120));
+  return null;
+}
 // Resolve the season board for `base` from the run's board listing. From season 1 on a missing
-// board is auto-created (trusted writes, global reads -- the exact shape the ops tool provisions;
-// FindOrCreate is idempotent so a listing-generation lag just re-finds it).
+// board is auto-created (trusted writes, global reads -- the exact shape the ops tool provisions).
 async function resolveSeasonBoard(lr, base, id) {
   const name = seasonBoardName(base, id);
   const found = ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).find(x => String(x.name || x.Name) === name);
   if (found) return { name, id: found.id || found.ID };
   if ((id | 0) >= 1) {
-    const res = await postForm('/ISteamLeaderboards/FindOrCreateLeaderboard/v2/', {
-      key: KEY, appid: APPID, name, sortmethod: 'Descending', displaytype: 'Numeric',
-      createifnotfound: 1, onlytrustedwrites: 1, onlyfriendsreads: 0, format: 'json',
-    });
-    const lb = (res.json && res.json.result && res.json.result.leaderboard) || (res.json && res.json.leaderboard) || null;
-    const newId = lb && (lb.leaderBoardID || lb.leaderboardID || lb.id || lb.ID);
-    if (res.ok && newId) { console.log('season board created: ' + name + ' id=' + newId); return { name, id: newId }; }
-    ghWarn('season board create failed: ' + name + ' HTTP ' + res.status + ' ' + String(res.text).slice(0, 120));
+    const newId = await findOrCreateBoard(name);
+    if (newId) { console.log('season board created: ' + name + ' id=' + newId); return { name, id: newId }; }
   }
   return { name, id: null };
 }
@@ -1156,7 +1164,7 @@ function creditXp(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers,
   }
 }
 // ===== endless co-op authority (match type 7): depth board + CP wallet; never rating/XP/LP. =====
-// Type-7 records are a 2-player PvE track. Their settle path only (a) writes the personal-best
+// Type-7 records are a 2-3 player PvE track. Their settle path only (a) writes the personal-best
 // depth board and (b) debits the CP wallet for continues spent -- every competitive pipeline
 // (TrueSkill, XP, LP, leaver conviction) is skipped by construction. The record layout is the
 // standard v3 record with a 4-int tail appended after the roster:
@@ -1168,9 +1176,10 @@ function creditXp(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers,
 const CP_LB = process.env.CP_LB || 'cp_bank';
 const ENDLESS_LB = process.env.ENDLESS_LB || 'endless_board';
 // trio ladder (knife-B/C 2026-08-13): 3-seat runs rank on their own board -- three diggers
-// structurally outscore two, a mixed board would be dominated. The board itself is created in
-// knife-C; until it resolves, pc=3 groups are left pending (boards are the debit target AND the
-// chain memory -- settling without them would silently drop the run, same rule as the duo gate).
+// structurally outscore two, a mixed board would be dominated. The board exists in production
+// (knife-C); while unresolved (listing wobble) pc=3 groups are left pending (boards are the
+// debit target AND the chain memory -- settling without them would silently drop the run,
+// same rule as the duo gate).
 const ENDLESS_LB_TRIO = process.env.ENDLESS_LB_TRIO || 'endless_board_trio';
 const ENDLESS = {
   MT: 7,
@@ -1812,11 +1821,15 @@ async function main() {
     enSeasonComplete = br.complete;
     for (const e of br.ents) endlessSeasonBest[e.steamID] = e.score | 0;
   }
-  // trio endless board (knife-B): resolved but NOT strict -- the board lands with knife-C, and
-  // until then its absence is expected (pc=3 groups defer at the settle gate with a plain log).
-  // Knife-C should flip this to strictBoard once the board exists in production.
+  // trio endless board (knife-C 2026-08-13: board exists in production). The board is brand
+  // new, so the listing can hide it for over an hour -- fall back to FindOrCreate by name
+  // (idempotent, listing-lag immune; season boards use the same bypass). Strict stays as the
+  // belt for the fallback's own HTTP failure -- a missing board leaves trio groups pending
+  // either way, strict just makes it loud.
   const enTrioLb = ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).find(x => String(x.name || x.Name) === ENDLESS_LB_TRIO);
-  const enTrioId = enTrioLb ? (enTrioLb.id || enTrioLb.ID) : null;
+  let enTrioId = enTrioLb ? (enTrioLb.id || enTrioLb.ID) : null;
+  if (!enTrioId) enTrioId = await findOrCreateBoard(ENDLESS_LB_TRIO);
+  if (!enTrioId) { strictBoard('trio endless board not found'); ghWarn('trio endless board not found (pre-create ' + ENDLESS_LB_TRIO + ', trusted-writes) -> trio endless groups left pending'); }
   const endlessTrioBest = {};
   let enTrioComplete = true;
   if (enTrioId) {
@@ -1826,6 +1839,7 @@ async function main() {
   }
   const enTrioSeason = (seasonId >= 1 && enTrioId) ? await resolveSeasonBoard(lr, ENDLESS_LB_TRIO, seasonId) : { name: null, id: null };
   const enTrioSeasonId = enTrioSeason.id;
+  if (seasonId >= 1 && enTrioId && !enTrioSeasonId) { strictBoard('seasonal trio endless board not found'); ghWarn('seasonal trio endless board unresolved -> trio endless groups left pending'); }
   const endlessTrioSeasonBest = {};
   let enTrioSeasonComplete = true;
   if (enTrioSeasonId) {
@@ -1915,19 +1929,19 @@ async function main() {
       const bSeasonChanged = useTrio ? changedEndlessTrioSeason : changedEndlessSeason;
       // boards are the debit target AND the chain memory -- without both, settling would mark
       // the group processed while silently dropping the debit (read-back would resurrect spent
-      // CP). Leave the group fresh; it settles whole once the boards resolve. (Trio board lands
-      // with knife-C -- until then pc=3 groups simply wait here.)
-      if (!cpId || !bId || (seasonId >= 1 && !bSeasonId)) { console.log('  endless ' + c.m + ': cp/' + (useTrio ? 'trio' : 'endless') + '/seasonal board unresolved -- left pending' + (useTrio && !enTrioId ? ' (trio board lands with knife-C)' : '')); continue; }
+      // CP). Leave the group fresh; it settles whole once the boards resolve.
+      if (!cpId || !bId || (seasonId >= 1 && !bSeasonId)) { console.log('  endless ' + c.m + ': cp/' + (useTrio ? 'trio' : 'endless') + '/seasonal board unresolved -- left pending'); continue; }
       const t = endlessTail(g[0].d);   // presence + domains guaranteed by the sanity gate above
       const roster0 = rosterConsensus(g);
       const rosterSids = Object.values(roster0).map(String);
       // chain rule: startDepth credit only up to the deepest end depth any roster player has
-      // settled. A resume may legitimately cross seat counts (a duo save resumed as a trio and
-      // vice versa -- the client allows it), so the chain memory is the max over BOTH ladders.
+      // settled ON THIS LADDER. Client saves are per-seat-count slots (knife-C) -- a resume
+      // never crosses seat counts, so the chain memory is per-board (knife-B's cross-ladder
+      // max is retired with the mixed-resume semantics it served; legacy mixed resumes only
+      // pace slower, never flag).
       let chainMax = 0;
       for (const sid of rosterSids) {
-        if (endlessBest[sid] != null) chainMax = Math.max(chainMax, unpackEndlessScore(endlessBest[sid]).depth);
-        if (endlessTrioBest[sid] != null) chainMax = Math.max(chainMax, unpackEndlessScore(endlessTrioBest[sid]).depth);
+        if (bBest[sid] != null) chainMax = Math.max(chainMax, unpackEndlessScore(bBest[sid]).depth);
       }
       let pend7 = startsPending[c.m];
       if (!pend7) {
