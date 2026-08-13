@@ -222,18 +222,21 @@ function sanityFlags(g) {
       if (team2WinTeamOf(g) == null) out.push('rank-conflict');
     }
   } else if (base === ENDLESS.MT) {
-    // endless co-op: exactly 2 seats, never a premade mask, and a well-formed depth tail.
+    // endless co-op: 2 or 3 seats (knife-B 2026-08-13), never a premade mask, well-formed depth tail.
     if (mask !== 0) out.push('mask');
-    if (pc !== 2) out.push('pc');
+    if (pc !== 2 && pc !== 3) out.push('pc');
     const t = endlessTail(d0);
     if (!t) out.push('tail');                         // every real writer appends the tail; absence = malformed/forged
     else {
       if (t.startDepth < 0 || t.endDepth < t.startDepth || t.endDepth > ENDLESS.DEPTH_CAP) out.push('depth');
-      if ((t.continuesUsed & ~0xFF) !== 0) out.push('cont');   // only seats 0/1 exist -> only the low two nibbles may be set
+      // per-seat continue nibbles: only the low pc nibbles may be set (the int packing
+      // structurally holds 8 seats; a nibble beyond the real seat count is forged). Guarded on
+      // a sane pc -- a bad pc is already flagged above and 1<<(4*pc) overflows past pc=7.
+      if (pc >= 2 && pc <= 3 && (t.continuesUsed & ~((1 << (4 * pc)) - 1)) !== 0) out.push('cont');
       if (t.tokensCp !== 0) out.push('tokens');                // CP-purchased saves are retired; real clients always write 0
       // score cap scales with the claimed depth (the global matchmade cap has no meaning on an
       // unbounded track); the floor stays shared -- shop overdraft is equally legal here.
-      scoreCap = endlessGoalFor(t.endDepth, 2) * ENDLESS.SCORE_MULT;
+      scoreCap = endlessGoalFor(t.endDepth, pc) * ENDLESS.SCORE_MULT;
     }
   } else {
     if (pc < 2 || pc > 4) out.push('pc');             // matchmade lobbies are 2..4 players
@@ -1164,6 +1167,11 @@ function creditXp(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers,
 // residual as ranked 2P) -- colluding pairs are bounded by the structural checks + pacing only.
 const CP_LB = process.env.CP_LB || 'cp_bank';
 const ENDLESS_LB = process.env.ENDLESS_LB || 'endless_board';
+// trio ladder (knife-B/C 2026-08-13): 3-seat runs rank on their own board -- three diggers
+// structurally outscore two, a mixed board would be dominated. The board itself is created in
+// knife-C; until it resolves, pc=3 groups are left pending (boards are the debit target AND the
+// chain memory -- settling without them would silently drop the run, same rule as the duo gate).
+const ENDLESS_LB_TRIO = process.env.ENDLESS_LB_TRIO || 'endless_board_trio';
 const ENDLESS = {
   MT: 7,
   // Physical floor per level. The level timer is 60s (lockstep with the client config), but a
@@ -1287,16 +1295,19 @@ function endlessContinueCost(n) {
   const k = Math.max(1, n | 0);
   return Math.max(0, Math.round(ENDLESS.CONTINUE.base * Math.pow(ENDLESS.CONTINUE.esc, k - 1)));
 }
-// continuesUsed wire format: per-seat counts packed as nibbles (bits 0..3 = seat 0, 4..7 = seat 1).
+// continuesUsed wire format: per-seat counts packed as nibbles (bits 4s..4s+3 = seat s; the
+// int32 structurally holds 8 seats, production uses 2-3 -- knife-B 2026-08-13).
 const endlessNib = (packed, seat) => ((packed | 0) >> (4 * (seat | 0))) & 0xF;
 // canonical per-seat debit replay. The wire carries per-seat COUNTS, not press order, so the
-// ladder is replayed seat-ascending (seat 0 takes rungs 1..n0, seat 1 the next n1). Exact whenever
-// a single wallet paid (the common case); an interleaved pair can differ from true press order by
-// a few CP -- the client's optimistic deduction is reconciled by read-back either way.
+// ladder is replayed seat-ascending (seat 0 takes rungs 1..n0, seat 1 the next n1, ...). Exact
+// whenever a single wallet paid (the common case); an interleaved group can differ from true
+// press order by a few CP -- the client's optimistic deduction is reconciled by read-back either
+// way. Replays all 8 structural seats: sanity pins nibbles beyond the real seat count to zero,
+// so the extra slots stay 0 and the settle loop only reads the first pc entries.
 function endlessDebits(contPacked) {
-  const out = [0, 0];
+  const out = [0, 0, 0, 0, 0, 0, 0, 0];
   let rung = 1;
-  for (let seat = 0; seat <= 1; seat++) for (let i = 0, n = endlessNib(contPacked, seat); i < n; i++) out[seat] += endlessContinueCost(rung++);
+  for (let seat = 0; seat < 8; seat++) for (let i = 0, n = endlessNib(contPacked, seat); i < n; i++) out[seat] += endlessContinueCost(rung++);
   return out;
 }
 // board key packing: depth is the primary rank, team score the tiebreak (saturating -- ties above
@@ -1801,6 +1812,27 @@ async function main() {
     enSeasonComplete = br.complete;
     for (const e of br.ents) endlessSeasonBest[e.steamID] = e.score | 0;
   }
+  // trio endless board (knife-B): resolved but NOT strict -- the board lands with knife-C, and
+  // until then its absence is expected (pc=3 groups defer at the settle gate with a plain log).
+  // Knife-C should flip this to strictBoard once the board exists in production.
+  const enTrioLb = ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).find(x => String(x.name || x.Name) === ENDLESS_LB_TRIO);
+  const enTrioId = enTrioLb ? (enTrioLb.id || enTrioLb.ID) : null;
+  const endlessTrioBest = {};
+  let enTrioComplete = true;
+  if (enTrioId) {
+    const br = await readBoardAll(enTrioId, 'trio endless board');
+    enTrioComplete = br.complete;
+    for (const e of br.ents) endlessTrioBest[e.steamID] = e.score | 0;
+  }
+  const enTrioSeason = (seasonId >= 1 && enTrioId) ? await resolveSeasonBoard(lr, ENDLESS_LB_TRIO, seasonId) : { name: null, id: null };
+  const enTrioSeasonId = enTrioSeason.id;
+  const endlessTrioSeasonBest = {};
+  let enTrioSeasonComplete = true;
+  if (enTrioSeasonId) {
+    const br = await readBoardAll(enTrioSeasonId, 'seasonal trio endless board');
+    enTrioSeasonComplete = br.complete;
+    for (const e of br.ents) endlessTrioSeasonBest[e.steamID] = e.score | 0;
+  }
 
   fresh.sort((a, b) => (a.m < b.m ? -1 : a.m > b.m ? 1 : 0));
   // On-demand base values: when a bulk read hit PAGE_CAP the maps are incomplete -- a settling
@@ -1808,7 +1840,7 @@ async function main() {
   // would silently reset his LP/XP. Fetch exactly the players this run settles (record holders +
   // roster members: leaver LP penalty targets roster sids that wrote no record). A missing entry
   // after the targeted read is a genuine new player (base 0 correct).
-  if ((lpId && !lpComplete) || (xpId && !xpComplete) || (cpId && !cpComplete) || (enId && !enComplete) || (enSeasonId && !enSeasonComplete)) {
+  if ((lpId && !lpComplete) || (xpId && !xpComplete) || (cpId && !cpComplete) || (enId && !enComplete) || (enSeasonId && !enSeasonComplete) || (enTrioId && !enTrioComplete) || (enTrioSeasonId && !enTrioSeasonComplete)) {
     const need = new Set();
     for (const c of fresh) for (const r of c.g) {
       need.add(String(r.steamID));
@@ -1835,13 +1867,21 @@ async function main() {
         const e = await readUserEntry(enSeasonId, sid, 'seasonal endless');
         if (e) endlessSeasonBest[sid] = e.score | 0;
       }
+      if (enTrioId && !enTrioComplete && endlessTrioBest[sid] == null) {
+        const e = await readUserEntry(enTrioId, sid, 'trio endless');
+        if (e) endlessTrioBest[sid] = e.score | 0;
+      }
+      if (enTrioSeasonId && !enTrioSeasonComplete && endlessTrioSeasonBest[sid] == null) {
+        const e = await readUserEntry(enTrioSeasonId, sid, 'seasonal trio endless');
+        if (e) endlessTrioSeasonBest[sid] = e.score | 0;
+      }
     });
     const failed = fetched.filter(x => x.status === 'rejected');
     if (failed.length) { ghErr('on-demand base reads failed (' + failed.length + '/' + need.size + ') -- abort run, do NOT settle from base 0'); process.exit(1); }
     console.log('on-demand base reads: ' + need.size + ' players (bulk window incomplete)');
   }
   const today = Math.floor(Date.now() / 86400000);   // UTC day index (matches client lastWinDay) for the daily-first bonus
-  const changed = {}; const changedLp = {}; const changedXp = {}; const changedCp = {}; const changedEndless = {}; const changedEndlessSeason = {}; const reveal = {}; const careerDet = {}; let settled = 0, voided = 0, settledEndless = 0;
+  const changed = {}; const changedLp = {}; const changedXp = {}; const changedCp = {}; const changedEndless = {}; const changedEndlessSeason = {}; const changedEndlessTrio = {}; const changedEndlessTrioSeason = {}; const reveal = {}; const careerDet = {}; let settled = 0, voided = 0, settledEndless = 0;
   for (const c of fresh) {
     const g = c.g;
     const matchType = g[0].d[2] | 0;   // 2=ranked; visible LP only moves for ranked (quick = MMR only)
@@ -1862,16 +1902,33 @@ async function main() {
     // spillover -- mirrors the client's own isolation). Sits before the generic pacing gate:
     // endless uses its depth-scaled bound instead of the flat matchmade minimum.
     if (isEndlessMt(matchType)) {
+      // knife-B (2026-08-13): 2 or 3 seats. Trio runs rank on their own ladder (3 diggers
+      // structurally outscore 2 -- a mixed board would be dominated), so every board-shaped
+      // dependency (gate / chain memory read / best map / write pool) picks the pc-matched pair.
+      const pc7 = g[0].d[8] | 0;                 // sanity pinned to 2..3 above
+      const useTrio = pc7 >= 3;
+      const bId = useTrio ? enTrioId : enId;
+      const bSeasonId = useTrio ? enTrioSeasonId : enSeasonId;
+      const bBest = useTrio ? endlessTrioBest : endlessBest;
+      const bSeasonBest = useTrio ? endlessTrioSeasonBest : endlessSeasonBest;
+      const bChanged = useTrio ? changedEndlessTrio : changedEndless;
+      const bSeasonChanged = useTrio ? changedEndlessTrioSeason : changedEndlessSeason;
       // boards are the debit target AND the chain memory -- without both, settling would mark
       // the group processed while silently dropping the debit (read-back would resurrect spent
-      // CP). Leave the group fresh; it settles whole once the boards resolve.
-      if (!cpId || !enId || (seasonId >= 1 && !enSeasonId)) { console.log('  endless ' + c.m + ': cp/endless/seasonal board unresolved -- left pending'); continue; }
+      // CP). Leave the group fresh; it settles whole once the boards resolve. (Trio board lands
+      // with knife-C -- until then pc=3 groups simply wait here.)
+      if (!cpId || !bId || (seasonId >= 1 && !bSeasonId)) { console.log('  endless ' + c.m + ': cp/' + (useTrio ? 'trio' : 'endless') + '/seasonal board unresolved -- left pending' + (useTrio && !enTrioId ? ' (trio board lands with knife-C)' : '')); continue; }
       const t = endlessTail(g[0].d);   // presence + domains guaranteed by the sanity gate above
       const roster0 = rosterConsensus(g);
       const rosterSids = Object.values(roster0).map(String);
-      // chain rule: startDepth credit only up to the deepest end depth either player has settled
+      // chain rule: startDepth credit only up to the deepest end depth any roster player has
+      // settled. A resume may legitimately cross seat counts (a duo save resumed as a trio and
+      // vice versa -- the client allows it), so the chain memory is the max over BOTH ladders.
       let chainMax = 0;
-      for (const sid of rosterSids) if (endlessBest[sid] != null) chainMax = Math.max(chainMax, unpackEndlessScore(endlessBest[sid]).depth);
+      for (const sid of rosterSids) {
+        if (endlessBest[sid] != null) chainMax = Math.max(chainMax, unpackEndlessScore(endlessBest[sid]).depth);
+        if (endlessTrioBest[sid] != null) chainMax = Math.max(chainMax, unpackEndlessScore(endlessTrioBest[sid]).depth);
+      }
       let pend7 = startsPending[c.m];
       if (!pend7) {
         // no attestation ever sighted (job outage / failed client write): the settle's own first
@@ -1895,7 +1952,7 @@ async function main() {
       // would forgive a forged continue, and a legit balance can only dip negative transiently
       // when the funding matchmade record settles a run later.
       const debits = endlessDebits(t.continuesUsed);
-      for (let seat = 0; seat <= 1; seat++) {
+      for (let seat = 0; seat < pc7; seat++) {
         const sid = roster0[seat] != null ? String(roster0[seat]) : null;
         if (!sid || !debits[seat]) continue;
         const cur = cp[sid] == null ? 0 : cp[sid];
@@ -1904,23 +1961,24 @@ async function main() {
       }
       // personal-best board write for RECORD WRITERS only (abandoning the run earns no credit);
       // packed key is lex-monotone in (depth, team score), so "greater = improved" suffices.
-      const teamScore = ((g[0].d[10] | 0) + (g[0].d[11] | 0));
+      let teamScore = 0;
+      for (let i = 0; i < pc7; i++) teamScore += g[0].d[10 + i] | 0;
       if ((t.endDepth | 0) > 0) {
         const packed = packEndlessScore(t.endDepth, teamScore);
         for (const sid of writerSids) {
-          if (endlessBest[sid] == null || packed > endlessBest[sid]) {
-            endlessBest[sid] = packed; changedEndless[sid] = { s: packed, ts: teamScore };
-            console.log('  endless best ' + c.m + ': ' + plog(sid) + ' depth ' + t.endDepth + ' team ' + teamScore + ' -> board ' + packed);
+          if (bBest[sid] == null || packed > bBest[sid]) {
+            bBest[sid] = packed; bChanged[sid] = { s: packed, ts: teamScore };
+            console.log('  endless best' + (useTrio ? ' (trio)' : '') + ' ' + c.m + ': ' + plog(sid) + ' depth ' + t.endDepth + ' team ' + teamScore + ' -> board ' + packed);
           }
           // seasonal double-write: same improved-best rule against the season board's own base
           // (fresh each season = the per-season "dig it again" ladder).
-          if (enSeasonId && (endlessSeasonBest[sid] == null || packed > endlessSeasonBest[sid])) {
-            endlessSeasonBest[sid] = packed; changedEndlessSeason[sid] = { s: packed, ts: teamScore };
-            console.log('  endless season best ' + c.m + ': ' + plog(sid) + ' depth ' + t.endDepth + ' -> board ' + packed);
+          if (bSeasonId && (bSeasonBest[sid] == null || packed > bSeasonBest[sid])) {
+            bSeasonBest[sid] = packed; bSeasonChanged[sid] = { s: packed, ts: teamScore };
+            console.log('  endless season best' + (useTrio ? ' (trio)' : '') + ' ' + c.m + ': ' + plog(sid) + ' depth ' + t.endDepth + ' -> board ' + packed);
           }
         }
       }
-      console.log('  endless settle ' + c.m + ': depth ' + t.startDepth + '->' + t.endDepth + ' team ' + teamScore + (c.void ? ' (void disp majority -- settled anyway: co-op has no outcome to void)' : ''));
+      console.log('  endless settle ' + c.m + ': pc ' + pc7 + ' depth ' + t.startDepth + '->' + t.endDepth + ' team ' + teamScore + (c.void ? ' (void disp majority -- settled anyway: co-op has no outcome to void)' : ''));
       processed.add(c.m); settledEndless++;
       continue;
     }
@@ -2158,12 +2216,32 @@ async function main() {
     else console.log('  ok endless season ' + plog(sid) + ' = ' + w.s);
     return okFlag;
   });
+  // trio ladder writes (knife-B): the settle gate guarantees these maps only fill when the trio
+  // boards resolved, so the ids are non-null whenever the pools are non-empty.
+  const wEndlessTrio = await mapPool(Object.keys(changedEndlessTrio), CONCURRENCY, async (sid) => {
+    const w = changedEndlessTrio[sid];
+    const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: enTrioId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, [w.ts | 0]);
+    const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
+    if (!okFlag) ghWarn('write trio endless ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
+    else console.log('  ok endless trio ' + plog(sid) + ' = ' + w.s);
+    return okFlag;
+  });
+  const wEndlessTrioSeason = await mapPool(Object.keys(changedEndlessTrioSeason), CONCURRENCY, async (sid) => {
+    const w = changedEndlessTrioSeason[sid];
+    const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: enTrioSeasonId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, [w.ts | 0]);
+    const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
+    if (!okFlag) ghWarn('write seasonal trio endless ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
+    else console.log('  ok endless trio season ' + plog(sid) + ' = ' + w.s);
+    return okFlag;
+  });
   const rOk = wRating.filter(x => x.status === 'fulfilled' && x.value).length;
   const pOk = wPoints.filter(x => x.status === 'fulfilled' && x.value).length;
   const xOk = wXp.filter(x => x.status === 'fulfilled' && x.value).length;
   const cOk = wCp.filter(x => x.status === 'fulfilled' && x.value).length;
   const eOk = wEndless.filter(x => x.status === 'fulfilled' && x.value).length;
   const esOk = wEndlessSeason.filter(x => x.status === 'fulfilled' && x.value).length;
+  const etOk = wEndlessTrio.filter(x => x.status === 'fulfilled' && x.value).length;
+  const etsOk = wEndlessTrioSeason.filter(x => x.status === 'fulfilled' && x.value).length;
   saveProcessed(processed);
   saveSkill(skill);
   if (groupsDirty) saveGroups(groupMem, nowMs);
@@ -2176,13 +2254,13 @@ async function main() {
   // redeem channel last: wallet debits base on the in-memory post-settle balances just written
   // above (passing the map avoids re-reading scores that global reads may still serve stale).
   await processRedeems(cp);
-  console.log('written: rating ' + rOk + '/' + wRating.length + ', points ' + pOk + '/' + wPoints.length + ', xp ' + xOk + '/' + wXp.length + ', cp ' + cOk + '/' + wCp.length + ', endless ' + eOk + '/' + wEndless.length + (wEndlessSeason.length ? (' (+season ' + esOk + '/' + wEndlessSeason.length + ')') : '') + ', state updated (idempotent)');
+  console.log('written: rating ' + rOk + '/' + wRating.length + ', points ' + pOk + '/' + wPoints.length + ', xp ' + xOk + '/' + wXp.length + ', cp ' + cOk + '/' + wCp.length + ', endless ' + eOk + '/' + wEndless.length + (wEndlessSeason.length ? (' (+season ' + esOk + '/' + wEndlessSeason.length + ')') : '') + (wEndlessTrio.length ? (' (+trio ' + etOk + '/' + wEndlessTrio.length + ')') : '') + (wEndlessTrioSeason.length ? (' (+trio-season ' + etsOk + '/' + wEndlessTrioSeason.length + ')') : '') + ', state updated (idempotent)');
   RUN.writes = rOk + '/' + wRating.length + ' ' + pOk + '/' + wPoints.length + ' ' + xOk + '/' + wXp.length;
-  RUN.writesEndless = cOk + '/' + wCp.length + ' ' + eOk + '/' + wEndless.length + (wEndlessSeason.length ? ('+' + esOk + '/' + wEndlessSeason.length) : '');
+  RUN.writesEndless = cOk + '/' + wCp.length + ' ' + eOk + '/' + wEndless.length + (wEndlessSeason.length ? ('+' + esOk + '/' + wEndlessSeason.length) : '') + (wEndlessTrio.length ? ('+t' + etOk + '/' + wEndlessTrio.length) : '');
   writeRunSummary();
 }
 
 if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
-module.exports = { isVoidDisp, voidByConsensus, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, CONFESS_MAGIC, reconcileConfessions, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan };
+module.exports = { isVoidDisp, voidByConsensus, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, CONFESS_MAGIC, reconcileConfessions, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan };

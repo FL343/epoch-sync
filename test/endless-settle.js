@@ -61,11 +61,16 @@ eq('cp gain probes [valid r0 q, valid r0 rk, valid r1 q, valid r3 q, innocent q,
 // -- continue ladder + canonical per-seat debit replay --
 eq('continue ladder 1..5', [1, 2, 3, 4, 5].map(endlessContinueCost), [20, 30, 45, 68, 101]);
 eq('nib decode', [endlessNib(0x21, 0), endlessNib(0x21, 1)], [1, 2]);
-eq('debits: single payer seat0 x2', endlessDebits(2), [50, 0]);
-eq('debits: single payer seat1 x2', endlessDebits(2 << 4), [0, 50]);
-eq('debits: seat0 x2 + seat1 x1 (seat-ascending rungs)', endlessDebits(2 | (1 << 4)), [50, 45]);
+// knife-B (2026-08-13): the replay covers all 8 structural seats (production pc = 2-3; sanity
+// pins nibbles beyond the seat count to zero, so the extra slots stay 0).
+const Z6 = [0, 0, 0, 0, 0, 0];
+eq('debits: single payer seat0 x2', endlessDebits(2), [50, 0].concat(Z6));
+eq('debits: single payer seat1 x2', endlessDebits(2 << 4), [0, 50].concat(Z6));
+eq('debits: seat0 x2 + seat1 x1 (seat-ascending rungs)', endlessDebits(2 | (1 << 4)), [50, 45].concat(Z6));
 eq('debits sum == full ladder regardless of split', endlessDebits(1 | (2 << 4))[0] + endlessDebits(1 | (2 << 4))[1], 20 + 30 + 45);
-eq('debits: none', endlessDebits(0), [0, 0]);
+eq('debits: none', endlessDebits(0), [0, 0].concat(Z6));
+eq('debits: seat2 x1 after seat0 x1 (trio, rung order 0->2)', endlessDebits(1 | (1 << 8)), [20, 0, 30].concat([0, 0, 0, 0, 0]));
+eq('nib decode seat2', endlessNib(0x321, 2), 3);
 
 // -- board key packing: lex-monotone in (depth, team score), tiebreak saturates --
 eq('pack(5, 3210000)/unpack', unpackEndlessScore(packEndlessScore(5, 3210000)), { depth: 5, tiebreak: 3210 });
@@ -85,7 +90,15 @@ const pair = (o) => grp(mk7(A, 0, o), mk7(B, 1, o));
 eq('clean endless record -> []', sanityFlags(pair({ startDepth: 0, endDepth: 6 })), []);
 eq('clean resumed record (deep scores under depth-scaled cap) -> []', sanityFlags(pair({ startDepth: 15, endDepth: 22, scores: [60000, 55000] })), []);
 has('premade mask forged onto endless (0x17)', sanityFlags(pair({ mt: 0x17 })), 'mask');
-has('pc=3 on a 2P co-op track', sanityFlags(grp(mk7(A, 0, { pc: 3, scores: [1, 2, 3], rosterSids: [A, B, C] }), mk7(B, 1, { pc: 3, scores: [1, 2, 3], rosterSids: [A, B, C] }))), 'pc');
+// knife-B (2026-08-13): 3 seats are now a legal co-op form; 4 stays forged
+const trio = (o) => grp(mk7(A, 0, Object.assign({ pc: 3, scores: [400, 300, 200], rosterSids: [A, B, C] }, o)),
+                        mk7(B, 1, Object.assign({ pc: 3, scores: [400, 300, 200], rosterSids: [A, B, C] }, o)));
+eq('clean pc=3 record -> [] (knife-B trio track)', sanityFlags(trio({ startDepth: 0, endDepth: 6 })), []);
+has('pc=4 stays forged', sanityFlags(grp(mk7(A, 0, { pc: 4, scores: [1, 2, 3, 4], rosterSids: [A, B, C] }), mk7(B, 1, { pc: 4, scores: [1, 2, 3, 4], rosterSids: [A, B, C] }))), 'pc');
+has('trio: continues in seat-3 nibble forged (mask scales with pc)', sanityFlags(trio({ cont: 1 << 12 })), 'cont');
+not('trio: seat-2 continue nibble legal', sanityFlags(trio({ cont: 1 << 8 })), 'cont');
+not('trio: score cap scales x3 (14k at depth 6 x3 players)', sanityFlags(trio({ startDepth: 0, endDepth: 6, scores: [14000, 100, 100] })), 'score');
+has('trio: score over its own x3 cap still flags (60k at depth 1)', sanityFlags(trio({ startDepth: 0, endDepth: 1, scores: [60000, 100, 100] })), 'score');
 has('missing tail', sanityFlags(pair({ noTail: true })), 'tail');
 has('depth inversion (end < start)', sanityFlags(pair({ startDepth: 9, endDepth: 3 })), 'depth');
 has('depth over structural cap', sanityFlags(pair({ startDepth: 0, endDepth: 300000 })), 'depth');
