@@ -28,7 +28,7 @@ const WL_PATH = path.join(__dirname, '..', 'feedback-wordlist.json');
   ok('[1] entries are 16-hex hashes only', allHex);
   // no readable word in the public file: no CJK/kana/hangul/cyrillic anywhere
   const rawTxt = fs.readFileSync(WL_PATH, 'utf8');
-  ok('[1] no non-latin plaintext leaked', !/[一-鿿぀-ヿ가-힯Ѐ-ӿ]/.test(rawTxt));
+  ok('[1] no non-latin plaintext leaked', !/[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af\u0400-\u04ff]/.test(rawTxt));
 }
 // fail-closed: missing / unparseable / empty / legacy-plaintext all -> null
 {
@@ -54,19 +54,19 @@ function mkWl(subWords, wordWords) {
   return wl;
 }
 {
-  const wl = mkWl(['傻逼', 'slurtoken'], ['retard', 'cunt']);
+  const wl = mkWl(['\u50bb\u903c', 'slurtoken'], ['retard', 'cunt']);
   const fr = (t) => vv.filterReason(t, wl, SALT);
-  ok('[2] sub hit inline', fr('你就是个傻逼玩意') === 'wordlist');
-  ok('[2] sub hit spaced (fold rejoins)', fr('傻 逼 玩 意') === 'wordlist');
+  ok('[2] sub hit inline', fr('\u4f60\u5c31\u662f\u4e2a\u50bb\u903c\u73a9\u610f') === 'wordlist');
+  ok('[2] sub hit spaced (fold rejoins)', fr('\u50bb \u903c \u73a9 \u610f') === 'wordlist');
   ok('[2] sub hit dotted', fr('s.l.u.r.t.o.k.e.n here') === 'wordlist');
   ok('[2] word tier hits whole token', fr('what a retard move') === 'wordlist');
   ok('[2] word tier no substring FP', fr('flame retardant walls idea') === null);
   ok('[2] scunthorpe safe', fr('greetings from scunthorpe') === null);
-  ok('[2] clean CJK passes', fr('钩子手感有点飘，第三关物件太密了') === null);
+  ok('[2] clean CJK passes', fr('\u94a9\u5b50\u624b\u611f\u6709\u70b9\u98d8\uff0c\u7b2c\u4e09\u5173\u7269\u4ef6\u592a\u5bc6\u4e86') === null);
   ok('[2] mild profanity passes (philosophy)', fr('this level design is shit but fun') === null);
   ok('[2] spam run', fr('aaaaaaaaaaaaaa') === 'spam');
   ok('[2] symbol noise', fr('!!!???...') === 'noise');
-  ok('[2] wrong salt = no match (unreadable without secret)', vv.filterReason('傻逼', wl, 'other-salt') === null);
+  ok('[2] wrong salt = no match (unreadable without secret)', vv.filterReason('\u50bb\u903c', wl, 'other-salt') === null);
 }
 
 // ---- [3] ad/promo heuristics (TOP priority; evasion normalization) ----
@@ -74,20 +74,20 @@ function mkWl(subWords, wordWords) {
   const wl = mkWl(['zzz-never'], []);
   const fr = (t) => vv.filterReason(t, wl, SALT);
   const AD = [
-    '低价金币上 goldshop.com 快来', '有意加 www.example.net', 'https://x.yz/abc',
-    'g o l d s h o p . c o m 全场五折', 'goldshop[.]com 出金币', 'goldshop(点)com',
-    'goldshop。com', 'ｇｏｌｄｓｈｏｐ．ｃｏｍ', 'gоldshоp.cоm',    // fullwidth / cyrillic o
-    'goldshop dot com', '加QQ群 123456789', '加 Q Q 群 1 2 3 4 5 6',
-    '加群一二三四五六七', '微信abcd123 带你上分', 'vx12345678',
-    '代练上分找我 65432101', '联系 98765432123',
+    '\u4f4e\u4ef7\u91d1\u5e01\u4e0a goldshop.com \u5feb\u6765', '\u6709\u610f\u52a0 www.example.net', 'https://x.yz/abc',
+    'g o l d s h o p . c o m \u5168\u573a\u4e94\u6298', 'goldshop[.]com \u51fa\u91d1\u5e01', 'goldshop(\u70b9)com',
+    'goldshop\u3002com', '\uff47\uff4f\uff4c\uff44\uff53\uff48\uff4f\uff50\uff0e\uff43\uff4f\uff4d', 'g\u043eldsh\u043ep.c\u043em',    // fullwidth / cyrillic o
+    'goldshop dot com', '\u52a0QQ\u7fa4 123456789', '\u52a0 Q Q \u7fa4 1 2 3 4 5 6',
+    '\u52a0\u7fa4\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03', '\u5fae\u4fe1abcd123 \u5e26\u4f60\u4e0a\u5206', 'vx12345678',
+    '\u4ee3\u7ec3\u4e0a\u5206\u627e\u6211 65432101', '\u8054\u7cfb 98765432123',
   ];
   for (const t of AD) ok('[3] ad: ' + t.slice(0, 24), fr(t) === 'ad', String(fr(t)));
   const PASS = [
-    '有人开外挂，麻烦封一下',                    // cheater report must pass
+    '\u6709\u4eba\u5f00\u5916\u6302\uff0c\u9ebb\u70e6\u5c01\u4e00\u4e0b',                    // cheater report must pass
     'version 1.5 feels better than 2.0',        // dots, no TLD
     'i scored 1250000 in endless',              // 7 digits, no contact word
-    '第一二关太简单，三四五关不错',              // CN numerals, short runs
-    '微信登录崩溃了报错 123',                    // contact word + short number
+    '\u7b2c\u4e00\u4e8c\u5173\u592a\u7b80\u5355\uff0c\u4e09\u56db\u4e94\u5173\u4e0d\u9519',              // CN numerals, short runs
+    '\u5fae\u4fe1\u767b\u5f55\u5d29\u6e83\u4e86\u62a5\u9519 123',                    // contact word + short number
   ];
   for (const t of PASS) ok('[3] pass: ' + t.slice(0, 24), fr(t) === null, String(fr(t)));
 }

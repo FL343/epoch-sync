@@ -1,6 +1,6 @@
 'use strict';
 // ============================================================
-// feedback-admin -- local moderation console (PLAYER_VOICE_PLAN §5)
+// feedback-admin -- local moderation console (PLAYER_VOICE_PLAN \u00a75)
 // ============================================================
 // Local-only HTML console over the repo checkout: pulls first, shows the item
 // set (held / recent / filtered / all) with votes and report counts, writes
@@ -30,7 +30,9 @@ const fb = require('../feedback.js');
 const STATE = process.env.FB_STATE_FILE ? path.resolve(process.env.FB_STATE_FILE) : path.join(REPO, 'feedback.json');
 const MOD = process.env.FB_MOD_FILE ? path.resolve(process.env.FB_MOD_FILE) : path.join(REPO, 'feedback-mod.json');
 const PORT = Number(process.env.PORT || 8399);
-const APPID = process.env.APPID || '4815320';
+// de-identified repo: the app id never appears in the source; env or secrets file
+function readSecret(f) { try { return fs.readFileSync(path.join(os.homedir(), 'gmt-secrets', f), 'utf8').trim(); } catch (e) { return ''; } }
+const APPID = process.env.APPID || readSecret('steam_appid.txt');
 
 function git(args) {
   const r = cp.spawnSync('git', args, { cwd: REPO, encoding: 'utf8' });
@@ -63,10 +65,8 @@ function dataPayload() {
 
 // Emergency: block + delete this item's entries from every feed board now.
 async function nuke(id) {
-  let key = process.env.STEAM_PUBLISHER_KEY;
-  if (!key) {
-    key = fs.readFileSync(path.join(os.homedir(), 'gmt-secrets', 'steam_publisher_key.txt'), 'utf8').trim();
-  }
+  const key = process.env.STEAM_PUBLISHER_KEY || readSecret('steam_publisher_key.txt');
+  if (!key || !APPID) throw new Error('missing publisher key / app id (env or ~/gmt-secrets)');
   process.env.STEAM_PUBLISHER_KEY = key;
   process.env.APPID = APPID;
   const v = require('../validate.js');
@@ -107,11 +107,11 @@ h1{font-size:18px;color:#fbbf24}
 #log{font-size:12px;color:#7ac0b8;white-space:pre-wrap;margin-top:8px}
 .empty{color:#7a6a4a;padding:24px;text-align:center}
 </style>
-<h1>玩家心声 · 管理台 <button class="pub" onclick="pub()">发布 (commit + push)</button></h1>
+<h1>\u73a9\u5bb6\u5fc3\u58f0 \u00b7 \u7ba1\u7406\u53f0 <button class="pub" onclick="pub()">\u53d1\u5e03 (commit + push)</button></h1>
 <div class="tabs" id="tabs"></div><div id="log"></div><div id="list"></div>
 <script>
 let DATA=null, VIEW='held';
-const VIEWS={held:'待复核 (held)',fresh:'近 48h',filtered:'已过滤',blocked:'已下架',all:'全部'};
+const VIEWS={held:'\u5f85\u590d\u6838 (held)',fresh:'\u8fd1 48h',filtered:'\u5df2\u8fc7\u6ee4',blocked:'\u5df2\u4e0b\u67b6',all:'\u5168\u90e8'};
 async function load(){DATA=await (await fetch('/data')).json();render();}
 function rel(m){return m<60?m+'m':m<2880?Math.floor(m/60)+'h':Math.floor(m/1440)+'d';}
 function render(){
@@ -119,7 +119,7 @@ function render(){
   tabs.innerHTML=Object.keys(VIEWS).map(v=>'<button class="'+(v===VIEW?'on':'')+'" onclick="VIEW=\\''+v+'\\';render()">'+VIEWS[v]+' ('+count(v)+')</button>').join('');
   const list=document.getElementById('list');
   const items=DATA.items.filter(x=>match(x,VIEW));
-  list.innerHTML=items.length?items.map(card).join(''):'<div class="empty">这个视图没有条目</div>';
+  list.innerHTML=items.length?items.map(card).join(''):'<div class="empty">\u8fd9\u4e2a\u89c6\u56fe\u6ca1\u6709\u6761\u76ee</div>';
 }
 function count(v){return DATA.items.filter(x=>match(x,v)).length;}
 function match(x,v){
@@ -132,14 +132,14 @@ function match(x,v){
 function esc(s){return s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
 function card(x){
   const acts=[];
-  if(x.st!=='blocked')acts.push('<button class="warn" onclick="act(\\'block\\','+x.id+')">下架</button>');
-  else acts.push('<button onclick="act(\\'unblock\\','+x.id+')">解除下架</button>');
-  if(x.st==='filtered'||x.st==='capped')acts.push('<button onclick="act(\\'allow\\','+x.id+')">放行</button>');
-  if(x.st==='held')acts.push('<button onclick="act(\\'clear\\','+x.id+')">恢复 (清举报计数)</button>');
-  acts.push('<button class="danger" onclick="if(confirm(\\'立即从全部展示榜删除并下架？\\'))act(\\'nuke\\','+x.id+')">紧急撤榜</button>');
-  return '<div class="card '+x.st+'"><div class="meta"><b>['+x.cat+'/'+x.lang+']</b> '+rel(x.ageMin)+' 前'+
-    ' · ▲'+x.up+' ▼'+x.down+' · 举报 '+x.rep+'/'+DATA.holdAt+(x.repAll!==x.rep?' (累计 '+x.repAll+')':'')+
-    ' · id='+x.id+'<span class="st">'+x.st+'</span></div>'+
+  if(x.st!=='blocked')acts.push('<button class="warn" onclick="act(\\'block\\','+x.id+')">\u4e0b\u67b6</button>');
+  else acts.push('<button onclick="act(\\'unblock\\','+x.id+')">\u89e3\u9664\u4e0b\u67b6</button>');
+  if(x.st==='filtered'||x.st==='capped')acts.push('<button onclick="act(\\'allow\\','+x.id+')">\u653e\u884c</button>');
+  if(x.st==='held')acts.push('<button onclick="act(\\'clear\\','+x.id+')">\u6062\u590d (\u6e05\u4e3e\u62a5\u8ba1\u6570)</button>');
+  acts.push('<button class="danger" onclick="if(confirm(\\'\u7acb\u5373\u4ece\u5168\u90e8\u5c55\u793a\u699c\u5220\u9664\u5e76\u4e0b\u67b6\uff1f\\'))act(\\'nuke\\','+x.id+')">\u7d27\u6025\u64a4\u699c</button>');
+  return '<div class="card '+x.st+'"><div class="meta"><b>['+x.cat+'/'+x.lang+']</b> '+rel(x.ageMin)+' \u524d'+
+    ' \u00b7 \u25b2'+x.up+' \u25bc'+x.down+' \u00b7 \u4e3e\u62a5 '+x.rep+'/'+DATA.holdAt+(x.repAll!==x.rep?' (\u7d2f\u8ba1 '+x.repAll+')':'')+
+    ' \u00b7 id='+x.id+'<span class="st">'+x.st+'</span></div>'+
     '<div class="txt">'+esc(x.text)+'</div><div class="act">'+acts.join('')+'</div></div>';
 }
 async function act(a,id){
@@ -170,23 +170,23 @@ const server = http.createServer(async (req, res) => {
       else if (a === 'clear') { mod.clear[String(id)] = fb.nowTsMin(); }
       else if (a === 'nuke') {
         const r = await nuke(id);
-        return send(200, JSON.stringify({ ok: true, msg: '紧急撤榜完成: 扫 ' + r.boards + ' 榜, 删 ' + r.removed + ' 条 (已加入 block; 记得点发布固化)' }));
+        return send(200, JSON.stringify({ ok: true, msg: '\u7d27\u6025\u64a4\u699c\u5b8c\u6210: \u626b ' + r.boards + ' \u699c, \u5220 ' + r.removed + ' \u6761 (\u5df2\u52a0\u5165 block; \u8bb0\u5f97\u70b9\u53d1\u5e03\u56fa\u5316)' }));
       } else return send(400, JSON.stringify({ ok: false, msg: 'bad action' }));
       saveModFile(mod);
-      return send(200, JSON.stringify({ ok: true, msg: a + ' id=' + id + ' 已写入 feedback-mod.json (点发布后下一 tick 生效)' }));
+      return send(200, JSON.stringify({ ok: true, msg: a + ' id=' + id + ' \u5df2\u5199\u5165 feedback-mod.json (\u70b9\u53d1\u5e03\u540e\u4e0b\u4e00 tick \u751f\u6548)' }));
     }
     if (u.pathname === '/publish' && req.method === 'POST') {
       const steps = [];
       let r = git(['add', '--', path.basename(MOD)]);
       steps.push('add: ' + (r.ok ? 'ok' : r.out));
       r = git(['diff', '--cached', '--quiet']);
-      if (r.ok) return send(200, JSON.stringify({ ok: true, msg: '没有要发布的改动' }));
+      if (r.ok) return send(200, JSON.stringify({ ok: true, msg: '\u6ca1\u6709\u8981\u53d1\u5e03\u7684\u6539\u52a8' }));
       r = git(['commit', '-m', 'mod: update feedback moderation file']);
       steps.push('commit: ' + (r.ok ? 'ok' : r.out));
       r = git(['pull', '--rebase']);
       steps.push('pull: ' + (r.ok ? 'ok' : r.out));
       r = git(['push']);
-      steps.push('push: ' + (r.ok ? 'ok (下一 tick 生效)' : r.out));
+      steps.push('push: ' + (r.ok ? 'ok (\u4e0b\u4e00 tick \u751f\u6548)' : r.out));
       return send(200, JSON.stringify({ ok: r.ok, msg: steps.join('\n') }));
     }
     send(404, JSON.stringify({ ok: false, msg: 'not found' }));
