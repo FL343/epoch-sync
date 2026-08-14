@@ -1,9 +1,9 @@
 'use strict';
-// voice.js unit tests: wire codec, validation negatives, vote merge/tally,
+// feedback.js unit tests: wire codec, validation negatives, vote merge/tally,
 // hot score, feed packing, and magic uniqueness against validate.js.
 const fs = require('fs');
 const path = require('path');
-const vv = require('../voice.js');
+const vv = require('../feedback.js');
 const v = require('../validate.js');
 
 let fail = 0, pass = 0;
@@ -29,7 +29,7 @@ function makeBoxWords(sid, text, cat, lang, ts, encPick) {
     : (u16.len < u8.len ? { enc: 1, p: u16 } : { enc: 0, p: u8 });
   const itemId = vv.fnv1a32(String(sid) + ':' + ts);
   const w1 = ((1 & 0xFF) << 24) | ((cat & 0xFF) << 16) | ((pick.enc & 0xFF) << 8) | (pick.p.len & 0xFF);
-  return { words: [vv.VOICE_MAGIC | 0, w1 | 0, vv.packLang(lang), itemId | 0, ts | 0].concat(pick.p.words), itemId };
+  return { words: [vv.FB_MAGIC | 0, w1 | 0, vv.packLang(lang), itemId | 0, ts | 0].concat(pick.p.words), itemId };
 }
 const NOW_MIN = vv.nowTsMin();
 {
@@ -55,14 +55,14 @@ const NOW_MIN = vv.nowTsMin();
   const okMk = makeBoxWords(sid, t104, 2, 'zh', NOW_MIN);
   const d = vv.decodeBoxEntry(sid, okMk.words, NOW_MIN);
   ok('box 208B boundary decodes', d && d.text === t104);
-  ok('cjk 105 exceeds both encodings', vv.packText(t105, 1).len > vv.VOICE_BODY_MAX && vv.packText(t105, 0).len > vv.VOICE_BODY_MAX);
+  ok('cjk 105 exceeds both encodings', vv.packText(t105, 1).len > vv.FB_BODY_MAX && vv.packText(t105, 0).len > vv.FB_BODY_MAX);
 }
 
 // ---- vote entry decode + merge + tally ----
 {
   const mkVote = (votes) => {
     const w1 = ((1 & 0xFF) << 24) | ((votes.length & 0xFF) << 16);
-    const words = [vv.VOTE_MAGIC | 0, w1 | 0];
+    const words = [vv.FB_VOTE_MAGIC | 0, w1 | 0];
     for (const [itemId, dir, ts] of votes) words.push(itemId | 0, ((ts << 2) | dir) | 0);
     return words;
   };
@@ -78,7 +78,7 @@ const NOW_MIN = vv.nowTsMin();
   const t = vv.tallyVotes(votes['111'], 'authorP');
   ok('tally: cleared not counted, self excluded', t.up === 1 && t.down === 0 && t.rep === 1);
   ok('vote bad magic -> empty', vv.decodeVoteEntry([0x99, 0]).length === 0);
-  ok('vote overcount -> empty', vv.decodeVoteEntry([vv.VOTE_MAGIC, ((1 << 24) | (31 << 16)) | 0]).length === 0);
+  ok('vote overcount -> empty', vv.decodeVoteEntry([vv.FB_VOTE_MAGIC, ((1 << 24) | (31 << 16)) | 0]).length === 0);
 }
 
 // ---- hot score: net votes x100 minus age hours ----
@@ -93,7 +93,7 @@ const NOW_MIN = vv.nowTsMin();
 {
   const item = { cat: 1, lang: 'zh', itemId: 12345, ts: 1000, text: '\u5efa\u8bae\u52a0\u4e00\u4e2a\u8272\u76f2\u914d\u8272\u9009\u9879' };
   const det = vv.packFeedDetails(item, 7, 2);
-  ok('feed pack header', det[0] === vv.VOICE_MAGIC && det[3] === 12345 && det[5] === 7 && det[6] === 2);
+  ok('feed pack header', det[0] === vv.FB_MAGIC && det[3] === 12345 && det[5] === 7 && det[6] === 2);
   ok('feed pack <= 64 words', det.length <= 64);
   const big = { ...item, text: '\u597d'.repeat(104) };
   const detBig = vv.packFeedDetails(big, 0, 0);
@@ -103,17 +103,17 @@ const NOW_MIN = vv.nowTsMin();
 }
 
 // ---- board naming + constants ----
-ok('feed board name shape', vv.feedBoardName(0, 'hot') === 'voice_feed_bug_hot' && vv.feedBoardName(3, 'new') === 'voice_feed_other_new');
-ok('cats locked', JSON.stringify(vv.VOICE_CATS) === JSON.stringify(['bug', 'idea', 'balance', 'other']));
+ok('feed board name shape', vv.feedBoardName(0, 'hot') === 'feedback_feed_bug_hot' && vv.feedBoardName(3, 'new') === 'feedback_feed_other_new');
+ok('cats locked', JSON.stringify(vv.FB_CATS) === JSON.stringify(['bug', 'idea', 'balance', 'other']));
 
-// ---- magic uniqueness: voice magics must not collide with any magic validate.js declares ----
+// ---- magic uniqueness: feedback magics must not collide with any magic validate.js declares ----
 {
   const src = fs.readFileSync(path.join(__dirname, '..', 'validate.js'), 'utf8');
   const used = new Set();
   for (const m of src.matchAll(/MAGIC\s*=\s*(0x[0-9A-Fa-f]+)/g)) used.add(parseInt(m[1], 16));
   ok('validate.js declares magics', used.size >= 4, [...used].map(x => x.toString(16)).join(','));
-  ok('VOICE_MAGIC 0xB6 unused elsewhere', !used.has(vv.VOICE_MAGIC));
-  ok('VOTE_MAGIC 0xB7 unused elsewhere', !used.has(vv.VOTE_MAGIC));
+  ok('FB_MAGIC 0xB6 unused elsewhere', !used.has(vv.FB_MAGIC));
+  ok('FB_VOTE_MAGIC 0xB7 unused elsewhere', !used.has(vv.FB_VOTE_MAGIC));
 }
 // validate.js import stays require-safe (main is guarded): the require above did not run main.
 ok('validate.js helpers importable', typeof v.postFormDetails === 'function' && typeof v.findOrCreateBoard === 'function');
@@ -121,10 +121,10 @@ ok('validate.js helpers importable', typeof v.postFormDetails === 'function' && 
 // lookup (createifnotfound: 0). Regressing to listing-only = fresh boards invisible
 // for 1h+; regressing to createifnotfound: 1 = risk of mis-provisioning as trusted.
 {
-  const vsrc = fs.readFileSync(path.join(__dirname, "..", "voice.js"), "utf8");
+  const vsrc = fs.readFileSync(path.join(__dirname, "..", "feedback.js"), "utf8");
   ok("box/vote lookup uses createifnotfound: 0", vsrc.includes("createifnotfound: 0"));
   ok("feed boards still find-or-create (trusted)", vsrc.includes("v.findOrCreateBoard("));
 }
 
-console.log('voice-settle: ' + pass + '/' + (pass + fail) + (fail ? ' FAIL' : ' ok'));
+console.log('feedback-settle: ' + pass + '/' + (pass + fail) + (fail ? ' FAIL' : ' ok'));
 process.exit(fail ? 1 : 0);

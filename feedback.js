@@ -1,6 +1,6 @@
 'use strict';
 // ============================================================
-// voice.js -- player-voice pipeline (community feedback + votes)
+// voice.js -- player-feedback pipeline (community feedback + votes)
 // ============================================================
 // Players submit short free-text feedback (client-writable voice_box board) and
 // votes (voice_vote board, rolling window). This job harvests both, sanitizes,
@@ -9,7 +9,7 @@
 // wrote is ever shown to other players without passing through this job: the
 // feed boards are the moderation choke point.
 //
-// Runs as its OWN workflow (voice.yml), deliberately NOT inside the reconcile
+// Runs as its OWN workflow (feedback.yml), deliberately NOT inside the reconcile
 // tick: harvesting two boards + rewriting up to 8 feed boards must never add
 // latency to match settlement. State is disjoint (voice.json only), so the
 // bot-state pushes of the two workflows can always rebase cleanly past each
@@ -24,7 +24,7 @@
 // lang16: two ASCII letters packed c0<<8|c1 (self-describing -- no table to sync).
 // dir: 0=clear vote, 1=up, 2=down, 3=report (report is record-only here; the
 //      auto-unlist threshold ships with the governance slice).
-// tsMin: minutes since VOICE_EPOCH0 (custom epoch -- immune to the int32-seconds
+// tsMin: minutes since FB_EPOCH0 (custom epoch -- immune to the int32-seconds
 //      2038 family by construction).
 // itemId: fnv1a32(steamid + ':' + tsMin) -- recomputed here; mismatch = drop.
 //
@@ -40,19 +40,19 @@
 const fs = require('fs');
 const v = require('./validate.js');   // main() is require-guarded; safe to import helpers
 
-const VOICE_MAGIC = 0xB6, VOTE_MAGIC = 0xB7, VOICE_VER = 1;
-const VOICE_BODY_MAX = 208;                       // bytes; client enforces, we re-check
-const VOICE_CATS = ['bug', 'idea', 'balance', 'other'];
-const VOICE_EPOCH0 = Date.UTC(2026, 0, 1);        // ms; tsMin = minutes since this
-const VOICE_VOTE_WINDOW = 30;                     // votes per rolling upload (2+30*2=62<=64)
-const VOICE_LB = process.env.VOICE_LB || 'voice_box';
-const VOICE_VOTE_LB = process.env.VOICE_VOTE_LB || 'voice_vote';
-const VOICE_FEED_PREFIX = process.env.VOICE_FEED_PREFIX || 'voice_feed';
-const VOICE_STATE_FILE = process.env.VOICE_STATE_FILE || 'voice.json';
-const VOICE_FEED_CAP = Math.max(1, Number(process.env.VOICE_FEED_CAP || 100));
-const VOICE_WRITE_CAP = Math.max(1, Number(process.env.VOICE_WRITE_CAP || 200));  // safety valve per run
+const FB_MAGIC = 0xB6, FB_VOTE_MAGIC = 0xB7, FB_VER = 1;
+const FB_BODY_MAX = 208;                       // bytes; client enforces, we re-check
+const FB_CATS = ['bug', 'idea', 'balance', 'other'];
+const FB_EPOCH0 = Date.UTC(2026, 0, 1);        // ms; tsMin = minutes since this
+const FB_VOTE_WINDOW = 30;                     // votes per rolling upload (2+30*2=62<=64)
+const FB_LB = process.env.FB_LB || 'feedback_box';
+const FB_VOTE_LB = process.env.FB_VOTE_LB || 'feedback_vote';
+const FB_FEED_PREFIX = process.env.FB_FEED_PREFIX || 'feedback_feed';
+const FB_STATE_FILE = process.env.FB_STATE_FILE || 'feedback.json';
+const FB_FEED_CAP = Math.max(1, Number(process.env.FB_FEED_CAP || 100));
+const FB_WRITE_CAP = Math.max(1, Number(process.env.FB_WRITE_CAP || 200));  // safety valve per run
 
-function feedBoardName(catIdx, sort) { return VOICE_FEED_PREFIX + '_' + VOICE_CATS[catIdx] + '_' + sort; }
+function feedBoardName(catIdx, sort) { return FB_FEED_PREFIX + '_' + FB_CATS[catIdx] + '_' + sort; }
 
 function packLang(code) {
   const s = String(code || 'xx').toLowerCase();
@@ -96,31 +96,31 @@ function sanitizeText(s) {
     .trim();
 }
 
-function nowTsMin(nowMs) { return Math.floor(((nowMs == null ? Date.now() : nowMs) - VOICE_EPOCH0) / 60000); }
+function nowTsMin(nowMs) { return Math.floor(((nowMs == null ? Date.now() : nowMs) - FB_EPOCH0) / 60000); }
 
 // Decode + validate one voice_box entry. Returns {itemId,cat,lang,ts,text} or null.
 function decodeBoxEntry(sid, words, nowMin) {
-  if (!words || words.length < 6 || words[0] !== VOICE_MAGIC) return null;
+  if (!words || words.length < 6 || words[0] !== FB_MAGIC) return null;
   const w1 = words[1] | 0;
   const ver = (w1 >>> 24) & 0xFF, cat = (w1 >>> 16) & 0xFF, enc = (w1 >>> 8) & 0xFF, len = w1 & 0xFF;
-  if (ver !== VOICE_VER || cat >= VOICE_CATS.length || enc > 1) return null;
-  if (len < 1 || len > VOICE_BODY_MAX || words.length < 5 + ((len + 3) >> 2)) return null;
+  if (ver !== FB_VER || cat >= FB_CATS.length || enc > 1) return null;
+  if (len < 1 || len > FB_BODY_MAX || words.length < 5 + ((len + 3) >> 2)) return null;
   const lang = unpackLang(words[2] | 0), itemId = words[3] | 0, ts = words[4] | 0;
   if (ts < 0 || ts > nowMin + 1440) return null;                    // future beyond +1d = bad clock/forgery
   if (fnv1a32(String(sid) + ':' + ts) !== itemId) return null;      // provenance check
   const text = sanitizeText(unpackText(words, 5, len, enc));
   if (!text) return null;
   // A tampered oversize body re-encodes past the cap -> fail closed.
-  if (Buffer.byteLength(text, 'utf8') > VOICE_BODY_MAX * 3) return null;
+  if (Buffer.byteLength(text, 'utf8') > FB_BODY_MAX * 3) return null;
   return { itemId, cat, lang, ts, text };
 }
 
 // Decode one voice_vote entry into [{itemId, dir, ts}] (window order kept).
 function decodeVoteEntry(words) {
-  if (!words || words.length < 2 || words[0] !== VOTE_MAGIC) return [];
+  if (!words || words.length < 2 || words[0] !== FB_VOTE_MAGIC) return [];
   const w1 = words[1] | 0;
   const ver = (w1 >>> 24) & 0xFF, count = (w1 >>> 16) & 0xFF;
-  if (ver !== VOICE_VER || count > VOICE_VOTE_WINDOW || words.length < 2 + count * 2) return [];
+  if (ver !== FB_VER || count > FB_VOTE_WINDOW || words.length < 2 + count * 2) return [];
   const out = [];
   for (let i = 0; i < count; i++) {
     const itemId = words[2 + i * 2] | 0, w = words[3 + i * 2] | 0;
@@ -160,7 +160,7 @@ function tallyVotes(slot, authorPid) {
 // hot = net votes weighted minus age in hours (older items decay one point per
 // hour; a fresh +1 outweighs a day-old +25 tie). new = tsMin (custom epoch).
 function hotScoreOf(up, down, ts, nowMs) {
-  const ageH = Math.floor(((nowMs == null ? Date.now() : nowMs) - (VOICE_EPOCH0 + ts * 60000)) / 3600000);
+  const ageH = Math.floor(((nowMs == null ? Date.now() : nowMs) - (FB_EPOCH0 + ts * 60000)) / 3600000);
   const s = (up - down) * 100 - Math.max(0, ageH);
   return Math.max(-2147483648, Math.min(2147483647, s)) | 0;
 }
@@ -169,18 +169,18 @@ function packFeedDetails(item, up, down) {
   // Prefer the smaller encoding, same rule as the client writer.
   const u8 = packText(item.text, 0), u16 = packText(item.text, 1);
   const pick = u16.len < u8.len ? { enc: 1, p: u16 } : { enc: 0, p: u8 };
-  if (pick.p.len > VOICE_BODY_MAX) return null;
-  const w1 = ((VOICE_VER & 0xFF) << 24) | ((item.cat & 0xFF) << 16) | ((pick.enc & 0xFF) << 8) | (pick.p.len & 0xFF);
-  return [VOICE_MAGIC | 0, w1 | 0, packLang(item.lang), item.itemId | 0, item.ts | 0, up | 0, down | 0].concat(pick.p.words);
+  if (pick.p.len > FB_BODY_MAX) return null;
+  const w1 = ((FB_VER & 0xFF) << 24) | ((item.cat & 0xFF) << 16) | ((pick.enc & 0xFF) << 8) | (pick.p.len & 0xFF);
+  return [FB_MAGIC | 0, w1 | 0, packLang(item.lang), item.itemId | 0, item.ts | 0, up | 0, down | 0].concat(pick.p.words);
 }
 
 function loadState() {
   try {
-    const s = JSON.parse(fs.readFileSync(VOICE_STATE_FILE, 'utf8'));
+    const s = JSON.parse(fs.readFileSync(FB_STATE_FILE, 'utf8'));
     return { boards: s.boards || {}, items: s.items || {}, votes: s.votes || {} };
   } catch (e) { return { boards: {}, items: {}, votes: {} }; }
 }
-function saveState(st) { fs.writeFileSync(VOICE_STATE_FILE, JSON.stringify(st)); }
+function saveState(st) { fs.writeFileSync(FB_STATE_FILE, JSON.stringify(st)); }
 
 async function main() {
   const missing = [];
@@ -211,8 +211,8 @@ async function main() {
     if (id) { st.boards[n] = id; dirty = true; }
     return id;
   };
-  const boxId = await findBoard(VOICE_LB), voteId = await findBoard(VOICE_VOTE_LB);
-  if (!boxId) { console.log('voice box board absent (pre-create ' + VOICE_LB + ', client-writable) -- skip run'); return; }
+  const boxId = await findBoard(FB_LB), voteId = await findBoard(FB_VOTE_LB);
+  if (!boxId) { console.log('feedback box board absent (pre-create ' + FB_LB + ', client-writable) -- skip run'); return; }
 
   // ---- harvest submissions ----
   const sidByItem = {};                        // runtime only, never persisted
@@ -233,7 +233,7 @@ async function main() {
   // ---- harvest votes ----
   let voteEnts = 0;
   if (voteId) {
-    const vb = await v.readBoardAll(voteId, 'voice votes');
+    const vb = await v.readBoardAll(voteId, 'feedback votes');
     for (const e of vb.ents) {
       const decoded = decodeVoteEntry(v.decodeDetails(e.detailData));
       if (!decoded.length) continue;
@@ -244,7 +244,7 @@ async function main() {
 
   // ---- read current feed boards (recovers author sids for older items) ----
   const feeds = {};                            // name -> { id, entries: {sid: {itemId, score}} }
-  for (let c = 0; c < VOICE_CATS.length; c++) {
+  for (let c = 0; c < FB_CATS.length; c++) {
     for (const sort of ['hot', 'new']) {
       const name = feedBoardName(c, sort);
       let id = st.boards[name] || byName(name);
@@ -255,7 +255,7 @@ async function main() {
       const entries = {};
       for (const e of br.ents) {
         const d = v.decodeDetails(e.detailData);
-        if (d[0] === VOICE_MAGIC && d.length >= 7) {
+        if (d[0] === FB_MAGIC && d.length >= 7) {
           entries[String(e.steamID)] = { itemId: d[3] | 0, score: e.score | 0, up: d[5] | 0, down: d[6] | 0 };
           if (!sidByItem[String(d[3] | 0)]) sidByItem[String(d[3] | 0)] = String(e.steamID);
         } else {
@@ -275,7 +275,7 @@ async function main() {
 
   // ---- compute + write desired feed sets ----
   let writes = 0, dels = 0, writeFail = 0;
-  for (let c = 0; c < VOICE_CATS.length; c++) {
+  for (let c = 0; c < FB_CATS.length; c++) {
     // candidates: live items of this category with a recoverable author
     const cand = [];
     for (const key of Object.keys(st.items)) {
@@ -294,13 +294,16 @@ async function main() {
       for (const x of scored) {                 // one slot per author = their best item
         if (seen.has(x.sid)) continue;
         seen.add(x.sid); desired.push(x);
-        if (desired.length >= VOICE_FEED_CAP) break;
+        if (desired.length >= FB_FEED_CAP) break;
       }
       const desiredSids = new Set(desired.map(x => x.sid));
       for (const x of desired) {
         const cur = feed.entries[x.sid];
-        if (cur && cur.itemId === (x.item.itemId | 0) && cur.score === x.score && cur.up === x.up && cur.down === x.down) continue;
-        if (writes + dels >= VOICE_WRITE_CAP) { v.ghWarn('voice write cap reached (' + VOICE_WRITE_CAP + ') -- rest next run'); break; }
+        // items are keyed by itemId (x.key); the item record itself has no itemId
+        // field -- comparing a nonexistent field made every run rewrite every
+        // entry (caught by the e2e idempotency assertion).
+        if (cur && cur.itemId === (x.key | 0) && cur.score === x.score && cur.up === x.up && cur.down === x.down) continue;
+        if (writes + dels >= FB_WRITE_CAP) { v.ghWarn('feedback write cap reached (' + FB_WRITE_CAP + ') -- rest next run'); break; }
         const det = packFeedDetails({ ...x.item, itemId: x.key | 0 }, x.up, x.down);
         if (!det) continue;
         const r = await v.postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', {
@@ -311,7 +314,7 @@ async function main() {
       }
       for (const sid of Object.keys(feed.entries)) {
         if (desiredSids.has(sid)) continue;
-        if (writes + dels >= VOICE_WRITE_CAP) break;
+        if (writes + dels >= FB_WRITE_CAP) break;
         const r = await v.postForm('/ISteamLeaderboards/DeleteLeaderboardScore/v1/', {
           key: process.env.STEAM_PUBLISHER_KEY, appid: process.env.APPID, leaderboardid: feed.id,
           steamid: sid, format: 'json',
@@ -322,16 +325,16 @@ async function main() {
   }
 
   if (dirty) saveState(st);
-  console.log('voice: items+' + newItems + ' (total ' + Object.keys(st.items).length + '), voteEnts=' + voteEnts +
+  console.log('feedback: items+' + newItems + ' (total ' + Object.keys(st.items).length + '), voteEnts=' + voteEnts +
     ', feed writes=' + writes + ' dels=' + dels + (writeFail ? ' FAILED=' + writeFail : '') + (dirty ? ' state saved' : ' no state change'));
 }
 
 if (require.main === module) {
-  main().catch(e => { console.error('voice run failed: ' + (e && e.stack || e)); process.exit(1); });
+  main().catch(e => { console.error('feedback run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
 module.exports = {
-  VOICE_MAGIC, VOTE_MAGIC, VOICE_VER, VOICE_BODY_MAX, VOICE_CATS, VOICE_EPOCH0,
-  VOICE_VOTE_WINDOW, VOICE_LB, VOICE_VOTE_LB, VOICE_FEED_PREFIX, VOICE_FEED_CAP,
+  FB_MAGIC, FB_VOTE_MAGIC, FB_VER, FB_BODY_MAX, FB_CATS, FB_EPOCH0,
+  FB_VOTE_WINDOW, FB_LB, FB_VOTE_LB, FB_FEED_PREFIX, FB_FEED_CAP,
   feedBoardName, packLang, unpackLang, fnv1a32, unpackText, packText, sanitizeText,
   nowTsMin, decodeBoxEntry, decodeVoteEntry, mergeVotes, tallyVotes, hotScoreOf, packFeedDetails,
 };

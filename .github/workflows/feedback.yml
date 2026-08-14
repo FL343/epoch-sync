@@ -1,7 +1,7 @@
-name: voice
-# Player-voice pipeline. Runs as its own workflow, NOT inside the reconcile tick:
+name: feedback
+# Player-feedback pipeline. Runs as its own workflow, NOT inside the reconcile tick:
 # harvesting + rewriting up to 8 feed boards must never add latency to match
-# settlement. State (voice.json) is disjoint from reconcile state, so the two
+# settlement. State (feedback.json) is disjoint from reconcile state, so the two
 # workflows' bot pushes always rebase cleanly past each other; persist retries
 # the push to absorb the race window. Offset schedule (minute 2 of each 5) keeps
 # the two runners from starting on the same tick boundary.
@@ -12,10 +12,10 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: voice
+  group: feedback
   cancel-in-progress: false
 jobs:
-  voice:
+  feedback:
     if: github.repository == 'FL343/epoch-sync'
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -27,27 +27,27 @@ jobs:
           fetch-depth: 0
       - name: test
         run: |
-          for f in test/voice-*.js; do echo "== $f =="; node "$f" || exit 1; done
+          for f in test/feedback-*.js; do echo "== $f =="; node "$f" || exit 1; done
       - name: run
         env:
           STEAM_PUBLISHER_KEY: ${{ secrets.STEAM_PUBLISHER_KEY }}
           APPID: ${{ secrets.APPID }}
           STATE_SALT: ${{ secrets.STATE_SALT }}
-        run: node voice.js
+        run: node feedback.js
       - name: persist
         run: |
-          if [ -n "$(git status --porcelain -- voice.json)" ]; then
+          if [ -n "$(git status --porcelain -- feedback.json)" ]; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add -- voice.json
-            git commit -m "state: update voice state"
-            # Race window vs the reconcile persist: voice.json is disjoint from
+            git add -- feedback.json
+            git commit -m "state: update feedback state"
+            # Race window vs the reconcile persist: feedback.json is disjoint from
             # reconcile state files, so rebase is always clean -- retry only the
             # push contention, then fail loudly.
             n=0
             until git pull --rebase origin "${GITHUB_REF_NAME}" && git push; do
               n=$((n+1))
-              if [ "$n" -ge 3 ]; then echo "::error::voice state push failed after $n tries"; exit 1; fi
+              if [ "$n" -ge 3 ]; then echo "::error::feedback state push failed after $n tries"; exit 1; fi
               sleep $((5 * n))
             done
           else
