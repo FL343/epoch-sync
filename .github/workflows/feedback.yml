@@ -33,6 +33,10 @@ jobs:
           STEAM_PUBLISHER_KEY: ${{ secrets.STEAM_PUBLISHER_KEY }}
           APPID: ${{ secrets.APPID }}
           STATE_SALT: ${{ secrets.STATE_SALT }}
+          # daily digest (governance slice): first tick after UTC midnight mails
+          # new items to the owner via Resend; unset secrets = silently off
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          FB_DIGEST_TO: ${{ secrets.FB_DIGEST_TO }}
         run: node feedback.js
       - name: persist
         run: |
