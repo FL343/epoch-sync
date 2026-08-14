@@ -195,7 +195,23 @@ async function main() {
   const lr = await v.getJson(v.BASE + '/ISteamLeaderboards/GetLeaderboardsForGame/v2/?key=' + process.env.STEAM_PUBLISHER_KEY + '&appid=' + process.env.APPID + '&format=json');
   const list = ((lr.json && lr.json.response && lr.json.response.leaderboards) || []);
   const byName = (n) => { const f = list.find(x => String(x.name || x.Name) === n); return f ? (f.id || f.ID) : null; };
-  const boxId = byName(VOICE_LB), voteId = byName(VOICE_VOTE_LB);
+  // Listing-lag bypass for the two client-writable boards: FindOrCreateLeaderboard
+  // with createifnotfound=0 is a pure by-name lookup (never creates, so it can
+  // never mis-provision them as trusted-writes). Ids are cached in state.
+  const findBoard = async (n) => {
+    if (st.boards[n]) return st.boards[n];
+    let id = byName(n);
+    if (!id) {
+      const res = await v.postForm('/ISteamLeaderboards/FindOrCreateLeaderboard/v2/', {
+        key: process.env.STEAM_PUBLISHER_KEY, appid: process.env.APPID, name: n, createifnotfound: 0, format: 'json',
+      });
+      const lb = (res.json && res.json.result && res.json.result.leaderboard) || (res.json && res.json.leaderboard) || null;
+      id = lb && (lb.leaderBoardID || lb.leaderboardID || lb.id || lb.ID) || null;
+    }
+    if (id) { st.boards[n] = id; dirty = true; }
+    return id;
+  };
+  const boxId = await findBoard(VOICE_LB), voteId = await findBoard(VOICE_VOTE_LB);
   if (!boxId) { console.log('voice box board absent (pre-create ' + VOICE_LB + ', client-writable) -- skip run'); return; }
 
   // ---- harvest submissions ----

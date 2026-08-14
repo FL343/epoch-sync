@@ -117,6 +117,14 @@ ok('cats locked', JSON.stringify(vv.VOICE_CATS) === JSON.stringify(['bug', 'idea
 }
 // validate.js import stays require-safe (main is guarded): the require above did not run main.
 ok('validate.js helpers importable', typeof v.postFormDetails === 'function' && typeof v.findOrCreateBoard === 'function');
+// Listing-lag bypass pin: the client-writable boards resolve via a pure by-name
+// lookup (createifnotfound: 0). Regressing to listing-only = fresh boards invisible
+// for 1h+; regressing to createifnotfound: 1 = risk of mis-provisioning as trusted.
+{
+  const vsrc = fs.readFileSync(path.join(__dirname, "..", "voice.js"), "utf8");
+  ok("box/vote lookup uses createifnotfound: 0", vsrc.includes("createifnotfound: 0"));
+  ok("feed boards still find-or-create (trusted)", vsrc.includes("v.findOrCreateBoard("));
+}
 
 console.log('voice-settle: ' + pass + '/' + (pass + fail) + (fail ? ' FAIL' : ' ok'));
 process.exit(fail ? 1 : 0);
