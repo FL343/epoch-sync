@@ -22,8 +22,8 @@
 //   feed entry: [0xB6, VER<<24|cat<<16|enc<<8|len, lang16, itemId, tsMin, up, down, body...]
 // enc: 0=utf-8, 1=utf-16le (client picks whichever is smaller; body <= 208 bytes).
 // lang16: two ASCII letters packed c0<<8|c1 (self-describing -- no table to sync).
-// dir: 0=clear vote, 1=up, 2=down, 3=report (report is record-only here; the
-//      auto-unlist threshold ships with the governance slice).
+// dir: 0=clear vote, 1=up, 2=down, 3=report (FB_REPORT_HOLD unique reporters
+//      auto-unlist the item to 'held' pending human review, see governance below).
 // tsMin: minutes since FB_EPOCH0 (custom epoch -- immune to the int32-seconds
 //      2038 family by construction).
 // itemId: fnv1a32(steamid + ':' + tsMin) -- recomputed here; mismatch = drop.
@@ -38,6 +38,7 @@
 // Author identity for feed writes is recovered from live board reads each run
 // and never persisted.
 const fs = require('fs');
+const crypto = require('crypto');
 const v = require('./validate.js');   // main() is require-guarded; safe to import helpers
 
 const FB_MAGIC = 0xB6, FB_VOTE_MAGIC = 0xB7, FB_VER = 1;
@@ -51,6 +52,14 @@ const FB_FEED_PREFIX = process.env.FB_FEED_PREFIX || 'feedback_feed';
 const FB_STATE_FILE = process.env.FB_STATE_FILE || 'feedback.json';
 const FB_FEED_CAP = Math.max(1, Number(process.env.FB_FEED_CAP || 100));
 const FB_WRITE_CAP = Math.max(1, Number(process.env.FB_WRITE_CAP || 200));  // safety valve per run
+// Governance (V4+V5 slice): daily display allowance per author, and the unique-
+// reporter threshold that auto-unlists an item pending review. 15 is a decree
+// (2026-08-14): clearly above what one full lobby / premade can muster, still
+// reachable at this game's population; retune from real report distributions.
+const FB_DAILY_CAP = Math.max(1, Number(process.env.FB_DAILY_CAP || 3));
+const FB_REPORT_HOLD = Math.max(1, Number(process.env.FB_REPORT_HOLD || 15));
+const FB_WORDLIST_FILE = process.env.FB_WORDLIST_FILE || 'feedback-wordlist.json';
+const FB_MOD_FILE = process.env.FB_MOD_FILE || 'feedback-mod.json';
 
 function feedBoardName(catIdx, sort) { return FB_FEED_PREFIX + '_' + FB_CATS[catIdx] + '_' + sort; }
 
@@ -97,6 +106,235 @@ function sanitizeText(s) {
 }
 
 function nowTsMin(nowMs) { return Math.floor(((nowMs == null ? Date.now() : nowMs) - FB_EPOCH0) / 60000); }
+function dayOfTs(tsMin) { return Math.floor((FB_EPOCH0 + tsMin * 60000) / 86400000); }   // UTC day index
+
+// ============================================================
+// Governance (V4+V5): content filter + daily cap + moderation file + report hold
+// ============================================================
+// Item status machine (items[key].st):
+//   live      placeable on feed boards
+//   archived  author sid not recoverable -> cannot be placed (auto-flips back)
+//   filtered  failed the content filter at admission; never shown; admin 'allow'
+//             releases a false positive back to live
+//   capped    past the author's FB_DAILY_CAP for that UTC day; never shown
+//   held      unique reports crossed FB_REPORT_HOLD -> auto-unlisted pending
+//             review. ONLY an admin clearance restores it -- cron never auto-
+//             restores, even if reporters retract (review is a human call, §5)
+//   blocked   on the moderation block list. The list is DECLARATIVE: on it =
+//             blocked, dropped from it = released back to live.
+
+// Content wordlist -- HASHED in the public repo (decree 2026-08-15: a readable
+// list is an exact evasion cheat-sheet, so the file carries only
+// HMAC-SHA256(STATE_SALT, folded word) cut to 16 hex, plus the folded
+// code-point length for the substring tier). The plaintext master lives in
+// ~/gmt-secrets; rebuild with tools/build-wordlist.js. Matching re-derives the
+// same hashes from sliding windows of the folded text, so substring semantics
+// survive hashing intact (~250 cps x ~10 lengths = a few thousand HMACs per
+// NEW item -- negligible). FAIL-CLOSED by decree: file missing/unparseable/
+// empty -> NO new item is admitted that tick (existing items untouched); a
+// broken filter must never behave like an open gate. Two tiers:
+//   sub:  substring match on case-folded, separator-stripped text (slurs and
+//         unambiguous tokens; catches s-p-a-c-e-d and dotted variants)
+//   word: whole-token match on lowercased text (short/ambiguous terms that
+//         substring matching would false-positive on; latin scripts only)
+function wlHash(salt, s) {
+  return crypto.createHmac('sha256', String(salt)).update(String(s), 'utf8').digest('hex').slice(0, 16);
+}
+function loadWordlist(file) {
+  try {
+    const w = JSON.parse(fs.readFileSync(file || FB_WORDLIST_FILE, 'utf8'));
+    const byLen = {};
+    let nSub = 0;
+    for (const e of (w.sub || [])) {
+      const l = e && (e.l | 0), h = e && String(e.h || '');
+      if (l > 0 && l <= 32 && /^[0-9a-f]{16}$/.test(h)) { (byLen[l] = byLen[l] || new Set()).add(h); nSub++; }
+    }
+    const word = new Set();
+    for (const h of (w.word || [])) if (/^[0-9a-f]{16}$/.test(String(h))) word.add(String(h));
+    if (!nSub) return null;
+    return { byLen, word };
+  } catch (e) { return null; }
+}
+function wlSubHit(folded, wl, salt) {
+  const cps = Array.from(folded);
+  for (const lStr of Object.keys(wl.byLen)) {
+    const L = lStr | 0;
+    if (L > cps.length) continue;
+    const set = wl.byLen[lStr];
+    for (let i = 0; i + L <= cps.length; i++) {
+      if (set.has(wlHash(salt, cps.slice(i, i + L).join('')))) return true;
+    }
+  }
+  return false;
+}
+function wlWordHit(low, wl, salt) {
+  if (!wl.word.size) return false;
+  for (const tok of low.split(/[^\p{L}\p{N}]+/u)) {
+    if (tok && wl.word.has(wlHash(salt, tok))) return true;
+  }
+  return false;
+}
+
+// ---- Ad/promo detection: TOP filtering priority by decree (2026-08-15) ----
+// Domains, QQ-group / WeChat plugs, bare long numbers. Spammers evade lazily
+// (spacing, fullwidth chars, "[.]"/"(\u70B9)", Chinese numerals, Cyrillic look-
+// alikes), so we NORMALIZE first and only then match: NFKC (fullwidth ->
+// ascii, circled digits -> digits) + homoglyph fold + CN-numeral -> digit +
+// every dot-spelling -> "." + wrapper strip. The arms race is not won here --
+// novel evasions get added to the wordlist file (next tick, no code change),
+// reports (>=FB_REPORT_HOLD) auto-unlist, and the daily digest + admin block
+// the rest. Structurally this board is a terrible ad channel anyway: 15min
+// cooldown, 3/day cap, one display slot per author, ~5min publish delay.
+const AD_HOMOGLYPH = {
+  '\u0430': 'a', '\u0435': 'e', '\u043E': 'o', '\u0440': 'p', '\u0441': 'c', '\u0445': 'x', '\u0443': 'y',
+  '\u0456': 'i', '\u0455': 's', '\u0501': 'd', '\u03BD': 'v', '\u03BF': 'o', '\u03B1': 'a', '\u0442': 't', '\u043A': 'k',
+};
+const AD_CN_DIGIT = {
+  '\u96F6': '0', '\u3007': '0', '\u4E00': '1', '\u58F9': '1', '\u4E8C': '2', '\u8D30': '2', '\u4E24': '2',
+  '\u4E09': '3', '\u53C1': '3', '\u56DB': '4', '\u8086': '4', '\u4E94': '5', '\u4F0D': '5', '\u516D': '6',
+  '\u9646': '6', '\u4E03': '7', '\u67D2': '7', '\u516B': '8', '\u634C': '8', '\u4E5D': '9', '\u7396': '9',
+};
+// dom = surface for domain matching (dots kept + dot-spellings folded in,
+// wrappers/noise stripped, whitespace around dots tightened);
+// dig = surface for contact/number matching (everything non-alnum stripped so
+// spaced-out digits and keywords rejoin).
+function adSurfaces(low) {
+  let s = low.normalize ? low.normalize('NFKC').toLowerCase() : low;
+  let out = '';
+  for (const ch of s) out += AD_HOMOGLYPH[ch] || AD_CN_DIGIT[ch] || ch;
+  let dom = out
+    .replace(/[\u3002\u3001\u4E36\u30FB\u2027\u00B7\u2219\u2022\u22C5]/g, '.')
+    .replace(/\u70B9/g, '.')
+    .replace(/\bdot\b/g, '.')
+    .replace(/[()[\]{}<>"'`*~|:;!?,]/g, '')
+    .replace(/\s*\.\s*/g, '.')
+    .replace(/\.{2,}/g, '.');
+  const dig = out.replace(/[^\p{L}\p{N}]/gu, '');
+  return { norm: out, dom, dig };
+}
+const AD_DOMAIN_RE = /(?:https?:\/\/|www\.)|(?:[a-z0-9-]{2,}\.)+(?:com|net|org|cn|top|xyz|cc|tv|shop|vip|club|icu|info|io|me|gg|tk|site|online|store|fun|pro|live|app|link|co)\b/;
+// contact keyword near a number (keyword ALONE never filters: "\u6709\u4EBA\u5F00\u5916\u6302" is
+// honest feedback about cheaters, "\u5916\u6302\u7FA4123456" is the ad)
+const AD_CONTACT_NEAR_RE = /(?:qq|\u6263\u6263|\u4F01\u9E45|q\u7FA4|\u52A0\u7FA4|\u8FDB\u7FA4|\u5FAE\u4FE1|weixin|wx|vx|\u8587\u4FE1|\u5A01\u4FE1|\u7535\u62A5|telegram|discord|\u4EE3\u7EC3|\u4EE3\u6253|\u5916\u6302|\u8F85\u52A9|\u4F4E\u4EF7|\u51FA\u552E|\u6536\u8D2D|\u5237\u5206)[^0-9]{0,6}[0-9]{4,}/;
+// ...or anywhere in the text alongside a QQ-length number (7+ digits; 6-digit
+// error codes stay safe, real QQ/phone plugs are 8-11)
+const AD_CONTACT_WORD_RE = /(?:qq|\u6263\u6263|\u4F01\u9E45|q\u7FA4|\u52A0\u7FA4|\u8FDB\u7FA4|\u5FAE\u4FE1|weixin|\u8587\u4FE1|\u5A01\u4FE1|\u7535\u62A5|telegram|discord|\u4EE3\u7EC3|\u4EE3\u6253|\u4F4E\u4EF7|\u51FA\u552E|\u6536\u8D2D|\u5237\u5206)/;
+// unambiguous contact words may also plug a letters id (WeChat ids are alnum)
+const AD_CONTACT_ID_RE = /(?:\u5FAE\u4FE1|weixin|\u8587\u4FE1|\u5A01\u4FE1|\u6263\u6263|\u4F01\u9E45|\u52A0\u7FA4|\u8FDB\u7FA4)\u53F7?[a-z][a-z0-9_-]{3,}/;
+const AD_DIGITRUN_RE = /[0-9]{9,}/;
+function adReason(low) {
+  const s = adSurfaces(low);
+  // URL schemes checked on the intact normalized text (the dom surface strips
+  // ':' as wrapper noise, which would eat "https://")
+  if (/(?:https?:\/\/|www\.)/.test(s.norm)) return 'ad';
+  // spelled-out letters ("g o l d s h o p . c o m") rejoin when all whitespace
+  // goes; \b on the TLD keeps ordinary joined sentences from matching
+  if (AD_DOMAIN_RE.test(s.dom) || AD_DOMAIN_RE.test(s.dom.replace(/\s+/g, ''))) return 'ad';
+  if (AD_CONTACT_NEAR_RE.test(s.dig) || AD_CONTACT_ID_RE.test(s.dig)) return 'ad';
+  if (AD_CONTACT_WORD_RE.test(s.dig) && /[0-9]{7,}/.test(s.dig)) return 'ad';
+  if (AD_DIGITRUN_RE.test(s.dig)) return 'ad';
+  return null;
+}
+
+// Shared fold for wordlist matching -- the SAME fold is applied to candidate
+// text windows at match time and to master words at build time (tools/
+// build-wordlist.js), so hashes line up by construction.
+function foldForWordlist(s) {
+  return String(s == null ? '' : s).toLowerCase()
+    .replace(/[\s\u200B-\u200F\u2060-\u206F\uFEFF.,_\-*|~'"`!?:;()[\]{}]/g, '');
+}
+
+// Why an item must not be shown, or null. Ad heuristics first (top priority,
+// code-side so they hold even while the wordlist evolves), then the hashed
+// wordlist, then noise heuristics: long single-char runs (keyboard mash) and
+// bodies with no letter or digit at all (pure symbol noise).
+function filterReason(text, wl, salt) {
+  const raw = String(text == null ? '' : text);
+  const low = raw.toLowerCase();
+  const folded = foldForWordlist(low);
+  const ad = adReason(low);
+  if (ad) return ad;
+  if (wlSubHit(folded, wl, salt)) return 'wordlist';
+  if (wlWordHit(low, wl, salt)) return 'wordlist';
+  if (/(.)\1{9,}/.test(folded)) return 'spam';
+  if (!/[\p{L}\p{N}]/u.test(raw)) return 'noise';
+  return null;
+}
+
+// Items this author already has on the same UTC day (filtered ones don't
+// consume the allowance -- they were never displayable).
+function countAuthorDay(items, ap, tsMin) {
+  const day = dayOfTs(tsMin | 0);
+  let n = 0;
+  for (const k of Object.keys(items)) {
+    const it = items[k];
+    if (it.ap === ap && it.st !== 'filtered' && dayOfTs(it.ts | 0) === day) n++;
+  }
+  return n;
+}
+
+// Moderation control file, written by tools/feedback-admin.js and committed to
+// the repo (the next tick applies it). Absent file = empty defaults: moderation
+// is opt-in, the wordlist above is the fail-closed side.
+//   block: [itemId]        declarative unlist (on = blocked, off = released)
+//   allow: [itemId]        wordlist false-positive release (filtered -> live)
+//   clear: {itemId: tsMin} held review passed -- reports at/before tsMin stop
+//                          counting and the item returns to the boards
+function loadMod(file) {
+  try {
+    const m = JSON.parse(fs.readFileSync(file || FB_MOD_FILE, 'utf8'));
+    return {
+      block: (m.block || []).map(n => n | 0),
+      allow: (m.allow || []).map(n => n | 0),
+      clear: (m.clear && typeof m.clear === 'object') ? m.clear : {},
+    };
+  } catch (e) { return { block: [], allow: [], clear: {} }; }
+}
+
+// Unique reporters whose LATEST direction is still 'report', cast after the
+// item's last admin clearance (self reports never count, tallyVotes discipline).
+function reportsSince(slot, authorPid, clearAt) {
+  let n = 0;
+  for (const pidKey of Object.keys(slot || {})) {
+    if (pidKey === authorPid) continue;
+    const rec = slot[pidKey];
+    if ((rec[0] | 0) === 3 && (rec[1] | 0) > (clearAt | 0)) n++;
+  }
+  return n;
+}
+
+// trust_tier reserve (B5/B6 discipline: record-only until real traffic
+// calibrates thresholds): low-trust authors get down-weighted or withheld here
+// once the reconcile trust map ships. Zero-effect seam, pinned by tests.
+function trustPenaltyOf(pid) { return 0; }
+
+// Apply the moderation file + report threshold to the item set. Mutates items,
+// returns whether anything changed. Order: block list first (declarative, wins
+// over everything), then allow (filtered release), then the report hold.
+function governItems(items, votes, mod, nowMin) {
+  let dirty = false;
+  const blockSet = new Set(mod.block.map(String));
+  const allowSet = new Set(mod.allow.map(String));
+  for (const key of Object.keys(items)) {
+    const item = items[key];
+    if (blockSet.has(key)) {
+      if (item.st !== 'blocked') { item.st = 'blocked'; dirty = true; }
+      continue;
+    }
+    if (item.st === 'blocked') { item.st = 'live'; dirty = true; }
+    if (item.st === 'filtered' && allowSet.has(key)) { item.st = 'live'; dirty = true; }
+    const clearAt = (mod.clear[key] != null) ? (mod.clear[key] | 0) : -1;
+    const rep = reportsSince(votes[key], item.ap, clearAt);
+    if (item.st === 'live' && rep >= FB_REPORT_HOLD) {
+      item.st = 'held'; item.ha = nowMin | 0; dirty = true;
+    } else if (item.st === 'held' && clearAt >= (item.ha | 0) && rep < FB_REPORT_HOLD) {
+      // held -> live happens ONLY through a clearance younger than the hold;
+      // reporters retracting on their own never restores (human call by decree)
+      item.st = 'live'; dirty = true;
+    }
+  }
+  return dirty;
+}
 
 // Decode + validate one voice_box entry. Returns {itemId,cat,lang,ts,text} or null.
 function decodeBoxEntry(sid, words, nowMin) {
@@ -177,10 +415,53 @@ function packFeedDetails(item, up, down) {
 function loadState() {
   try {
     const s = JSON.parse(fs.readFileSync(FB_STATE_FILE, 'utf8'));
-    return { boards: s.boards || {}, items: s.items || {}, votes: s.votes || {} };
-  } catch (e) { return { boards: {}, items: {}, votes: {} }; }
+    return { boards: s.boards || {}, items: s.items || {}, votes: s.votes || {}, digest: s.digest || { day: '', at: 0 } };
+  } catch (e) { return { boards: {}, items: {}, votes: {}, digest: { day: '', at: 0 } }; }
 }
 function saveState(st) { fs.writeFileSync(FB_STATE_FILE, JSON.stringify(st)); }
+
+// ---- daily digest (rides the O49 Resend channel) ----
+// First tick after a UTC day rollover mails every item admitted since the last
+// watermark to the owner's inbox for a once-over (the name-and-unlist workflow,
+// §5). The mail body carries player text -- the inbox is private; LOGS still
+// carry counts only (feedback-logsafe tripwire). A failed send keeps the
+// watermark -> retried next tick. Unconfigured env = silently off.
+async function maybeSendDigest(st, nowMs) {
+  const to = process.env.FB_DIGEST_TO, apiKey = process.env.RESEND_API_KEY;
+  if (!to || !apiKey) return false;
+  const day = new Date(nowMs).toISOString().slice(0, 10);
+  const dg = st.digest || (st.digest = { day: '', at: 0 });
+  if (dg.day === day && !process.env.FB_DIGEST_FORCE) return false;
+  const since = dg.at | 0;
+  const fresh = Object.keys(st.items)
+    .map(k => ({ id: k, it: st.items[k] }))
+    .filter(x => (x.it.ts | 0) > since)
+    .sort((a, b) => (a.it.ts | 0) - (b.it.ts | 0));
+  let maxTs = since;
+  for (const x of fresh) maxTs = Math.max(maxTs, x.it.ts | 0);
+  if (fresh.length) {
+    const lines = fresh.slice(0, 200).map(x => {
+      const t = tallyVotes(st.votes[x.id], x.it.ap);
+      return '[' + FB_CATS[x.it.cat | 0] + '/' + x.it.lang + ' st=' + x.it.st + ' +' + t.up + '/-' + t.down +
+        ' rep' + t.rep + ' id=' + x.id + ']\n' + x.it.text;
+    });
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + apiKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        from: process.env.FB_DIGEST_FROM || 'onboarding@resend.dev',
+        to: [to],
+        subject: 'feedback digest ' + day + ': ' + fresh.length + ' new',
+        text: 'New player feedback since the last digest: ' + fresh.length + '\n' +
+          'Unlist: run tools/feedback-admin.js (or add the id to feedback-mod.json "block").\n\n' +
+          lines.join('\n\n'),
+      }),
+    });
+    if (!res.ok) { v.ghWarn('feedback digest send failed HTTP ' + res.status); return false; }
+  }
+  st.digest = { day, at: maxTs };
+  return true;
+}
 
 async function main() {
   const missing = [];
@@ -189,6 +470,9 @@ async function main() {
   const nowMs = Date.now(), nowMin = nowTsMin(nowMs);
   const st = loadState();
   let dirty = false;
+  const wl = loadWordlist();
+  const mod = loadMod();
+  if (!wl) v.ghWarn('feedback wordlist unavailable -- admitting no new items this tick (fail-closed)');
 
   // ---- resolve boards (find-or-create bypasses the listing lag; box/vote are
   //      client-writable and provisioned out of band -- absent = skip, warn) ----
@@ -214,10 +498,10 @@ async function main() {
   const boxId = await findBoard(FB_LB), voteId = await findBoard(FB_VOTE_LB);
   if (!boxId) { console.log('feedback box board absent (pre-create ' + FB_LB + ', client-writable) -- skip run'); return; }
 
-  // ---- harvest submissions ----
+  // ---- harvest submissions (admission gate: filter + daily cap) ----
   const sidByItem = {};                        // runtime only, never persisted
   const box = await v.readBoardAll(boxId, 'voice box');
-  let newItems = 0;
+  let newItems = 0, filteredN = 0, cappedN = 0;
   for (const e of box.ents) {
     const sid = String(e.steamID);
     const it = decodeBoxEntry(sid, v.decodeDetails(e.detailData), nowMin);
@@ -225,7 +509,13 @@ async function main() {
     sidByItem[String(it.itemId)] = sid;
     const key = String(it.itemId);
     if (!st.items[key]) {
-      st.items[key] = { ap: v.pid(sid), cat: it.cat, lang: it.lang, ts: it.ts, text: it.text, st: 'live' };
+      if (!wl) continue;                       // fail-closed: no filter, no admissions
+      const ap = v.pid(sid);
+      let stt = 'live';
+      if (filterReason(it.text, wl, process.env.STATE_SALT) && mod.allow.indexOf(it.itemId | 0) < 0) stt = 'filtered';
+      else if (countAuthorDay(st.items, ap, it.ts) >= FB_DAILY_CAP) stt = 'capped';
+      st.items[key] = { ap, cat: it.cat, lang: it.lang, ts: it.ts, text: it.text, st: stt };
+      if (stt === 'filtered') filteredN++; else if (stt === 'capped') cappedN++;
       newItems++; dirty = true;
     }
   }
@@ -241,6 +531,9 @@ async function main() {
       if (mergeVotes(st.votes, v.pid(String(e.steamID)), decoded)) dirty = true;
     }
   }
+
+  // ---- governance: moderation file (block/allow/clear) + report hold ----
+  if (governItems(st.items, st.votes, mod, nowMin)) dirty = true;
 
   // ---- read current feed boards (recovers author sids for older items) ----
   const feeds = {};                            // name -> { id, entries: {sid: {itemId, score}} }
@@ -288,7 +581,7 @@ async function main() {
       const name = feedBoardName(c, sort);
       const feed = feeds[name];
       if (!feed) continue;
-      const scored = cand.map(x => ({ ...x, score: sort === 'hot' ? hotScoreOf(x.up, x.down, x.item.ts, nowMs) : (x.item.ts | 0) }))
+      const scored = cand.map(x => ({ ...x, score: sort === 'hot' ? hotScoreOf(x.up, x.down, x.item.ts, nowMs) - trustPenaltyOf(x.item.ap) : (x.item.ts | 0) }))
         .sort((a, b) => b.score - a.score || (b.item.ts | 0) - (a.item.ts | 0));
       const seen = new Set(); const desired = [];
       for (const x of scored) {                 // one slot per author = their best item
@@ -324,8 +617,14 @@ async function main() {
     }
   }
 
+  if (await maybeSendDigest(st, nowMs)) { dirty = true; console.log('feedback digest sent (' + st.digest.day + ')'); }
+
   if (dirty) saveState(st);
-  console.log('feedback: items+' + newItems + ' (total ' + Object.keys(st.items).length + '), voteEnts=' + voteEnts +
+  const cnt = {};
+  for (const k of Object.keys(st.items)) { const s2 = st.items[k].st; cnt[s2] = (cnt[s2] || 0) + 1; }
+  console.log('feedback: items+' + newItems + ' (total ' + Object.keys(st.items).length +
+    ', filtered ' + (cnt.filtered || 0) + ', capped ' + (cnt.capped || 0) +
+    ', held ' + (cnt.held || 0) + ', blocked ' + (cnt.blocked || 0) + '), voteEnts=' + voteEnts +
     ', feed writes=' + writes + ' dels=' + dels + (writeFail ? ' FAILED=' + writeFail : '') + (dirty ? ' state saved' : ' no state change'));
 }
 
@@ -335,6 +634,10 @@ if (require.main === module) {
 module.exports = {
   FB_MAGIC, FB_VOTE_MAGIC, FB_VER, FB_BODY_MAX, FB_CATS, FB_EPOCH0,
   FB_VOTE_WINDOW, FB_LB, FB_VOTE_LB, FB_FEED_PREFIX, FB_FEED_CAP,
+  FB_DAILY_CAP, FB_REPORT_HOLD, FB_WORDLIST_FILE, FB_MOD_FILE,
   feedBoardName, packLang, unpackLang, fnv1a32, unpackText, packText, sanitizeText,
   nowTsMin, decodeBoxEntry, decodeVoteEntry, mergeVotes, tallyVotes, hotScoreOf, packFeedDetails,
+  dayOfTs, loadWordlist, adSurfaces, adReason, filterReason, countAuthorDay,
+  loadMod, reportsSince, trustPenaltyOf, governItems, maybeSendDigest,
+  wlHash, wlSubHit, wlWordHit, foldForWordlist,
 };

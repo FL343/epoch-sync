@@ -1,0 +1,147 @@
+{
+ "_comment": [
+  "Hashed content wordlist. Entries are HMAC-SHA256(STATE_SALT, word) cut to",
+  "16 hex (+ folded code-point length for the substring tier); the plaintext",
+  "master lives outside the repo. Rebuild: node tools/build-wordlist.js.",
+  "Pipeline side fails closed: file missing/empty/unreadable = no new items",
+  "admitted that tick."
+ ],
+ "alg": "hmac-sha256-16hex",
+ "sub": [
+  {
+   "l": 6,
+   "h": "d070365a0705500f"
+  },
+  {
+   "l": 5,
+   "h": "8c935ad298c6be10"
+  },
+  {
+   "l": 6,
+   "h": "ef3f167cafd435fb"
+  },
+  {
+   "l": 4,
+   "h": "ed108e9818689345"
+  },
+  {
+   "l": 7,
+   "h": "774e645275a3c3ad"
+  },
+  {
+   "l": 6,
+   "h": "36572765047539ea"
+  },
+  {
+   "l": 9,
+   "h": "9c5731e2bb85ec93"
+  },
+  {
+   "l": 2,
+   "h": "eb125e3cc6473c0b"
+  },
+  {
+   "l": 2,
+   "h": "e7b532e06e764190"
+  },
+  {
+   "l": 2,
+   "h": "2e09fdbd06cab863"
+  },
+  {
+   "l": 2,
+   "h": "b1dbcab54f13b33b"
+  },
+  {
+   "l": 3,
+   "h": "5f5903c9488caec6"
+  },
+  {
+   "l": 3,
+   "h": "82817658e68b9d4f"
+  },
+  {
+   "l": 1,
+   "h": "f41dd0cbffbf77b4"
+  },
+  {
+   "l": 3,
+   "h": "30d0ad57d7240fd0"
+  },
+  {
+   "l": 3,
+   "h": "fb9a55005525d6e7"
+  },
+  {
+   "l": 3,
+   "h": "952c0123cb8db699"
+  },
+  {
+   "l": 3,
+   "h": "21aa56976fd9bbed"
+  },
+  {
+   "l": 2,
+   "h": "699158316289db36"
+  },
+  {
+   "l": 3,
+   "h": "f775faf24b30d133"
+  },
+  {
+   "l": 7,
+   "h": "e2d851da8201b9ae"
+  },
+  {
+   "l": 5,
+   "h": "088cc2aadff1149c"
+  },
+  {
+   "l": 7,
+   "h": "bf53b69e0c8e58f5"
+  },
+  {
+   "l": 9,
+   "h": "523f2295049eb9ea"
+  },
+  {
+   "l": 11,
+   "h": "021bc0f68a967820"
+  },
+  {
+   "l": 10,
+   "h": "6ea4d6a25ddd4bfa"
+  },
+  {
+   "l": 9,
+   "h": "a07c665801423868"
+  },
+  {
+   "l": 2,
+   "h": "c1f7a5f2e5640902"
+  },
+  {
+   "l": 4,
+   "h": "1a3f3ce91309879b"
+  },
+  {
+   "l": 2,
+   "h": "f1158dc06251d08d"
+  },
+  {
+   "l": 2,
+   "h": "1ea2cab5c93531c0"
+  }
+ ],
+ "word": [
+  "c986b52688f57697",
+  "01d65de4a4218e50",
+  "89d36d1995f976c6",
+  "f9e3339d555913e8",
+  "5095c728a6213a2b",
+  "ed558e3311bac77c",
+  "e80e965e791ba09c",
+  "0cd294324b38dca7",
+  "9a76dfd3bfa82115"
+ ]
+}
