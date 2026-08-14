@@ -403,6 +403,21 @@ function hotScoreOf(up, down, ts, nowMs) {
   return Math.max(-2147483648, Math.min(2147483647, s)) | 0;
 }
 
+// Held items keep their feed slot as a ZERO-BODY TOMBSTONE instead of being
+// deleted: the entry preserves the author sid on the board, so an admin
+// clearance can actually put the item back -- a delete would orphan the item
+// forever once the author's box slot moves on to a newer submission (state
+// keeps HMAC pseudonyms only, never sids, by decree). Clients reject a
+// zero-length body at decode (7 words < min 8) and never display it. Bounded
+// caveat: the author's other live item in the same category can still claim
+// the slot; restorability then degrades to box-recovery only. Blocked/nuked
+// items are deleted for real -- permanent removal has no restore surface.
+const FB_TOMB_SCORE = -2147483647;
+function tombstoneDetails(item, itemId) {
+  const w1 = ((FB_VER & 0xFF) << 24) | ((item.cat & 0xFF) << 16);
+  return [FB_MAGIC | 0, w1 | 0, packLang(item.lang), itemId | 0, item.ts | 0, 0, 0];
+}
+
 function packFeedDetails(item, up, down) {
   // Prefer the smaller encoding, same rule as the client writer.
   const u8 = packText(item.text, 0), u16 = packText(item.text, 1);
@@ -549,10 +564,10 @@ async function main() {
       for (const e of br.ents) {
         const d = v.decodeDetails(e.detailData);
         if (d[0] === FB_MAGIC && d.length >= 7) {
-          entries[String(e.steamID)] = { itemId: d[3] | 0, score: e.score | 0, up: d[5] | 0, down: d[6] | 0 };
+          entries[String(e.steamID)] = { itemId: d[3] | 0, score: e.score | 0, up: d[5] | 0, down: d[6] | 0, tomb: (d[1] & 0xFF) === 0 };
           if (!sidByItem[String(d[3] | 0)]) sidByItem[String(d[3] | 0)] = String(e.steamID);
         } else {
-          entries[String(e.steamID)] = { itemId: 0, score: e.score | 0, up: 0, down: 0 };
+          entries[String(e.steamID)] = { itemId: 0, score: e.score | 0, up: 0, down: 0, tomb: false };
         }
       }
       feeds[name] = { id, entries };
@@ -567,7 +582,7 @@ async function main() {
   }
 
   // ---- compute + write desired feed sets ----
-  let writes = 0, dels = 0, writeFail = 0;
+  let writes = 0, dels = 0, tombs = 0, writeFail = 0;
   for (let c = 0; c < FB_CATS.length; c++) {
     // candidates: live items of this category with a recoverable author
     const cand = [];
@@ -595,8 +610,8 @@ async function main() {
         // items are keyed by itemId (x.key); the item record itself has no itemId
         // field -- comparing a nonexistent field made every run rewrite every
         // entry (caught by the e2e idempotency assertion).
-        if (cur && cur.itemId === (x.key | 0) && cur.score === x.score && cur.up === x.up && cur.down === x.down) continue;
-        if (writes + dels >= FB_WRITE_CAP) { v.ghWarn('feedback write cap reached (' + FB_WRITE_CAP + ') -- rest next run'); break; }
+        if (cur && !cur.tomb && cur.itemId === (x.key | 0) && cur.score === x.score && cur.up === x.up && cur.down === x.down) continue;
+        if (writes + dels + tombs >= FB_WRITE_CAP) { v.ghWarn('feedback write cap reached (' + FB_WRITE_CAP + ') -- rest next run'); break; }
         const det = packFeedDetails({ ...x.item, itemId: x.key | 0 }, x.up, x.down);
         if (!det) continue;
         const r = await v.postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', {
@@ -607,7 +622,20 @@ async function main() {
       }
       for (const sid of Object.keys(feed.entries)) {
         if (desiredSids.has(sid)) continue;
-        if (writes + dels >= FB_WRITE_CAP) break;
+        if (writes + dels + tombs >= FB_WRITE_CAP) break;
+        const cur = feed.entries[sid];
+        const heldItem = cur.itemId && st.items[String(cur.itemId)] && st.items[String(cur.itemId)].st === 'held'
+          ? st.items[String(cur.itemId)] : null;
+        if (heldItem) {
+          // held -> tombstone, not delete (restorability; see tombstoneDetails)
+          if (cur.tomb) continue;
+          const r = await v.postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', {
+            key: process.env.STEAM_PUBLISHER_KEY, appid: process.env.APPID, leaderboardid: feed.id,
+            steamid: sid, score: FB_TOMB_SCORE, scoremethod: 'ForceUpdate', format: 'json',
+          }, tombstoneDetails(heldItem, cur.itemId));
+          if (r.ok) tombs++; else { writeFail++; v.ghWarn('feed tombstone failed ' + name + ' HTTP ' + r.status); }
+          continue;
+        }
         const r = await v.postForm('/ISteamLeaderboards/DeleteLeaderboardScore/v1/', {
           key: process.env.STEAM_PUBLISHER_KEY, appid: process.env.APPID, leaderboardid: feed.id,
           steamid: sid, format: 'json',
@@ -625,7 +653,7 @@ async function main() {
   console.log('feedback: items+' + newItems + ' (total ' + Object.keys(st.items).length +
     ', filtered ' + (cnt.filtered || 0) + ', capped ' + (cnt.capped || 0) +
     ', held ' + (cnt.held || 0) + ', blocked ' + (cnt.blocked || 0) + '), voteEnts=' + voteEnts +
-    ', feed writes=' + writes + ' dels=' + dels + (writeFail ? ' FAILED=' + writeFail : '') + (dirty ? ' state saved' : ' no state change'));
+    ', feed writes=' + writes + ' tombs=' + tombs + ' dels=' + dels + (writeFail ? ' FAILED=' + writeFail : '') + (dirty ? ' state saved' : ' no state change'));
 }
 
 if (require.main === module) {
@@ -640,4 +668,5 @@ module.exports = {
   dayOfTs, loadWordlist, adSurfaces, adReason, filterReason, countAuthorDay,
   loadMod, reportsSince, trustPenaltyOf, governItems, maybeSendDigest,
   wlHash, wlSubHit, wlWordHit, foldForWordlist,
+  FB_TOMB_SCORE, tombstoneDetails,
 };

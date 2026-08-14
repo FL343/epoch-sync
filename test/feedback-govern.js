@@ -166,6 +166,16 @@ function mkWl(subWords, wordWords) {
   ok('[8] trust seam wired + zero-effect', SRC.includes('- trustPenaltyOf(') && vv.trustPenaltyOf('any') === 0);
   ok('[8] wordlist-missing warn (counts only)', SRC.includes('feedback wordlist unavailable'));
   ok('[8] held/blocked never candidates (single live gate)', /item\.st !== 'live'/.test(SRC));
+  // held -> tombstone (restorability), blocked/nuke -> real delete
+  {
+    const t = vv.tombstoneDetails({ cat: 2, lang: 'en', ts: 777 }, 12345);
+    ok('[8] tombstone shape (7 words, zero body len, id/ts kept)',
+       t.length === 7 && (t[0] | 0) === vv.FB_MAGIC && (t[1] & 0xFF) === 0 && t[3] === 12345 && t[4] === 777 && t[5] === 0 && t[6] === 0);
+    ok('[8] tombstone score bottom-pinned', vv.FB_TOMB_SCORE === -2147483647);
+    ok('[8] held branch tombstones instead of delete (wiring)',
+       /st\.items\[String\(cur\.itemId\)\]\.st === 'held'/.test(SRC) && SRC.includes('tombstoneDetails(heldItem, cur.itemId)'));
+    ok('[8] tombstone slot rewritten on restore (idempotency skips need !cur.tomb)', SRC.includes('cur && !cur.tomb &&'));
+  }
   // no invisible characters in source (zero-width literals are self-laid mines)
   ok('[8] no invisible chars in feedback.js', ![...SRC].some(c => { const p = c.codePointAt(0); return (p >= 0x200B && p <= 0x200F) || (p >= 0x2060 && p <= 0x206F) || p === 0xFEFF; }));
 
