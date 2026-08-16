@@ -466,7 +466,7 @@ async function maybeSendDigest(st, nowMs) {
       body: JSON.stringify({
         from: process.env.FB_DIGEST_FROM || 'onboarding@resend.dev',
         to: [to],
-        subject: 'feedback digest ' + day + ': ' + fresh.length + ' new',
+        subject: (process.env.FB_DIGEST_TAG || '') + 'feedback digest ' + day + ': ' + fresh.length + ' new',
         text: 'New player feedback since the last digest: ' + fresh.length + '\n' +
           'Unlist: run tools/feedback-admin.js (or add the id to feedback-mod.json "block").\n\n' +
           lines.join('\n\n'),

@@ -1,0 +1,76 @@
+name: playtest
+# Second-appid reconcile job for the pre-release playtest channel (validate.js PT_MODE=1).
+# Own workflow + disjoint pt-*.json state files (feedback.yml precedent): the bot pushes of
+# the three workflows always rebase cleanly past each other, and the offset schedule keeps
+# the runners off the same tick boundary (reconcile=0, feedback=2, playtest=3 of each 5).
+# The playtest channel keeps NO rating/points/redeem surface: PT_MODE skips those wholesale,
+# provisions the channel's own boards idempotently, and hard-fails the run if a forbidden
+# board ever appears on the app (lock layer 3 -- the surface must not exist).
+# No fallback yield gate: the disaster-recovery fallback only settles the MAIN app, so this
+# job can never double-settle anything the fallback handled.
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: '3-59/5 * * * *'
+permissions:
+  contents: read
+concurrency:
+  group: playtest
+  cancel-in-progress: false
+jobs:
+  playtest:
+    if: github.repository == 'FL343/epoch-sync'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: test
+        run: |
+          for f in test/playtest-*.js; do echo "== $f =="; node "$f" || exit 1; done
+      - name: run
+        env:
+          STEAM_PUBLISHER_KEY: ${{ secrets.STEAM_PUBLISHER_KEY }}
+          APPID: ${{ secrets.PLAYTEST_APPID }}
+          LB_PREFIX: ${{ secrets.LB_PREFIX }}
+          XP_LB: ${{ secrets.XP_LB }}
+          # rating/points board names are consulted ONLY by the forbidden-board tripwire here
+          RANKED_LB: ${{ secrets.RANKED_LB }}
+          LP_LB: ${{ secrets.LP_LB }}
+          STATE_SALT: ${{ secrets.STATE_SALT }}
+          PT_MODE: '1'
+          PROCESSED_FILE: pt-processed.json
+          LEAVERS_FILE: pt-leavers.json
+          XP_FILE: pt-xp.json
+          STARTS_FILE: pt-starts.json
+          SIGNALS_FILE: pt-signals.json
+          CONFESSIONS_FILE: pt-confessions.json
+          # rating-side state is never produced in PT mode; pointed off the main files anyway
+          # (belt over suspenders) and deliberately NOT persisted below.
+          SKILL_FILE: pt-skill.json
+          GROUPS_FILE: pt-groups.json
+          STRICT_BOARDS: '1'
+        run: node validate.js
+      - name: persist
+        run: |
+          state_files=""
+          for f in pt-processed.json pt-leavers.json pt-xp.json pt-starts.json pt-signals.json pt-confessions.json; do
+            [ -f "$f" ] && state_files="$state_files $f"
+          done
+          if [ -n "$state_files" ] && [ -n "$(git status --porcelain -- $state_files)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add -- $state_files
+            git commit -m "state: update playtest reconciliation state"
+            n=0
+            until git pull --rebase origin "${GITHUB_REF_NAME}" && git push; do
+              n=$((n+1))
+              if [ "$n" -ge 3 ]; then echo "::error::playtest state push failed after $n tries"; exit 1; fi
+              sleep $((5 * n))
+            done
+          else
+            echo "no state change"
+          fi

@@ -14,6 +14,30 @@ const K_FACTOR = Number(process.env.K_FACTOR || 32), BASE_MMR = Number(process.e
 const APPLY_MMR = process.env.APPLY_MMR !== '0';
 const CONCURRENCY = Math.max(1, Number(process.env.CONCURRENCY || 8));
 
+// ---- playtest channel (PT_MODE=1) ----
+// Second-appid job for the pre-release playtest build: the SAME reconcile pipeline pointed at
+// the playtest app, with every competitive/monetized authority surface structurally ABSENT.
+// The design rule ("lock layer 3"): a board that does not exist cannot be written, so a
+// modified playtest client has nowhere to land a forged ranked/redeem claim -- the strongest
+// possible lock, enforced here rather than in client UI.
+//  * settles quick (base 1/3/5) + co-op endless (7) only. Every ranked base (2/4/6) has no
+//    client entry point on this channel (the queue guard refuses ranked wholesale), so a
+//    ranked-typed record is forgery by construction: sanity-flagged, never settled.
+//  * no rating/points surface: TrueSkill and the visible points ladder are skipped wholesale
+//    (skill/groups state untouched). XP/career, the CP wallet and the endless depth boards run
+//    same-source as live -- optimistic client values still need their authoritative correction.
+//  * redeem channel disabled (its resolver would otherwise auto-create the redeem/grant boards).
+//  * board bootstrap: provisions the channel's own boards idempotently each run and FAILS the
+//    run if a forbidden board (rating/points/redeem/grant/mirror) exists on this app id.
+//  * PT_SEED_CP: one-shot starter wallet for first-seen players. This channel earns CP only
+//    during forced quick windows, but the endless continue economy still needs exercising --
+//    the flat grant funds a couple of continues without touching the live earn rates.
+const PT_MODE = process.env.PT_MODE === '1';
+const PT_MT_ALLOWED = [1, 3, 5, 7];   // lockstep: client MATCHTYPE_CODE quick=1(+team offsets 3/5), endless=7
+const PT_SEED_CP = Math.max(0, Number(process.env.PT_SEED_CP || 60));
+const PT_SHARD_COUNT = Math.max(1, Number(process.env.PT_SHARD_COUNT || 50));   // lockstep: client LEDGER_SHARDS
+const PT_MIRROR_LB = 'mirror_box';   // never provisioned on the playtest app (progress does not migrate)
+
 const pid = (s) => crypto.createHmac('sha256', String(SALT || '')).update(String(s)).digest('hex').slice(0, 16);
 const plog = (s) => pid(s).slice(0, 8);
 
@@ -208,7 +232,9 @@ function sidPlausible(sid) { try { const b = BigInt(sid); return b >= SID_MIN &&
 function sanityFlags(g) {
   const out = [];
   const d0 = g[0].d, mt = d0[2] | 0, base = baseMt(mt), mask = premadeMaskOf(mt), pc = d0[8] | 0;
-  if (SANITY.MT_ALLOWED.indexOf(base) < 0) out.push('mt');
+  // playtest channel: the allowed set narrows to quick + endless -- a ranked-typed record has
+  // no legit writer on this channel (queue guard refuses ranked), so it is flagged as forgery.
+  if ((PT_MODE ? PT_MT_ALLOWED : SANITY.MT_ALLOWED).indexOf(base) < 0) out.push('mt');
   let scoreCap = SANITY.SCORE_CAP;
   if (base === 3 || base === 4 || base === 5 || base === 6) {
     if (mask !== 0) out.push('team-mask');            // team codes never carry a premade mask
@@ -487,7 +513,7 @@ function writeRunSummary() {
   try {
     const s = (k, d) => (RUN[k] === undefined ? d : RUN[k]);
     fs.appendFileSync(p, [
-      '### reconcile',
+      '### reconcile' + (PT_MODE ? ' (playtest)' : ''),
       '| metric | value |',
       '|---|---|',
       '| records / start attestations | ' + s('rec', 0) + ' / ' + s('starts', 0) + ' |',
@@ -782,10 +808,10 @@ function seasonSeedLp(prevScore, display) {
 // id) and immune to the listing-generation lag that can hide a fresh board from
 // GetLeaderboardsForGame for over an hour -- the canonical bypass for any by-name resolution
 // that must not wait out that lag. Returns the id or null (failure -> warn).
-async function findOrCreateBoard(name) {
+async function findOrCreateBoard(name, trusted) {
   const res = await postForm('/ISteamLeaderboards/FindOrCreateLeaderboard/v2/', {
     key: KEY, appid: APPID, name, sortmethod: 'Descending', displaytype: 'Numeric',
-    createifnotfound: 1, onlytrustedwrites: 1, onlyfriendsreads: 0, format: 'json',
+    createifnotfound: 1, onlytrustedwrites: (trusted == null || trusted) ? 1 : 0, onlyfriendsreads: 0, format: 'json',
   });
   const lb = (res.json && res.json.result && res.json.result.leaderboard) || (res.json && res.json.leaderboard) || null;
   const id = lb && (lb.leaderBoardID || lb.leaderboardID || lb.id || lb.ID);
@@ -1398,13 +1424,57 @@ function eloDeltas(parts, mmr) {
   return delta;
 }
 
+// One-shot starter wallet (playtest channel): a first-seen participant gets a flat CP baseline
+// before any earn/debit applies. "First seen" == no wallet-board entry (cp[sid] == null after the
+// complete/on-demand base reads); once written the entry exists forever (a zero or negative
+// balance keeps its entry), so the grant structurally cannot repeat. Returns seeded count.
+function ptSeedCp(cp, changedCp, sids) {
+  let n = 0;
+  for (const sid0 of sids) {
+    const sid = String(sid0);
+    if (cp[sid] != null) continue;
+    cp[sid] = PT_SEED_CP; changedCp[sid] = PT_SEED_CP; n++;
+    console.log('  pt starter cp ' + plog(sid) + ' = +' + PT_SEED_CP);
+  }
+  return n;
+}
+// Playtest board provisioning plan (pure -- executed by the PT bootstrap in main()).
+// names = board names currently listed on the app; cfg carries the channel's board names.
+// Returns { create: [{name, trusted}], forbidden: [present names that must NOT exist] }.
+// The create set is the channel's whole surface: client-written record shards + the report/
+// card/gate boards, and the trusted authority boards the channel DOES keep (xp/cp/endless).
+// The forbidden set is lock layer 3: rating, points (incl. its per-season archives), redeem,
+// grant and mirror boards must never exist on this app id -- their presence means someone
+// provisioned an authority surface the channel promised not to have, so the run refuses.
+function ptBoardPlan(names, cfg) {
+  const have = new Set(names.map(String));
+  const create = [];
+  const add = (name, trusted) => { if (name && !have.has(name)) create.push({ name, trusted: trusted ? 1 : 0 }); };
+  for (let i = 0; i < (cfg.shards | 0); i++) add(cfg.prefix + i, 0);   // client-written record shards
+  add(cfg.xpLb, 1); add(cfg.cpLb, 1); add(cfg.endlessLb, 1); add(cfg.endlessTrioLb, 1);
+  add('version_gate', 1);   // authoritative-version gate (ops-written, client read-only)
+  add('gate_window', 1);    // queue-gate forced window / emergency stop (ops-written, client read-only)
+  add(cfg.trustLb, 1); add(cfg.reportLb, 0);
+  add('card_box', 0);       // cosmetic claim rows (client-writable, zero authority)
+  const forbidden = [];
+  for (const n0 of names) {
+    const n = String(n0);
+    if (cfg.rankedLb && n === cfg.rankedLb) forbidden.push(n);
+    else if (cfg.lpLb && (n === cfg.lpLb || n.indexOf(cfg.lpLb + '_s') === 0)) forbidden.push(n);
+    else if (n === cfg.redeemLb || n === cfg.grantLb || n === cfg.mirrorLb) forbidden.push(n);
+  }
+  return { create, forbidden };
+}
+
 async function main() {
   const missing = [];
   if (!KEY) missing.push('STEAM_PUBLISHER_KEY');
   if (!APPID) missing.push('APPID');
   if (!PREFIX) missing.push('LB_PREFIX');
-  if (!RANKED_LB) missing.push('RANKED_LB');
-  if (!LP_LB) missing.push('LP_LB');
+  // the playtest channel has no rating/points surface at all -- those envs are only consulted
+  // for the forbidden-board tripwire there (optional), never required.
+  if (!RANKED_LB && !PT_MODE) missing.push('RANKED_LB');
+  if (!LP_LB && !PT_MODE) missing.push('LP_LB');
   if (!SALT) missing.push('STATE_SALT');
   if (missing.length) { ghErr('missing env: ' + missing.join(', ')); process.exit(1); }
   RUN.t0 = Date.now();
@@ -1413,16 +1483,35 @@ async function main() {
   const lr = await getJson(BASE + '/ISteamLeaderboards/GetLeaderboardsForGame/v2/?key=' + KEY + '&appid=' + APPID + '&format=json');
   if (lr.status === 403) { ghErr('403 (key has no access)'); process.exit(1); }
   if (!lr.ok) { ghErr('GetLeaderboardsForGame HTTP ' + lr.status); process.exit(1); }
+  // playtest bootstrap: provision the channel's own boards (idempotent -- find-or-create by
+  // name is listing-lag immune) and enforce the forbidden set BEFORE anything settles. A
+  // forbidden board present is a provisioning error severe enough to stop the whole run: the
+  // channel's lock story is "the surface does not exist", not "the surface is unused".
+  if (PT_MODE) {
+    const ptNames = ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).map(x => String(x.name || x.Name));
+    const ptPlan = ptBoardPlan(ptNames, {
+      prefix: PREFIX, shards: PT_SHARD_COUNT, xpLb: XP_LB, cpLb: CP_LB,
+      endlessLb: ENDLESS_LB, endlessTrioLb: ENDLESS_LB_TRIO, trustLb: TRUST_LB, reportLb: REPORT_LB,
+      rankedLb: RANKED_LB, lpLb: LP_LB, redeemLb: REDEEM_LB, grantLb: GRANT_LB, mirrorLb: PT_MIRROR_LB,
+    });
+    if (ptPlan.forbidden.length) { ghErr('playtest channel: forbidden board(s) exist on this app: ' + ptPlan.forbidden.join(', ') + ' -- refusing to run (lock layer 3)'); process.exit(1); }
+    for (const b of ptPlan.create) {
+      const id = await findOrCreateBoard(b.name, b.trusted);
+      if (!id) { ghErr('playtest bootstrap: board create failed: ' + b.name); process.exit(1); }
+      console.log('pt bootstrap: provisioned ' + b.name + (b.trusted ? ' (trusted)' : ' (client-writable)'));
+    }
+  }
   // seasonal points target (see SEASONS): resolved once per run; the previous season's board
   // (if any) is the lazy soft-reset source and is never created, only found.
+  // Playtest channel: no points surface at all -- nothing resolved, nothing auto-created.
   const seasonId = seasonAt(seasonNowMs());
-  const lpCur = await resolveSeasonBoard(lr, LP_LB, seasonId);
+  const lpCur = PT_MODE ? { name: null, id: null } : await resolveSeasonBoard(lr, LP_LB, seasonId);
   const lpBoardId = lpCur.id;
-  const prevLpLb = seasonId >= 1
+  const prevLpLb = (!PT_MODE && seasonId >= 1)
     ? ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).find(x => String(x.name || x.Name) === seasonBoardName(LP_LB, seasonId - 1))
     : null;
   const prevLpId = prevLpLb ? (prevLpLb.id || prevLpLb.ID) : null;
-  if (seasonId > 0) console.log('season ' + seasonId + ': points -> ' + lpCur.name + (prevLpId ? (' (soft-reset source ' + seasonBoardName(LP_LB, seasonId - 1) + ')') : ' (no previous-season board)'));
+  if (seasonId > 0 && !PT_MODE) console.log('season ' + seasonId + ': points -> ' + lpCur.name + (prevLpId ? (' (soft-reset source ' + seasonBoardName(LP_LB, seasonId - 1) + ')') : ' (no previous-season board)'));
   const ALLOW_TEST = process.env.ALLOW_TEST === '1';
   const shards = ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).filter(x => { const n = String(x.name || x.Name); return n.indexOf(PREFIX) === 0 && (ALLOW_TEST || n.indexOf('test') < 0); });
   console.log('shards: ' + shards.length);
@@ -1554,7 +1643,9 @@ async function main() {
   let confRes = { seen: 0, penalized: 0, exitHits: 0, refunded: 0, finalized: 0 };
   if (confessions.length || Object.keys(confState).length) {
     const lpId0 = lpBoardId;   // season-resolved (see top of main)
-    if (!lpId0) strictBoard('points board absent (confession path)');
+    // playtest: no points surface by design -- confessions still record exit-rate signals, the
+    // LP deduction half is structurally absent (readLp/writeLp run with a null board id).
+    if (!lpId0 && !PT_MODE) strictBoard('points board absent (confession path)');
     const skill0 = loadSkill();   // read-only here (first-ranked leaver seeding base)
     confRes = await reconcileConfessions(confessions, groups, processed, confState, leavers, nowMs, {
       penalty: LEAVER_LP_PENALTY, lpMax: LP_MAX, maturityMs: STARTS_MATURITY_MS,
@@ -1673,6 +1764,9 @@ async function main() {
   // cpVals = in-memory post-settle balances on the main path (fresh -- avoids the read-lag on
   // just-written scores); null on the settle-free paths -> targeted reads per claimant.
   const processRedeems = async (cpVals) => {
+    // playtest channel: the redeem/entitlement surface does not exist (lock layer 3) and this
+    // resolver would otherwise CREATE its boards via find-or-create -- hard-disabled first.
+    if (PT_MODE) return;
     const list = (lr.json && lr.json.response && lr.json.response.leaderboards) || [];
     // Freshly created boards lag the listing for a long time -> resolve by name via
     // find-or-create (idempotent: same name always returns the same id) so this phase can
@@ -1760,13 +1854,15 @@ async function main() {
   console.log(consistentMatches.length + ' consistent, ' + fresh.length + ' fresh (settled ' + (consistentMatches.length - fresh.length) + ')');
   if (fresh.length === 0) { console.log('no fresh matches, skip'); persistStartsSide(); await maintainTrust(); await processRedeems(null); writeRunSummary(); return; }
 
-  const rankedLb = ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).find(x => String(x.name || x.Name) === RANKED_LB);
-  if (!rankedLb) { ghErr('rating board not found (must be pre-created)'); process.exit(1); }
-  const rankedId = rankedLb.id || rankedLb.ID;
+  // playtest channel: no rating board exists (and must not -- lock layer 3); the TrueSkill
+  // update block below is skipped wholesale, so the id is never consulted.
+  const rankedLb = PT_MODE ? null : ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).find(x => String(x.name || x.Name) === RANKED_LB);
+  if (!rankedLb && !PT_MODE) { ghErr('rating board not found (must be pre-created)'); process.exit(1); }
+  const rankedId = rankedLb ? (rankedLb.id || rankedLb.ID) : null;
   const skill = loadSkill();
   const groupMem = loadGroups(); let groupsDirty = false;   // repeat-group decay memory (see GROUP_DECAY)
   const lpId = lpBoardId;   // season-resolved once at the top of main (auto-created from season 1 on)
-  if (!lpId) { strictBoard('points board not found'); ghWarn('points board not found (pre-create with onlytrustedwrites) -> skip points this run'); }
+  if (!lpId && !PT_MODE) { strictBoard('points board not found'); ghWarn('points board not found (pre-create with onlytrustedwrites) -> skip points this run'); }
   const lp = {}, lpDet = {};   // lpDet = existing detail bytes per player, so an unread reveal survives a later normal-match LP update
   let lpComplete = true;
   if (lpId) {
@@ -1961,6 +2057,10 @@ async function main() {
       for (const sid of writerSids) day7.n[pid(sid)] = (day7.n[pid(sid)] || 0) + 1;
       recordEndlessSignals(signals, rosterSids.length ? rosterSids : writerSids, nowMs);
       sigDirty = true;
+      // playtest starter wallet: seed BEFORE the debit replay so a first run with continues
+      // debits from the starter baseline, not into synthetic debt. Roster included: a debit
+      // targets consensus-roster seats whether or not they wrote a record.
+      if (PT_MODE) ptSeedCp(cp, changedCp, [...new Set(rosterSids.concat(writerSids))]);
       // CP debit per seat (canonical nibble replay). Targets the consensus ROSTER -- writing no
       // record does not dodge a debit both ends witnessed. Debt is kept (no clamp): clamping
       // would forgive a forged continue, and a legit balance can only dip negative transiently
@@ -2037,6 +2137,9 @@ async function main() {
     if (progFrac !== 1) console.log('  progress ' + c.m + ': ' + prog + '/' + XP_CFG.progressLevels + ' levels -> points x' + progFrac);
     if (xpId) creditXp(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers, today, progFrac, careerDet);
     // CP (the endless-economy wallet) earns from matchmade records on the same credit classes.
+    // Playtest starter wallet first: writers only (a leaver whose first-ever appearance is the
+    // leave itself earns the baseline on their first finished game instead).
+    if (PT_MODE && cpId) ptSeedCp(cp, changedCp, writerSids);
     if (cpId) creditCp(g, matchType, rankOf, cp, changedCp);
     if (c.void) {
       recordMatchSignals(signals, g, parts, null, matchType, true, nowMs); sigDirty = true;   // co-presence + void counters (dodge-ring history)
@@ -2050,105 +2153,112 @@ async function main() {
     // a high ns rate becomes a cheap fabrication tell for the judgment layer.
     if (!pend) for (const sid of writerSids) sigPlayer(signals, pid(sid), nowMs).ns += 1;
     const leavers0 = detectLeavers(g);   // consensus-absent seats: LP penalty below + §7 teammate shield input
-    const tsIn = parts.map(p => { const sk = skill[pid(p.steamID)] || ts.DEFAULTS; return { id: p.steamID, rank: rankOf[p.steamID], mu: sk.mu, sigma: sk.sigma }; });
-    // placement seeding: first ranked settle -> seed the lp map itself (recorded in changedLp so a
-    //   bare seed persists), so the plan below, the settle write and the leaver penalty all read one
-    //   consistent base. Leavers seed too (their first ranked appearance may be the leave itself --
-    //   the -100 then applies to the seeded base, not to 0).
-    // seed-settle exemption: players seeded THIS settle skip the promotion/relegation series clamp below -- the seed
-    //   already lands their LP at the display-derived position, and applying crossline in the same
-    //   settle could force a boundary crossing on a player's very first ranked game (silent demote/
-    //   promote before placement has calibrated). Mirrors client results.js (_firstRankedBefore gate);
-    //   lp==null before seeding == the client's !lpSeeded flag (2026-07-19 audit L3: the client gate
-    //   moved off rankedGamesPlayed===0 -- a VOID first match now seeds NEITHER end, keeping the
-    //   crossline skip aligned settle for settle), so both ends skip the same settle.
-    const seededNow = new Set();
-    if (lpId && appliesLp(matchType)) {
-      // lazy season seed (first settle this season): previous-season entry soft-resets in, else
-      // display-derived placement seed (seasonSeedLp priority). A prev-board read FAILURE aborts
-      // the run -- seeding blind would silently discard last season's finish (same "never settle
-      // from base 0" discipline as the on-demand reads). Absent entry = null = legit fallback.
-      const seedOne = async (sid, mu, sigma, tag) => {
-        let prevE = null;
-        if (prevLpId) {
-          try { prevE = await readUserEntry(prevLpId, sid, 'prev points'); }
-          catch (err) { ghErr('prev-season base read failed for ' + plog(sid) + ' -- abort run, do NOT seed blind: ' + (err && err.message)); process.exit(1); }
-        }
-        const disp = ts.displayRating(mu, sigma);
-        lp[sid] = seasonSeedLp(prevE ? (prevE.score | 0) : null, disp);
-        changedLp[sid] = lp[sid]; seededNow.add(sid);
-        console.log('  seed ' + c.m + ': ' + plog(sid) + ' ' + tag +
-          (prevE ? (', soft-reset from ' + (prevE.score | 0)) : (', display ' + disp)) + ' -> pts ' + lp[sid]);
-      };
-      for (const t of tsIn) if (lp[t.id] == null) await seedOne(t.id, t.mu, t.sigma, 'first settle this season');
-      for (const x of leavers0) {
-        if (lp[x.steamID] == null) {
-          const sk = skill[pid(x.steamID)] || ts.DEFAULTS;
-          await seedOne(x.steamID, sk.mu, sk.sigma, 'leaver, first settle this season');
+    // ===== playtest channel: no rating/points surface (lock layer 3) -- the TrueSkill update,
+    // placement seeding, group-decay memory and every points write are skipped wholesale, so
+    // skill.json/groups.json stay untouched and the changed/changedLp pools stay empty. The
+    // leaver loop below still runs (exit-rate is a channel-neutral signal); its LP half
+    // self-gates on the absent points board. =====
+    if (!PT_MODE) {
+      const tsIn = parts.map(p => { const sk = skill[pid(p.steamID)] || ts.DEFAULTS; return { id: p.steamID, rank: rankOf[p.steamID], mu: sk.mu, sigma: sk.sigma }; });
+      // placement seeding: first ranked settle -> seed the lp map itself (recorded in changedLp so a
+      //   bare seed persists), so the plan below, the settle write and the leaver penalty all read one
+      //   consistent base. Leavers seed too (their first ranked appearance may be the leave itself --
+      //   the -100 then applies to the seeded base, not to 0).
+      // seed-settle exemption: players seeded THIS settle skip the promotion/relegation series clamp below -- the seed
+      //   already lands their LP at the display-derived position, and applying crossline in the same
+      //   settle could force a boundary crossing on a player's very first ranked game (silent demote/
+      //   promote before placement has calibrated). Mirrors client results.js (_firstRankedBefore gate);
+      //   lp==null before seeding == the client's !lpSeeded flag (2026-07-19 audit L3: the client gate
+      //   moved off rankedGamesPlayed===0 -- a VOID first match now seeds NEITHER end, keeping the
+      //   crossline skip aligned settle for settle), so both ends skip the same settle.
+      const seededNow = new Set();
+      if (lpId && appliesLp(matchType)) {
+        // lazy season seed (first settle this season): previous-season entry soft-resets in, else
+        // display-derived placement seed (seasonSeedLp priority). A prev-board read FAILURE aborts
+        // the run -- seeding blind would silently discard last season's finish (same "never settle
+        // from base 0" discipline as the on-demand reads). Absent entry = null = legit fallback.
+        const seedOne = async (sid, mu, sigma, tag) => {
+          let prevE = null;
+          if (prevLpId) {
+            try { prevE = await readUserEntry(prevLpId, sid, 'prev points'); }
+            catch (err) { ghErr('prev-season base read failed for ' + plog(sid) + ' -- abort run, do NOT seed blind: ' + (err && err.message)); process.exit(1); }
+          }
+          const disp = ts.displayRating(mu, sigma);
+          lp[sid] = seasonSeedLp(prevE ? (prevE.score | 0) : null, disp);
+          changedLp[sid] = lp[sid]; seededNow.add(sid);
+          console.log('  seed ' + c.m + ': ' + plog(sid) + ' ' + tag +
+            (prevE ? (', soft-reset from ' + (prevE.score | 0)) : (', display ' + disp)) + ' -> pts ' + lp[sid]);
+        };
+        for (const t of tsIn) if (lp[t.id] == null) await seedOne(t.id, t.mu, t.sigma, 'first settle this season');
+        for (const x of leavers0) {
+          if (lp[x.steamID] == null) {
+            const sk = skill[pid(x.steamID)] || ts.DEFAULTS;
+            await seedOne(x.steamID, sk.mu, sk.sigma, 'leaver, first settle this season');
+          }
         }
       }
-    }
-    // repeat-group decay: advance streak memory for the WHOLE consensus roster (writers + leavers)
-    //   and fetch each rated player's update weight. Applied to the TrueSkill delta below;
-    //   points/XP/CP untouched (real play is not zero-sum -- only rating farming is sealed).
-    const gPlan = groupDecayPlan(groupMem,
-      parts.map(p => pid(p.steamID)).concat(leavers0.map(x => pid(x.steamID))), nowMs);
-    groupsDirty = true;
-    let tsOut;
-    if (isTeamMt(matchType)) {
-      // M3: team modes rate as TWO TEAMS (strength = sum mu, binary outcome) -- the ordinal pairwise
-      // update would also transfer rating between TEAMMATES (rank 1 vs rank 2), which team play must not.
-      // Mode 2: the binary outcome comes from the sub-score-derived winner, never the money sums.
-      const winTeam = (t2Win != null) ? t2Win
-        : (((scores[2] | 0) + (scores[3] | 0)) > ((scores[0] | 0) + (scores[1] | 0)) ? 1 : 0);
-      const sides = [[], []];
-      for (let i = 0; i < parts.length; i++) sides[(parts[i].seat >> 1) & 1].push(tsIn[i]);
-      tsOut = (sides[0].length && sides[1].length)
-        ? ts.updateTeamMatch([{ players: sides[winTeam], rank: 1 }, { players: sides[1 - winTeam], rank: 2 }])
-        : ts.updateMatch(tsIn);   // one side fully absent -> degenerate: ordinal fallback among the present
-    } else {
-      tsOut = ts.updateMatch(tsIn);
-    }
-    // visible-LP plan uses PRE-match ratings (tsIn) + current LP -> per-player adjusted delta + reveal flag.
-    //   team matches: halved team-LP path (teamLpPlan); FFA: per-unit plan (premade pairs from the
-    //   matchType mask settle at their average rank -- design line 66; solos = original formula).
-    const planIn = tsIn.map((t, i) => ({ steamID: t.id, seat: parts[i].seat | 0, mmr: ts.displayRating(t.mu, t.sigma), rank: t.rank, lp: (lp[t.id] == null ? 0 : lp[t.id]) }));
-    const rsPlan = isTeamMt(matchType)
-      ? teamLpPlan(planIn, matchType, scores, leavers0.map(x => x.seat), t2Win)
-      : reducedStakesPlan(planIn, matchType, premadeMaskOf(matchType));
-    for (const r of tsOut) {
-      // repeat-group decay: blend the update toward the pre-match rating by the streak weight
-      //   (w=1 full, w=0 frozen). Blending sigma the same way keeps a frozen player's uncertainty
-      //   frozen too (a x0 match teaches the ladder nothing about them).
-      const gp = gPlan[pid(r.id)];
-      if (gp && gp.w < 1) {
-        const pre = tsIn.find(t => t.id === r.id);
-        if (pre) {
-          r.mu = pre.mu + (r.mu - pre.mu) * gp.w;
-          r.sigma = pre.sigma + (r.sigma - pre.sigma) * gp.w;
+      // repeat-group decay: advance streak memory for the WHOLE consensus roster (writers + leavers)
+      //   and fetch each rated player's update weight. Applied to the TrueSkill delta below;
+      //   points/XP/CP untouched (real play is not zero-sum -- only rating farming is sealed).
+      const gPlan = groupDecayPlan(groupMem,
+        parts.map(p => pid(p.steamID)).concat(leavers0.map(x => pid(x.steamID))), nowMs);
+      groupsDirty = true;
+      let tsOut;
+      if (isTeamMt(matchType)) {
+        // M3: team modes rate as TWO TEAMS (strength = sum mu, binary outcome) -- the ordinal pairwise
+        // update would also transfer rating between TEAMMATES (rank 1 vs rank 2), which team play must not.
+        // Mode 2: the binary outcome comes from the sub-score-derived winner, never the money sums.
+        const winTeam = (t2Win != null) ? t2Win
+          : (((scores[2] | 0) + (scores[3] | 0)) > ((scores[0] | 0) + (scores[1] | 0)) ? 1 : 0);
+        const sides = [[], []];
+        for (let i = 0; i < parts.length; i++) sides[(parts[i].seat >> 1) & 1].push(tsIn[i]);
+        tsOut = (sides[0].length && sides[1].length)
+          ? ts.updateTeamMatch([{ players: sides[winTeam], rank: 1 }, { players: sides[1 - winTeam], rank: 2 }])
+          : ts.updateMatch(tsIn);   // one side fully absent -> degenerate: ordinal fallback among the present
+      } else {
+        tsOut = ts.updateMatch(tsIn);
+      }
+      // visible-LP plan uses PRE-match ratings (tsIn) + current LP -> per-player adjusted delta + reveal flag.
+      //   team matches: halved team-LP path (teamLpPlan); FFA: per-unit plan (premade pairs from the
+      //   matchType mask settle at their average rank -- design line 66; solos = original formula).
+      const planIn = tsIn.map((t, i) => ({ steamID: t.id, seat: parts[i].seat | 0, mmr: ts.displayRating(t.mu, t.sigma), rank: t.rank, lp: (lp[t.id] == null ? 0 : lp[t.id]) }));
+      const rsPlan = isTeamMt(matchType)
+        ? teamLpPlan(planIn, matchType, scores, leavers0.map(x => x.seat), t2Win)
+        : reducedStakesPlan(planIn, matchType, premadeMaskOf(matchType));
+      for (const r of tsOut) {
+        // repeat-group decay: blend the update toward the pre-match rating by the streak weight
+        //   (w=1 full, w=0 frozen). Blending sigma the same way keeps a frozen player's uncertainty
+        //   frozen too (a x0 match teaches the ladder nothing about them).
+        const gp = gPlan[pid(r.id)];
+        if (gp && gp.w < 1) {
+          const pre = tsIn.find(t => t.id === r.id);
+          if (pre) {
+            r.mu = pre.mu + (r.mu - pre.mu) * gp.w;
+            r.sigma = pre.sigma + (r.sigma - pre.sigma) * gp.w;
+          }
+          console.log('  group-decay ' + c.m + ': ' + plog(r.id) + ' repeat-group streak ' + gp.k + ' -> rating weight x' + gp.w);
         }
-        console.log('  group-decay ' + c.m + ': ' + plog(r.id) + ' repeat-group streak ' + gp.k + ' -> rating weight x' + gp.w);
+        skill[pid(r.id)] = { mu: r.mu, sigma: r.sigma };
+        changed[r.id] = { mu: r.mu, sigma: r.sigma };
+        let lpLine = '';
+        if (lpId && appliesLp(matchType)) {   // quick = MMR only; visible LP ladder is ranked-only
+          const cur = lp[r.id] == null ? 0 : lp[r.id];
+          const rs = rsPlan && rsPlan[r.id];
+          const d0 = rs ? rs.adjDelta : lpDelta(cur, rankOf[r.id], parts.length);
+          // promotion/relegation series clamp: decisive line crossing for the boundary-zone match.
+          //   won: plan-supplied (unit average rank / team outcome), else top-half at own rank.
+          //   PROTECTED (flag 2) keeps its compressed natural loss -- no forced drop.
+          const wonLike = rs ? !!rs.won : ((rankOf[r.id] | 0) <= (parts.length + 1) / 2);
+          // PROTECTED (flag 2) keeps natural loss; a seed settle (first ranked) skips the series clamp too.
+          const d = ((rs && rs.flag === 2) || seededNow.has(r.id)) ? d0 : crosslineDelta(cur, d0, wonLike);
+          const nv = Math.max(0, Math.min(LP_MAX, cur + d));
+          lp[r.id] = nv; changedLp[r.id] = nv;
+          if (rs && rs.flag) reveal[r.id] = { matchHash: g[0].d[3] | 0, seed: g[0].d[4] | 0, flag: rs.flag, adjDelta: d, normalDelta: rs.normalDelta };
+          lpLine = ' | pts ' + cur + (d >= 0 ? '+' : '') + d + '->' + nv + (rs && rs.flag ? (' [' + (rs.flag === 1 ? 'UPSET' : 'PROTECTED') + ' normal ' + rs.normalDelta + ']') : '')
+            + (d !== d0 ? (' [SERIES ' + (wonLike ? 'PROMOTED' : 'RELEGATED') + ' from ' + d0 + ']') : '');
+        }
+        console.log('  settle ' + c.m + ': ' + plog(r.id) + ' rank' + rankOf[r.id] + ' mu' + r.mu.toFixed(2) + ' sigma' + r.sigma.toFixed(2) + ' -> ' + ts.displayRating(r.mu, r.sigma) + lpLine);
       }
-      skill[pid(r.id)] = { mu: r.mu, sigma: r.sigma };
-      changed[r.id] = { mu: r.mu, sigma: r.sigma };
-      let lpLine = '';
-      if (lpId && appliesLp(matchType)) {   // quick = MMR only; visible LP ladder is ranked-only
-        const cur = lp[r.id] == null ? 0 : lp[r.id];
-        const rs = rsPlan && rsPlan[r.id];
-        const d0 = rs ? rs.adjDelta : lpDelta(cur, rankOf[r.id], parts.length);
-        // promotion/relegation series clamp: decisive line crossing for the boundary-zone match.
-        //   won: plan-supplied (unit average rank / team outcome), else top-half at own rank.
-        //   PROTECTED (flag 2) keeps its compressed natural loss -- no forced drop.
-        const wonLike = rs ? !!rs.won : ((rankOf[r.id] | 0) <= (parts.length + 1) / 2);
-        // PROTECTED (flag 2) keeps natural loss; a seed settle (first ranked) skips the series clamp too.
-        const d = ((rs && rs.flag === 2) || seededNow.has(r.id)) ? d0 : crosslineDelta(cur, d0, wonLike);
-        const nv = Math.max(0, Math.min(LP_MAX, cur + d));
-        lp[r.id] = nv; changedLp[r.id] = nv;
-        if (rs && rs.flag) reveal[r.id] = { matchHash: g[0].d[3] | 0, seed: g[0].d[4] | 0, flag: rs.flag, adjDelta: d, normalDelta: rs.normalDelta };
-        lpLine = ' | pts ' + cur + (d >= 0 ? '+' : '') + d + '->' + nv + (rs && rs.flag ? (' [' + (rs.flag === 1 ? 'UPSET' : 'PROTECTED') + ' normal ' + rs.normalDelta + ']') : '')
-          + (d !== d0 ? (' [SERIES ' + (wonLike ? 'PROMOTED' : 'RELEGATED') + ' from ' + d0 + ']') : '');
-      }
-      console.log('  settle ' + c.m + ': ' + plog(r.id) + ' rank' + rankOf[r.id] + ' mu' + r.mu.toFixed(2) + ' sigma' + r.sigma.toFixed(2) + ' -> ' + ts.displayRating(r.mu, r.sigma) + lpLine);
     }
     for (const x of leavers0) {
       // a confession already counted this exact (player, match) leave -- exit-rate AND the LP hit
@@ -2277,4 +2387,4 @@ async function main() {
 if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
-module.exports = { isVoidDisp, voidByConsensus, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, CONFESS_MAGIC, reconcileConfessions, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan, postForm, postFormDetails, findOrCreateBoard, ghWarn, ghErr };
+module.exports = { isVoidDisp, voidByConsensus, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, CONFESS_MAGIC, reconcileConfessions, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan, postForm, postFormDetails, findOrCreateBoard, ghWarn, ghErr, PT_MODE, PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, ptSeedCp, ptBoardPlan };

@@ -57,3 +57,44 @@ jobs:
           else
             echo "no state change"
           fi
+  # Playtest-channel twin: same pipeline pointed at the playtest app with its own disjoint
+  # state file. Serialized after the main job (needs + always) so the two persists never
+  # contend; a main-job failure must not starve the playtest harvest. Tests already ran in
+  # the main job on this same checkout, so the twin goes straight to the run.
+  playtest-feedback:
+    if: ${{ always() && github.repository == 'FL343/epoch-sync' }}
+    needs: feedback
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: run
+        env:
+          STEAM_PUBLISHER_KEY: ${{ secrets.STEAM_PUBLISHER_KEY }}
+          APPID: ${{ secrets.PLAYTEST_APPID }}
+          STATE_SALT: ${{ secrets.STATE_SALT }}
+          FB_STATE_FILE: feedback-playtest.json
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          FB_DIGEST_TO: ${{ secrets.FB_DIGEST_TO }}
+          FB_DIGEST_TAG: '[playtest] '
+        run: node feedback.js
+      - name: persist
+        run: |
+          if [ -n "$(git status --porcelain -- feedback-playtest.json)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add -- feedback-playtest.json
+            git commit -m "state: update playtest feedback state"
+            n=0
+            until git pull --rebase origin "${GITHUB_REF_NAME}" && git push; do
+              n=$((n+1))
+              if [ "$n" -ge 3 ]; then echo "::error::playtest feedback state push failed after $n tries"; exit 1; fi
+              sleep $((5 * n))
+            done
+          else
+            echo "no state change"
+          fi
