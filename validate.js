@@ -1454,6 +1454,8 @@ function ptBoardPlan(names, cfg) {
   add(cfg.xpLb, 1); add(cfg.cpLb, 1); add(cfg.endlessLb, 1); add(cfg.endlessTrioLb, 1);
   add('version_gate', 1);   // authoritative-version gate (ops-written, client read-only)
   add('gate_window', 1);    // queue-gate forced window / emergency stop (ops-written, client read-only)
+  add('pt_master', 1);      // playtest master switch: an active window closes the whole playtest
+                            //   (clients fail-open: no entry / expired window = playtest open)
   add(cfg.trustLb, 1); add(cfg.reportLb, 0);
   add('card_box', 0);       // cosmetic claim rows (client-writable, zero authority)
   const forbidden = [];

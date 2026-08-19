@@ -60,17 +60,17 @@ const CFG = {
 };
 {
   const plan = ptBoardPlan([], CFG);
-  eq('empty listing -> full surface provisioned', plan.create.length, 59);
+  eq('empty listing -> full surface provisioned', plan.create.length, 60);
   const byName = {}; for (const b of plan.create) byName[b.name] = b.trusted;
   T('all 50 shards planned client-writable', Array.from({ length: 50 }, (_, i) => byName['rec_' + i]).every(t => t === 0));
-  for (const [n, t] of [['xpb', 1], ['cpb', 1], ['enb', 1], ['enb3', 1], ['version_gate', 1], ['gate_window', 1], ['trb', 1], ['rpb', 0], ['card_box', 0]])
+  for (const [n, t] of [['xpb', 1], ['cpb', 1], ['enb', 1], ['enb3', 1], ['version_gate', 1], ['gate_window', 1], ['pt_master', 1], ['trb', 1], ['rpb', 0], ['card_box', 0]])
     eq('plan ' + n + ' trusted=' + t, byName[n], t);
   eq('nothing forbidden on a clean app', plan.forbidden, []);
 }
 {
   const plan = ptBoardPlan(['rec_0', 'rec_7', 'xpb', 'gate_window', 'unrelated'], CFG);
   T('existing boards skipped (idempotent)', plan.create.every(b => ['rec_0', 'rec_7', 'xpb', 'gate_window'].indexOf(b.name) < 0));
-  eq('plan size shrinks by the existing four', plan.create.length, 55);
+  eq('plan size shrinks by the existing four', plan.create.length, 56);
 }
 {
   const plan = ptBoardPlan(['rkb', 'lpb', 'lpb_s3', 'rdb', 'gtb', 'mrb', 'lpbX', 'xpb'], CFG);
@@ -79,7 +79,7 @@ const CFG = {
 }
 {
   const plan = ptBoardPlan([], { prefix: 'rec_', shards: 2, redeemLb: 'rdb', grantLb: 'gtb', mirrorLb: 'mrb' });
-  T('unset optional names are simply skipped', plan.create.length === 2 + 3 && plan.forbidden.length === 0);   // 2 shards + version_gate + gate_window + card_box
+  T('unset optional names are simply skipped', plan.create.length === 2 + 4 && plan.forbidden.length === 0);   // 2 shards + version_gate + gate_window + pt_master + card_box
 }
 
 // ---- 5) source pins (the structural skips must stay wired exactly where they are) ----
