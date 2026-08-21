@@ -1519,8 +1519,14 @@ async function main() {
   console.log('shards: ' + shards.length);
 
   const recs = [];
-  const nonEmpty = shards.filter(s => (s.entries | 0) > 0);
-  const shardOut = await mapPool(nonEmpty, CONCURRENCY, async (s) => {
+  // Read EVERY shard every run. The listing's per-board `entries` count is eventually
+  // consistent with a lag of minutes-to-HOURS for fresh writes (and sticks stale for days
+  // after deletes) -- gating shard reads on it left cold shards unsettled for hours: the
+  // playtest channel's first real match (2026-08-21) sat on shards whose count still read
+  // 0 while direct entry reads returned the records, so back-to-back runs logged
+  // "records: 0" against live data. 50 paged reads cost single-digit seconds under the
+  // worker pool; the count is not worth trusting for anything.
+  const shardOut = await mapPool(shards, CONCURRENCY, async (s) => {
     const id = s.id || s.ID;
     const label = 's' + String(s.name || s.Name).replace(PREFIX, '');
     const { ents } = await readBoardAll(id, 'shard ' + label);   // paged; cap-hit is warned inside
