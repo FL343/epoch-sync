@@ -134,5 +134,70 @@ console.log('=== sanityFlags: mode-2 branch ===');
   t('mt3 group never checks rank claims (no conflict flag)', sanityFlags(fullGroup(0, { mt: 3 })).indexOf('rank-conflict') < 0);
 }
 
+// ============================================================
+// O82 6P matchmaking: bases 8/9 = mode 2 at teamSize 3 (seats 0-2 vs 3-5, blocks {1..3}v{4..6}).
+// Same engine, same red lines, wider seats -- every consumer goes through teamSizeOfMt.
+// ============================================================
+console.log('=== O82 3V3 (bases 8/9) ===');
+const { teamSizeOfMt, teamOfSeat, careerWon } = V;
+eq('teamSizeOfMt: 8/9 -> 3, other team bases -> 2', [teamSizeOfMt(8), teamSizeOfMt(9), teamSizeOfMt(3), teamSizeOfMt(5)], [3, 3, 2, 2]);
+eq('teamOfSeat ts=3: 0-2 -> A, 3-5 -> B', [0, 1, 2, 3, 4, 5].map(s => teamOfSeat(s, 3)), [0, 0, 0, 1, 1, 1]);
+eq('isTeamMt covers 8/9', [isTeamMt(8), isTeamMt(9)], [true, true]);
+eq('isSubScoreMt covers 8/9 (rank claims, never money)', [isSubScoreMt(8), isSubScoreMt(9)], [true, true]);
+eq('appliesLp: 9 ranked-only (8 = quick, LP-free)', [appliesLp(8), appliesLp(9)], [false, true]);
+eq('careerWon team = rank <= teamSize (3V3 winners {1,2,3})', [careerWon(8, 3), careerWon(8, 4), careerWon(5, 2), careerWon(5, 3)], [true, false, true, false]);
+
+// 6-seat honest group builder (3V3 convention ranks)
+const fullGroup6 = (winTeam, o) => {
+  o = o || {};
+  const scores = o.scores || [100, 40, 30, 95, 60, 20];
+  const parts = [0, 1, 2, 3, 4, 5].map(s => ({ seat: s, score: scores[s] }));
+  const blocks = [parts.filter(p => teamOfSeat(p.seat, 3) === winTeam), parts.filter(p => teamOfSeat(p.seat, 3) !== winTeam)]
+    .map(b => b.sort((x, y) => (y.score !== x.score) ? y.score - x.score : x.seat - y.seat));
+  const rankBySeat = {};
+  blocks.forEach((b, bi) => b.forEach((p, i) => { rankBySeat[p.seat] = bi * 3 + i + 1; }));
+  return [0, 1, 2, 3, 4, 5].map(s => REC('sid' + s, s, rankBySeat[s], Object.assign({ scores }, o, { mt: (o.mt == null ? 8 : o.mt) })));
+};
+{
+  const g6 = fullGroup6(0);
+  eq('team2WinTeamOf mt8: team A claims -> 0', team2WinTeamOf(g6), 0);
+  eq('team2WinTeamOf mt8: team B claims -> 1', team2WinTeamOf(fullGroup6(1)), 1);
+  const cf = fullGroup6(0); cf[3].d[6] = 2;   // seat 3 (team B) claims rank 2 = "B won" -> conflict
+  eq('3V3 rank conflict -> null', team2WinTeamOf(cf), null);
+  const rz = fullGroup6(0); rz[1].d[6] = 0;   // recon sentinel rank 0 = out of domain
+  eq('3V3 rank-0 sentinel -> null', team2WinTeamOf(rz), null);
+  const rx = fullGroup6(0); rx[1].d[6] = 7;   // rank 7 out of 1..6 domain
+  eq('3V3 rank 7 out of domain -> null', team2WinTeamOf(rx), null);
+  // convention ranks: winning block {1,2,3} by score, losing {4,5,6}
+  const parts6 = [0, 1, 2, 3, 4, 5].map(s => ({ steamID: 'sid' + s, seat: s, score: [100, 40, 30, 95, 60, 20][s] }));
+  eq('team2RankOf ts=3 blocks', team2RankOf(parts6, 0, 3),
+     { sid0: 1, sid1: 2, sid2: 3, sid3: 4, sid4: 5, sid5: 6 });
+  // absent seats keep block offsets: lone winners keep {1..}, losers still {4..}
+  eq('team2RankOf ts=3 partial keeps blocks', team2RankOf([parts6[0], parts6[3], parts6[4]], 0, 3),
+     { sid0: 1, sid3: 4, sid4: 5 });
+  // sanity: clean 3V3 group; wrong pc; premade fields on a team code
+  eq('clean mt8 pc=6 -> no flags', sanityFlags(g6), []);
+  t('mt8 pc=4 -> pc flag', sanityFlags(fullGroup(0, { mt: 8 })).indexOf('pc') >= 0);
+  t('mt8 + pair mask -> team-mask', sanityFlags(fullGroup6(0, { mt: 8 | (1 << 4) })).indexOf('team-mask') >= 0);
+  t('mt8 + trio bits -> team-mask', sanityFlags(fullGroup6(0, { mt: 8 | (1 << 8) })).indexOf('team-mask') >= 0);
+  const hi6 = Math.round(SANITY.SCORE_CAP * (TEAM2.SCORE_MULT - 0.5));
+  eq('mt8 score inside gamble headroom -> clean', sanityFlags(fullGroup6(0, { scores: [hi6, 40, 30, 95, 60, 20] })), []);
+  // teamLpPlan mt9: 3+3 sums, halved team component, drip full
+  const plan6 = teamLpPlan(
+    [0, 1, 2, 3, 4, 5].map(s => ({ steamID: 'sid' + s, seat: s, mmr: 1000, lp: 300 })),
+    9, [100, 40, 30, 95, 60, 20], [], 0);
+  t('teamLpPlan mt9 non-null', plan6 != null);
+  const segT = V.lpSeg(300);
+  eq('3V3 winners get halved team win + drip', [plan6.sid0.adjDelta, plan6.sid1.adjDelta, plan6.sid2.adjDelta],
+     [Math.round(segT.win / 2 + segT.drip), Math.round(segT.win / 2 + segT.drip), Math.round(segT.win / 2 + segT.drip)]);
+  eq('3V3 losers get halved team loss + drip', plan6.sid3.adjDelta, Math.round(-segT.loss / 2 + segT.drip));
+  eq('3V3 won flags follow teams', [plan6.sid0.won, plan6.sid5.won], [true, false]);
+  // winTeamOverride is authoritative even against money (sub-score red line)
+  const planB = teamLpPlan(
+    [0, 1, 2, 3, 4, 5].map(s => ({ steamID: 'sid' + s, seat: s, mmr: 1000, lp: 300 })),
+    9, [100, 40, 30, 5, 5, 5], [], 1);   // money says A, override says B
+  eq('3V3 winTeamOverride beats money', [planB.sid0.won, planB.sid3.won], [false, true]);
+}
+
 console.log(failN ? ('=== FAIL (' + failN + ') ===') : '=== PASS (team2-settle) ===');
 process.exit(failN ? 1 : 0);

@@ -26,7 +26,7 @@ const grp = (...rs) => rs;
 console.log('=== sanityFlags (B5 tier A) ===');
 
 eq('defaults pinned (cap/floor/dur/start-age)', [SANITY.SCORE_CAP, SANITY.SCORE_FLOOR, SANITY.DUR_CAP, SANITY.MIN_START_AGE_MS], [100000, -50000, 7200, 300000]);
-eq('mt whitelist pinned', SANITY.MT_ALLOWED, [1, 2, 3, 4, 5, 6, 7]);   // 5/6 = mode 2 (sub-score outcome, see team2-settle.js); 7 = endless co-op (own settle branch)
+eq('mt whitelist pinned', SANITY.MT_ALLOWED, [1, 2, 3, 4, 5, 6, 7, 8, 9]);   // 5/6 = mode 2; 7 = endless co-op; 8/9 = mode 2 at teamSize 3 (O82 6P matchmaking)
 
 eq('clean 3P quick -> []', sanityFlags(grp(mk(A, 0), mk(B, 1))), []);
 eq('clean ranked premade mask (mt=34, pc=4) -> []', sanityFlags(grp(mk(A, 0, { mt: 34, pc: 4 }), mk(B, 1, { mt: 34, pc: 4 }))), []);
@@ -34,13 +34,21 @@ eq('clean team (mt=4, pc=4) -> []', sanityFlags(grp(mk(A, 0, { mt: 4, pc: 4 }), 
 eq('shop overdraft score -100 legal', sanityFlags(grp(mk(A, 0, { scores: [-100, 50, 60] }), mk(B, 1, { scores: [-100, 50, 60] }))), []);
 
 has('mt=0 (private, never client-reported)', sanityFlags(grp(mk(A, 0, { mt: 0 }), mk(B, 1, { mt: 0 }))), 'mt');
-has('mt=8 (unassigned code)', sanityFlags(grp(mk(A, 0, { mt: 8 }), mk(B, 1, { mt: 8 }))), 'mt');
+has('mt=10 (unassigned code)', sanityFlags(grp(mk(A, 0, { mt: 10 }), mk(B, 1, { mt: 10 }))), 'mt');
 has('team code carrying mask (3|1<<4)', sanityFlags(grp(mk(A, 0, { mt: 19, pc: 4 }), mk(B, 1, { mt: 19, pc: 4 }))), 'team-mask');
 has('team pc!=4', sanityFlags(grp(mk(A, 0, { mt: 3, pc: 3 }), mk(B, 1, { mt: 3, pc: 3 }))), 'pc');
 has('ffa pc=1', sanityFlags(grp(mk(A, 0, { pc: 1, scores: [10] }), mk(B, 0, { pc: 1, scores: [10] }))), 'pc');
-has('ffa pc=5', sanityFlags(grp(mk(A, 0, { pc: 5, scores: [1, 2, 3, 4, 5] }), mk(B, 1, { pc: 5, scores: [1, 2, 3, 4, 5] }))), 'pc');
+has('ffa pc=7', sanityFlags(grp(mk(A, 0, { pc: 7, scores: [1, 2, 3, 4, 5, 6, 7] }), mk(B, 1, { pc: 7, scores: [1, 2, 3, 4, 5, 6, 7] }))), 'pc');
+eq('ffa pc=5 now legal (O82 6P: 5P fallback composition)', sanityFlags(grp(mk(A, 0, { pc: 5, scores: [1, 2, 3, 4, 5] }), mk(B, 1, { pc: 5, scores: [1, 2, 3, 4, 5] }))), []);
 has('mask bit1 with pc=2 (seats 2,3 absent)', sanityFlags(grp(mk(A, 0, { mt: 33, pc: 2 }), mk(B, 1, { mt: 33, pc: 2 }))), 'mask-range');
 has('mask>3', sanityFlags(grp(mk(A, 0, { mt: 1 | (5 << 4), pc: 4 }), mk(B, 1, { mt: 1 | (5 << 4), pc: 4 }))), 'mask-range');
+// O82 trio field (bits 8..10 = start seat + 1): domain checks
+eq('clean 6P ffa + trio seats 0-2 (mt=1|1<<8)', sanityFlags(grp(mk(A, 0, { mt: 1 | (1 << 8), pc: 6, scores: [1, 2, 3, 4, 5, 6] }), mk(B, 1, { mt: 1 | (1 << 8), pc: 6, scores: [1, 2, 3, 4, 5, 6] }))), []);
+eq('clean 5P ffa + trio seats 2-4 (trioAt=3)', sanityFlags(grp(mk(A, 0, { mt: 1 | (3 << 8), pc: 5, scores: [1, 2, 3, 4, 5] }), mk(B, 1, { mt: 1 | (3 << 8), pc: 5, scores: [1, 2, 3, 4, 5] }))), []);
+eq('clean 6P ffa + pair(0,1) + trio(3-5) coexist', sanityFlags(grp(mk(A, 0, { mt: 1 | (1 << 4) | (4 << 8), pc: 6, scores: [1, 2, 3, 4, 5, 6] }), mk(B, 1, { mt: 1 | (1 << 4) | (4 << 8), pc: 6, scores: [1, 2, 3, 4, 5, 6] }))), []);
+has('trio seats past pc (trioAt=5, pc=5)', sanityFlags(grp(mk(A, 0, { mt: 1 | (5 << 8), pc: 5, scores: [1, 2, 3, 4, 5] }), mk(B, 1, { mt: 1 | (5 << 8), pc: 5, scores: [1, 2, 3, 4, 5] }))), 'trio-range');
+has('pair(0,1) overlapping trio(0-2) = forged units', sanityFlags(grp(mk(A, 0, { mt: 1 | (1 << 4) | (1 << 8), pc: 6, scores: [1, 2, 3, 4, 5, 6] }), mk(B, 1, { mt: 1 | (1 << 4) | (1 << 8), pc: 6, scores: [1, 2, 3, 4, 5, 6] }))), 'unit-overlap');
+has('endless code carrying trio bits', sanityFlags(grp(mk(A, 0, { mt: 7 | (1 << 8), pc: 2, scores: [1, 2] }), mk(B, 1, { mt: 7 | (1 << 8), pc: 2, scores: [1, 2] }))), 'mask');
 has('score above cap', sanityFlags(grp(mk(A, 0, { scores: [999999, 1, 2] }), mk(B, 1, { scores: [999999, 1, 2] }))), 'score');
 has('score below floor', sanityFlags(grp(mk(A, 0, { scores: [-60000, 1, 2] }), mk(B, 1, { scores: [-60000, 1, 2] }))), 'score');
 has('duration negative', sanityFlags(grp(mk(A, 0, { dur: -5 }), mk(B, 1))), 'duration');
