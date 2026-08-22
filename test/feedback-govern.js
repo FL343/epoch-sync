@@ -179,6 +179,19 @@ function mkWl(subWords, wordWords) {
   // no invisible characters in source (zero-width literals are self-laid mines)
   ok('[8] no invisible chars in feedback.js', ![...SRC].some(c => { const p = c.codePointAt(0); return (p >= 0x200B && p <= 0x200F) || (p >= 0x2060 && p <= 0x206F) || p === 0xFEFF; }));
 
+  // [9] state file stays ASCII-only (2026-08-22 leak: the CI bot commits state without local
+  // hooks, so raw player CJK in feedback-playtest.json reached the public repo AND bricked
+  // every local push on the repo-wide Han scan). asciiJson is the single write path.
+  {
+    const sample = { items: { a: { text: '55465e97754c9762 emoji D83dDe00 ok' } } };
+    const enc = vv.asciiJson(sample);
+    ok('[9] asciiJson output is pure ASCII', !/[^\x00-\x7f]/.test(enc));
+    ok('[9] asciiJson round-trips losslessly (surrogate pairs included)',
+       JSON.stringify(JSON.parse(enc)) === JSON.stringify(sample));
+    ok('[9] saveState writes through asciiJson (single choke point)',
+       /function saveState\(st\) \{ fs\.writeFileSync\(FB_STATE_FILE, asciiJson\(st\)\); \}/.test(SRC));
+  }
+
   console.log('feedback-govern: ' + pass + '/' + (pass + fail) + (fail ? ' FAIL' : ' ok'));
   process.exit(fail ? 1 : 0);
 })();

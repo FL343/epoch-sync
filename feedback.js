@@ -433,7 +433,16 @@ function loadState() {
     return { boards: s.boards || {}, items: s.items || {}, votes: s.votes || {}, digest: s.digest || { day: '', at: 0 } };
   } catch (e) { return { boards: {}, items: {}, votes: {}, digest: { day: '', at: 0 } }; }
 }
-function saveState(st) { fs.writeFileSync(FB_STATE_FILE, JSON.stringify(st)); }
+// State is the ONLY file in this repo that persists player-written text (held tombstones /
+// item bodies), and the CI bot commits it without local hooks -- so the writer itself must
+// keep the file ASCII-only (\uXXXX escapes; JSON.parse round-trips them losslessly). Raw
+// non-ASCII here leaked real player feedback text into the public repo on the playtest
+// channel (2026-08-22) and then bricked every local push on the repo-wide Han scan.
+// Escaping per UTF-16 code unit is valid JSON (surrogate pairs stay paired escapes).
+function asciiJson(o) {
+  return JSON.stringify(o).replace(/[\u0080-\uffff]/g, c => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0'));
+}
+function saveState(st) { fs.writeFileSync(FB_STATE_FILE, asciiJson(st)); }
 
 // ---- daily digest (rides the O49 Resend channel) ----
 // First tick after a UTC day rollover mails every item admitted since the last
@@ -667,6 +676,6 @@ module.exports = {
   nowTsMin, decodeBoxEntry, decodeVoteEntry, mergeVotes, tallyVotes, hotScoreOf, packFeedDetails,
   dayOfTs, loadWordlist, adSurfaces, adReason, filterReason, countAuthorDay,
   loadMod, reportsSince, trustPenaltyOf, governItems, maybeSendDigest,
-  wlHash, wlSubHit, wlWordHit, foldForWordlist,
+  wlHash, wlSubHit, wlWordHit, foldForWordlist, asciiJson,
   FB_TOMB_SCORE, tombstoneDetails,
 };
