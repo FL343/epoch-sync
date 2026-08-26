@@ -1265,12 +1265,15 @@ const ENDLESS_LB = process.env.ENDLESS_LB || 'endless_board';
 const ENDLESS_LB_TRIO = process.env.ENDLESS_LB_TRIO || 'endless_board_trio';
 const ENDLESS = {
   MT: 7,
-  // Physical floor per level. The level timer is 60s (lockstep with the client config), but a
-  // fully-cleared level ends early and the between-level screens can be declined in seconds,
-  // so the ENFORCED floor is deliberately half the timer. Generosity is free here: pacing only
+  // Physical floor per level. The level timer is 75s (lockstep with the client config; O114
+  // 2026-08-26 global pacing slowdown raised it from the original 60), but a fully-cleared
+  // level ends early and the between-level screens can be declined in seconds, so the
+  // ENFORCED floor is deliberately half the timer. Generosity is free here: pacing only
   // DEFERS a settle (plain log, never a flag), so a legit speedrun merely settles a few minutes
   // later while a fabricated deep run still has to sit out most of the real play time.
-  LEVEL_SECONDS: 60,
+  // Rollout note: raising the floor ahead of clients is safe in both directions -- records from
+  // 60s-era clients still accrue real wall time well above 75*0.5 per depth.
+  LEVEL_SECONDS: 75,
   PACE_FRAC: Number(process.env.ENDLESS_PACE_FRAC || 0.5),
   DEPTH_CAP: Number(process.env.ENDLESS_DEPTH_CAP || 200000),   // structural domain; keeps packed board keys far inside int32
   SCORE_MULT: Number(process.env.ENDLESS_SCORE_MULT || 10),     // per-seat score cap = team goal at endDepth x this

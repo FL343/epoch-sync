@@ -35,7 +35,7 @@ console.log('=== endless settle authority (type 7) ===');
 // -- constants pinned (companion-repo lockstep re-pins the client-shared subset) --
 eq('config pinned (levelSecs/frac/depthCap/scoreMult/scale/div)',
   [ENDLESS.MT, ENDLESS.LEVEL_SECONDS, ENDLESS.PACE_FRAC, ENDLESS.DEPTH_CAP, ENDLESS.SCORE_MULT, ENDLESS.BOARD_SCALE, ENDLESS.TIEBREAK_DIV],
-  [7, 60, 0.5, 200000, 10, 10000, 1000]);
+  [7, 75, 0.5, 200000, 10, 10000, 1000]);   // O114 2026-08-26: level timer 60->75 (client lockstep)
 eq('goal curve pinned', ENDLESS.GOAL, { start: 650, addonStart: 275, growEarly: 250, growLate: 50, earlyLevels: 9 });
 eq('cp config pinned', ENDLESS.CP, { base: 10, rankBonus: [10, 5, 0, 0], rankedMult: 2.0 });
 eq('continue ladder pinned', ENDLESS.CONTINUE, { base: 20, esc: 1.5 });
@@ -79,10 +79,10 @@ eq('negative team score clamps tiebreak to 0', unpackEndlessScore(packEndlessSco
 eq('depth cap fits int32 with headroom', packEndlessScore(ENDLESS.DEPTH_CAP, 999999999) <= 2147483647, true);
 
 // -- pacing: depth-scaled minimum real time, start credit only up to the proven chain --
-eq('fresh 0->10 needs 10 levels x 30s', endlessRequiredMs({ startDepth: 0, endDepth: 10 }, 0), 10 * 30000);
-eq('resume 8->10 with chain 8: only the gain is owed', endlessRequiredMs({ startDepth: 8, endDepth: 10 }, 8), 2 * 30000);
-eq('resume 8->10 with NO chain: full span owed (no time credit for an unproven start)', endlessRequiredMs({ startDepth: 8, endDepth: 10 }, 0), 10 * 30000);
-eq('chain deeper than claim credits only startDepth', endlessRequiredMs({ startDepth: 8, endDepth: 10 }, 20), 2 * 30000);
+eq('fresh 0->10 needs 10 levels x 37.5s', endlessRequiredMs({ startDepth: 0, endDepth: 10 }, 0), 10 * 37500);
+eq('resume 8->10 with chain 8: only the gain is owed', endlessRequiredMs({ startDepth: 8, endDepth: 10 }, 8), 2 * 37500);
+eq('resume 8->10 with NO chain: full span owed (no time credit for an unproven start)', endlessRequiredMs({ startDepth: 8, endDepth: 10 }, 0), 10 * 37500);
+eq('chain deeper than claim credits only startDepth', endlessRequiredMs({ startDepth: 8, endDepth: 10 }, 20), 2 * 37500);
 eq('no gain -> no wait', endlessRequiredMs({ startDepth: 5, endDepth: 5 }, 5), 0);
 
 // -- sanity branch (flag-don't-settle) --
