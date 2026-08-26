@@ -219,9 +219,12 @@ const SANITY = {
 // The client repo pins its gamble table's max multiplier against this factor in its lockstep test.
 const TEAM2 = { SCORE_MULT: Number(process.env.TEAM2_SCORE_MULT || 3) };
 // NOTE (extensibility): SCORE_CAP/DUR_CAP/MIN_START_AGE_MS were derived from the MATCHMADE game
-// as it is today -- 5 levels per matchmade run, 2-4 players, current item-value scale. A level-
-// count change or economy rework must re-derive them. Mode-2 (5/6) keeps the same duration cap
-// (5 rounds + gamble + at most one sudden-death level is the same order of play time) but takes a
+// -- originally 5 levels per matchmade run, 2-4 players, current item-value scale. A level-count
+// change or economy rework must re-derive them. Re-derived 2026-08-26 (O117, 5 -> 6 levels):
+// theoretical vacuum-everything ~36-60k << SCORE_CAP 100k, a 6-level run ~12-30 min << DUR_CAP
+// 7200s, and a longer match only strengthens the MIN_START_AGE premise -- all three caps stand.
+// Mode-2 (5/6) keeps the same duration cap
+// (6 rounds + gamble + at most one sudden-death level is the same order of play time) but takes a
 // x3 score headroom for the gamble round (TEAM2 above). The client repo pins these assumptions in
 // its lockstep test so such a change fails loudly there. Type 7 (endless) deliberately does NOT
 // use these caps: its score cap scales with the claimed depth and its time bound is the
