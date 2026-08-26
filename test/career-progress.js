@@ -17,12 +17,14 @@ const assert = (label, cond) => { if (cond) ok(label); else bad(label); };
 // ============================================================
 console.log('=== xpProgressFrac (early-settle points discount) ===');
 const N = XP_CFG.progressLevels;
-eq('progressLevels pinned = 5 (matchmade level count)', N, 5);
+eq('progressLevels pinned = 6 (matchmade level count, O117)', N, 6);
+eq('progressFullAt pinned = 5 (transition-safe full threshold, O117)', XP_CFG.progressFullAt, 5);
 eq('0 (legacy record, no data) -> full 1', xpProgressFrac(0), 1);
-eq('1 level -> 1/5', xpProgressFrac(1), 1 / N);
-eq('2 levels -> 2/5', xpProgressFrac(2), 2 / N);
-eq('4 levels -> 4/5', xpProgressFrac(4), 4 / N);
-eq('5 levels (full match) -> 1', xpProgressFrac(5), 1);
+eq('1 level -> 1/6', xpProgressFrac(1), 1 / N);
+eq('2 levels -> 2/6', xpProgressFrac(2), 2 / N);
+eq('4 levels -> 4/6', xpProgressFrac(4), 4 / N);
+eq('5 levels -> full 1 (pre-O117 full record must not be docked 5/6)', xpProgressFrac(5), 1);
+eq('6 levels (full match) -> 1', xpProgressFrac(6), 1);
 eq('negative -> full 1 (garbage earns no leverage)', xpProgressFrac(-3), 1);
 
 // ============================================================
@@ -30,10 +32,11 @@ console.log('=== matchProgressOf (min-of-writers; out-of-domain ignored) ===');
 // d[7] = win(bit0) | progress<<1 -- win bits differ per writer, progress bits should agree.
 const rec7 = (d7) => { const d = []; d[7] = d7; return { d }; };
 eq('two writers agree (win bits differ): [win|2<<1, 0|2<<1] -> 2', matchProgressOf([rec7(1 | (2 << 1)), rec7(0 | (2 << 1))]), 2);
-eq('full match [1|5<<1, 0|5<<1] -> 5', matchProgressOf([rec7(1 | (5 << 1)), rec7(5 << 1)]), 5);
-eq('transition skew (4 vs 5) -> min 4', matchProgressOf([rec7(4 << 1), rec7(5 << 1)]), 4);
-eq('lone forger deflating (1 vs 5,5) -> min 1 (hurts own award too)', matchProgressOf([rec7(1 << 1), rec7(5 << 1), rec7(5 << 1)]), 1);
-eq('forger inflating beyond domain (9) ignored -> 5', matchProgressOf([rec7(9 << 1), rec7(5 << 1)]), 5);
+eq('full match [1|6<<1, 0|6<<1] -> 6', matchProgressOf([rec7(1 | (6 << 1)), rec7(6 << 1)]), 6);
+eq('transition skew (5 vs 6) -> min 5', matchProgressOf([rec7(5 << 1), rec7(6 << 1)]), 5);
+eq('lone forger deflating (1 vs 6,6) -> min 1 (hurts own award too)', matchProgressOf([rec7(1 << 1), rec7(6 << 1), rec7(6 << 1)]), 1);
+eq('forger inflating beyond domain (9) ignored -> 6', matchProgressOf([rec7(9 << 1), rec7(6 << 1)]), 6);
+eq('pre-O117 record (5) still in-domain -> 5 (frac 1 via progressFullAt)', matchProgressOf([rec7(5 << 1), rec7(5 << 1)]), 5);
 eq('negative d[7] ignored -> other writer wins', matchProgressOf([rec7(-8), rec7(3 << 1)]), 3);
 eq('all legacy zero -> 0 (frac 1)', matchProgressOf([rec7(1), rec7(0)]), 0);
 eq('legacy zero writer ignored in min: [0, 3<<1] -> 3', matchProgressOf([rec7(0), rec7(3 << 1)]), 3);
@@ -95,16 +98,16 @@ const B = XP_CFG.base;
   const g = [mkRec(0, 1, A), mkRec(1, 1, BB)];   // peers-gone finishers (valid)
   const scores = [300, 100], rankOf = { [A]: 1, [BB]: 2 };
   const xp = {}, changedXp = {}, xpState = {}, leavers = {}, det = {};
-  const pf = xpProgressFrac(2);   // settled during level 2 -> x0.4
+  const pf = xpProgressFrac(2);   // settled during level 2 -> x(2/6)
   creditXp(g, 1, scores, rankOf, xp, changedXp, xpState, leavers, TODAY, pf, det);
   const rawA = B + XP_CFG.rankBonus[0] + Math.floor(300 / XP_CFG.moneyDivisor) + XP_CFG.dailyFirstWin;
-  eq('early settle (2/5): winner gets round(raw * 0.4)', xp[A], Math.round(rawA * (1 * pf)));
+  eq('early settle (2/6): winner gets round(raw * 2/6)', xp[A], Math.round(rawA * (1 * pf)));
   eq('gain matches computeXpGain(factor=1*pf) directly', xp[A], computeXpGain('valid', 0, 300, false, true, 1 * pf));
   eq('career W/L still counts fully on a discounted match', [xpState[pid(A)].cg, xpState[pid(A)].cw], [1, 1]);
   // full-progress control: pf=1 path unchanged
   const xp2 = {}, det2 = {};
-  creditXp(g, 1, scores, rankOf, xp2, {}, {}, {}, TODAY, xpProgressFrac(5), det2);
-  eq('full match (5/5) unchanged = raw', xp2[A], rawA);
+  creditXp(g, 1, scores, rankOf, xp2, {}, {}, {}, TODAY, xpProgressFrac(6), det2);
+  eq('full match (6/6) unchanged = raw', xp2[A], rawA);
 }
 
 // legacy call sites (no progFrac/careerDet args) behave exactly as before

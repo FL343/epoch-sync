@@ -1116,8 +1116,14 @@ function saveXp(s) { try { fs.writeFileSync(XP_FILE, JSON.stringify(s, null, 0))
 // highest tier at-or-below the player's level applies -- tiers are absolute, not additive).
 // curve = the level-cost function (mirror of the client progression curve): the first fastLevels
 // of every century cost fastCost, the rest normalCost, all scaled by (1 + centuryGrowth * century).
+// progressLevels 5 -> 6 (O117 2026-08-26: matchmade level count is now 6). progressFullAt = 5
+// stays below the denominator on purpose -- (a) transition safety: full-progress records written
+// by pre-O117 clients carry progress=5 and must not be docked 5/6 regardless of which side
+// (client build / this cron) goes live first; (b) permanent semantics: reaching level 5 of 6
+// before every opponent left is near-full content, and the discount compensates for missing
+// content rather than punishing anyone. Client mirror: RANKED_CONFIG.XP.PROGRESS_FULL_AT.
 const XP_CFG = {
-  base: 100, rankBonus: [80, 45, 20, 0], moneyDivisor: 50, moneyBonusCap: 120, rankedMult: 1.25, dailyFirstWin: 150, progressLevels: 5,
+  base: 100, rankBonus: [80, 45, 20, 0], moneyDivisor: 50, moneyBonusCap: 120, rankedMult: 1.25, dailyFirstWin: 150, progressLevels: 6, progressFullAt: 5,
   boosts: [[5, 5], [12, 10], [25, 15], [40, 20], [60, 25], [90, 30]],
   curve: { fastLevels: 10, fastCost: 300, normalCost: 700, centuryGrowth: 0.1 },
 };
@@ -1152,7 +1158,7 @@ function xpBoostMult(level) {
 // ignored rather than flagged (garbage earns no leverage); all-zero (legacy records) = full.
 function xpProgressFrac(prog) {
   const n = prog | 0;
-  return (n <= 0 || n >= XP_CFG.progressLevels) ? 1 : n / XP_CFG.progressLevels;
+  return (n <= 0 || n >= (XP_CFG.progressFullAt || XP_CFG.progressLevels)) ? 1 : n / XP_CFG.progressLevels;
 }
 function matchProgressOf(g) {
   let prog = 0;
