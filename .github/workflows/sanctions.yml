@@ -2,15 +2,22 @@ name: sanctions
 # Anti-cheat sanction sync. Consumes the EOS Sanctions sync stream (deployment-
 # scoped, shared across appids) and enforces on each Steam appid's boards: a
 # trusted ban gate board + shadow-board exile of the banned account's rows, with
-# restore on the unban (eventType 3) event. Runs as its OWN workflow, hourly --
-# sanctions are a rare, low-volume event stream, so it deliberately does NOT ride
-# the 5-minute reconcile tick (and is exempt from the CF sync-tick dispatcher).
+# restore on the unban (eventType 3) event. Runs as its OWN workflow (never inside
+# the reconcile tick -- enforcement must not add latency to match settlement), on
+# the same 5-minute cadence as the rest: anti-cheat bans are issued automatically
+# by EAC, so an hour of lag between "detected" and "enforced on our boards" is a
+# window the cheater keeps playing in. The event stream is a light cursor call, so
+# polling it every 5 minutes costs nothing. Minute offset 4 (reconcile 0 /
+# feedback 2 / playtest 3) keeps the runners off each other's tick boundary.
+# ⚠ At a 5-minute cadence this workflow MUST be wired into the Cloudflare
+# sync-tick dispatcher (GitHub's native scheduler throttles to a few runs/day) --
+# see infra/sync-tick in the game repo; test/sync-tick-dispatch.js enforces it.
 # State (sanctions.json / pt-sanctions.json) is a disjoint cursor file per appid;
 # persist retries the push to absorb any race with the other bot commits.
 on:
   workflow_dispatch: {}
   schedule:
-    - cron: '13 * * * *'
+    - cron: '4-59/5 * * * *'
 permissions:
   contents: read
 concurrency:
