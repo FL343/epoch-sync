@@ -106,4 +106,53 @@ const DRILL = {
   ok("shadow suffix '_banned'", s.BAN_SHADOW_SUFFIX === '_banned');
 }
 
+// ---- action code (two-state gate: full ban vs matchmaking-only) ----
+{
+  ok('actionCodeOf: RESTRICT_GAME_ACCESS -> full (1)', s.actionCodeOf('RESTRICT_GAME_ACCESS') === s.ACT_FULL);
+  ok('actionCodeOf: RESTRICT_MATCHMAKING -> mm (2)', s.actionCodeOf('RESTRICT_MATCHMAKING') === s.ACT_MM);
+  ok('actionCodeOf: unknown/custom action -> full (unknown severity must not widen access)',
+    s.actionCodeOf('SOME_CUSTOM_ACTION') === s.ACT_FULL && s.actionCodeOf('') === s.ACT_FULL && s.actionCodeOf(null) === s.ACT_FULL);
+  ok('ACT codes pinned (client eac-gate decodes 1=full 2=mm; legacy 0/absent=full)',
+    s.ACT_FULL === 1 && s.ACT_MM === 2);
+}
+
+// ---- referenceId <-> 4x int32 round-trip (appeal handle in ban_board details) ----
+{
+  const ints = s.refIdInts(DRILL.referenceId);
+  ok('refIdInts: UUID -> exactly 4 int32s', ints.length === 4 && ints.every(x => (x | 0) === x));
+  ok('refIdFromInts round-trips the drill UUID byte-exact',
+    s.refIdFromInts(ints) === DRILL.referenceId);
+  ok('refIdInts: malformed/absent -> all-zero sentinel',
+    s.refIdInts('').join(',') === '0,0,0,0' && s.refIdInts('not-a-uuid').join(',') === '0,0,0,0');
+  ok('refIdFromInts: all-zero sentinel -> empty string (absent)',
+    s.refIdFromInts([0, 0, 0, 0]) === '' && s.refIdFromInts(null) === '');
+  ok('high-bit UUID survives the int32 sign boundary (>>>0 on the way back)',
+    s.refIdFromInts(s.refIdInts('ffffffff-ffff-ffff-ffff-ffffffffffff')) === 'ffffffff-ffff-ffff-ffff-ffffffffffff');
+}
+
+// ---- banDetails layout ([exp, act, ref x4]) + shared-codec round trip ----
+{
+  const det = s.banDetails(29798629, s.ACT_MM, DRILL.referenceId);
+  ok('banDetails: [expMin, actCode, ref0..3] = 6 ints',
+    det.length === 6 && det[0] === 29798629 && det[1] === s.ACT_MM);
+  const back = v.decodeDetails(v.encodeDetails(det));
+  ok('banDetails survives the shared detail codec byte-exact',
+    back.join(',') === det.join(',') && s.refIdFromInts(back.slice(2)) === DRILL.referenceId);
+}
+
+// ---- expiry sweep (natural lapse never appears in the event stream) ----
+{
+  const now = Date.now();
+  const fut = Math.floor(now / 60000) + 60, past = Math.floor(now / 60000) - 5;
+  const row = (sid, expMin, score) => ({ steamID: sid, score: score == null ? 1 : score,
+    detailData: v.encodeDetails(s.banDetails(expMin, s.ACT_FULL, DRILL.referenceId)) });
+  ok('expiredSids: lapsed row is swept', s.expiredSids([row('76561198000000001', past)], now).join(',') === '76561198000000001');
+  ok('expiredSids: future expiry is kept', s.expiredSids([row('76561198000000002', fut)], now).length === 0);
+  ok('expiredSids: permanent (exp=0) never sweeps', s.expiredSids([row('76561198000000003', 0)], now).length === 0);
+  ok('expiredSids: score<=0 rows ignored', s.expiredSids([row('76561198000000004', past, 0)], now).length === 0);
+  ok('expiredSids: legacy single-int details still decode (exp only)',
+    s.expiredSids([{ steamID: '76561198000000005', score: 1, detailData: v.encodeDetails([past]) }], now).length === 1);
+  ok('expiredSids: empty/garbage input -> []', s.expiredSids(null, now).length === 0 && s.expiredSids([{}], now).length === 0);
+}
+
 console.log('ALL PASS (sanctions ' + pass + ')');

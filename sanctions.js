@@ -4,20 +4,35 @@
 // ============================================================
 // Consumes the EOS Sanctions "sync" Web API (an incremental event stream with a
 // lastLogId cursor; eventType 1=create 2=update 3=delete) and enforces downstream:
-//   1. ban gate board (trusted-writes 'ban_board'): one row per banned account,
-//      score=1, details[0]=expiry in unix minutes (0 = permanent). The client
-//      boot gate / queue gate / roster cross-check all read this board; clearing
-//      the row (on unban / expiry-delete event) restores access. Fail-open on the
-//      client side, so a missing board only ever weakens, never strands players.
-//   2. leaderboard exile: the banned account's rows on the display boards are
+//   1. ban gate board (trusted-writes 'ban_board'): one row per sanctioned
+//      account, score=1. Detail layout (client eac-gate decodes the same way):
+//        details[0] = expiry in unix minutes (0 = permanent)
+//        details[1] = action code: 1 = full ban (RESTRICT_GAME_ACCESS et al),
+//                     2 = matchmaking-only (RESTRICT_MATCHMAKING). Absent/0 =
+//                     legacy row = full ban (conservative).
+//        details[2..5] = sanction referenceId (UUID, 16 bytes as 4 big-endian
+//                     int32s; all-zero = absent) -- the appeal handle the client
+//                     must show even when the guard is not running.
+//      The client boot gate / queue gate / roster cross-check all read this
+//      board; clearing the row (on unban / expiry) restores access. Fail-open on
+//      the client side, so a missing board only ever weakens, never strands.
+//   2. leaderboard exile (FULL bans only -- a matchmaking restriction is not a
+//      score-fraud verdict): the banned account's rows on the display boards are
 //      moved to a same-shape '<board>_banned' shadow board (trusted) and deleted
 //      from the source. THE SHADOW IS THE STORAGE: restore on unban reads the
 //      shadow row back (score + raw detail bytes preserved). No identity or
 //      score ever needs to live in repo state -- the state file stays a cursor.
-//   3. platform game bans (optional): ICheatReportingService report+ban per app
-//      id listed in BAN_APPIDS (revoke on unban). Runs only where that env is
-//      set (one job), so a two-job workflow cannot double-issue.
-//   4. a mail note per processed event (rare-event observability; same channel
+//   3. platform game bans (optional; FULL bans only -- a Steam game ban is a
+//      public account mark): ICheatReportingService report+ban per app id listed
+//      in BAN_APPIDS (revoke on unban). Runs only where that env is set (one
+//      job), so a two-job workflow cannot double-issue.
+//   4. expiry sweep: EOS does not emit a sync event when a temporary sanction
+//      lapses on its own (only create/update/delete are in the stream), so a
+//      details[0] deadline that passes would otherwise leave the gate row -- and
+//      the exiled scores -- in place forever. Every run scans ban_board for
+//      expired rows and runs the unban path on them (idempotent; the client
+//      additionally fail-opens past the deadline locally so nobody waits on us).
+//   5. a mail note per processed event (rare-event observability; same channel
 //      as the feedback digest).
 // Own workflow (sanctions.yml), hourly + manual dispatch -- never inside the
 // reconcile tick. State file is disjoint (sanctions.json / pt-sanctions.json),
@@ -167,6 +182,33 @@ function verbOf(ev) {
   return 'skip';
 }
 
+// ---- ban_board detail codec (client eac-gate.js decodes the same layout) ----
+// Action string -> code. Only RESTRICT_MATCHMAKING maps to the softer queue-only
+// gate; every other (or unknown/custom) action stays a full ban -- unknown
+// severity must not accidentally widen access.
+const ACT_FULL = 1, ACT_MM = 2;
+function actionCodeOf(action) {
+  return /RESTRICT_MATCHMAKING/i.test(String(action || '')) ? ACT_MM : ACT_FULL;
+}
+// UUID string -> 4 big-endian int32s (all-zero when absent/malformed).
+function refIdInts(refId) {
+  const hex = String(refId || '').replace(/-/g, '').toLowerCase();
+  if (!/^[0-9a-f]{32}$/.test(hex)) return [0, 0, 0, 0];
+  const out = [];
+  for (let i = 0; i < 4; i++) out.push(parseInt(hex.slice(i * 8, i * 8 + 8), 16) | 0);
+  return out;
+}
+// Inverse (tooling/tests; the client carries its own mirror -- lockstep-pinned).
+function refIdFromInts(ints) {
+  if (!Array.isArray(ints) || ints.length < 4 || ints.every(x => (x | 0) === 0)) return '';
+  let hex = '';
+  for (let i = 0; i < 4; i++) hex += ((ints[i] | 0) >>> 0).toString(16).padStart(8, '0');
+  return hex.slice(0, 8) + '-' + hex.slice(8, 12) + '-' + hex.slice(12, 16) + '-' + hex.slice(16, 20) + '-' + hex.slice(20);
+}
+function banDetails(expMin, actCode, refId) {
+  return [expMin | 0, actCode | 0].concat(refIdInts(refId));
+}
+
 // ---- board row moves (exile/restore) ----
 // Detail bytes are round-tripped through validate.js's own codec (decodeDetails ->
 // int32 array -> postFormDetails) rather than a second hand-rolled hex/percent
@@ -224,9 +266,37 @@ async function steamUnban(sid, appid) {
 
 // ---- enforcement (idempotent by construction: absent source row = skip;
 //      re-running a processed event converges to the same end state) ----
-async function enactBan(boards, sid, expMin, refId) {
+async function restoreRows(boards, sid) {
+  let restored = 0;
+  for (const name of EXILE_BOARDS) {
+    const srcId = boards.src[name], shId = boards.shadow[name];
+    if (!srcId || !shId) continue;
+    const row = await v.readUserEntry(shId, sid, 'restore ' + name);
+    if (!row) continue;
+    const okW = await setRow(srcId, sid, row.score | 0, String(row.detailData || ''));
+    if (!okW) { v.ghWarn('restore write failed ' + name + ' (' + plog(sid) + ') -- shadow row kept'); continue; }
+    await delRow(shId, sid);
+    restored++;
+  }
+  return restored;
+}
+
+async function enactBan(boards, sid, expMin, ev) {
+  const actCode = actionCodeOf(ev && ev.action);
+  await setRow(boards.ban, sid, 1, v.encodeDetails(banDetails(expMin, actCode, ev && ev.refId)));
+  if (actCode === ACT_MM) {
+    // Matchmaking-only: gate row is the whole enforcement (client blocks queue
+    // contexts, everything else stays open). Also walk the restore/unban path so
+    // a full->mm downgrade (update event) hands the scores and platform access
+    // back; on a fresh mm sanction both are structural no-ops.
+    const restored = await restoreRows(boards, sid);
+    let unbans = 0;
+    for (const app of BAN_APPIDS) if (await steamUnban(sid, app)) unbans++;
+    console.log('sanction MM-RESTRICT ' + plog(sid) + ': gate row set (queue-only)' +
+      (restored ? ', restored ' + restored + ' row(s) (downgrade)' : ''));
+    return { moved: 0, bans: 0 };
+  }
   let moved = 0;
-  await setRow(boards.ban, sid, 1, v.encodeDetails([expMin | 0]));
   for (const name of EXILE_BOARDS) {
     const srcId = boards.src[name], shId = boards.shadow[name];
     if (!srcId || !shId) continue;
@@ -239,28 +309,44 @@ async function enactBan(boards, sid, expMin, refId) {
   }
   let bans = 0;
   const dur = expMin > 0 ? Math.max(60, expMin * 60 - Math.floor(Date.now() / 1000)) : 315360000;
-  for (const app of BAN_APPIDS) if (await steamBan(sid, app, dur, 'anti-cheat sanction ' + (refId || ''))) bans++;
+  // pass the event object through -- steamBan reads refId/action/justification off
+  // it for the evidence text (first cut passed a pre-baked string: '[object Object]')
+  for (const app of BAN_APPIDS) if (await steamBan(sid, app, dur, ev || {})) bans++;
   console.log('sanction BAN ' + plog(sid) + ': gate row set, exiled ' + moved + ' board row(s), platform bans ' + bans + '/' + BAN_APPIDS.length);
   return { moved, bans };
 }
 
 async function enactUnban(boards, sid) {
-  let restored = 0;
   await delRow(boards.ban, sid);
-  for (const name of EXILE_BOARDS) {
-    const srcId = boards.src[name], shId = boards.shadow[name];
-    if (!srcId || !shId) continue;
-    const row = await v.readUserEntry(shId, sid, 'restore ' + name);
-    if (!row) continue;
-    const okW = await setRow(srcId, sid, row.score | 0, String(row.detailData || ''));
-    if (!okW) { v.ghWarn('restore write failed ' + name + ' (' + plog(sid) + ') -- shadow row kept'); continue; }
-    await delRow(shId, sid);
-    restored++;
-  }
+  const restored = await restoreRows(boards, sid);
   let unbans = 0;
   for (const app of BAN_APPIDS) if (await steamUnban(sid, app)) unbans++;
   console.log('sanction UNBAN ' + plog(sid) + ': gate row cleared, restored ' + restored + ' board row(s), platform unbans ' + unbans + '/' + BAN_APPIDS.length);
   return { restored, unbans };
+}
+
+// ---- expiry sweep (pipeline leg 4) ----
+// Pure part: which rows of the gate board have lapsed. details[0] is unix
+// minutes; 0 = permanent (never sweeps). Exported for tests.
+function expiredSids(ents, nowMs) {
+  const out = [];
+  for (const e of (ents || [])) {
+    if ((e.score | 0) <= 0) continue;
+    const det = v.decodeDetails(String(e.detailData || ''));
+    const expMin = det && det.length ? (det[0] | 0) : 0;
+    if (expMin > 0 && expMin * 60000 <= nowMs) out.push(String(e.steamID));
+  }
+  return out;
+}
+
+async function sweepExpired(boards, mail) {
+  const { ents } = await v.readBoardAll(boards.ban, 'ban sweep');
+  const lapsed = expiredSids(ents, Date.now());
+  for (const sid of lapsed) {
+    const r = await enactUnban(boards, sid);
+    mail.push('EXPIRE ' + sid + ' restored=' + r.restored + ' platform=' + r.unbans);
+  }
+  return lapsed.length;
 }
 
 
@@ -314,6 +400,7 @@ async function main() {
   let processed = 0, skipped = 0, unmapped = 0;
   let cursor = String(st.lastLogId || '');
   const cursor0 = cursor;
+  const boards0 = JSON.stringify(st.boards || {});   // persist when the id cache grows (sweep-only runs)
   let boards = null;
   // Documented resume protocol: ask with the cursor, consume the batch IN THE ORDER
   // RETURNED, then set the cursor to the LAST element's logId. logId is opaque -- it
@@ -344,7 +431,7 @@ async function main() {
       if (!boards.ban) throw new Error('ban gate board unavailable -- refusing to advance the cursor');
       if (verb === 'ban') {
         const r = await enactBan(boards, sid, expiryMinOf(ev.expiresAt), ev);
-        mail.push('BAN ' + sid + ' action=' + ev.action + (ev.automated ? ' (automated)' : '') +
+        mail.push((actionCodeOf(ev.action) === ACT_MM ? 'MM-RESTRICT ' : 'BAN ') + sid + ' action=' + ev.action + (ev.automated ? ' (automated)' : '') +
           ' exp=' + (expiryMinOf(ev.expiresAt) || 'permanent') + ' exiled=' + r.moved + ' platform=' + r.bans + ' ref=' + ev.refId);
       } else {
         const r = await enactUnban(boards, sid);
@@ -353,12 +440,21 @@ async function main() {
       processed++;
     }
   }
-  if (cursor !== cursor0 || !fs.existsSync(SN_STATE_FILE)) {
+  // Expiry sweep every run (leg 4): natural lapses never appear in the event
+  // stream. Board resolution is cached in state, the gate board is tiny, and the
+  // sweep is idempotent -- a failed run just retries next tick.
+  let lapsed = 0;
+  try {
+    if (!boards) boards = await resolveBoards(st);
+    if (boards.ban) lapsed = await sweepExpired(boards, mail);
+  } catch (e) { v.ghWarn('expiry sweep failed (retries next tick): ' + (e && e.message)); }
+  if (cursor !== cursor0 || JSON.stringify(st.boards || {}) !== boards0 || !fs.existsSync(SN_STATE_FILE)) {
     st.lastLogId = cursor;
     saveState(st);
   }
   await maybeMail(mail);
-  console.log('sanctions: processed ' + processed + ', skipped ' + skipped + (unmapped ? ' (unmapped ' + unmapped + ')' : '') + ', cursor ' + (cursor ? cursor.slice(0, 8) + '...' : '(none)'));
+  console.log('sanctions: processed ' + processed + ', skipped ' + skipped + (unmapped ? ' (unmapped ' + unmapped + ')' : '') +
+    (lapsed ? ', expired ' + lapsed : '') + ', cursor ' + (cursor ? cursor.slice(0, 8) + '...' : '(none)'));
 }
 
 if (require.main === module) {
@@ -367,4 +463,5 @@ if (require.main === module) {
 module.exports = {
   SN_STATE_FILE, BAN_LB, BAN_SHADOW_SUFFIX, EXILE_BOARDS, SN_MAP_BATCH,
   normalizeEvents, sidOfEvent, expiryMinOf, verbOf, loadState, saveState,
+  ACT_FULL, ACT_MM, actionCodeOf, refIdInts, refIdFromInts, banDetails, expiredSids,
 };
