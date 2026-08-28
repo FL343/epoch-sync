@@ -1,0 +1,109 @@
+name: sanctions
+# Anti-cheat sanction sync. Consumes the EOS Sanctions sync stream (deployment-
+# scoped, shared across appids) and enforces on each Steam appid's boards: a
+# trusted ban gate board + shadow-board exile of the banned account's rows, with
+# restore on the unban (eventType 3) event. Runs as its OWN workflow, hourly --
+# sanctions are a rare, low-volume event stream, so it deliberately does NOT ride
+# the 5-minute reconcile tick (and is exempt from the CF sync-tick dispatcher).
+# State (sanctions.json / pt-sanctions.json) is a disjoint cursor file per appid;
+# persist retries the push to absorb any race with the other bot commits.
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: '13 * * * *'
+permissions:
+  contents: read
+concurrency:
+  group: sanctions
+  cancel-in-progress: false
+jobs:
+  sanctions:
+    if: github.repository == 'FL343/epoch-sync'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: test
+        run: |
+          for f in test/sanctions*.js; do echo "== $f =="; node "$f" || exit 1; done
+      - name: run
+        env:
+          STEAM_PUBLISHER_KEY: ${{ secrets.STEAM_PUBLISHER_KEY }}
+          APPID: ${{ secrets.APPID }}
+          STATE_SALT: ${{ secrets.STATE_SALT }}
+          EOS_TRUSTED_CLIENT_ID: ${{ secrets.EOS_TRUSTED_CLIENT_ID }}
+          EOS_TRUSTED_CLIENT_SECRET: ${{ secrets.EOS_TRUSTED_CLIENT_SECRET }}
+          EOS_DEPLOYMENT_ID: ${{ secrets.EOS_DEPLOYMENT_ID }}
+          # optional platform game bans (only set on the MAIN job -> never double-issued)
+          BAN_APPIDS: ${{ secrets.BAN_APPIDS }}
+          # optional extra display boards to exile (comma list); repo defaults cover the common set
+          EXILE_BOARDS: ${{ secrets.EXILE_BOARDS }}
+          # rare-event mail note (same Resend channel as the feedback digest); unset = off
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          SN_MAIL_TO: ${{ secrets.FB_DIGEST_TO }}
+        run: node sanctions.js
+      - name: persist
+        run: |
+          if [ -n "$(git status --porcelain -- sanctions.json)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add -- sanctions.json
+            git commit -m "state: update sanctions cursor"
+            n=0
+            until git pull --rebase origin "${GITHUB_REF_NAME}" && git push; do
+              n=$((n+1))
+              if [ "$n" -ge 3 ]; then echo "::error::sanctions state push failed after $n tries"; exit 1; fi
+              sleep $((5 * n))
+            done
+          else
+            echo "no state change"
+          fi
+  # Playtest-channel twin: same EOS stream, enforced on the playtest app's boards
+  # with its own disjoint cursor. Serialized after the main job (needs + always)
+  # so the two persists never contend. Platform game bans are intentionally NOT
+  # wired here (BAN_APPIDS lives on the main job only) to avoid double-banning.
+  playtest-sanctions:
+    if: ${{ always() && github.repository == 'FL343/epoch-sync' }}
+    needs: sanctions
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: run
+        env:
+          STEAM_PUBLISHER_KEY: ${{ secrets.STEAM_PUBLISHER_KEY }}
+          APPID: ${{ secrets.PLAYTEST_APPID }}
+          STATE_SALT: ${{ secrets.STATE_SALT }}
+          EOS_TRUSTED_CLIENT_ID: ${{ secrets.EOS_TRUSTED_CLIENT_ID }}
+          EOS_TRUSTED_CLIENT_SECRET: ${{ secrets.EOS_TRUSTED_CLIENT_SECRET }}
+          EOS_DEPLOYMENT_ID: ${{ secrets.EOS_DEPLOYMENT_ID }}
+          EXILE_BOARDS: ${{ secrets.EXILE_BOARDS }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          SN_MAIL_TO: ${{ secrets.FB_DIGEST_TO }}
+          SN_STATE_FILE: pt-sanctions.json
+          FB_DIGEST_TAG: '[playtest] '
+        run: node sanctions.js
+      - name: persist
+        run: |
+          if [ -n "$(git status --porcelain -- pt-sanctions.json)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add -- pt-sanctions.json
+            git commit -m "state: update playtest sanctions cursor"
+            n=0
+            until git pull --rebase origin "${GITHUB_REF_NAME}" && git push; do
+              n=$((n+1))
+              if [ "$n" -ge 3 ]; then echo "::error::playtest sanctions state push failed after $n tries"; exit 1; fi
+              sleep $((5 * n))
+            done
+          else
+            echo "no state change"
+          fi

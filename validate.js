@@ -56,7 +56,14 @@ const CONFESS_MAGIC = 0xB5;
 // 'kicked' (7) = removed by the host for in-match inactivity; classed abandoner like user-quit.
 // A kicked player never writes a settle record (they leave mid-match), so the code never appears
 // in a shard in practice -- it exists for client-side exit-signal classing and table lockstep.
-const DISP_NAME = ['finished', 'peers-gone', 'host-left', 'level-begin-timeout', 'migrate-disband', 'user-quit', 'reconnect-failed', 'kicked'];
+// 'eac-kick' (8) = anti-cheat detected a cheater; the host terminated the match for everyone.
+// Innocent finishers each write a settle record with this code (innocent class, VOID >= 2), so the
+// group voids by consensus: no rating/points move, detectLeavers never runs (the removed cheater is
+// not convicted as a leaver here -- the anti-cheat sanction pipeline handles them), and each writer
+// still gets innocent-class credit (base XP / consolation path).
+// 'eac-drop' (9) = this client lost anti-cheat protection mid-match and was removed alone (innocent;
+// like 'kicked' it never appears in a shard -- the dropped client leaves without writing).
+const DISP_NAME = ['finished', 'peers-gone', 'host-left', 'level-begin-timeout', 'migrate-disband', 'user-quit', 'reconnect-failed', 'kicked', 'eac-kick', 'eac-drop'];
 const dispName = c => (DISP_NAME[c | 0] || ('disp' + (c | 0)));
 const isVoidDisp = c => (c | 0) >= 2;
 
