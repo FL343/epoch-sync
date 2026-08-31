@@ -91,7 +91,19 @@ console.log('== A) verifySoloRecord ==');
   const badPc = rec.slice(); badPc[8] = 2;
   eq('pc != 1 -> pc (solo only)', A.verifySoloRecord(badPc, TABLE).reason, 'pc');
   const badAtt = rec.slice(); badAtt[19] = 2;
-  eq('unknown attestation ver -> att-ver', A.verifySoloRecord(badAtt, TABLE).reason, 'att-ver');
+  {
+    // knife-7 second audit P2-4: an unknown attVer is a LAYOUT this cron cannot locate the sig
+    //   in -- same rollout-lag family as unknown-key, so it must be pending, never destroyed.
+    const va = A.verifySoloRecord(badAtt, TABLE);
+    assert('unknown attestation ver -> att-ver + pending (rollout window, not destruction)',
+      va.ok === false && va.reason === 'att-ver' && va.pending === true);
+  }
+  // knife-7 second audit P2-4: the Steam details buffer is fixed-size zero-padded -- zeros after
+  //   the sig are normal, a NON-zero tail is an unsigned writable region and must be rejected.
+  const padded = rec.concat(new Array(64 - rec.length).fill(0));
+  assert('zero padding after sig still verifies (fixed-64 details buffer)', A.verifySoloRecord(padded, TABLE).ok === true);
+  const smug = rec.concat([0, 0, 12345]);
+  eq('non-zero tail after sig -> trailing (no unsigned writable region)', A.verifySoloRecord(smug, TABLE).reason, 'trailing');
 
   // unknown key = the ONE soft state (table push lag), not a hard reject
   const future = sign(buildBase(Object.assign({}, META, { keyId: 2099010101 })), kSealed.priv);
@@ -172,6 +184,36 @@ const HOST = '76561198000000010', OTHER = '76561198000000011';
   assert('signals carry no steamID/sid field for accused seats (payload is seat-indexed only)',
     allSignals.every(s => !('seatSid' in s) && !('accused' in s) && Array.isArray(s.perSeat)));
   eq('subjects are exactly the writers of their own rows', [r1.signals[0].subject, r4.signals[0].subject], [String(HOST), String(OTHER)]);
+
+  // knife-7 second audit P1-4: confessions are written DURING the match (write-on-detect) while
+  //   records land at settle -> the first sighting is usually uncorroborated. A stored-orphan
+  //   entry must keep re-checking the match index and upgrade ONCE when the records land --
+  //   without re-spamming weak signals while it stays orphan.
+  const stateC = {};
+  const rowsC = [{ steamID: HOST, details: encodeBox([{ matchId: 'm2', pc: 2, perSeat: [0, 3, 0, 0, 0, 0] }]) }];
+  const u1 = A.reconcileUnmatched(rowsC, { matchIndex: new Map(), state: stateC, now: 1000 });
+  eq('pass 1 (records not settled yet): orphan + weak', [u1.orphan, u1.signals[0].weight], [1, 'weak']);
+  const u1b = A.reconcileUnmatched(rowsC, { matchIndex: new Map(), state: stateC, now: 1500 });
+  eq('still no records: NO duplicate weak signal', [u1b.fresh, u1b.signals.length], [0, 0]);
+  const idx2 = new Map([[A.hash32('m2') >>> 0, { hostSid: HOST }]]);
+  const u2 = A.reconcileUnmatched(rowsC, { matchIndex: idx2, state: stateC, now: 2000 });
+  assert('records landed: upgrades ONCE to review weight',
+    (u2.upgraded | 0) === 1 && u2.signals.length === 1 && u2.signals[0].weight === 'review' && u2.signals[0].upgraded === true);
+  const u3 = A.reconcileUnmatched(rowsC, { matchIndex: idx2, state: stateC, now: 3000 });
+  eq('after the upgrade: fully sticky, silent', [u3.fresh, (u3.upgraded | 0), u3.signals.length], [0, 0, 0]);
+  // a writer who was NOT that match's host stays orphan even after the records land (no upgrade)
+  const stateD = {};
+  const rowsD = [{ steamID: OTHER, details: encodeBox([{ matchId: 'm2', pc: 2, perSeat: [0, 3, 0, 0, 0, 0] }]) }];
+  A.reconcileUnmatched(rowsD, { matchIndex: new Map(), state: stateD, now: 1000 });
+  const u4 = A.reconcileUnmatched(rowsD, { matchIndex: idx2, state: stateD, now: 2000 });
+  eq('non-host writer never upgrades (host identity is the corroboration)', [(u4.upgraded | 0), u4.signals.length], [0, 0]);
+
+  // knife-7 second audit P2-3: the attest-keys mirror in THIS repo parses and carries the dev key
+  const tbl = A.loadPubTable(require('path').join(__dirname, '..', 'attest-keys.json'));
+  assert('attest-keys.json mirror loads and has a dev entry (pubs non-empty)',
+    !!(tbl && tbl.dev && Array.isArray(tbl.dev.pubs) && tbl.dev.pubs.length && tbl.dev.sealed === false));
+  assert('loadPubTable on a missing file -> null (caller degrades to pending, never crashes)',
+    A.loadPubTable('no-such-file.json') === null);
 
   // zero-total events are ignored entirely
   const r5 = A.reconcileUnmatched([{ steamID: HOST, details: encodeBox([{ matchId: 'm9', pc: 2, perSeat: [0, 0, 0, 0, 0, 0] }]) }], { matchIndex, state: {}, now: 5000 });

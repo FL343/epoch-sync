@@ -64,4 +64,31 @@ console.log('== knife-7 unmatched confession wiring ==');
   eq('a grown total is new information (fresh again)', g.fresh, 1);
 }
 
+console.log('== knife-7 second audit P1-3: unmatched state must be PERSISTED by both jobs ==');
+{
+  // The sticky dedupe/max-lock state only exists across runs if the workflow commits it. This
+  //   was the second audit's P1-3: the module tests passed while every real run started from {}.
+  //   Lock the workflow contract textually (yml whitelist + env override), fail-closed.
+  const fs = require('fs');
+  const path = require('path');
+  const vyml = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'validate.yml'), 'utf8');
+  const pyml = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'playtest.yml'), 'utf8');
+  assert('validate.yml persists unmatched.json (state_files whitelist)', /for f in [^\n]*\bunmatched\.json\b/.test(vyml));
+  assert('playtest.yml sets UNMATCHED_FILE: pt-unmatched.json (state isolation)', /UNMATCHED_FILE:\s*pt-unmatched\.json/.test(pyml));
+  assert('playtest.yml persists pt-unmatched.json (state_files whitelist)', /for f in [^\n]*\bpt-unmatched\.json\b/.test(pyml));
+  // generic guard for the class: every *_FILE default that validate.js both loads AND saves in
+  //   the main tick must be persisted by validate.yml (a state written but never committed is
+  //   structurally inert -- the exact shape of audit finding 1 and P1-3).
+  const vjs = fs.readFileSync(path.join(__dirname, '..', 'validate.js'), 'utf8');
+  const defaults = [];
+  const re = /process\.env\.[A-Z_]+_FILE \|\| '([a-z-]+\.json)'/g;
+  let m;
+  while ((m = re.exec(vjs))) defaults.push(m[1]);
+  assert('scanned validate.js *_FILE defaults (found ' + defaults.length + ')', defaults.length >= 8);
+  const wlMatch = vyml.match(/state_files=""\s*\n\s*for f in ([^\n;]+);/);
+  const wl = wlMatch ? wlMatch[1].trim().split(/\s+/) : [];
+  const missing = defaults.filter((f) => wl.indexOf(f) < 0);
+  assert('every validate.js state default is in the validate.yml whitelist' + (missing.length ? ' (missing: ' + missing.join(',') + ')' : ''), missing.length === 0);
+}
+
 if (process.exitCode) console.log('\n[attest-wiring] FAIL'); else console.log('\n[attest-wiring] all green');

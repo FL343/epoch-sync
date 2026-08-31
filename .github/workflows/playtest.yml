@@ -48,6 +48,7 @@ jobs:
           STARTS_FILE: pt-starts.json
           SIGNALS_FILE: pt-signals.json
           CONFESSIONS_FILE: pt-confessions.json
+          UNMATCHED_FILE: pt-unmatched.json
           # rating-side state is never produced in PT mode; pointed off the main files anyway
           # (belt over suspenders) and deliberately NOT persisted below.
           SKILL_FILE: pt-skill.json
@@ -57,7 +58,7 @@ jobs:
       - name: persist
         run: |
           state_files=""
-          for f in pt-processed.json pt-leavers.json pt-xp.json pt-starts.json pt-signals.json pt-confessions.json; do
+          for f in pt-processed.json pt-leavers.json pt-xp.json pt-starts.json pt-signals.json pt-confessions.json pt-unmatched.json; do
             [ -f "$f" ] && state_files="$state_files $f"
           done
           if [ -n "$state_files" ] && [ -n "$(git status --porcelain -- $state_files)" ]; then

@@ -73,9 +73,21 @@ function verifySoloRecord(d, pubTable) {
     keyId, keyName, attVer: d[19] & 0xff, jwtPresent: !!((d[19] >> 8) & 1), jwtHashLo: d[20] >>> 0,
     rosterSid,
   };
-  if (fields.attVer !== ATT_VER) return { ok: false, reason: 'att-ver', fields };
+  // attVer mismatch = a layout this cron cannot even locate the signature in. Same soft-state
+  //   family as unknown-key (client shipped first, cron update lagged): PENDING, not destroyed --
+  //   a later cron that knows the layout settles it. Hard-rejecting here would burn legitimate
+  //   runs during every rollout window (knife-7 second audit P2-4).
+  if (fields.attVer !== ATT_VER) return { ok: false, reason: 'att-ver', pending: true, fields };
+  // schema contract: sig is ALWAYS the last block; future fields insert BEFORE sig. The Steam
+  //   details buffer is fixed-size zero-padded, so every int after the sig must be zero -- a
+  //   non-zero tail would be an unsigned writable region smuggled past the signature domain:
+  //   reject. (Checked AFTER the attVer gate: a future layout moves the sig end, so only the
+  //   cron matching that layout may judge the tail.) (knife-7 second audit P2-4.)
+  for (let i = BASE_LEN + SIG_INTS; i < d.length; i++) {
+    if ((d[i] | 0) !== 0) return { ok: false, reason: 'trailing', fields };
+  }
   const ent = pubTable && pubTable[keyName];
-  // unknown key = the ONLY soft state: a freshly shipped build whose key table push lagged.
+  // unknown key = a soft state: a freshly shipped build whose key table push lagged.
   //   The record waits (pending) instead of being rejected; a later run settles it.
   if (!ent || !Array.isArray(ent.pubs) || !ent.pubs.length) return { ok: false, reason: 'unknown-key', pending: true, fields };
   const base = d.slice(0, BASE_LEN);
@@ -148,10 +160,31 @@ function reconcileUnmatched(rows, opts) {
       if (ev.total <= 0) continue;
       const key = idOf(writer) + '|' + (ev.matchHash >>> 0).toString(16);
       const prev = state[key];
-      // sticky dedupe: the box is a rolling ring, so the SAME event reappears every run until it
-      //   ages out. Only a GROWN total is new information (the guard re-writes as the tally grows).
-      if (prev && (prev.total | 0) >= ev.total) continue;
       const known = o.matchIndex ? (o.matchIndex.get ? o.matchIndex.get(ev.matchHash >>> 0) : o.matchIndex[ev.matchHash >>> 0]) : null;
+      // sticky dedupe: the box is a rolling ring, so the SAME event reappears every run until it
+      //   ages out. Only a GROWN total is new information (the guard re-writes as the tally grows)
+      //   -- EXCEPT corroboration: the confession is written DURING the match (write-on-detect),
+      //   while its records land in the shards only at settle, so the first sighting is almost
+      //   always uncorroborated. A stored-uncorroborated entry keeps re-checking the match index
+      //   on later runs (records persist in shards until overwritten) and upgrades ONCE to
+      //   'review' weight when the writer proves to be that match's host; no duplicate weak
+      //   signal is emitted while it stays orphan. (knife-7 second audit P1-4.)
+      if (prev && (prev.total | 0) >= ev.total) {
+        if (prev.corroborated) continue;
+        const nowCorr = !!(known && known.hostSid && String(known.hostSid) === writer);
+        if (!nowCorr) continue;
+        prev.corroborated = 1;
+        res.corroborated++;
+        res.upgraded = (res.upgraded | 0) + 1;
+        const up = {
+          subject: idOf(writer), matchHash: ev.matchHash >>> 0, total: prev.total | 0,
+          perSeat: ev.perSeat.slice(), pc: ev.pc, corroborated: true,
+          kind: 'unmatched-host-drop', weight: 'review', upgraded: true,
+        };
+        res.signals.push(up);
+        if (typeof o.onSignal === 'function') o.onSignal(up);
+        continue;
+      }
       // corroboration: the writer must actually have been the HOST of that match this run's
       //   records describe. An uncorroborated row is kept as a weak signal but flagged orphan -
       //   it can be a match whose records aged out, or a fabricated hash (which harms nobody:
@@ -180,6 +213,18 @@ function reconcileUnmatched(rows, opts) {
   return res;
 }
 
+// attest-keys.json mirror loader (knife-7 second audit P2-3): the private repo is the source of
+//   truth for the build->pubkey table; a mirror lives in THIS repo (committed by the upload
+//   runbook) so verifySoloRecord has a loadable table when O93 wires solo settlement. Returns
+//   the {keyName: {pubs, sealed}} map or null (absent/corrupt mirror -> caller treats every
+//   keyId as unknown -> pending, never a crash).
+function loadPubTable(file) {
+  try {
+    const j = JSON.parse(require('fs').readFileSync(file || 'attest-keys.json', 'utf8'));
+    return (j && j.keys && typeof j.keys === 'object') ? j.keys : null;
+  } catch (e) { return null; }
+}
+
 // prune sticky state (ring entries age out of the box; keep state bounded)
 function pruneUnmatchedState(state, now, ttlMs) {
   const ttl = ttlMs || 30 * 86400000;
@@ -192,7 +237,7 @@ module.exports = {
   hash32,
   // A
   LEDGER_MAGIC, LEDGER_VER, MT_ENDLESS, ATT_VER, BASE_LEN, SIG_INTS,
-  verifySoloRecord, soloSettleGate, toBytes,
+  verifySoloRecord, soloSettleGate, toBytes, loadPubTable,
   // B
   CONFESS_MAGIC, CONFESS_VER, CONFESS_MAX_SEATS,
   decodeUnmatched, reconcileUnmatched, pruneUnmatchedState,
