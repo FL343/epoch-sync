@@ -62,10 +62,16 @@ function verifySoloRecord(d, pubTable) {
   if (d[8] !== 1) return { ok: false, reason: 'pc' };
   const keyId = d[18] | 0;
   const keyName = keyId === 0 ? 'dev' : String(keyId >>> 0);
+  // roster seat 0 = the account the run belongs to (@12 lo, @13 hi). The settle caller MUST bind
+  //   this to the leaderboard ROW OWNER (see soloSettleGate opts.owner) - the signature proves "a
+  //   guard signed this content", NOT "this account's guard signed for this account". Without the
+  //   binding, a sealed-key extractor could sign a record for an arbitrary steamId. (knife-7 audit.)
+  const rosterSid = ((BigInt(d[13] >>> 0) << 32n) | BigInt(d[12] >>> 0)).toString();
   const fields = {
     matchHash: d[3] >>> 0, runSeed: d[4] | 0, durationSec: d[9] | 0, score: d[10] | 0,
     startDepth: d[14] | 0, endDepth: d[15] | 0, continuesUsed: d[16] | 0, tokensCp: d[17] | 0,
     keyId, keyName, attVer: d[19] & 0xff, jwtPresent: !!((d[19] >> 8) & 1), jwtHashLo: d[20] >>> 0,
+    rosterSid,
   };
   if (fields.attVer !== ATT_VER) return { ok: false, reason: 'att-ver', fields };
   const ent = pubTable && pubTable[keyName];
@@ -83,12 +89,20 @@ function verifySoloRecord(d, pubTable) {
   return { ok: false, reason: 'bad-sig', fields };
 }
 
-// Production gate for the solo board: a sealed (shipped) build key is required. A dev-key record
-//   verifies cryptographically but must NEVER settle onto the real solo board (dev machines sign
-//   with a fixed, committed key by design) - it is accepted only on the *_test board.
+// Production gate for the solo board: a sealed (shipped) build key is required, AND the record
+//   must belong to the account that wrote the row.
+//   - opts.owner: the leaderboard ROW OWNER's raw steamId (Steam-authenticated). REQUIRED when
+//     O93 wires settlement -- the embedded roster steamId (verdict.fields.rosterSid) must equal it,
+//     else a sealed-key extractor could sign a record crediting/framing an arbitrary account. A
+//     valid signature is NOT identity binding (knife-7 audit finding 2). Omitting owner leaves the
+//     record verified-but-unbound (used only by tests / the *_test board where framing is moot).
+//   - dev-key records verify cryptographically but must NEVER settle onto the real solo board
+//     (dev machines sign with a fixed, committed key) -- accepted only on the *_test board.
 function soloSettleGate(verdict, opts) {
   if (!verdict || !verdict.ok) return { settle: false, reason: verdict ? verdict.reason : 'none', pending: !!(verdict && verdict.pending) };
   if (!verdict.sealed && !(opts && opts.allowDevKey)) return { settle: false, reason: 'dev-key-on-prod' };
+  if (opts && opts.owner != null && String(opts.owner) !== String(verdict.fields && verdict.fields.rosterSid))
+    return { settle: false, reason: 'owner-mismatch' };
   return { settle: true };
 }
 

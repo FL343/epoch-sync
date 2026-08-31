@@ -106,6 +106,14 @@ console.log('== A) verifySoloRecord ==');
   assert('soloSettleGate allows a dev key when explicitly on the test board', A.soloSettleGate(vd, { allowDevKey: true }).settle === true);
   assert('soloSettleGate settles a sealed-key record', A.soloSettleGate(v, {}).settle === true);
   assert('soloSettleGate never settles a pending record', A.soloSettleGate(vf, { allowDevKey: true }).settle === false);
+
+  // knife-7 audit finding 2: a valid signature is NOT identity binding. The settle gate must bind
+  //   the record's embedded roster steamId to the leaderboard ROW OWNER, else a sealed-key
+  //   extractor could sign a record crediting/framing an arbitrary account.
+  eq('verifySoloRecord surfaces the embedded roster steamId', v.fields.rosterSid, '76561198000000001');
+  assert('soloSettleGate settles when owner == embedded rosterSid', A.soloSettleGate(v, { owner: '76561198000000001' }).settle === true);
+  eq('soloSettleGate rejects when owner != embedded rosterSid (no arbitrary-account credit)',
+    A.soloSettleGate(v, { owner: '76561198000000999' }).reason, 'owner-mismatch');
 }
 
 console.log('== B) reconcileUnmatched ==');

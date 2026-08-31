@@ -2,6 +2,7 @@
 const fs = require('fs');
 const crypto = require('crypto');
 const ts = require('./trueskill.js');
+const attest = require('./attest.js');   // knife-7: solo attested-record verify + unmatched confession reconcile
 
 const APPID = Number(process.env.APPID);
 const PREFIX = process.env.LB_PREFIX;
@@ -367,6 +368,9 @@ function sigDay(s, now) { const d = Math.floor(now / 86400000); if (s.day.d !== 
 // but not counted (mirrors the DAILY_CAP record-only philosophy).
 const REPORT_MAGIC = 0xB3;
 const REPORT_LB = process.env.REPORT_LB || 'report_box';
+// knife-7: host self-incrimination box (guard writes when its renderer silently dropped joiner
+//   events). Client-writable, record-only, NEVER settles (signal for review, subject = writer).
+const UNMATCHED_LB = process.env.UNMATCHED_LB || 'unmatched_box';
 const REPORT_REASON_MIN = 1, REPORT_REASON_MAX = 4;
 const REPORT_DAILY_CAP = Number(process.env.REPORT_DAILY_CAP || 20);
 // entries = [{steamID, d}] (d = decoded details ints). Returns {seen, counted, capped, bad}.
@@ -625,6 +629,11 @@ function saveConfessions(s, now) {
   for (const k of Object.keys(s)) if (now - (s[k].t0 || 0) > CONFESS_PRUNE_MS) delete s[k];
   try { fs.writeFileSync(CONFESSIONS_FILE, JSON.stringify(s, null, 0)); } catch (e) { ghWarn('write ' + CONFESSIONS_FILE + ' failed: ' + (e && e.message)); }
 }
+// knife-7 unmatched-confession sticky state (dedupe across runs; the box is a rolling ring so
+//   the same event reappears until it ages out -- only a GROWN total is new information).
+const UNMATCHED_FILE = process.env.UNMATCHED_FILE || 'unmatched.json';
+function loadUnmatched() { try { return JSON.parse(fs.readFileSync(UNMATCHED_FILE, 'utf8')) || {}; } catch (e) { return {}; } }
+function saveUnmatched(s) { try { fs.writeFileSync(UNMATCHED_FILE, JSON.stringify(s, null, 0)); } catch (e) { ghWarn('write ' + UNMATCHED_FILE + ' failed: ' + (e && e.message)); } }
 // Process abandon confessions (record-writer identity = penalty target; nothing here can touch a
 // third party). Runs BEFORE the no-consistent-matches early returns -- the everyone-left scenario
 // this exists for produces no settle groups at all. Dependencies are injected so tests need no fetch.
@@ -1524,6 +1533,7 @@ function ptBoardPlan(names, cfg) {
                             //   (clients fail-open: no entry / expired window = playtest open)
   add(cfg.trustLb, 1); add(cfg.reportLb, 0);
   add('card_box', 0);       // cosmetic claim rows (client-writable, zero authority)
+  add(UNMATCHED_LB, 0);     // knife-7 host self-incrimination box (client-writable, record-only)
   const forbidden = [];
   for (const n0 of names) {
     const n = String(n0);
@@ -1777,6 +1787,40 @@ async function main() {
   } else if (!repLb) {
     strictBoard('report board absent');
     console.log('report board absent (pre-create ' + REPORT_LB + ', client-writable) -- skip');
+  }
+  // knife-7: unmatched confession box -- the host guard's self-incriminating "I silently dropped
+  //   joiner events" rows. RECORD-ONLY: this NEVER touches settlement (the two hard rules are in
+  //   attest.reconcileUnmatched -- the signal accuses ONLY the writer/host, never the joiner seats
+  //   in the payload, and it is a review signal, not a verdict). Wrapped so a read failure can't
+  //   affect the settle path. Correlate by matchHash (== record d[3]); host = roster seat 0.
+  const umLb = ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).find(x => String(x.name || x.Name) === UNMATCHED_LB);
+  if (umLb && (umLb.entries | 0) > 0) {
+    try {
+      const ub = await readBoardAll(umLb.id || umLb.ID, 'unmatched box');
+      const matchIndex = new Map();
+      for (const r of recs) {
+        const roster = decodeRoster(r.d);
+        const host = roster && (roster[0] != null ? roster[0] : roster['0']);
+        if (host) matchIndex.set(r.d[3] >>> 0, { hostSid: host });
+      }
+      const umState = loadUnmatched();
+      const collected = [];
+      const ures = attest.reconcileUnmatched(
+        ub.ents.map(e => ({ steamID: e.steamID, details: decodeDetails(e.detailData) })),
+        { matchIndex, state: umState, now: nowMs, pid, onSignal: (s) => collected.push(s) }
+      );
+      attest.pruneUnmatchedState(umState, nowMs);
+      saveUnmatched(umState);
+      RUN.umSeen = ures.seen; RUN.umFresh = ures.fresh; RUN.umCorrob = ures.corroborated;
+      if (ures.fresh) {
+        console.log('unmatched: ' + ures.fresh + ' fresh host-drop signals (' + ures.corroborated + ' corroborated, ' +
+          ures.orphan + ' orphan) of ' + ub.ents.length + ' rows [record-only, never settles]');
+        for (const s of collected) console.log('  unmatched-signal host=' + String(s.subject).slice(0, 8) +
+          ' match=' + (s.matchHash >>> 0).toString(16) + ' total=' + s.total + ' pc=' + s.pc + ' weight=' + s.weight);
+      }
+    } catch (e) { ghWarn('unmatched box read failed: ' + (e && e.message)); }
+  } else if (!umLb) {
+    console.log('unmatched box absent (pre-create ' + UNMATCHED_LB + ', client-writable) -- skip');
   }
   // trust board upkeep: recompute tiers for touched players + everyone currently ON the
   // board (decay/deletion). Runs on every exit path (reports/flags arrive with or without
