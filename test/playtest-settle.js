@@ -15,7 +15,7 @@ const eq = (label, got, exp) => { const a = JSON.stringify(got), b = JSON.string
 const T = (label, cond) => { if (cond) ok(label); else bad(label); };
 
 // ---- 1) whitelist invariants ----
-eq('PT_MT_ALLOWED (lockstep: client quick=1/team1=3/team2=5/3V3=8 + endless=7)', PT_MT_ALLOWED, [1, 3, 5, 7, 8]);
+eq('PT_MT_ALLOWED (lockstep: client quick=1/team1=3/team2=5/3V3=8 + endless=7 + private=10)', PT_MT_ALLOWED, [1, 3, 5, 7, 8, 10]);
 for (const b of PT_MT_ALLOWED) T('base ' + b + ' never bears points (appliesLp false)', !appliesLp(b));
 for (const b of PT_MT_ALLOWED) T('base ' + b + ' is a narrowing of the live whitelist', SANITY.MT_ALLOWED.indexOf(b) >= 0);
 for (const b of [2, 4, 6]) T('ranked base ' + b + ' excluded on the channel', PT_MT_ALLOWED.indexOf(b) < 0);

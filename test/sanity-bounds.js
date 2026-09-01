@@ -26,7 +26,7 @@ const grp = (...rs) => rs;
 console.log('=== sanityFlags (B5 tier A) ===');
 
 eq('defaults pinned (cap/floor/dur/start-age)', [SANITY.SCORE_CAP, SANITY.SCORE_FLOOR, SANITY.DUR_CAP, SANITY.MIN_START_AGE_MS], [100000, -50000, 7200, 300000]);
-eq('mt whitelist pinned', SANITY.MT_ALLOWED, [1, 2, 3, 4, 5, 6, 7, 8, 9]);   // 5/6 = mode 2; 7 = endless co-op; 8/9 = mode 2 at teamSize 3 (O82 6P matchmaking)
+eq('mt whitelist pinned', SANITY.MT_ALLOWED, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);   // 5/6 = mode 2; 7 = endless co-op; 8/9 = mode 2 at teamSize 3 (O82 6P matchmaking); 10 = O140 private friend rooms (XP-only)
 
 eq('clean 3P quick -> []', sanityFlags(grp(mk(A, 0), mk(B, 1))), []);
 eq('clean ranked premade mask (mt=34, pc=4) -> []', sanityFlags(grp(mk(A, 0, { mt: 34, pc: 4 }), mk(B, 1, { mt: 34, pc: 4 }))), []);
@@ -34,7 +34,7 @@ eq('clean team (mt=4, pc=4) -> []', sanityFlags(grp(mk(A, 0, { mt: 4, pc: 4 }), 
 eq('shop overdraft score -100 legal', sanityFlags(grp(mk(A, 0, { scores: [-100, 50, 60] }), mk(B, 1, { scores: [-100, 50, 60] }))), []);
 
 has('mt=0 (private, never client-reported)', sanityFlags(grp(mk(A, 0, { mt: 0 }), mk(B, 1, { mt: 0 }))), 'mt');
-has('mt=10 (unassigned code)', sanityFlags(grp(mk(A, 0, { mt: 10 }), mk(B, 1, { mt: 10 }))), 'mt');
+has('mt=11 (unassigned code)', sanityFlags(grp(mk(A, 0, { mt: 11 }), mk(B, 1, { mt: 11 }))), 'mt');   // O140: 10 is now the private friend-room code (own suite: private-xp.js)
 has('team code carrying mask (3|1<<4)', sanityFlags(grp(mk(A, 0, { mt: 19, pc: 4 }), mk(B, 1, { mt: 19, pc: 4 }))), 'team-mask');
 has('team pc!=4', sanityFlags(grp(mk(A, 0, { mt: 3, pc: 3 }), mk(B, 1, { mt: 3, pc: 3 }))), 'pc');
 has('ffa pc=1', sanityFlags(grp(mk(A, 0, { pc: 1, scores: [10] }), mk(B, 0, { pc: 1, scores: [10] }))), 'pc');

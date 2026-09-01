@@ -34,7 +34,7 @@ const CONCURRENCY = Math.max(1, Number(process.env.CONCURRENCY || 8));
 //    during forced quick windows, but the endless continue economy still needs exercising --
 //    the flat grant funds a couple of continues without touching the live earn rates.
 const PT_MODE = process.env.PT_MODE === '1';
-const PT_MT_ALLOWED = [1, 3, 5, 7, 8];   // lockstep: client MATCHTYPE_CODE quick=1(+team offsets 3/5/8), endless=7 (O82: 8 = quick 3V3)
+const PT_MT_ALLOWED = [1, 3, 5, 7, 8, 10];   // lockstep: client MATCHTYPE_CODE quick=1(+team offsets 3/5/8), endless=7 (O82: 8 = quick 3V3), private=10 (O140 friend-room XP)
 const PT_SEED_CP = Math.max(0, Number(process.env.PT_SEED_CP || 60));
 const PT_SHARD_COUNT = Math.max(1, Number(process.env.PT_SHARD_COUNT || 50));   // lockstep: client LEDGER_SHARDS
 const PT_MIRROR_LB = 'mirror_box';   // never provisioned on the playtest app (progress does not migrate)
@@ -167,7 +167,10 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
     // exit-rate economy by design (client parity), and a legit endless run outlives the matchmade
     // maturity window many times over -- convicting at 2h would hit players who are still playing.
     // The entry stays as the pacing anchor for its settle and is pruned on its own long TTL.
-    if (isEndlessMt(p.mt)) {
+    // O140: private friend rooms (type 10) join the endless exemption -- members come and go
+    // freely by design (no leaver economy on invite-only play), so an orphaned start convicts
+    // nobody; the entry stays as the settle's pacing anchor and prunes on the same long TTL.
+    if (isEndlessMt(p.mt) || isPrivateMt(p.mt)) {
       if (now - (p.t0 || 0) > ENDLESS.PENDING_TTL_MS) { delete pending[m]; cleaned++; }
       continue;
     }
@@ -219,13 +222,33 @@ const SANITY = {
   // match is 8+ min, so legit settles arrive already-aged (worst case one extra run of delay);
   // a fabricated start+settle batch has to sit out the minimum in pending first.
   MIN_START_AGE_MS: Number(process.env.SANITY_MIN_START_AGE_MS || 300000),
-  MT_ALLOWED: [1, 2, 3, 4, 5, 6, 7, 8, 9],                       // quick/ranked x brawl/team1/mode2 + endless co-op + O82 3V3 (8/9 joined with the 6P matchmaking client gate)
+  MT_ALLOWED: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],                   // quick/ranked x brawl/team1/mode2 + endless co-op + O82 3V3 (8/9 joined with the 6P matchmaking client gate) + O140 private friend rooms (10, XP-only track)
 };
 // Mode-2 (base 5/6) score headroom: the mid-run gamble round can at most triple a player's bank
 // (max table multiplier x3, bet bounded by own coins), so the generous global cap gets the same
 // x3 headroom -- without it a legit vacuum-everything run through the gamble could brush the cap.
 // The client repo pins its gamble table's max multiplier against this factor in its lockstep test.
 const TEAM2 = { SCORE_MULT: Number(process.env.TEAM2_SCORE_MULT || 3) };
+// ===== O140 friend-room XP (match type 10, 2026-09-01) =====
+// Invite-only private rooms earn SMALL XP (well below matchmade) so friend-only players still
+// progress. XP is the ONLY surface: no TrueSkill/LP/CP/career/leaver conviction/B6 pair signals.
+// Anti-farm = three layers (user-directed: TIME is the proof of work):
+//   1. structural: the ordinary >=2-consistent-writers settle gate (lone records never pay);
+//   2. time-as-work: a claimed lv-level room cannot settle before lv*LEVEL_SECONDS*PACE_FRAC
+//      of REAL wall time on this job's own clock (endless pacing family; floor MIN_START_AGE);
+//   3. per-UTC-day XP cap (dayCapXp) -- even a wall-clock-honest farm is bounded per day.
+// The WIN half is a zero-sum transfer paid out of the losers' share (winner ~= P+T, last
+// place ~= P-T): win-trading between colluding accounts nets zero beyond the day-capped
+// participation floor, and an all-tie group transfers nothing.
+// Client mirror: rating-store PRIVATE leg (RANKED_CONFIG.XP.PRIVATE) -- value-pinned by the
+// companion repo's lockstep test; change either side only together.
+const PRIVATE_XP = {
+  MT: 10,
+  base: 20, perLevel: 9, transferFrac: 0.4, dayCapXp: 500,
+  progMax: 15, defaultLevels: 3,                       // d[7] progress domain (private rooms run 3/6/9 levels)
+  LEVEL_SECONDS: 75, PACE_FRAC: 0.5,                   // same physical floor family as ENDLESS
+};
+function isPrivateMt(mt) { return baseMt(mt) === PRIVATE_XP.MT; }
 // NOTE (extensibility): SCORE_CAP/DUR_CAP/MIN_START_AGE_MS were derived from the MATCHMADE game
 // -- originally 5 levels per matchmade run, 2-4 players, current item-value scale. A level-count
 // change or economy rework must re-derive them. Re-derived 2026-08-26 (O117, 5 -> 6 levels):
@@ -275,6 +298,15 @@ function sanityFlags(g) {
       // unbounded track); the floor stays shared -- shop overdraft is equally legal here.
       scoreCap = endlessGoalFor(t.endDepth, pc) * ENDLESS.SCORE_MULT;
     }
+  } else if (base === PRIVATE_XP.MT) {
+    // O140 friend rooms: 2..6 seats, never premade fields (the client's mtCodeOf returns the
+    // bare base for entry 'private'). The room may have run mode-2 internally (the flat code
+    // carries no team info), so the score cap takes the same gamble headroom as the sub-score
+    // codes -- scores only order ranks for the XP-lite formula (money never feeds it), so a
+    // generous cap costs nothing.
+    if (mask !== 0 || trioAt !== 0) out.push('mask');
+    if (pc < 2 || pc > 6) out.push('pc');
+    scoreCap = SANITY.SCORE_CAP * TEAM2.SCORE_MULT;
   } else {
     if (pc < 2 || pc > 6) out.push('pc');             // matchmade FFA lobbies are 2..6 players (O82: 5-6P with a trio present)
     for (let k = 0; k < 4; k++) if ((mask >> k) & 1) { if (2 * k + 1 >= pc) { out.push('mask-range'); break; } }
@@ -1270,6 +1302,61 @@ function creditXp(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers,
     console.log('  xp ' + plog(sid) + ' ' + cls + ' rank' + (rank0 + 1) + (firstWin ? ' dailyWin' : '') + ' x' + factor + (pf !== 1 ? ' prog x' + pf : '') + (bm !== 1 ? ' boost x' + bm : '') + ' +' + gain + ' -> ' + (xp[sid] | 0) + ' career ' + (st.cg | 0) + 'g/' + (st.cw | 0) + 'w/' + (st.cl | 0) + 'l');
   }
 }
+// ===== O140 private friend-room XP credit (match type 10) =====
+// Levels-played reader for private groups (domain 1..15 -- rooms run 3/6/9 levels, wider than
+// the matchmade 1..6 window): min-of-writers, same anti-inflation stance as matchProgressOf
+// (a lone forger can only DEFLATE everyone's award including his own).
+function privateProgressOf(g) {
+  let prog = 0;
+  for (const r of g) {
+    const p = ((r.d[7] | 0) >> 1);
+    if (p >= 1 && p <= PRIVATE_XP.progMax && (prog === 0 || p < prog)) prog = p;
+  }
+  return prog;
+}
+// XP-lite credit for one consistent private group. Formula (client mirror, lockstep-pinned):
+//   P = base + perLevel*lv;  T = round(P * transferFrac)
+//   valid:    gain = max(0, round((P + t_i) * boostMult))
+//             t_i  = round(T * (avgRank - rank_i) * 2 / (N - 1))   (N = distinct writer seats)
+//   innocent: gain = round(base * boostMult)     abandoner: 0
+// The transfer sums to ~0 across writers (winners are paid BY the losers' share -- collusive
+// win-trading nets zero; ties transfer nothing since avgRank == every rank). No money bonus,
+// no daily-first-win, no leaver factor, no career counters -- deliberately narrow.
+// Day cap: per-UTC-day credited private XP <= dayCapXp (state pvDay/pvXp per pid).
+function creditXpPrivate(g, rankOf, lv, xp, changedXp, xpState, today) {
+  const recBySeat = {};
+  for (const r of g) { const s = r.d[5] | 0; if (recBySeat[s] == null) recBySeat[s] = r; }
+  const seats = Object.keys(recBySeat).map(k => k | 0).sort((a, b) => a - b);
+  const N = seats.length;
+  let avgR = 0;
+  for (const s of seats) avgR += ((rankOf[recBySeat[s].steamID] || 1) | 0);
+  avgR = N > 0 ? avgR / N : 1;
+  const P = PRIVATE_XP.base + PRIVATE_XP.perLevel * lv;
+  const T = Math.round(P * PRIVATE_XP.transferFrac);
+  for (const s of seats) {
+    const r = recBySeat[s], sid = r.steamID, p = pid(sid);
+    const cls = dispClassOf(r.dispCode);
+    if (cls === 'abandoner') continue;
+    const st = xpState[p] = xpState[p] || { lastWinDay: 0, games: 0 };
+    const bm = xpBoostMult(xpLevelOf(xp[sid] | 0));   // pre-credit board value (same rule as creditXp)
+    let gain;
+    if (cls === 'valid') {
+      const t = (N >= 2) ? Math.round(T * (avgR - ((rankOf[sid] || 1) | 0)) * 2 / (N - 1)) : 0;
+      gain = Math.max(0, Math.round((P + t) * bm));
+    } else {
+      gain = Math.max(0, Math.round(PRIVATE_XP.base * bm));
+    }
+    if ((st.pvDay | 0) !== today) { st.pvDay = today; st.pvXp = 0; }
+    const room = Math.max(0, PRIVATE_XP.dayCapXp - (st.pvXp | 0));
+    const credited = Math.min(gain, room);
+    st.pvXp = (st.pvXp | 0) + credited;
+    if (credited > 0) { xp[sid] = (xp[sid] | 0) + credited; changedXp[sid] = xp[sid]; }
+    console.log('  xp-private ' + plog(sid) + ' ' + cls + ' rank' + ((rankOf[sid] || 1) | 0) + ' lv' + lv
+      + (bm !== 1 ? ' boost x' + bm : '') + ' +' + credited
+      + (credited < gain ? ' (day-capped from ' + gain + ')' : '') + ' -> ' + (xp[sid] | 0));
+  }
+}
+
 // ===== endless co-op authority (match type 7): depth board + CP wallet; never rating/XP/LP. =====
 // Type-7 records are a 2-3 player PvE track. Their settle path only (a) writes the personal-best
 // depth board and (b) debits the CP wallet for continues spent -- every competitive pipeline
@@ -2118,7 +2205,7 @@ async function main() {
     console.log('on-demand base reads: ' + need.size + ' players (bulk window incomplete)');
   }
   const today = Math.floor(Date.now() / 86400000);   // UTC day index (matches client lastWinDay) for the daily-first bonus
-  const changed = {}; const changedLp = {}; const changedXp = {}; const changedCp = {}; const changedEndless = {}; const changedEndlessSeason = {}; const changedEndlessTrio = {}; const changedEndlessTrioSeason = {}; const reveal = {}; const careerDet = {}; let settled = 0, voided = 0, settledEndless = 0;
+  const changed = {}; const changedLp = {}; const changedXp = {}; const changedCp = {}; const changedEndless = {}; const changedEndlessSeason = {}; const changedEndlessTrio = {}; const changedEndlessTrioSeason = {}; const reveal = {}; const careerDet = {}; let settled = 0, voided = 0, settledEndless = 0, settledPrivate = 0;
   const seedcap = (SEEDCAP_ENFORCE || SEEDCAP_REJECT) ? loadSeedcap() : null;   // O124 knife-9
   for (const c of fresh) {
     const g = c.g;
@@ -2277,6 +2364,35 @@ async function main() {
       const tr = isSubScoreMt(matchType) ? team2RankOf(parts, t2Win, teamSizeOfMt(matchType)) : teamRankOf(parts);
       if (tr) { for (const p of parts) rankOf[p.steamID] = tr[p.steamID]; for (const s of sorted) s.rank = tr[s.steamID]; }
     }
+    // ===== O140 private friend rooms (type 10): XP-only settle, then done. =====
+    // Placed AFTER the rank derivation (the XP-lite formula consumes rankOf) and BEFORE every
+    // competitive surface: creditXp/creditCp/B6 recordMatchSignals/TrueSkill/LP/leaver loop
+    // are all skipped by construction (the endless-branch pattern, narrower still).
+    // Time-as-work: private DOES write start attestations (reconcileStarts exempts type 10
+    // from conviction, keeps t0); a missing/failed attestation falls back to the settle's own
+    // first sighting (synth pend -- identical wall-time cost for a fabricator, endless family).
+    // The generic MIN_START_AGE pacing gate above already deferred us past the 5-min floor;
+    // here the requirement scales with the claimed level count (a 9-level room waits longer).
+    // Known benign skew: a private group deferred HERE (not by the generic gate) recounts the
+    // day.n signal next run -- advisory signal only, at most one extra tick for lv>8 rooms.
+    if (isPrivateMt(matchType)) {
+      let pendP = startsPending[c.m];
+      if (!pendP) {
+        pendP = startsPending[c.m] = { t0: nowMs, mt: matchType, roster: {}, settled: [], synth: true };
+        for (const sid of writerSids) sigPlayer(signals, pid(sid), nowMs).ns += 1;
+        sigDirty = true;
+      }
+      const lvP = privateProgressOf(g) || PRIVATE_XP.defaultLevels;
+      const reqMsP = Math.max(SANITY.MIN_START_AGE_MS, lvP * PRIVATE_XP.LEVEL_SECONDS * 1000 * PRIVATE_XP.PACE_FRAC);
+      if (nowMs - (pendP.t0 || 0) < reqMsP) {
+        console.log('  private-pacing ' + c.m + ': lv ' + lvP + ' needs ' + Math.round(reqMsP / 1000) + 's real time, seen ' + Math.round((nowMs - (pendP.t0 || 0)) / 1000) + 's -- deferred');
+        continue;
+      }
+      if (xpId) creditXpPrivate(g, rankOf, lvP, xp, changedXp, xpState, today);
+      console.log('  private settle ' + c.m + ': ' + g.length + ' writers, lv ' + lvP + (c.void ? ' (void majority -- XP by class only, nothing else to void)' : ''));
+      processed.add(c.m); settledPrivate++;
+      continue;
+    }
     // points are credited for BOTH settled AND consensus-VOID matches -- VOID only gates MMR/LP; an innocent victim
     //   still earns participation points (mirrors the client crediting innocent records). per-record class-driven.
     //   Early-settled matches (everyone else left) award progress/levelCount of the points (min-of-writers, see matchProgressOf).
@@ -2433,7 +2549,7 @@ async function main() {
     }
     processed.add(c.m); settled++;
   }
-  console.log('settled ' + settled + ' (+' + settledEndless + ' endless), voided ' + voided + ', ' + Object.keys(changed).length + ' players changed, ' + leaverHits + ' leavers');
+  console.log('settled ' + settled + ' (+' + settledEndless + ' endless, +' + settledPrivate + ' private), voided ' + voided + ', ' + Object.keys(changed).length + ' players changed, ' + leaverHits + ' leavers');
   RUN.endless = settledEndless;
 
   if (!APPLY_MMR) { console.log('APPLY_MMR=0 dry-run, nothing written'); return; }
@@ -2582,4 +2698,4 @@ async function main() {
 if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
-module.exports = { isVoidDisp, voidByConsensus, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, RS_SOLO_VS_TRIO, RS_TRIO_WIN, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, CONFESS_MAGIC, reconcileConfessions, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan, postForm, postFormDetails, findOrCreateBoard, ghWarn, ghErr, PT_MODE, PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, ptSeedCp, ptBoardPlan };
+module.exports = { isVoidDisp, voidByConsensus, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, RS_SOLO_VS_TRIO, RS_TRIO_WIN, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, CONFESS_MAGIC, reconcileConfessions, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan, postForm, postFormDetails, findOrCreateBoard, ghWarn, ghErr, PT_MODE, PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, ptSeedCp, ptBoardPlan, PRIVATE_XP, isPrivateMt, privateProgressOf, creditXpPrivate };

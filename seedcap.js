@@ -82,6 +82,16 @@ function capParamsOf(mt, pc, tail) {
   if (base === 7) {
     return { entry: 'endless', pc, startDepth: tail ? tail.startDepth | 0 : 0, endDepth: tail ? tail.endDepth | 0 : 0 };
   }
+  if (base === 10) {
+    // O140 private friend rooms (2026-09-01): world gen is entry-agnostic (same placeItems),
+    // so the seed replay applies -- audited on the WIDEST room config (9 levels; rooms run
+    // 3/6/9) and the verdict takes a gamble-round headroom multiplier (capMult, applied
+    // post-CLI: the flat type-10 code hides whether the room ran mode-2 internally).
+    // Generous fail-open envelope, same stance as the matchmade levels:6 constant; the
+    // room's stake is XP-lite only, the value here is the offense/suspect SIGNAL (a
+    // mathematically impossible vector self-reports the account, seedcap_offense lane).
+    return { entry: 'quick', pc, ts: 0, isTeam: false, team2: false, levels: 9, teams: [], capMult: v.TEAM2.SCORE_MULT };
+  }
   const ranked = base === 2 || base === 4 || base === 6 || base === 9;
   const team2 = base === 5 || base === 6 || base === 8 || base === 9;
   const isTeam = base === 3 || base === 4;
@@ -136,7 +146,7 @@ function pickAuditable(st, groups) {
     const g = groups[m];
     const d0 = g[0].d;
     const mt = d0[2] | 0, pc = d0[8] | 0, base = v.baseMt(mt);
-    if (base < 1 || base > 9 || pc < 1 || pc > 8 || d0.length < 10 + pc) continue;
+    if (base < 1 || base > 10 || pc < 1 || pc > 8 || d0.length < 10 + pc) continue;   // 10 = O140 private (audited via capParamsOf)
     const vecOf = (d) => d.slice(10, 10 + pc).join(',');
     if (!g.every(r => vecOf(r.d) === vecOf(d0))) continue;   // forgery-suspect groups are the reconcile's own flag lane
     const scores = d0.slice(10, 10 + pc).map(x => x | 0);
@@ -173,9 +183,10 @@ function applyAudit(st, pending, cliMap, processed, t) {
       console.log('seedcap: ERR ' + r.err + ' m=' + x.m);
       return;
     }
+    const capEff = Math.round(r.cap * (x.p.capMult || 1));   // O140: private takes the gamble headroom post-CLI
     const overSeats = [];
-    x.scores.forEach((sc, seat) => { if (sc > r.cap) overSeats.push(seat); });
-    st.audited[x.m] = { c: r.cap, s: Math.max.apply(null, x.scores), o: overSeats.length ? 1 : 0, t };
+    x.scores.forEach((sc, seat) => { if (sc > capEff) overSeats.push(seat); });
+    st.audited[x.m] = { c: capEff, s: Math.max.apply(null, x.scores), o: overSeats.length ? 1 : 0, t };
     if (overSeats.length) {
       over++;
       st.veto[x.m] = { t, seats: overSeats };
@@ -191,11 +202,11 @@ function applyAudit(st, pending, cliMap, processed, t) {
         st.corrections.push({ id: 'sc-' + x.m, m: x.m, seats: overSeats, t });
       }
       flags.push({
-        m: x.m, t, runSeed: x.runSeed | 0, mt: x.mt | 0, cap: r.cap | 0,
+        m: x.m, t, runSeed: x.runSeed | 0, mt: x.mt | 0, cap: capEff | 0,
         offenders: overSeats.map(s2 => ({ seat: s2, sid: x.roster[s2] ? String(x.roster[s2]) : null, score: x.scores[s2] | 0 })),
       });
       // pids only in logs -- never sids (public run logs)
-      console.log('::warning::seedcap OVER-CAP m=' + x.m + ' cap=' + r.cap + ' scores=' + x.scores.join(',') +
+      console.log('::warning::seedcap OVER-CAP m=' + x.m + ' cap=' + capEff + ' scores=' + x.scores.join(',') +
         ' seats=' + overSeats.join(',') + ' pids=' + overSeats.map(s2 => x.roster[s2] ? v.pid(x.roster[s2]).slice(0, 8) : '?').join(','));
     } else {
       okN++;
