@@ -49,6 +49,10 @@ jobs:
           SIGNALS_FILE: pt-signals.json
           CONFESSIONS_FILE: pt-confessions.json
           UNMATCHED_FILE: pt-unmatched.json
+          # O124 seedcap consult (read-only; seedcap.yml owns the file). Enforce = observe-first
+          # switch: flip to '1' after the audit soak looks clean (SEEDCAP_REJECT likewise).
+          SC_STATE_FILE: pt-seedcap.json
+          SEEDCAP_ENFORCE: '0'
           # rating-side state is never produced in PT mode; pointed off the main files anyway
           # (belt over suspenders) and deliberately NOT persisted below.
           SKILL_FILE: pt-skill.json

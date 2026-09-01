@@ -1,0 +1,121 @@
+name: seedcap
+# Per-seed score-cap audit (O124). Post-hoc auditor OUTSIDE the reconcile tick
+# (feedback.yml precedent: own workflow, disjoint state file, offset schedule).
+# Replays every settled/pending match's SEED through a compiled world-model CLI
+# and flags scores that exceed the mathematical per-seed cap; the reconcile
+# consumes the state read-only on its own tick (veto / suspects / corrections),
+# gated by SEEDCAP_ENFORCE there -- this job never writes a game board.
+# WINDOWS runner: the CLI is an MSVC /fp:precise build (bit-exact with the JS
+# engine's arithmetic); it is fetched from a private artifact repo via a
+# read-only deploy key -- generation logic and data tables never appear in this
+# public repo in source form, only compiled bytes reach the runner.
+# 10-minute cadence (audit is post-hoc; halves the Steam Web API read volume vs
+# the 5-minute reconcile tick), driven by the sync-tick CF worker like every
+# other tick-class workflow here (native schedules throttle on quiet repos).
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: '4-59/10 * * * *'
+permissions:
+  contents: read
+concurrency:
+  group: seedcap
+  cancel-in-progress: false
+jobs:
+  seedcap:
+    if: github.repository == 'FL343/epoch-sync'
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: FL343/gmt-authority-dist
+          ssh-key: ${{ secrets.SEEDCAP_DIST_KEY }}
+          path: authority-dist
+      - name: test
+        shell: bash
+        run: |
+          for f in test/seedcap-*.js; do echo "== $f =="; node "$f" || exit 1; done
+      - name: run
+        shell: bash
+        env:
+          STEAM_PUBLISHER_KEY: ${{ secrets.STEAM_PUBLISHER_KEY }}
+          APPID: ${{ secrets.APPID }}
+          LB_PREFIX: ${{ secrets.LB_PREFIX }}
+          RANKED_LB: ${{ secrets.RANKED_LB }}
+          LP_LB: ${{ secrets.LP_LB }}
+          STATE_SALT: ${{ secrets.STATE_SALT }}
+          SEEDCAP_CLI: ./authority-dist/seedcap_cli.exe
+          SC_STATE_FILE: seedcap.json
+          PROCESSED_FILE: processed.json
+          SIGNALS_FILE: signals.json
+        run: node seedcap.js
+      - name: persist
+        shell: bash
+        run: |
+          if [ -f seedcap.json ] && [ -n "$(git status --porcelain -- seedcap.json)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add -- seedcap.json
+            git commit -m "state: update seedcap audit state"
+            n=0
+            until git pull --rebase origin "${GITHUB_REF_NAME}" && git push; do
+              n=$((n+1))
+              if [ "$n" -ge 3 ]; then echo "::error::seedcap state push failed after $n tries"; exit 1; fi
+              sleep $((5 * n))
+            done
+          else
+            echo "no state change"
+          fi
+  playtest-seedcap:
+    needs: seedcap
+    if: ${{ always() && github.repository == 'FL343/epoch-sync' }}
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: FL343/gmt-authority-dist
+          ssh-key: ${{ secrets.SEEDCAP_DIST_KEY }}
+          path: authority-dist
+      - name: run
+        shell: bash
+        env:
+          STEAM_PUBLISHER_KEY: ${{ secrets.STEAM_PUBLISHER_KEY }}
+          APPID: ${{ secrets.PLAYTEST_APPID }}
+          LB_PREFIX: ${{ secrets.LB_PREFIX }}
+          RANKED_LB: ${{ secrets.RANKED_LB }}
+          LP_LB: ${{ secrets.LP_LB }}
+          STATE_SALT: ${{ secrets.STATE_SALT }}
+          SEEDCAP_CLI: ./authority-dist/seedcap_cli.exe
+          SC_STATE_FILE: pt-seedcap.json
+          PROCESSED_FILE: pt-processed.json
+          SIGNALS_FILE: pt-signals.json
+        run: node seedcap.js
+      - name: persist
+        shell: bash
+        run: |
+          if [ -f pt-seedcap.json ] && [ -n "$(git status --porcelain -- pt-seedcap.json)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add -- pt-seedcap.json
+            git commit -m "state: update playtest seedcap audit state"
+            n=0
+            until git pull --rebase origin "${GITHUB_REF_NAME}" && git push; do
+              n=$((n+1))
+              if [ "$n" -ge 3 ]; then echo "::error::playtest seedcap state push failed after $n tries"; exit 1; fi
+              sleep $((5 * n))
+            done
+          else
+            echo "no state change"
+          fi

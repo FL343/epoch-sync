@@ -87,7 +87,13 @@ console.log('== knife-7 second audit P1-3: unmatched state must be PERSISTED by 
   assert('scanned validate.js *_FILE defaults (found ' + defaults.length + ')', defaults.length >= 8);
   const wlMatch = vyml.match(/state_files=""\s*\n\s*for f in ([^\n;]+);/);
   const wl = wlMatch ? wlMatch[1].trim().split(/\s+/) : [];
-  const missing = defaults.filter((f) => wl.indexOf(f) < 0);
+  // O124 (knife-9): seedcap.json is a READ-ONLY consult in validate.js -- seedcap.yml owns and
+  // persists it (cross-workflow single-writer discipline). The exemption is verified, not
+  // trusted: validate.js must have no write path to it (loadSeedcap only, no saveSeedcap).
+  const READ_ONLY = ['seedcap.json'];
+  assert('read-only exemptions really are read-only in validate.js (no save/write of SC_STATE_FILE)',
+    /function loadSeedcap/.test(vjs) && vjs.indexOf('saveSeedcap') < 0 && vjs.indexOf('writeFileSync(SC_STATE_FILE') < 0);
+  const missing = defaults.filter((f) => wl.indexOf(f) < 0 && READ_ONLY.indexOf(f) < 0);
   assert('every validate.js state default is in the validate.yml whitelist' + (missing.length ? ' (missing: ' + missing.join(',') + ')' : ''), missing.length === 0);
 }
 

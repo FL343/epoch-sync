@@ -621,6 +621,15 @@ function saveSkill(s) { try { fs.writeFileSync(SKILL_FILE, JSON.stringify(s, nul
 const LEAVERS_FILE = process.env.LEAVERS_FILE || 'leavers.json';
 function loadLeavers() { try { return JSON.parse(fs.readFileSync(LEAVERS_FILE, 'utf8')) || {}; } catch (e) { return {}; } }
 function saveLeavers(s) { try { fs.writeFileSync(LEAVERS_FILE, JSON.stringify(s, null, 0)); } catch (e) { ghWarn('write ' + LEAVERS_FILE + ' failed: ' + (e && e.message)); } }
+// ---- O124 seedcap consult (knife-9) -- seedcap.js OWNS its state file; the reconcile only
+// READS it (cross-workflow ownership stays clean: each side writes its own file, the applied-
+// correction handshake goes through signals.json which the reconcile owns). Enforcement is
+// observe-first: SEEDCAP_ENFORCE gates the over-cap veto + board corrections, SEEDCAP_REJECT
+// gates the per-suspect refusal lever; both default OFF (the auditor still records everything).
+const SC_STATE_FILE = process.env.SC_STATE_FILE || 'seedcap.json';
+const SEEDCAP_ENFORCE = process.env.SEEDCAP_ENFORCE === '1';
+const SEEDCAP_REJECT = process.env.SEEDCAP_REJECT === '1';
+function loadSeedcap() { try { return JSON.parse(fs.readFileSync(SC_STATE_FILE, 'utf8')) || null; } catch (e) { return null; } }
 // pending abandon confessions (see reconcileConfessions): "pid|matchKey" -> {t0, mt, ded, ex, refunded, done}
 const CONFESSIONS_FILE = process.env.CONFESSIONS_FILE || 'confessions.json';
 const CONFESS_PRUNE_MS = Number(process.env.CONFESS_PRUNE_MS || 48 * 3600 * 1000);
@@ -2110,6 +2119,7 @@ async function main() {
   }
   const today = Math.floor(Date.now() / 86400000);   // UTC day index (matches client lastWinDay) for the daily-first bonus
   const changed = {}; const changedLp = {}; const changedXp = {}; const changedCp = {}; const changedEndless = {}; const changedEndlessSeason = {}; const changedEndlessTrio = {}; const changedEndlessTrioSeason = {}; const reveal = {}; const careerDet = {}; let settled = 0, voided = 0, settledEndless = 0;
+  const seedcap = (SEEDCAP_ENFORCE || SEEDCAP_REJECT) ? loadSeedcap() : null;   // O124 knife-9
   for (const c of fresh) {
     const g = c.g;
     const matchType = g[0].d[2] | 0;   // 2=ranked; visible LP only moves for ranked (quick = MMR only)
@@ -2125,6 +2135,26 @@ async function main() {
       continue;
     }
     const writerSids = [...new Set(g.map(r => String(r.steamID)))];
+    // O124 seedcap veto (knife-9): the seed-replay auditor proved the AGREED score vector
+    // exceeds this seed's mathematical cap (causal impossibility, every uncertain branch
+    // maxed) -> same flag-don't-settle shape as sanityFlags: not settled, not processed,
+    // self-heals if the auditor ever clears a false positive.
+    if (SEEDCAP_ENFORCE && seedcap && seedcap.veto && seedcap.veto[c.m]) {
+      recordFlag(signals, g, c.m, nowMs); sigDirty = true;
+      RUN.seedcapVeto = (RUN.seedcapVeto | 0) + 1;
+      ghWarn('match=' + c.m + ': seedcap over-cap veto (seats ' + ((seedcap.veto[c.m].seats || []).join(',') || '?') + ') -- not settled');
+      continue;
+    }
+    // O124 suspect refusal (optional lever, default off): a recorded over-cap offender's
+    // matches stop settling entirely until ops clears the suspect entry (seedcap-review tool).
+    if (SEEDCAP_REJECT && seedcap && seedcap.suspects) {
+      const scHit = writerSids.find(sid => seedcap.suspects[pid(sid)]);
+      if (scHit) {
+        RUN.seedcapReject = (RUN.seedcapReject | 0) + 1;
+        ghWarn('match=' + c.m + ': seedcap suspect ' + plog(scHit) + ' present -- not settled');
+        continue;
+      }
+    }
     // ===== endless (type 7): own settle authority -- depth board + CP debit, nothing else. =====
     // TrueSkill/XP/LP/leaver conviction never see a type-7 group (PvE track, zero career
     // spillover -- mirrors the client's own isolation). Sits before the generic pacing gate:
@@ -2407,6 +2437,50 @@ async function main() {
   RUN.endless = settledEndless;
 
   if (!APPLY_MMR) { console.log('APPLY_MMR=0 dry-run, nothing written'); return; }
+
+  // ---- O124 seedcap corrections (knife-9): already-settled over-cap ENDLESS matches. ----
+  // The auditor only QUEUES (seedcap.json corrections[]); the reconcile stays the sole writer
+  // of game boards and applies here "next tick" -- delete the flagged seats' endless board
+  // entries iff they still carry exactly the flagged match's packed score (an honest later
+  // improvement is never touched). Applied ids land in signals.seedcapApplied so the auditor
+  // prunes its queue; unactionable ids (records rotated off the shards) are marked too so the
+  // queue can never wedge. CP needs no reversal (endless settle only DEBITS; gains are matchmade).
+  if (SEEDCAP_ENFORCE && seedcap && Array.isArray(seedcap.corrections) && seedcap.corrections.length) {
+    signals.seedcapApplied = signals.seedcapApplied || [];
+    const scApplied = new Set(signals.seedcapApplied);
+    for (const cor of seedcap.corrections) {
+      if (!cor || !cor.id || scApplied.has(cor.id)) continue;
+      const cg = groups[cor.m];
+      const markApplied = () => { signals.seedcapApplied.push(cor.id); scApplied.add(cor.id); sigDirty = true; };
+      if (!cg || !cg.length) { ghWarn('seedcap correction ' + cor.id + ': match records gone -- dropped'); markApplied(); continue; }
+      const mtC = cg[0].d[2] | 0;
+      if (!isEndlessMt(mtC)) { markApplied(); continue; }
+      const pcC = cg[0].d[8] | 0;
+      const tC = endlessTail(cg[0].d);
+      let teamScoreC = 0;
+      for (let i = 0; i < pcC; i++) teamScoreC += cg[0].d[10 + i] | 0;
+      const packedC = packEndlessScore(tC.endDepth, teamScoreC);
+      const rosterC = rosterConsensus(cg);
+      const useTrioC = pcC >= 3;
+      const targets = [
+        [useTrioC ? enTrioId : enId, useTrioC ? endlessTrioBest : endlessBest, useTrioC ? 'endless-trio' : 'endless'],
+        [useTrioC ? enTrioSeasonId : enSeasonId, useTrioC ? endlessTrioSeasonBest : endlessSeasonBest, 'endless-season'],
+      ];
+      for (const seat of (cor.seats || [])) {
+        const sidC = rosterC[seat] != null ? String(rosterC[seat]) : null;
+        if (!sidC) continue;
+        for (const [bidC, bestMapC, labelC] of targets) {
+          if (!bidC || !bestMapC || bestMapC[sidC] == null || bestMapC[sidC] !== packedC) continue;
+          const resC = await postForm('/ISteamLeaderboards/DeleteLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: bidC, steamid: sidC, format: 'json' });
+          if (resC.ok) { delete bestMapC[sidC]; console.log('  seedcap correction ' + cor.id + ': deleted ' + labelC + ' entry ' + plog(sidC) + ' (packed ' + packedC + ')'); }
+          else ghWarn('seedcap correction ' + cor.id + ': delete ' + labelC + ' ' + plog(sidC) + ' HTTP ' + resC.status);
+        }
+      }
+      markApplied();
+      RUN.seedcapFix = (RUN.seedcapFix | 0) + 1;
+    }
+    if (signals.seedcapApplied.length > 400) signals.seedcapApplied = signals.seedcapApplied.slice(-400);
+  }
   const wRating = await mapPool(Object.keys(changed), CONCURRENCY, async (sid) => {
     const mu = changed[sid].mu, sigma = changed[sid].sigma;
     const disp = ts.displayRating(mu, sigma);

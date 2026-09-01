@@ -51,6 +51,10 @@ jobs:
           LP_LB: ${{ secrets.LP_LB }}
           XP_LB: ${{ secrets.XP_LB }}
           STATE_SALT: ${{ secrets.STATE_SALT }}
+          # O124 seedcap consult (read-only; seedcap.yml owns seedcap.json). Observe-first
+          # switch: flip to '1' after the audit soak looks clean (SEEDCAP_REJECT likewise).
+          SC_STATE_FILE: seedcap.json
+          SEEDCAP_ENFORCE: '0'
           # all boards are provisioned: a board missing from the listing is a config
           # regression -- fail loudly (e-mail) instead of silently skipping authority
           STRICT_BOARDS: '1'
