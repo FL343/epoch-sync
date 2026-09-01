@@ -49,10 +49,14 @@ jobs:
           SIGNALS_FILE: pt-signals.json
           CONFESSIONS_FILE: pt-confessions.json
           UNMATCHED_FILE: pt-unmatched.json
-          # O124 seedcap consult (read-only; seedcap.yml owns the file). Enforce = observe-first
-          # switch: flip to '1' after the audit soak looks clean (SEEDCAP_REJECT likewise).
+          # O124 seedcap consult (read-only; seedcap.yml owns the file). ENFORCE armed
+          # 2026-09-01 after a clean 80-match observation soak (0 over-cap, 0 suspects).
+          # SEEDCAP_REJECT stays off through a 2-week enforce soak (flip ~2026-09-15 if
+          # the anomaly-alert mail stays silent): it locks a flagged account's FUTURE
+          # settles, so it is the only false-positive amplifier -- veto alone already
+          # blocks every over-cap match and self-heals if the auditor clears a flag.
           SC_STATE_FILE: pt-seedcap.json
-          SEEDCAP_ENFORCE: '0'
+          SEEDCAP_ENFORCE: '1'
           # rating-side state is never produced in PT mode; pointed off the main files anyway
           # (belt over suspenders) and deliberately NOT persisted below.
           SKILL_FILE: pt-skill.json
