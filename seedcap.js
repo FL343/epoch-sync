@@ -47,6 +47,19 @@ const SEEDCAP_CLI = process.env.SEEDCAP_CLI || './seedcap_cli.exe';
 const AUDITED_KEEP = Math.max(500, Number(process.env.SC_AUDITED_KEEP || 4000));
 const VETO_KEEP_MIN = Math.max(1440, Number(process.env.SC_VETO_KEEP_MIN || 43200));   // 30d
 const SUSPECT_MATCH_KEEP = 8;
+// Permanent offense ledger + mass-anomaly alert (2026-09-01): the flag moment also
+// (a) mirrors the per-account cumulative over-cap count onto a PRESERVE-class trusted
+//     board (score = suspects[pid].n -- absolute, so a missed write self-heals on the
+//     account's next flag; details carry the latest offense for analysis), and
+// (b) mails the ops inbox when one run flags a wave (a wave usually means a
+//     false-positive storm -- world-model drift after a content change -- not a cheat
+//     wave) or the suspect roll keeps growing past the floor.
+// Neither is gated by SEEDCAP_ENFORCE/REJECT: the analysis record must exist from the
+// observation phase onward, ban or no ban.
+const OFFENSE_LB = process.env.SC_OFFENSE_LB || 'seedcap_offense';
+const OFFENSE_MAGIC = 0xC7;   // details: [magic, tMin, runSeed, mt, cap, claimedScore]
+const SC_MAIL_MIN_OVER = Math.max(1, Number(process.env.SC_MAIL_MIN_OVER || 3));
+const SC_MAIL_SUS_MIN = Math.max(1, Number(process.env.SC_MAIL_SUS_MIN || 5));
 
 const nowMin = () => Math.floor(Date.now() / 60000);
 
@@ -149,6 +162,7 @@ function pickAuditable(st, groups) {
 // ---- apply CLI verdicts onto state (pure state-machine half; testable offline) ----
 function applyAudit(st, pending, cliMap, processed, t) {
   let over = 0, okN = 0, errN = 0;
+  const flags = [];   // runtime-only offense detail (sids never enter the public state file)
   pending.forEach((x, i) => {
     const r = cliMap['m' + i];
     if (!r) { errN++; st.audited[x.m] = { e: 'no-out', t }; return; }
@@ -176,6 +190,10 @@ function applyAudit(st, pending, cliMap, processed, t) {
       if (processed.has(x.m) && x.p.entry === 'endless' && !st.corrections.some(c => c.m === x.m)) {
         st.corrections.push({ id: 'sc-' + x.m, m: x.m, seats: overSeats, t });
       }
+      flags.push({
+        m: x.m, t, runSeed: x.runSeed | 0, mt: x.mt | 0, cap: r.cap | 0,
+        offenders: overSeats.map(s2 => ({ seat: s2, sid: x.roster[s2] ? String(x.roster[s2]) : null, score: x.scores[s2] | 0 })),
+      });
       // pids only in logs -- never sids (public run logs)
       console.log('::warning::seedcap OVER-CAP m=' + x.m + ' cap=' + r.cap + ' scores=' + x.scores.join(',') +
         ' seats=' + overSeats.join(',') + ' pids=' + overSeats.map(s2 => x.roster[s2] ? v.pid(x.roster[s2]).slice(0, 8) : '?').join(','));
@@ -192,7 +210,73 @@ function applyAudit(st, pending, cliMap, processed, t) {
       }
     }
   });
-  return { over, okN, errN };
+  return { over, okN, errN, flags };
+}
+
+// ---- offense-board mirror + anomaly mail (pure planners; IO stays at the call site) ----
+function offensePlanOf(st, flags) {
+  const plan = {};
+  for (const f of flags || []) for (const o of (f.offenders || [])) {
+    if (!o.sid) continue;
+    const su = st.suspects[v.pid(o.sid)];
+    plan[o.sid] = {
+      score: su ? su.n | 0 : 1,   // absolute cumulative count = idempotent + self-healing
+      details: [OFFENSE_MAGIC, f.t | 0, f.runSeed | 0, f.mt | 0, f.cap | 0, o.score | 0],
+    };
+  }
+  return plan;
+}
+async function writeOffense(st, flags) {
+  const plan = offensePlanOf(st, flags);
+  const sids = Object.keys(plan);
+  if (!sids.length) return;
+  const bid = await v.findOrCreateBoard(OFFENSE_LB);   // trusted writes, global reads
+  if (!bid) { v.ghWarn('seedcap: offense board unavailable -- count lives on in suspects state'); return; }
+  for (const sid of sids) {
+    const w = plan[sid];
+    const res = await v.postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', {
+      key: KEY, appid: APPID, leaderboardid: bid, steamid: sid, score: w.score, scoremethod: 'ForceUpdate', format: 'json',
+    }, w.details);
+    if (res.ok) console.log('seedcap: offense ' + v.pid(sid).slice(0, 8) + ' n=' + w.score);
+    else v.ghWarn('seedcap: offense write failed HTTP ' + res.status + ' (suspects state still keeps the count)');
+  }
+}
+function mailDecision(newOver, suspectsTotal, lastMailedSus) {
+  const reasons = [];
+  if ((newOver | 0) >= SC_MAIL_MIN_OVER) reasons.push('over-cap x' + (newOver | 0) + ' in one run');
+  let mailedSus = lastMailedSus | 0;
+  if ((suspectsTotal | 0) >= SC_MAIL_SUS_MIN && (suspectsTotal | 0) > mailedSus) {
+    reasons.push('suspect accounts now ' + (suspectsTotal | 0));
+    mailedSus = suspectsTotal | 0;
+  }
+  return { send: reasons.length > 0, reasons, mailedSus };
+}
+async function sendAlertMail(reasons, flags, totals) {
+  const to = process.env.SC_MAIL_TO || process.env.FB_DIGEST_TO, apiKey = process.env.RESEND_API_KEY;
+  if (!to || !apiKey) return false;   // unconfigured -> decision stays pending (mailedSus not advanced)
+  const lines = ['seedcap anomaly alert: ' + reasons.join(' + '), ''];
+  for (const f of flags || []) {
+    lines.push('OVER m=' + f.m + ' mt=' + f.mt + ' seed=' + f.runSeed + ' cap=' + f.cap + '  ' +
+      (f.offenders || []).map(o => 'seat' + o.seat + '=' + o.score + ' sid=' + (o.sid || '?')).join(' | '));
+  }
+  lines.push('', 'totals: veto=' + (totals.veto | 0) + ' suspects=' + (totals.suspects | 0),
+    '', 'A wave here usually means a false-positive storm (world-model drift after a content change),',
+    'not a cheat wave -- audit before arming SEEDCAP_REJECT. The veto is flag-dont-settle and',
+    'self-heals once a flag is cleared (seedcap-review ops tool).');
+  try {
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + apiKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        from: process.env.FB_DIGEST_FROM || 'onboarding@resend.dev',
+        to: [to],
+        subject: (process.env.FB_DIGEST_TAG || '') + 'seedcap ALERT: ' + reasons.join(' + '),
+        text: lines.join('\n'),
+      }),
+    });
+    if (!res.ok) { v.ghWarn('seedcap mail failed HTTP ' + res.status); return false; }
+    return true;
+  } catch (e) { v.ghWarn('seedcap mail threw: ' + (e && e.message)); return false; }
 }
 
 // ---- prune (state stays bounded) ----
@@ -240,12 +324,19 @@ async function main() {
   }
 
   const pending = pickAuditable(st, groups);
-  let stats = { over: 0, okN: 0, errN: 0 };
+  let stats = { over: 0, okN: 0, errN: 0, flags: [] };
   if (pending.length) {
     const res = runCli(pending.map((x, i) => cliLineOf('m' + i, x.p, x.runSeed)));
     if (res.fail) { console.log('::error::seedcap: CLI run failed ' + res.fail); process.exit(1); }
     console.log('seedcap: ' + res.head + ' auditing ' + pending.length + ' groups');
     stats = applyAudit(st, pending, res.map, processed, nowMin());
+  }
+  if (stats.flags && stats.flags.length) await writeOffense(st, stats.flags);
+  const md = mailDecision(stats.over, Object.keys(st.suspects).length, st.mailSus | 0);
+  if (md.send && await sendAlertMail(md.reasons, stats.flags,
+      { veto: Object.keys(st.veto).length, suspects: Object.keys(st.suspects).length })) {
+    st.mailSus = md.mailedSus;   // advance only on a delivered mail (failed send retries next run)
+    console.log('seedcap: anomaly mail sent (' + md.reasons.join(' + ') + ')');
   }
   pruneState(st, applied, nowMin());
   saveState(st);
@@ -254,7 +345,7 @@ async function main() {
     ' suspects=' + Object.keys(st.suspects).length + ' corrections=' + st.corrections.length);
 }
 
-module.exports = { capParamsOf, cliLineOf, chainStartBank, pickAuditable, applyAudit, pruneState, runCli, loadState, saveState, SC_STATE_FILE, AUDITED_KEEP, VETO_KEEP_MIN };
+module.exports = { capParamsOf, cliLineOf, chainStartBank, pickAuditable, applyAudit, pruneState, runCli, loadState, saveState, SC_STATE_FILE, AUDITED_KEEP, VETO_KEEP_MIN, offensePlanOf, writeOffense, mailDecision, sendAlertMail, OFFENSE_LB, OFFENSE_MAGIC, SC_MAIL_MIN_OVER, SC_MAIL_SUS_MIN };
 if (require.main === module) {
   main().catch(e => { console.log('::error::seedcap run failed: ' + (e && e.stack || e)); process.exit(1); });
 }

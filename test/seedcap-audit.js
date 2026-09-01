@@ -146,8 +146,57 @@ const SIDA = '76561198000000001', SIDB = '76561198000000002';
   ok('[7] validate never writes the seedcap state (single-writer)', vjs.indexOf('saveSeedcap') < 0 && vjs.indexOf('writeFileSync(SC_STATE_FILE') < 0);
   const scjs = fs.readFileSync(path.join(__dirname, '..', 'seedcap.js'), 'utf8');
   ok('[7] seedcap.js never writes reconcile-owned files', scjs.indexOf('writeFileSync(PROCESSED_FILE') < 0 && scjs.indexOf('writeFileSync(SIGNALS_FILE') < 0);
-  ok('[7] seedcap.js never posts board writes (no SetLeaderboardScore/Delete)', scjs.indexOf('SetLeaderboardScore') < 0 && scjs.indexOf('DeleteLeaderboardScore') < 0);
+  // 2026-09-01: the auditor now writes exactly ONE board -- the PRESERVE-class offense
+  // mirror -- and still never touches a game board (settlement stays the reconcile's).
+  ok('[7] seedcap.js never deletes board entries', scjs.indexOf('DeleteLeaderboardScore') < 0);
+  ok('[7] seedcap.js single board write = the offense mirror', (scjs.match(/SetLeaderboardScore/g) || []).length === 1 &&
+    (scjs.match(/findOrCreateBoard\(/g) || []).length === 1 && /findOrCreateBoard\(OFFENSE_LB\)/.test(scjs));
+  ok('[7] seedcap.yml carries the mail channel on both jobs',
+    (yml.match(/RESEND_API_KEY: \$\{\{ secrets\.RESEND_API_KEY \}\}/g) || []).length === 2 &&
+    (yml.match(/FB_DIGEST_TO: \$\{\{ secrets\.FB_DIGEST_TO \}\}/g) || []).length === 2);
+  ok('[7] playtest seedcap job tags its mail', /FB_DIGEST_TAG: '\[playtest\] '/.test(yml));
+  const ptyml = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'playtest.yml'), 'utf8');
+  ok('[7] playtest reconcile ENFORCE armed (2026-09-01; flipping back is a deliberate act)', /SEEDCAP_ENFORCE: '1'/.test(ptyml));
+  ok('[7] playtest REJECT not armed yet (2-week enforce soak first)', !/SEEDCAP_REJECT: '1'/.test(ptyml));
+  const mainyml = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'validate.yml'), 'utf8');
+  ok('[7] main-app reconcile still observe-only (flips in the EA pre-launch batch)', /SEEDCAP_ENFORCE: '0'/.test(mainyml));
   ok('[7] state stays ascii-escaped (public-repo discipline)', /\\\\u0080-\\\\uffff|u0080-/.test(scjs.replace(/\n/g, ' ')) || /charCodeAt\(0\)\.toString\(16\)/.test(scjs));
+}
+
+// ---- [8] offense mirror + anomaly mail (2026-09-01) ----
+{
+  const st = { audited: {}, chain: {}, suspects: {}, veto: {}, corrections: [] };
+  st.suspects[v.pid(SIDB)] = { n: 5, t0: 1, ms: [] };   // prior offenses: plan must mirror the ABSOLUTE ledger, not this run's count
+  const pend = [
+    { m: 'ov1', mt: 1, pc: 2, scores: [100, 7777], p: { entry: 'quick' }, tail: null, roster: { 0: SIDA, 1: SIDB }, runSeed: 11 },
+    { m: 'ov2', mt: 7, pc: 2, scores: [8888, 1], p: { entry: 'endless' }, tail: { startDepth: 0, endDepth: 3 }, roster: { 0: SIDB, 1: SIDA }, runSeed: 12 },
+  ];
+  const stats = sc.applyAudit(st, pend, { m0: { cap: 5000 }, m1: { cap: 6000 } }, new Set(), 2000);
+  ok('[8] flags carry sid-resolved offenders + match cap/seed/mt', stats.flags.length === 2 &&
+    stats.flags[0].offenders[0].sid === SIDB && stats.flags[0].offenders[0].score === 7777 && stats.flags[0].cap === 5000 &&
+    stats.flags[1].offenders[0].sid === SIDB && stats.flags[1].mt === 7 && stats.flags[1].runSeed === 12);
+  ok('[8] flags never persist (sids stay out of the public state)', JSON.stringify(st).indexOf(SIDB) < 0);
+  const plan = sc.offensePlanOf(st, stats.flags);
+  ok('[8] plan score = suspects[pid].n absolute (prior 5 + 2 this run -> 7; idempotent rewrite)',
+    plan[SIDB] && plan[SIDB].score === 7 && Object.keys(plan).length === 1);
+  ok('[8] alert thresholds pinned (3 over/run mass floor, 5 suspect floor; env-overridable)',
+    sc.SC_MAIL_MIN_OVER === 3 && sc.SC_MAIL_SUS_MIN === 5);
+  ok('[8] plan details = [magic,t,seed,mt,cap,claimed] of the LATEST offense',
+    plan[SIDB].details.join(',') === [sc.OFFENSE_MAGIC, 2000, 12, 7, 6000, 8888].join(','));
+  ok('[8] offense magic stays clear of the known details namespace', sc.OFFENSE_MAGIC === 0xC7);
+  ok('[8] board name default + PRESERVE-class intent', sc.OFFENSE_LB === 'seedcap_offense');
+  ok('[8] below both thresholds -> silent', sc.mailDecision(sc.SC_MAIL_MIN_OVER - 1, sc.SC_MAIL_SUS_MIN - 1, 0).send === false);
+  ok('[8] mass over-cap in one run -> mail', sc.mailDecision(sc.SC_MAIL_MIN_OVER, 0, 0).send === true);
+  const d1 = sc.mailDecision(0, sc.SC_MAIL_SUS_MIN, 0);
+  ok('[8] suspect floor crossed -> mail once, watermark advances', d1.send && d1.mailedSus === sc.SC_MAIL_SUS_MIN);
+  ok('[8] same suspect total again -> silent (watermark)', sc.mailDecision(0, sc.SC_MAIL_SUS_MIN, d1.mailedSus).send === false);
+  ok('[8] growth past watermark -> mail again', sc.mailDecision(0, sc.SC_MAIL_SUS_MIN + 1, d1.mailedSus).send === true);
+  const scjs2 = fs.readFileSync(path.join(__dirname, '..', 'seedcap.js'), 'utf8');
+  ok('[8] unconfigured mail returns false BEFORE any fetch (watermark stays put)', /if \(!to \|\| !apiKey\) return false/.test(scjs2));
+  ok('[8] watermark advances only on a delivered mail', /md\.send && await sendAlertMail[\s\S]{0,200}st\.mailSus = md\.mailedSus/.test(scjs2));
+  // comments and the mail-body advice string may NAME the switches; code must never READ them
+  ok('[8] offense write is unconditional on the enforce switches (analysis record from observation on)',
+    scjs2.indexOf('process.env.SEEDCAP_ENFORCE') < 0 && scjs2.indexOf('process.env.SEEDCAP_REJECT') < 0);
 }
 
 try { fs.unlinkSync(process.env.SC_STATE_FILE); } catch (e) {}

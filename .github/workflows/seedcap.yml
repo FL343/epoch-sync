@@ -54,6 +54,9 @@ jobs:
           SC_STATE_FILE: seedcap.json
           PROCESSED_FILE: processed.json
           SIGNALS_FILE: signals.json
+          # offense-board mirror + mass-anomaly alert mail (Resend, feedback.yml channel)
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          FB_DIGEST_TO: ${{ secrets.FB_DIGEST_TO }}
         run: node seedcap.js
       - name: persist
         shell: bash
@@ -101,6 +104,10 @@ jobs:
           SC_STATE_FILE: pt-seedcap.json
           PROCESSED_FILE: pt-processed.json
           SIGNALS_FILE: pt-signals.json
+          # offense-board mirror + mass-anomaly alert mail (Resend, feedback.yml channel)
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          FB_DIGEST_TO: ${{ secrets.FB_DIGEST_TO }}
+          FB_DIGEST_TAG: '[playtest] '
         run: node seedcap.js
       - name: persist
         shell: bash
