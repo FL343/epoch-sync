@@ -3,6 +3,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const ts = require('./trueskill.js');
 const attest = require('./attest.js');   // knife-7: solo attested-record verify + unmatched confession reconcile
+const campaign = require('./campaign.js');   // O159 knife-7d: Vegas campaign clear attestation -> exclusive cosmetic grants
 
 const APPID = Number(process.env.APPID);
 const PREFIX = process.env.LB_PREFIX;
@@ -1411,6 +1412,9 @@ const ENDLESS = {
 // plus an optional points-ladder floor gate (met on THIS season's ladder or any archived one).
 const REDEEM_LB = process.env.REDEEM_LB || 'redeem_box';
 const GRANT_LB = process.env.GRANT_LB || 'grant_box';
+// O159 knife-7d: campaign clear attestation box (client-writable; the game's guard sidecar writes signed
+//   records). Dev/e2e guards write campaign_box_test; dev-key records settle ONLY on a *_test board.
+const CAMPAIGN_LB = process.env.CAMPAIGN_LB || 'campaign_box';
 const REDEEM_MAGIC = 0xCE, GRANT_MAGIC = 0xCF, GRANT_VER = 1;
 const GRANT_WORDS = 2;
 const REDEEM_CATALOG = {
@@ -2060,13 +2064,58 @@ async function main() {
       if (nPlayers) { RUN.redeems = nPlayers + 'p/' + nBits + 'b'; console.log('redeems: ' + nBits + ' bits across ' + nPlayers + ' players'); }
     } catch (e) { ghWarn('redeem channel failed: ' + (e && e.message)); }
   };
+  // O159 knife-7d: campaign clear attestation -> exclusive cosmetics. The guard sidecar wrote a signed record
+  //   (campaign.js layout) to CAMPAIGN_LB; verify (registered build key, owner binding, internal tier proof)
+  //   and OR the grant bits (6 banner / 5 title) into grant_box. Idempotent (bits already set -> skip); no
+  //   wallet debit (not a purchase). Runs on every exit path like redeems. playtest: the campaign is not
+  //   shipped there (lock layer) -> hard-disabled so this never creates boards on that appid.
+  const processCampaignGrants = async () => {
+    if (PT_MODE) return;
+    const list = (lr.json && lr.json.response && lr.json.response.leaderboards) || [];
+    const byName = (name) => { const f = list.find(x => String(x.name || x.Name) === name); return f ? (f.id || f.ID) : null; };
+    try {
+      let cbId = byName(CAMPAIGN_LB);
+      if (!cbId) cbId = await findOrCreateBoard(CAMPAIGN_LB, false);   // client-writable (guard writes as the user)
+      const gtId = byName(GRANT_LB) || await findOrCreateBoard(GRANT_LB, true);
+      if (!cbId || !gtId) { console.log('campaign/grant board absent -- skip'); return; }
+      const cb = await readBoardAll(cbId, 'campaign box');
+      if (!cb.ents.length) return;
+      const pubTable = attest.loadPubTable(require('path').join(__dirname, 'attest-keys.json')) || {};
+      const allowDevKey = /_test$/.test(CAMPAIGN_LB);
+      const gb = await readBoardAll(gtId, 'grant box');
+      const grantedBy = {};
+      for (const e of gb.ents) { const m = decodeGrantMask(decodeDetails(e.detailData)); if (m) grantedBy[String(e.steamID)] = m; }
+      let nBits = 0, nPlayers = 0, nPend = 0, nRej = 0;
+      for (const e of cb.ents) {
+        const sid = String(e.steamID);
+        const v = campaign.verifyCampaignRecord(decodeDetails(e.detailData), pubTable);
+        const plan = campaign.campaignGrantPlan(v, { owner: sid, allowDevKey });
+        if (!plan.bits.length) { if (plan.pending) nPend++; else { nRej++; console.log('  campaign ' + plog(sid) + ': rejected (' + plan.reason + ')'); } continue; }
+        const granted = grantedBy[sid] || [0, 0];
+        const newBits = plan.bits.filter(b => !grantBit(granted, b));
+        if (!newBits.length) continue;
+        if (!APPLY_MMR) { console.log('  campaign ' + plog(sid) + ': dry-run, would grant bits [' + newBits.join(' ') + ']'); continue; }
+        const newMask = granted.slice();
+        while (newMask.length < GRANT_WORDS) newMask.push(0);
+        for (const b of newBits) setGrantBit(newMask, b);
+        const det = [(GRANT_MAGIC | (GRANT_VER << 8)) | 0, Math.floor(nowMs / 60000) | 0, newMask[0] | 0, newMask[1] | 0];
+        const gw = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: gtId, steamid: sid, score: popcountWords(newMask), scoremethod: 'ForceUpdate', format: 'json' }, det);
+        const gOk = gw.ok && !(gw.json && gw.json.result && gw.json.result.result && gw.json.result.result !== 1);
+        if (!gOk) { ghWarn('campaign grant write failed ' + plog(sid) + ': HTTP ' + gw.status + ' (deferred)'); continue; }
+        grantedBy[sid] = newMask;
+        nBits += newBits.length; nPlayers++;
+        console.log('  campaign ' + plog(sid) + ': granted bits [' + newBits.join(' ') + '] tier=' + v.fields.tierBits + ' lastU=' + v.fields.lastU + ' credited=' + v.fields.credited + ' key=' + v.fields.keyName);
+      }
+      if (nPlayers || nPend || nRej) { RUN.campaign = nPlayers + 'p/' + nBits + 'b' + (nPend ? '/' + nPend + 'pend' : '') + (nRej ? '/' + nRej + 'rej' : ''); console.log('campaign grants: ' + nBits + ' bits across ' + nPlayers + ' players (pending ' + nPend + ', rejected ' + nRej + ')'); }
+    } catch (e) { ghWarn('campaign channel failed: ' + (e && e.message)); }
+  };
 
   RUN.consistent = consistentMatches.length;
-  if (consistentMatches.length === 0) { console.log('no consistent matches'); persistStartsSide(); await maintainTrust(); await processRedeems(null); writeRunSummary(); return; }
+  if (consistentMatches.length === 0) { console.log('no consistent matches'); persistStartsSide(); await maintainTrust(); await processRedeems(null); await processCampaignGrants(); writeRunSummary(); return; }
   const fresh = consistentMatches.filter(c => !processed.has(c.m));
   RUN.fresh = fresh.length;
   console.log(consistentMatches.length + ' consistent, ' + fresh.length + ' fresh (settled ' + (consistentMatches.length - fresh.length) + ')');
-  if (fresh.length === 0) { console.log('no fresh matches, skip'); persistStartsSide(); await maintainTrust(); await processRedeems(null); writeRunSummary(); return; }
+  if (fresh.length === 0) { console.log('no fresh matches, skip'); persistStartsSide(); await maintainTrust(); await processRedeems(null); await processCampaignGrants(); writeRunSummary(); return; }
 
   // playtest channel: no rating board exists (and must not -- lock layer 3); the TrueSkill
   // update block below is skipped wholesale, so the id is never consulted.
@@ -2689,6 +2738,7 @@ async function main() {
   // redeem channel last: wallet debits base on the in-memory post-settle balances just written
   // above (passing the map avoids re-reading scores that global reads may still serve stale).
   await processRedeems(cp);
+  await processCampaignGrants();
   console.log('written: rating ' + rOk + '/' + wRating.length + ', points ' + pOk + '/' + wPoints.length + ', xp ' + xOk + '/' + wXp.length + ', cp ' + cOk + '/' + wCp.length + ', endless ' + eOk + '/' + wEndless.length + (wEndlessSeason.length ? (' (+season ' + esOk + '/' + wEndlessSeason.length + ')') : '') + (wEndlessTrio.length ? (' (+trio ' + etOk + '/' + wEndlessTrio.length + ')') : '') + (wEndlessTrioSeason.length ? (' (+trio-season ' + etsOk + '/' + wEndlessTrioSeason.length + ')') : '') + ', state updated (idempotent)');
   RUN.writes = rOk + '/' + wRating.length + ' ' + pOk + '/' + wPoints.length + ' ' + xOk + '/' + wXp.length;
   RUN.writesEndless = cOk + '/' + wCp.length + ' ' + eOk + '/' + wEndless.length + (wEndlessSeason.length ? ('+' + esOk + '/' + wEndlessSeason.length) : '') + (wEndlessTrio.length ? ('+t' + etOk + '/' + wEndlessTrio.length) : '');
@@ -2698,4 +2748,4 @@ async function main() {
 if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
-module.exports = { isVoidDisp, voidByConsensus, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, RS_SOLO_VS_TRIO, RS_TRIO_WIN, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, CONFESS_MAGIC, reconcileConfessions, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan, postForm, postFormDetails, findOrCreateBoard, ghWarn, ghErr, PT_MODE, PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, ptSeedCp, ptBoardPlan, PRIVATE_XP, isPrivateMt, privateProgressOf, creditXpPrivate };
+module.exports = { isVoidDisp, voidByConsensus, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, RS_SOLO_VS_TRIO, RS_TRIO_WIN, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, CONFESS_MAGIC, reconcileConfessions, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan, postForm, postFormDetails, findOrCreateBoard, ghWarn, ghErr, PT_MODE, PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, ptSeedCp, ptBoardPlan, PRIVATE_XP, isPrivateMt, privateProgressOf, creditXpPrivate, CAMPAIGN_LB };
