@@ -1866,6 +1866,19 @@ async function main() {
       console.log('pt bootstrap: provisioned ' + b.name + (b.trusted ? ' (trusted)' : ' (client-writable)'));
     }
   }
+  // O93 solo competitive surface on the main app: the ladder (trusted) and the client-writable save box must
+  //   exist BEFORE the first solo save lands (the guard writes the row as the user; a missing board = save refused,
+  //   refund, run continues) -- provisioned up-front like the playtest bootstrap, not lazily behind the fresh-match
+  //   early returns (live e2e 2026-09-06: first save on a fresh test app id hit a missing box board).
+  if (!PT_MODE) {
+    const names0 = ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).map(x => String(x.name || x.Name));
+    for (const [nm, trusted] of [[ENDLESS_COMP_LB, true], [SAVE_BOX_LB, false]]) {
+      if (names0.indexOf(nm) >= 0) continue;
+      const id0 = await findOrCreateBoard(nm, trusted);
+      if (id0) console.log('solo boards: provisioned ' + nm + (trusted ? ' (trusted)' : ' (client-writable)'));
+      else ghWarn('solo boards: provision failed for ' + nm + ' (solo saves refuse until it exists)');
+    }
+  }
   // seasonal points target (see SEASONS): resolved once per run; the previous season's board
   // (if any) is the lazy soft-reset source and is never created, only found.
   // Playtest channel: no points surface at all -- nothing resolved, nothing auto-created.

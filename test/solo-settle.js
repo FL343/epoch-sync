@@ -143,5 +143,14 @@ console.log('-- board surface --');
   eq('playtest plan provisions the solo ladder (trusted) + save box (client-writable)', [byName.cmp, byName.sbx], [1, 0]);
 }
 
+console.log('-- wiring pins --');
+{
+  const src = require('fs').readFileSync(path.join(__dirname, '..', 'validate.js'), 'utf8');
+  assert('main app provisions the solo ladder + save box up-front (before the fresh-match early returns)',
+    /for \(const \[nm, trusted\] of \[\[ENDLESS_COMP_LB, true\], \[SAVE_BOX_LB, false\]\]\)/.test(src) && src.indexOf('solo boards: provisioned') < src.indexOf('no consistent matches'));
+  assert('solo segments enter the settle loop as their own consistent entries', /consistentMatches\.push\(\{ m, g, void: false, solo: true \}\)/.test(src) && /if \(c\.solo\) \{ if \(await soloSettle\(c\)\) settledSolo\+\+; continue; \}/.test(src));
+  assert('solo settle verifies the signature and binds the row owner', /attest\.soloSettleGate\(v, \{ owner: sid, allowDevKey: soloAllowDev \}\)/.test(src));
+  assert('a save point is consumed once and the resume debit rides the consume', /if \(plan\.consume\) \{[\s\S]{0,120}COMP\.RESUME_CP/.test(src));
+}
 console.log('=== ' + (failN === 0 ? 'PASS' : 'FAIL') + ' — ' + failN + ' fail (solo-settle) ===');
 if (failN) process.exit(1);
