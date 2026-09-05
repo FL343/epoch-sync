@@ -84,6 +84,12 @@ absent, so a run is unaffected before it is provisioned.
   for the pure helpers (run one with
   `node test/<name>.js`; CI runs all of `test/*.js` before each reconcile).
 - `.github/workflows/validate.yml` — scheduled run + state persistence.
+- `.github/workflows/playtest.yml` / `demo.yml` — the pre-release channel jobs: the same
+  reconcile pointed at a second/third app id in restricted-channel mode (`PT_MODE=1`: no
+  rating/points/redeem surface, channel boards provisioned idempotently, forbidden boards
+  fail the run) with disjoint `pt-*.json` / `demo-*.json` state. `feedback.yml`,
+  `sanctions.yml` and `seedcap.yml` carry per-channel twin jobs for the same app ids;
+  `test/channel-workflows.js` pins the twins to their template so they cannot drift apart.
 
 State files committed back each run (idempotency): `processed.json`, `skill.json`,
 `leavers.json`, `xp.json` (per-player `{ lastWinDay, games }` for the daily-first bonus

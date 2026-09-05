@@ -98,3 +98,42 @@ jobs:
           else
             echo "no state change"
           fi
+  # Demo-channel twin: same pipeline pointed at the demo app with its own disjoint state file.
+  # Serialized after the playtest twin (needs + always) so the three persists never contend.
+  demo-feedback:
+    if: ${{ always() && github.repository == 'FL343/epoch-sync' }}
+    needs: playtest-feedback
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: run
+        env:
+          STEAM_PUBLISHER_KEY: ${{ secrets.STEAM_PUBLISHER_KEY }}
+          APPID: ${{ secrets.DEMO_APPID }}
+          STATE_SALT: ${{ secrets.STATE_SALT }}
+          FB_STATE_FILE: feedback-demo.json
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          FB_DIGEST_TO: ${{ secrets.FB_DIGEST_TO }}
+          FB_DIGEST_TAG: '[demo] '
+        run: node feedback.js
+      - name: persist
+        run: |
+          if [ -n "$(git status --porcelain -- feedback-demo.json)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add -- feedback-demo.json
+            git commit -m "state: update demo feedback state"
+            n=0
+            until git pull --rebase origin "${GITHUB_REF_NAME}" && git push; do
+              n=$((n+1))
+              if [ "$n" -ge 3 ]; then echo "::error::demo feedback state push failed after $n tries"; exit 1; fi
+              sleep $((5 * n))
+            done
+          else
+            echo "no state change"
+          fi

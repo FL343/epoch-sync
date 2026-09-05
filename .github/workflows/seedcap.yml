@@ -126,3 +126,57 @@ jobs:
           else
             echo "no state change"
           fi
+  # Demo-channel twin: same auditor over the demo app's shards (the demo client caps depth, so the
+  # per-seed cap is the only remaining honest-score envelope on its endless boards). Own disjoint
+  # state, serialized after the playtest twin; demo.yml consumes demo-seedcap.json read-only.
+  demo-seedcap:
+    needs: playtest-seedcap
+    if: ${{ always() && github.repository == 'FL343/epoch-sync' }}
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: FL343/gmt-authority-dist
+          ssh-key: ${{ secrets.SEEDCAP_DIST_KEY }}
+          path: authority-dist
+      - name: run
+        shell: bash
+        env:
+          STEAM_PUBLISHER_KEY: ${{ secrets.STEAM_PUBLISHER_KEY }}
+          APPID: ${{ secrets.DEMO_APPID }}
+          LB_PREFIX: ${{ secrets.LB_PREFIX }}
+          RANKED_LB: ${{ secrets.RANKED_LB }}
+          LP_LB: ${{ secrets.LP_LB }}
+          STATE_SALT: ${{ secrets.STATE_SALT }}
+          SEEDCAP_CLI: ./authority-dist/seedcap_cli.exe
+          SC_STATE_FILE: demo-seedcap.json
+          PROCESSED_FILE: demo-processed.json
+          SIGNALS_FILE: demo-signals.json
+          # offense-board mirror + mass-anomaly alert mail (Resend, feedback.yml channel)
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          FB_DIGEST_TO: ${{ secrets.FB_DIGEST_TO }}
+          FB_DIGEST_TAG: '[demo] '
+        run: node seedcap.js
+      - name: persist
+        shell: bash
+        run: |
+          if [ -f demo-seedcap.json ] && [ -n "$(git status --porcelain -- demo-seedcap.json)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add -- demo-seedcap.json
+            git commit -m "state: update demo seedcap audit state"
+            n=0
+            until git pull --rebase origin "${GITHUB_REF_NAME}" && git push; do
+              n=$((n+1))
+              if [ "$n" -ge 3 ]; then echo "::error::demo seedcap state push failed after $n tries"; exit 1; fi
+              sleep $((5 * n))
+            done
+          else
+            echo "no state change"
+          fi

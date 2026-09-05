@@ -1,0 +1,84 @@
+name: demo
+# Third-appid reconcile job for the public demo channel (validate.js PT_MODE=1 -- the same
+# restricted pre-release channel semantics as the playtest job: no rating/points/redeem surface,
+# quick + co-op endless + friend-room XP settle only, channel boards provisioned idempotently,
+# forbidden boards hard-fail the run). Own workflow + disjoint demo-*.json state files so the
+# bot pushes of every channel rebase cleanly past each other; offset schedule (minute 1 of each 5)
+# keeps the runners off the same tick boundary (reconcile=0, demo=1, feedback=2, playtest=3,
+# sanctions=4). The client caps demo progress (depth / level) on its own side; the reconcile
+# stays same-source -- authoritative values are still what the client reads back and corrects to.
+# No fallback yield gate: the disaster-recovery fallback only settles the MAIN app, so this job
+# can never double-settle anything the fallback handled.
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: '1-59/5 * * * *'
+permissions:
+  contents: read
+concurrency:
+  group: demo
+  cancel-in-progress: false
+jobs:
+  demo:
+    if: github.repository == 'FL343/epoch-sync'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: test
+        run: |
+          for f in test/playtest-*.js test/channel-*.js; do echo "== $f =="; node "$f" || exit 1; done
+      - name: run
+        env:
+          STEAM_PUBLISHER_KEY: ${{ secrets.STEAM_PUBLISHER_KEY }}
+          APPID: ${{ secrets.DEMO_APPID }}
+          LB_PREFIX: ${{ secrets.LB_PREFIX }}
+          XP_LB: ${{ secrets.XP_LB }}
+          # rating/points board names are consulted ONLY by the forbidden-board tripwire here
+          RANKED_LB: ${{ secrets.RANKED_LB }}
+          LP_LB: ${{ secrets.LP_LB }}
+          STATE_SALT: ${{ secrets.STATE_SALT }}
+          PT_MODE: '1'
+          PROCESSED_FILE: demo-processed.json
+          LEAVERS_FILE: demo-leavers.json
+          XP_FILE: demo-xp.json
+          STARTS_FILE: demo-starts.json
+          SIGNALS_FILE: demo-signals.json
+          CONFESSIONS_FILE: demo-confessions.json
+          UNMATCHED_FILE: demo-unmatched.json
+          SUPPORTERS_FILE: demo-supporters.json
+          # O124 seedcap consult (read-only; seedcap.yml's demo twin owns the file). Enforce on
+          # from day one: the demo inherits the playtest enforce soak (0 over-cap, 0 suspects);
+          # SEEDCAP_REJECT stays off (same rationale as playtest -- veto alone blocks over-cap).
+          SC_STATE_FILE: demo-seedcap.json
+          SEEDCAP_ENFORCE: '1'
+          # rating-side state is never produced in PT mode; pointed off the main files anyway
+          # (belt over suspenders) and deliberately NOT persisted below.
+          SKILL_FILE: demo-skill.json
+          GROUPS_FILE: demo-groups.json
+          STRICT_BOARDS: '1'
+        run: node validate.js
+      - name: persist
+        run: |
+          state_files=""
+          for f in demo-processed.json demo-leavers.json demo-xp.json demo-starts.json demo-signals.json demo-confessions.json demo-unmatched.json demo-supporters.json; do
+            [ -f "$f" ] && state_files="$state_files $f"
+          done
+          if [ -n "$state_files" ] && [ -n "$(git status --porcelain -- $state_files)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add -- $state_files
+            git commit -m "state: update demo reconciliation state"
+            n=0
+            until git pull --rebase origin "${GITHUB_REF_NAME}" && git push; do
+              n=$((n+1))
+              if [ "$n" -ge 3 ]; then echo "::error::demo state push failed after $n tries"; exit 1; fi
+              sleep $((5 * n))
+            done
+          else
+            echo "no state change"
+          fi
