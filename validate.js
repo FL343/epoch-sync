@@ -239,6 +239,9 @@ const TEAM2 = { SCORE_MULT: Number(process.env.TEAM2_SCORE_MULT || 3) };
 //   2. time-as-work: a claimed lv-level room cannot settle before lv*LEVEL_SECONDS*PACE_FRAC
 //      of REAL wall time on this job's own clock (endless pacing family; floor MIN_START_AGE);
 //   3. per-UTC-day XP cap (dayCapXp) -- even a wall-clock-honest farm is bounded per day.
+//      2026-09-05: 500 -> 25,000 = the 24h theoretical ceiling (fastest honest rate ~92 XP per
+//      3-level room at ~5 min per room, 24h non-stop ~= 24-26k): the cap only bites physically
+//      impossible rates (multi-boxing / forgery); real anti-farm stays the zero-sum transfer + pacing.
 // The WIN half is a zero-sum transfer paid out of the losers' share (winner ~= P+T, last
 // place ~= P-T): win-trading between colluding accounts nets zero beyond the day-capped
 // participation floor, and an all-tie group transfers nothing.
@@ -246,7 +249,7 @@ const TEAM2 = { SCORE_MULT: Number(process.env.TEAM2_SCORE_MULT || 3) };
 // companion repo's lockstep test; change either side only together.
 const PRIVATE_XP = {
   MT: 10,
-  base: 20, perLevel: 9, transferFrac: 0.4, dayCapXp: 500,
+  base: 20, perLevel: 9, transferFrac: 0.4, dayCapXp: 25000,
   progMax: 15, defaultLevels: 3,                       // d[7] progress domain (private rooms run 3/6/9 levels)
   LEVEL_SECONDS: 75, PACE_FRAC: 0.5,                   // same physical floor family as ENDLESS
 };
@@ -296,6 +299,7 @@ function sanityFlags(g) {
       // a sane pc -- a bad pc is already flagged above and 1<<(4*pc) overflows past pc=7.
       if (pc >= 2 && pc <= 3 && (t.continuesUsed & ~((1 << (4 * pc)) - 1)) !== 0) out.push('cont');
       if (t.tokensCp !== 0) out.push('tokens');                // CP-purchased saves are retired; real clients always write 0
+      if (t.seasonId < -1 || t.seasonId > 4095) out.push('season');   // season snapshot domain (absent = -1 legacy; ids are small)
       // score cap scales with the claimed depth (the global matchmade cap has no meaning on an
       // unbounded track); the floor stays shared -- shop overdraft is equally legal here.
       scoreCap = endlessGoalFor(t.endDepth, pc) * ENDLESS.SCORE_MULT;
@@ -1338,6 +1342,36 @@ function creditXp(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers,
     console.log('  xp ' + plog(sid) + ' ' + cls + ' rank' + (rank0 + 1) + (firstWin ? ' dailyWin' : '') + ' x' + factor + (pf !== 1 ? ' prog x' + pf : '') + (bm !== 1 ? ' boost x' + bm : '') + ' +' + gain + ' -> ' + (xp[sid] | 0) + ' career ' + (st.cg | 0) + 'g/' + (st.cw | 0) + 'w/' + (st.cl | 0) + 'l');
   }
 }
+// ===== endless progress XP (match type 7) -- 2026-09-05 =====
+// Co-op endless runs now earn points by DEPTH PROGRESS: gain = round(perDepth * (endDepth - startDepth)
+// * boostMult). A resumed session only pays for its own new levels (the start depth is part of the
+// host-broadcast lockstep tail), so replaying a saved segment earns nothing extra. No rank, money,
+// daily-first or leaver terms (co-op has no outcome), no career counters, and no day cap: the
+// depth-scaled pacing gate already pins the rate (one level per LEVEL_SECONDS*PACE_FRAC of real time,
+// ~860 points/hour at most). perDepth == PRIVATE_XP.perLevel on purpose (one endless level ~= one
+// friend-room level; a 20-level run ~= one matchmade game). Client mirror: RANKED_CONFIG.XP.ENDLESS +
+// rating-store computeGameXpEndless -- value-pinned by the companion repo's lockstep test.
+const ENDLESS_XP = { perDepth: 9 };
+function computeXpEndless(startDepth, endDepth, boostMult) {
+  const delta = Math.max(0, (endDepth | 0) - (startDepth | 0));
+  return Math.max(0, Math.round(ENDLESS_XP.perDepth * delta * (boostMult == null ? 1 : boostMult)));
+}
+// credit for one settled type-7 group: every record WRITER (seat-deduped) except abandoners; valid and
+// innocent earn the same (no outcome to gate on). xpState is touched only for the pre-credit level read.
+function creditXpEndless(g, tail, xp, changedXp, spSet) {
+  const recBySeat = {};
+  for (const r of g) { const s = r.d[5] | 0; if (recBySeat[s] == null) recBySeat[s] = r; }
+  for (const seatKey of Object.keys(recBySeat).map(k => k | 0).sort((a, b) => a - b)) {
+    const r = recBySeat[seatKey], sid = r.steamID;
+    const cls = dispClassOf(r.dispCode);
+    if (cls === 'abandoner') continue;
+    const bm = xpBoostMult(xpLevelOf(xp[sid] | 0), !!(spSet && spSet.has(String(sid))));
+    const gain = computeXpEndless(tail.startDepth, tail.endDepth, bm);
+    if (gain > 0) { xp[sid] = (xp[sid] | 0) + gain; changedXp[sid] = xp[sid]; }
+    console.log('  xp-endless ' + plog(sid) + ' ' + cls + ' depth ' + (tail.startDepth | 0) + '->' + (tail.endDepth | 0)
+      + (bm !== 1 ? ' boost x' + bm : '') + ' +' + gain + ' -> ' + (xp[sid] | 0));
+  }
+}
 // ===== O140 private friend-room XP credit (match type 10) =====
 // Levels-played reader for private groups (domain 1..15 -- rooms run 3/6/9 levels, wider than
 // the matchmade 1..6 window): min-of-writers, same anti-inflation stance as matchProgressOf
@@ -1393,12 +1427,16 @@ function creditXpPrivate(g, rankOf, lv, xp, changedXp, xpState, today, spSet) {
   }
 }
 
-// ===== endless co-op authority (match type 7): depth board + CP wallet; never rating/XP/LP. =====
-// Type-7 records are a 2-3 player PvE track. Their settle path only (a) writes the personal-best
-// depth board and (b) debits the CP wallet for continues spent -- every competitive pipeline
-// (TrueSkill, XP, LP, leaver conviction) is skipped by construction. The record layout is the
+// ===== endless co-op authority (match type 7): depth board + CP wallet + progress XP; never rating/LP. =====
+// Type-7 records are a 2-3 player PvE track. Their settle path (a) writes the personal-best
+// depth board, (b) debits the CP wallet for continues spent and (c) since 2026-09-05 credits
+// depth-progress points (creditXpEndless) -- TrueSkill, LP and leaver conviction are skipped by
+// construction. The record layout is the
 // standard v3 record with a 4-int tail appended after the roster:
-//   [11+3pc ..) = [startDepth, endDepth, continuesUsed, tokensCp]   (lockstep with the client writer)
+//   [11+3pc ..) = [startDepth, endDepth, continuesUsed, tokensCp, seasonId?]   (lockstep with the client writer;
+//   seasonId = 5th int added 2026-09-05: the run's season snapshot -- the endless world is a pure
+//   function of (seasonId, depth, candidate(runSeed, depth)), so the seed-cap auditor replays the
+//   exact boards; records without it decode as seasonId -1 = pre-season-seed legacy world)
 // The one genuinely new defense is the depth-scaled pacing gate (endlessRequiredMs below): a
 // claimed depth gain cannot settle before the corresponding REAL time has passed on this job's
 // own clock. Consensus residual: always-2P co-op has no honest majority (same acknowledged
@@ -1491,7 +1529,8 @@ function isEndlessMt(mt) { return baseMt(mt) === ENDLESS.MT; }
 function endlessTail(d) {
   const pc = d[8] | 0, at = 11 + 3 * pc;
   if (!d || d.length < at + 4) return null;
-  return { startDepth: d[at] | 0, endDepth: d[at + 1] | 0, continuesUsed: d[at + 2] | 0, tokensCp: d[at + 3] | 0 };
+  return { startDepth: d[at] | 0, endDepth: d[at + 1] | 0, continuesUsed: d[at + 2] | 0, tokensCp: d[at + 3] | 0,
+    seasonId: d.length >= at + 5 ? (d[at + 4] | 0) : -1 };
 }
 // zero-tail abstention (2026-07-19 audit M3): a cold reconnector who lands straight on results
 // never saw a verdict frame -- his GAME.endless is all zeros, so his record carries a legitimate
@@ -1507,9 +1546,13 @@ function endlessTail(d) {
 function endlessAbstention(g, maxSeats) {
   const sv = g.map(r => { const pc = r.d[8] | 0; return (pc >= 1 && pc <= (maxSeats | 0) && r.d.length >= 10 + pc) ? JSON.stringify(r.d.slice(10, 10 + pc)) : 'BAD'; });
   if (!sv.every(v => v === sv[0] && v !== 'BAD')) return { same: false, canonIdx: 0 };
-  const tv = g.map(r => { const pc = r.d[8] | 0, at = 11 + 3 * pc; return r.d.length >= at + 4 ? JSON.stringify(r.d.slice(at, at + 4)) : 'BAD'; });
+  // tail = 4 legacy ints (+ seasonId when the writers carry it); zero-tail abstention keys on the FIRST FOUR
+  //   (a cold reconnector's seasonId is a real snapshot, not a claim about the run)
+  const tv = g.map(r => { const pc = r.d[8] | 0, at = 11 + 3 * pc; return r.d.length >= at + 4 ? JSON.stringify(r.d.slice(at, r.d.length >= at + 5 ? at + 5 : at + 4)) : 'BAD'; });
   if (tv.some(t => t === 'BAD')) return { same: false, canonIdx: 0 };
-  const ZERO = JSON.stringify([0, 0, 0, 0]);
+  const isZero = (t) => { const a = JSON.parse(t); return a[0] === 0 && a[1] === 0 && a[2] === 0 && a[3] === 0; };
+  const ZERO = '__zero__';
+  for (let i = 0; i < tv.length; i++) if (isZero(tv[i])) tv[i] = ZERO;
   const nz = tv.filter(t => t !== ZERO);
   if (!nz.every(t => t === nz[0])) return { same: false, canonIdx: 0 };
   return { same: true, canonIdx: Math.max(0, tv.findIndex(t => t !== ZERO)) };
@@ -1780,7 +1823,8 @@ async function main() {
     if (isEndlessMt(r.d[2] | 0)) {
       const at = 11 + 3 * pc;
       if (r.d.length < at + 4) return 'BAD(tail)';
-      v = v.concat(r.d.slice(at, at + 4));
+      // 5-int tail when present (seasonId is host-broadcast lockstep fact too); 4-int legacy records compare as before
+      v = v.concat(r.d.slice(at, r.d.length >= at + 5 ? at + 5 : at + 4));
     }
     return JSON.stringify(v);
   };
@@ -2540,6 +2584,9 @@ async function main() {
           }
         }
       }
+      // progress XP (2026-09-05): writers only, depth gain of THIS session; the pacing gate above already
+      //   made the claimed gain cost real time, so the rate is bounded without a day cap.
+      if (xpId) creditXpEndless(g, t, xp, changedXp, spSet);
       console.log('  endless settle ' + c.m + ': pc ' + pc7 + ' depth ' + t.startDepth + '->' + t.endDepth + ' team ' + teamScore + (c.void ? ' (void disp majority -- settled anyway: co-op has no outcome to void)' : ''));
       processed.add(c.m); settledEndless++;
       continue;
@@ -2913,4 +2960,4 @@ async function main() {
 if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
-module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, isVoidDisp, voidByConsensus, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, RS_SOLO_VS_TRIO, RS_TRIO_WIN, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, CONFESS_MAGIC, reconcileConfessions, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan, postForm, postFormDetails, findOrCreateBoard, ghWarn, ghErr, PT_MODE, PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, ptSeedCp, ptBoardPlan, PRIVATE_XP, isPrivateMt, privateProgressOf, creditXpPrivate, CAMPAIGN_LB, SEEDCAP_REJECT_LADDER_MIN, seedcapRejectWindowMin, seedcapRejectUntilMin, seedcapRejectActive };
+module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, isVoidDisp, voidByConsensus, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, RS_SOLO_VS_TRIO, RS_TRIO_WIN, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, CONFESS_MAGIC, reconcileConfessions, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan, postForm, postFormDetails, findOrCreateBoard, ghWarn, ghErr, PT_MODE, PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, ptSeedCp, ptBoardPlan, PRIVATE_XP, isPrivateMt, privateProgressOf, creditXpPrivate, ENDLESS_XP, computeXpEndless, creditXpEndless, CAMPAIGN_LB, SEEDCAP_REJECT_LADDER_MIN, seedcapRejectWindowMin, seedcapRejectUntilMin, seedcapRejectActive };

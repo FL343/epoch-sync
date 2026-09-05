@@ -86,7 +86,11 @@ function loadJsonObj(p) { try { return JSON.parse(fs.readFileSync(p, 'utf8')); }
 function capParamsOf(mt, pc, tail) {
   const base = v.baseMt(mt);
   if (base === 7) {
-    return { entry: 'endless', pc, startDepth: tail ? tail.startDepth | 0 : 0, endDepth: tail ? tail.endDepth | 0 : 0 };
+    // seasonId (2026-09-05): the run's season snapshot from the record tail (5th int; -1 when the
+    // record predates it) -- the world core replays the season-keyed boards exactly, so the cap is
+    // per-run exact instead of a legacy runSeed-keyed replay.
+    return { entry: 'endless', pc, startDepth: tail ? tail.startDepth | 0 : 0, endDepth: tail ? tail.endDepth | 0 : 0,
+      seasonId: (tail && tail.seasonId != null) ? (tail.seasonId | 0) : -1 };
   }
   if (base === 10) {
     // O140 private friend rooms (2026-09-01): world gen is entry-agnostic (same placeItems),
@@ -108,7 +112,9 @@ function capParamsOf(mt, pc, tail) {
 }
 function cliLineOf(tag, p, runSeed) {
   if (p.entry === 'endless') {
-    return 'E ' + tag + ' ' + (runSeed | 0) + ' ' + p.pc + ' ' + (p.startDepth | 0) + ' ' + (p.endDepth | 0) + ' ' + Math.round(p.startBank || 0);
+    // 7th field = seasonId (>=0 season-keyed world); omitted for legacy records (-1) so the CLI takes its legacy path
+    return 'E ' + tag + ' ' + (runSeed | 0) + ' ' + p.pc + ' ' + (p.startDepth | 0) + ' ' + (p.endDepth | 0) + ' ' + Math.round(p.startBank || 0) +
+      ((p.seasonId != null && p.seasonId >= 0) ? (' ' + (p.seasonId | 0)) : '');
   }
   return 'C ' + tag + ' ' + (runSeed | 0) + ' ' + p.entry + ' ' + p.pc + ' ' + (p.ts | 0) + ' ' +
     (p.isTeam ? 1 : 0) + ' ' + (p.team2 ? 1 : 0) + ' ' + p.levels + ' ' + (p.teams && p.teams.length ? p.teams.join('') : '-');

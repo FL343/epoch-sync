@@ -63,6 +63,12 @@ const SIDA = '76561198000000001', SIDB = '76561198000000002';
     'C t 7 quick 2 0 0 0 6 -');
   ok('[2] endless line', sc.cliLineOf('t', { entry: 'endless', pc: 3, startDepth: 4, endDepth: 9, startBank: 12345.6 }, 42) ===
     'E t 42 3 4 9 12346');
+  ok('[2] endless line + season (7th field; 2026-09-05)', sc.cliLineOf('t', { entry: 'endless', pc: 2, startDepth: 0, endDepth: 9, startBank: 0, seasonId: 1 }, 42) ===
+    'E t 42 2 0 9 0 1');
+  ok('[2] endless line legacy tail (seasonId -1 -> omitted)', sc.cliLineOf('t', { entry: 'endless', pc: 2, startDepth: 0, endDepth: 9, startBank: 0, seasonId: -1 }, 42) ===
+    'E t 42 2 0 9 0');
+  ok('[2] capParamsOf carries the tail season (absent -> -1)',
+    sc.capParamsOf(7, 2, { startDepth: 0, endDepth: 9, seasonId: 2 }).seasonId === 2 && sc.capParamsOf(7, 2, { startDepth: 0, endDepth: 9 }).seasonId === -1);
 }
 
 // ---- [3] endless chain carry bound ----

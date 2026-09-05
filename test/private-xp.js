@@ -39,7 +39,7 @@ console.log('=== O140 private friend-room XP (type 10) ===');
 eq('config pinned (mt/base/perLevel/transferFrac/dayCap/progMax/defaultLevels/levelSecs/frac)',
   [PRIVATE_XP.MT, PRIVATE_XP.base, PRIVATE_XP.perLevel, PRIVATE_XP.transferFrac, PRIVATE_XP.dayCapXp,
    PRIVATE_XP.progMax, PRIVATE_XP.defaultLevels, PRIVATE_XP.LEVEL_SECONDS, PRIVATE_XP.PACE_FRAC],
-  [10, 20, 9, 0.4, 500, 15, 3, 75, 0.5]);
+  [10, 20, 9, 0.4, 25000, 15, 3, 75, 0.5]);   // dayCapXp 500 -> 25000 (24h ceiling, 2026-09-05)
 eq('isPrivateMt(10/0x1A/1/7)', [isPrivateMt(10), isPrivateMt(0x1A), isPrivateMt(1), isPrivateMt(7)], [true, true, false, false]);
 eq('MT_ALLOWED includes 10', SANITY.MT_ALLOWED.indexOf(10) >= 0, true);
 eq('PT_MT_ALLOWED includes 10 (playtest friend rooms earn too)', PT_MT_ALLOWED.indexOf(10) >= 0, true);
@@ -98,10 +98,10 @@ function credit(recs, rankOf, lv, seedXp, seedState, today) {
 {
   // day cap: room clips, same-day accumulates, next day resets
   const st = {};
-  st[pid(A)] = { lastWinDay: 0, games: 0, pvDay: 20000, pvXp: 480 };   // 20 left today
+  st[pid(A)] = { lastWinDay: 0, games: 0, pvDay: 20000, pvXp: 24980 };   // 20 left today (cap 25000 = 24h ceiling, 2026-09-05)
   const r1 = credit([mk10(A, 0), mk10(B, 1)], { [A]: 1, [B]: 2 }, 6, {}, st, 20000);
-  eq('day cap clips (480 used -> +20 of 104)', r1.xp[A], 20);
-  eq('cap state advanced to 500', st[pid(A)].pvXp, 500);
+  eq('day cap clips (24980 used -> +20 of 104)', r1.xp[A], 20);
+  eq('cap state advanced to 25000', st[pid(A)].pvXp, 25000);
   const r2 = credit([mk10(A, 0), mk10(B, 1)], { [A]: 1, [B]: 2 }, 6, {}, st, 20000);
   eq('capped-out same day -> +0', r2.xp[A] == null, true);
   const r3 = credit([mk10(A, 0), mk10(B, 1)], { [A]: 1, [B]: 2 }, 6, {}, st, 20001);

@@ -73,10 +73,11 @@ assert('validate.xpBoostMult(level, supporter) routes through xpMult (Lv90 -> 1.
 
 console.log('=== supporters [5] validate.js wiring pins ===');
 const vjs = fs.readFileSync(path.join(__dirname, '..', 'validate.js'), 'utf8');
-assert('creditXp/creditXpPrivate take spSet and pass supporter flag into xpBoostMult',
+assert('creditXp/creditXpPrivate/creditXpEndless take spSet and pass supporter flag into xpBoostMult (three credit paths)',
   /function creditXp\([^)]*careerDet, spSet\)/.test(vjs) && /function creditXpPrivate\([^)]*today, spSet\)/.test(vjs)
-  && (vjs.match(/xpBoostMult\(xpLevelOf\(xp\[sid\] \| 0\), !!\(spSet && spSet\.has\(String\(sid\)\)\)\)/g) || []).length === 2);
-assert('both settle call sites pass spSet', /creditXpPrivate\(g, rankOf, lvP, xp, changedXp, xpState, today, spSet\)/.test(vjs) && /creditXp\(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers, today, progFrac, careerDet, spSet\)/.test(vjs));
+  && /function creditXpEndless\([^)]*changedXp, spSet\)/.test(vjs)
+  && (vjs.match(/xpBoostMult\(xpLevelOf\(xp\[sid\] \| 0\), !!\(spSet && spSet\.has\(String\(sid\)\)\)\)/g) || []).length === 3);
+assert('all three settle call sites pass spSet', /creditXpPrivate\(g, rankOf, lvP, xp, changedXp, xpState, today, spSet\)/.test(vjs) && /creditXp\(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers, today, progFrac, careerDet, spSet\)/.test(vjs) && /creditXpEndless\(g, t, xp, changedXp, spSet\)/.test(vjs));
 assert('processSupporters: playtest hard-off + env appid gate + probes via CheckAppOwnership + capped plan', /const processSupporters = async \(xpMap, extraSids\) => \{\s*const spSet = new Set\(\);\s*if \(PT_MODE\) return spSet;\s*const S = supporters\.SUPPORTER;\s*if \(!S\.DLC_APPID\)/.test(vjs) && /DLC_APPID: Number\(process\.env\.SUPPORTER_DLC_APPID\) \|\| 0/.test(fs.readFileSync(path.join(__dirname, '..', 'supporters.js'), 'utf8'))
   && /ISteamUser\/CheckAppOwnership\/v2\//.test(vjs) && /supporters\.checkPlan\(st, cands, pid, nowMs\)/.test(vjs));
 assert('processSupporters runs on both early-exit paths (quiet days still reconcile the wall) and on the main path before settle',

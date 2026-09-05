@@ -26,6 +26,7 @@ function mk7(writer, seat, o) {
   const ros = o.rosterSids || [A, B];
   for (const sid of ros) { const p = sidPair(sid); d.push(p[0], p[1]); }
   if (!o.noTail) d.push(o.startDepth | 0, o.endDepth == null ? 6 : o.endDepth | 0, o.cont | 0, o.tokens | 0);
+  if (!o.noTail && o.seasonId != null) d.push(o.seasonId | 0);   // 5th tail int (2026-09-05 season snapshot)
   return { steamID: writer, d, roster: decodeRoster(d), dispCode: (o.disp == null ? 0 : o.disp) };
 }
 const grp = (...rs) => rs;
@@ -50,7 +51,7 @@ eq('goalBase clamps depth<1', endlessGoalBase(0), 650);
 
 // -- tail decode --
 const clean = mk7(A, 0, { startDepth: 0, endDepth: 6, cont: 0, tokens: 0 });
-eq('tail decode', endlessTail(clean.d), { startDepth: 0, endDepth: 6, continuesUsed: 0, tokensCp: 0 });
+eq('tail decode (4-int legacy tail -> seasonId -1)', endlessTail(clean.d), { startDepth: 0, endDepth: 6, continuesUsed: 0, tokensCp: 0, seasonId: -1 });
 eq('missing tail -> null', endlessTail(mk7(A, 0, { noTail: true }).d), null);
 
 // -- CP gain mirror (client computeCpGain): base 10 + rank bonus (valid only), ranked x2 --
@@ -178,6 +179,34 @@ eq('rosterConsensus split vote -> seat dropped', rosterConsensus(grp(mk7(A, 0, {
   const zero2 = mk7(A, 0, { startDepth: 0, endDepth: 0, cont: 0, tokens: 0 });
   eq('all-zero group: consistent at depth 0 (no entry/debit downstream)', endlessAbstention([zero2, zero], 8), { same: true, canonIdx: 0 });
   eq('missing tail stays malformed/inconsistent', endlessAbstention([host, mk7(B, 1, { noTail: true })], 8).same, false);
+}
+
+// -- 2026-09-05: 5th tail int = season snapshot (world replay key) + depth-progress XP --
+{
+  const { endlessAbstention, computeXpEndless, creditXpEndless, ENDLESS_XP, PRIVATE_XP } = v;
+  const s1 = mk7(A, 0, { startDepth: 0, endDepth: 6, seasonId: 1 });
+  eq('tail decode with seasonId', endlessTail(s1.d), { startDepth: 0, endDepth: 6, continuesUsed: 0, tokensCp: 0, seasonId: 1 });
+  eq('5-int tail record -> [] (season in domain)', sanityFlags(grp(s1, mk7(B, 1, { startDepth: 0, endDepth: 6, seasonId: 1 }))), []);
+  has('season out of domain flags', sanityFlags(grp(mk7(A, 0, { seasonId: 5000 }), mk7(B, 1, { seasonId: 5000 }))), 'season');
+  not('legacy 4-int tail never flags season', sanityFlags(pair({ startDepth: 0, endDepth: 6 })), 'season');
+  // abstention with 5-int tails: a zero tail is "first four zero" (the snapshot is not a claim about the run)
+  const host5 = mk7(A, 0, { startDepth: 0, endDepth: 6, cont: 0x21, seasonId: 2 });
+  const zero5 = mk7(B, 1, { startDepth: 0, endDepth: 0, cont: 0, seasonId: 2 });
+  eq('5-int zero tail abstains (canon = non-zero record)', endlessAbstention([zero5, host5], 8), { same: true, canonIdx: 1 });
+  const seasonForged = mk7(B, 1, { startDepth: 0, endDepth: 6, cont: 0x21, seasonId: 3 });
+  eq('season mismatch between non-zero tails = inconsistent', endlessAbstention([host5, seasonForged], 8).same, false);
+  eq('identical 5-int tails consistent', endlessAbstention([host5, mk7(B, 1, { startDepth: 0, endDepth: 6, cont: 0x21, seasonId: 2 })], 8), { same: true, canonIdx: 0 });
+  // depth-progress XP (client mirror pinned by the companion lockstep suite)
+  eq('ENDLESS_XP pinned (perDepth 9 == PRIVATE_XP.perLevel)', [ENDLESS_XP.perDepth, PRIVATE_XP.perLevel], [9, 9]);
+  eq('computeXpEndless probes [0->20, 15->22, 5->5, 9->3, 0->10 x1.4]',
+    [computeXpEndless(0, 20, 1), computeXpEndless(15, 22, 1), computeXpEndless(5, 5, 1), computeXpEndless(9, 3, 1), computeXpEndless(0, 10, 1.4)], [180, 63, 0, 0, 126]);
+  const xp = {}, ch = {};
+  creditXpEndless([s1, mk7(B, 1, { startDepth: 0, endDepth: 6, seasonId: 1, disp: 5 })], endlessTail(s1.d), xp, ch, null);
+  eq('writers credited (+54 for 0->6), abandoner nothing', [xp[A], ch[A], xp[B] == null], [54, 54, true]);
+  const xp2 = { [A]: 300 * 5 + 1 }, ch2 = {};   // level 5 -> +5% boost (pre-credit board value)
+  creditXpEndless([mk7(A, 0, { startDepth: 0, endDepth: 10 })], { startDepth: 0, endDepth: 10 }, xp2, ch2, null);
+  eq('level boost applies (Lv5 +5%: 90 -> 95)', xp2[A] - 1501, 95);
+  eq('day cap raised to the 24h ceiling (25000)', PRIVATE_XP.dayCapXp, 25000);
 }
 
 console.log('=== ' + (failN === 0 ? 'PASS' : 'FAIL') + ' — ' + failN + ' fail (endless-settle) ===');

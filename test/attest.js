@@ -36,8 +36,8 @@ function buildBase(m) {
     A.hash32(m.matchId), (m.runSeed | 0), 0, 1, 0, 1,
     (m.durationSec | 0), (m.score | 0), 0,
     Number(sid & 0xFFFFFFFFn) | 0, Number((sid >> 32n) & 0xFFFFFFFFn) | 0,
-    (m.startDepth | 0), (m.endDepth | 0), (m.continuesUsed | 0), (m.tokensCp | 0),
-    (m.keyId | 0), (1 | ((m.jwtPresent ? 1 : 0) << 8)), (m.jwtHashLo | 0),
+    (m.startDepth | 0), (m.endDepth | 0), (m.continuesUsed | 0), (m.tokensCp | 0), (m.seasonId | 0),   // seasonId = 5th tail int (2026-09-05)
+    (m.keyId | 0), (2 | ((m.jwtPresent ? 1 : 0) << 8)), (m.jwtHashLo | 0),   // attVer 2 = seasonId layout
   ];
 }
 function sign(base, priv) {
@@ -90,7 +90,7 @@ console.log('== A) verifySoloRecord ==');
   eq('non-endless mt -> mt', A.verifySoloRecord(badMt, TABLE).reason, 'mt');
   const badPc = rec.slice(); badPc[8] = 2;
   eq('pc != 1 -> pc (solo only)', A.verifySoloRecord(badPc, TABLE).reason, 'pc');
-  const badAtt = rec.slice(); badAtt[19] = 2;
+  const badAtt = rec.slice(); badAtt[20] = 99;   // attVer sits at [20] in the attVer-2 layout
   {
     // knife-7 second audit P2-4: an unknown attVer is a LAYOUT this cron cannot locate the sig
     //   in -- same rollout-lag family as unknown-key, so it must be pending, never destroyed.

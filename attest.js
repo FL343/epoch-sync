@@ -39,8 +39,8 @@ function hash32(s) {
 // ============================================================
 // A) solo attested record verification
 // ============================================================
-const LEDGER_MAGIC = 0xB1, LEDGER_VER = 3, MT_ENDLESS = 7, ATT_VER = 1;
-const BASE_LEN = 21, SIG_INTS = 16;
+const LEDGER_MAGIC = 0xB1, LEDGER_VER = 3, MT_ENDLESS = 7, ATT_VER = 2;   // attVer 2 = seasonId in the endless tail (2026-09-05); 1 = the pre-season layout
+const BASE_LEN = 22, SIG_INTS = 16;
 const SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
 
 function toBytes(d) {
@@ -60,7 +60,7 @@ function verifySoloRecord(d, pubTable) {
   if (d[1] !== LEDGER_VER) return { ok: false, reason: 'ver' };
   if (d[2] !== MT_ENDLESS) return { ok: false, reason: 'mt' };
   if (d[8] !== 1) return { ok: false, reason: 'pc' };
-  const keyId = d[18] | 0;
+  const keyId = d[19] | 0;
   const keyName = keyId === 0 ? 'dev' : String(keyId >>> 0);
   // roster seat 0 = the account the run belongs to (@12 lo, @13 hi). The settle caller MUST bind
   //   this to the leaderboard ROW OWNER (see soloSettleGate opts.owner) - the signature proves "a
@@ -69,8 +69,8 @@ function verifySoloRecord(d, pubTable) {
   const rosterSid = ((BigInt(d[13] >>> 0) << 32n) | BigInt(d[12] >>> 0)).toString();
   const fields = {
     matchHash: d[3] >>> 0, runSeed: d[4] | 0, durationSec: d[9] | 0, score: d[10] | 0,
-    startDepth: d[14] | 0, endDepth: d[15] | 0, continuesUsed: d[16] | 0, tokensCp: d[17] | 0,
-    keyId, keyName, attVer: d[19] & 0xff, jwtPresent: !!((d[19] >> 8) & 1), jwtHashLo: d[20] >>> 0,
+    startDepth: d[14] | 0, endDepth: d[15] | 0, continuesUsed: d[16] | 0, tokensCp: d[17] | 0, seasonId: d[18] | 0,
+    keyId, keyName, attVer: d[20] & 0xff, jwtPresent: !!((d[20] >> 8) & 1), jwtHashLo: d[21] >>> 0,
     rosterSid,
   };
   // attVer mismatch = a layout this cron cannot even locate the signature in. Same soft-state
