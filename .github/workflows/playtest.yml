@@ -49,6 +49,7 @@ jobs:
           SIGNALS_FILE: pt-signals.json
           CONFESSIONS_FILE: pt-confessions.json
           UNMATCHED_FILE: pt-unmatched.json
+          SUPPORTERS_FILE: pt-supporters.json
           # O124 seedcap consult (read-only; seedcap.yml owns the file). ENFORCE armed
           # 2026-09-01 after a clean 80-match observation soak (0 over-cap, 0 suspects).
           # SEEDCAP_REJECT stays off through a 2-week enforce soak (flip ~2026-09-15 if
@@ -66,7 +67,7 @@ jobs:
       - name: persist
         run: |
           state_files=""
-          for f in pt-processed.json pt-leavers.json pt-xp.json pt-starts.json pt-signals.json pt-confessions.json pt-unmatched.json; do
+          for f in pt-processed.json pt-leavers.json pt-xp.json pt-starts.json pt-signals.json pt-confessions.json pt-unmatched.json pt-supporters.json; do
             [ -f "$f" ] && state_files="$state_files $f"
           done
           if [ -n "$state_files" ] && [ -n "$(git status --porcelain -- $state_files)" ]; then

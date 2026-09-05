@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const ts = require('./trueskill.js');
 const attest = require('./attest.js');   // knife-7: solo attested-record verify + unmatched confession reconcile
 const campaign = require('./campaign.js');   // O159 knife-7d: Vegas campaign clear attestation -> exclusive cosmetic grants
+const supporters = require('./supporters.js');   // supporter pack: DLC ownership probe -> wall board / grant bit / points bonus
 
 const APPID = Number(process.env.APPID);
 const PREFIX = process.env.LB_PREFIX;
@@ -1170,6 +1171,12 @@ function teamLpPlan(parts, matchType, scores, leaverSeats, winTeamOverride) {
 // ===== authoritative XP ladder: client optimistic value = display only, this job = truth. =====
 const XP_LB = process.env.XP_LB;   // optional: unset -> skip XP entirely (a live run is unaffected before board/secret exist)
 const XP_FILE = process.env.XP_FILE || 'xp.json';
+// supporter pack state (HMAC pid keyed): ownership probe cache + wall/opt-out bookkeeping (supporters.js header).
+const SUPPORTERS_FILE = process.env.SUPPORTERS_FILE || 'supporters.json';
+function loadSupporters() { try { return JSON.parse(fs.readFileSync(SUPPORTERS_FILE, 'utf8')) || {}; } catch (e) { return {}; } }
+function saveSupporters(s) { try { fs.writeFileSync(SUPPORTERS_FILE, JSON.stringify(s, null, 0)); } catch (e) { ghWarn('write ' + SUPPORTERS_FILE + ' failed: ' + (e && e.message)); } }
+const SUPPORTER_WALL_LB = process.env.SUPPORTER_WALL_LB || supporters.SUPPORTER.WALL_LB;
+const SUPPORTER_OPTOUT_LB = process.env.SUPPORTER_OPTOUT_LB || supporters.SUPPORTER.OPTOUT_LB;
 function loadXp() { try { return JSON.parse(fs.readFileSync(XP_FILE, 'utf8')) || {}; } catch (e) { return {}; } }
 function saveXp(s) { try { fs.writeFileSync(XP_FILE, JSON.stringify(s, null, 0)); } catch (e) { ghWarn('write ' + XP_FILE + ' failed: ' + (e && e.message)); } }
 // per-game point formula -- lockstep mirror of the client config (asserted by the schema-lockstep test).
@@ -1202,10 +1209,12 @@ function xpLevelOf(totalXp) {
   while (guard++ < 100000) { const need = xpLevelCost(level); if (rem < need) break; rem -= need; level++; }
   return level;
 }
-function xpBoostMult(level) {
+// supporter (optional) = the pack's permanent +10% on top of the level tier -- one shared multiplier
+//   expression (supporters.xpMult) so the client's optimistic mirror rounds identically.
+function xpBoostMult(level, supporter) {
   let pct = 0;
   for (const b of XP_CFG.boosts) if ((level | 0) >= b[0]) pct = b[1];
-  return 1 + pct / 100;
+  return supporters.xpMult(pct, !!supporter);
 }
 // ---- match-progress discount (early-settled matches award partial points) ----
 // A matchmade record carries "levels reached" in the high bits of d[7] (bit 0 stays the legacy
@@ -1272,7 +1281,7 @@ function computeXpGain(cls, rank0, money, isRanked, firstWinToday, factor, boost
 //   progFrac (optional, default 1) = match-progress discount, multiplied INTO the leaver factor so both
 //   repos share the exact rounding expression round(round(xp) * (leaverFactor * progFrac)).
 //   careerDet (optional map) receives per-sid cumulative career detail arrays for the board write.
-function creditXp(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers, today, progFrac, careerDet) {
+function creditXp(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers, today, progFrac, careerDet, spSet) {
   const isRanked = appliesLp(matchType);
   const pf = (progFrac == null ? 1 : progFrac);
   const recBySeat = {};
@@ -1290,7 +1299,7 @@ function creditXp(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers,
     // team win = team outcome) -- one predicate, three consumers (career wins, first-win, client
     // opts.win) now agree. FFA behavior unchanged (careerWon === rank 1 there).
     if (cls === 'valid' && careerWon(matchType, rankOf[sid]) && (st.lastWinDay | 0) < today) { firstWin = true; st.lastWinDay = today; }
-    const bm = xpBoostMult(xpLevelOf(xp[sid] | 0));   // pre-credit board value -> level -> permanent boost
+    const bm = xpBoostMult(xpLevelOf(xp[sid] | 0), !!(spSet && spSet.has(String(sid))));   // pre-credit board value -> level -> permanent boost (+ supporter pack)
     const gain = computeXpGain(cls, rank0, scores[seat] | 0, isRanked, firstWin, factor * pf, bm);
     if (gain > 0) { xp[sid] = (xp[sid] | 0) + gain; changedXp[sid] = xp[sid]; }
     if (cls === 'valid') st.games += 1;   // denominator = real finishes (innocent/abandoner don't count; mirrors client window)
@@ -1324,7 +1333,7 @@ function privateProgressOf(g) {
 // win-trading nets zero; ties transfer nothing since avgRank == every rank). No money bonus,
 // no daily-first-win, no leaver factor, no career counters -- deliberately narrow.
 // Day cap: per-UTC-day credited private XP <= dayCapXp (state pvDay/pvXp per pid).
-function creditXpPrivate(g, rankOf, lv, xp, changedXp, xpState, today) {
+function creditXpPrivate(g, rankOf, lv, xp, changedXp, xpState, today, spSet) {
   const recBySeat = {};
   for (const r of g) { const s = r.d[5] | 0; if (recBySeat[s] == null) recBySeat[s] = r; }
   const seats = Object.keys(recBySeat).map(k => k | 0).sort((a, b) => a - b);
@@ -1339,7 +1348,7 @@ function creditXpPrivate(g, rankOf, lv, xp, changedXp, xpState, today) {
     const cls = dispClassOf(r.dispCode);
     if (cls === 'abandoner') continue;
     const st = xpState[p] = xpState[p] || { lastWinDay: 0, games: 0 };
-    const bm = xpBoostMult(xpLevelOf(xp[sid] | 0));   // pre-credit board value (same rule as creditXp)
+    const bm = xpBoostMult(xpLevelOf(xp[sid] | 0), !!(spSet && spSet.has(String(sid))));   // pre-credit board value (same rule as creditXp, + supporter pack)
     let gain;
     if (cls === 'valid') {
       const t = (N >= 2) ? Math.round(T * (avgR - ((rankOf[sid] || 1) | 0)) * 2 / (N - 1)) : 0;
@@ -2109,13 +2118,95 @@ async function main() {
       if (nPlayers || nPend || nRej) { RUN.campaign = nPlayers + 'p/' + nBits + 'b' + (nPend ? '/' + nPend + 'pend' : '') + (nRej ? '/' + nRej + 'rej' : ''); console.log('campaign grants: ' + nBits + ' bits across ' + nPlayers + ' players (pending ' + nPend + ', rejected ' + nRej + ')'); }
     } catch (e) { ghWarn('campaign channel failed: ' + (e && e.message)); }
   };
+  // Supporter pack (supporters.js header): probe DLC ownership for known players (capped per run, cached in
+  //   state), then reconcile the wall board (respecting the client-writable opt-out board), OR the grant bit
+  //   and return the set of owner sids for this run's points credit. Every write is idempotent; failures are
+  //   warned and retried next tick. Playtest: the DLC belongs to the main app -> hard-disabled there.
+  //   xpMap = the already-read xp board (sid -> points) or null (early-exit paths read it here: the wall
+  //   must not wait for a fresh match on a quiet day). extraSids = this run's record writers/rosters.
+  const processSupporters = async (xpMap, extraSids) => {
+    const spSet = new Set();
+    if (PT_MODE) return spSet;
+    const S = supporters.SUPPORTER;
+    if (!S.DLC_APPID) { if (!processSupporters._warned) { processSupporters._warned = true; console.log('supporters: SUPPORTER_DLC_APPID unset -> channel off'); } return spSet; }
+    try {
+      const st = loadSupporters();
+      const list = (lr.json && lr.json.response && lr.json.response.leaderboards) || [];
+      const byName = (name) => { const f = list.find(x => String(x.name || x.Name) === name); return f ? (f.id || f.ID) : null; };
+      // candidate sids: everyone on the points board (= ever finished a game) + this run's writers
+      let known = xpMap;
+      if (!known) {
+        const xpId0 = XP_LB ? byName(XP_LB) : null;
+        known = {};
+        if (xpId0) { const br = await readBoardAll(xpId0, 'xp board (supporters)'); for (const e of br.ents) known[e.steamID] = 1; }
+      }
+      const cands = Object.keys(known).concat((extraSids || []).map(String));
+      const plan = supporters.checkPlan(st, cands, pid, nowMs);
+      let nOwn = 0, nProbe = plan.length, nFail = 0;
+      if (plan.length) {
+        const res = await mapPool(plan, 8, async (sid) => {
+          const r = await getJson(BASE + '/ISteamUser/CheckAppOwnership/v2/?key=' + KEY + '&steamid=' + sid + '&appid=' + S.DLC_APPID + '&format=json');
+          if (!r.ok || !r.json) throw new Error('HTTP ' + r.status);
+          return supporters.ownsFromResponse(r.json, sid);
+        });
+        res.forEach((o, i) => { if (o.status === 'fulfilled') supporters.applyProbe(st, pid(plan[i]), o.value, nowMs); else nFail++; });
+      }
+      // owner set for this run (points bonus) -- any candidate whose state says owner
+      const owners = [];
+      for (const sid of new Set(cands)) { const e = st[pid(sid)]; if (e && e.o) { spSet.add(String(sid)); owners.push(sid); } }
+      nOwn = owners.length;
+      if (owners.length) {
+        const wallId = byName(SUPPORTER_WALL_LB) || await findOrCreateBoard(SUPPORTER_WALL_LB, true);
+        const optId = byName(SUPPORTER_OPTOUT_LB) || await findOrCreateBoard(SUPPORTER_OPTOUT_LB, false);
+        const gtId = byName(GRANT_LB) || await findOrCreateBoard(GRANT_LB, true);
+        const optOut = new Set();
+        if (optId) { const ob = await readBoardAll(optId, 'supporter opt-out'); for (const e of ob.ents) if ((e.score | 0) === 1) optOut.add(String(e.steamID)); }
+        const grantedBy = {};
+        if (gtId) { const gb = await readBoardAll(gtId, 'grant box'); for (const e of gb.ents) { const m = decodeGrantMask(decodeDetails(e.detailData)); if (m) grantedBy[String(e.steamID)] = m; } }
+        let nWall = 0, nDel = 0, nGrant = 0;
+        for (const sid of owners) {
+          const e = st[pid(sid)];
+          const act = supporters.wallAction(e, optOut.has(String(sid)));
+          if (wallId && act && APPLY_MMR) {
+            if (act === 'write') {
+              const w = await postForm('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: wallId, steamid: sid, score: supporters.wallScore(e.f), scoremethod: 'ForceUpdate', format: 'json' });
+              const okW = w.ok && !(w.json && w.json.result && w.json.result.result && w.json.result.result !== 1);
+              if (okW) { e.w = 1; e.x = 0; nWall++; } else ghWarn('supporter wall write failed ' + plog(sid) + ': HTTP ' + w.status);
+            } else {
+              const d = await postForm('/ISteamLeaderboards/DeleteLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: wallId, steamid: sid, format: 'json' });
+              if (d.ok) { e.w = 0; e.x = 1; nDel++; } else ghWarn('supporter wall delete failed ' + plog(sid) + ': HTTP ' + d.status);
+            }
+          }
+          if (gtId && APPLY_MMR) {
+            const granted = grantedBy[String(sid)] || [0, 0];
+            if (!grantBit(granted, S.GRANT_BIT)) {
+              const newMask = granted.slice();
+              while (newMask.length < GRANT_WORDS) newMask.push(0);
+              setGrantBit(newMask, S.GRANT_BIT);
+              const det = [(GRANT_MAGIC | (GRANT_VER << 8)) | 0, Math.floor(nowMs / 60000) | 0, newMask[0] | 0, newMask[1] | 0];
+              const gw = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: gtId, steamid: sid, score: popcountWords(newMask), scoremethod: 'ForceUpdate', format: 'json' }, det);
+              const gOk = gw.ok && !(gw.json && gw.json.result && gw.json.result.result && gw.json.result.result !== 1);
+              if (gOk) { grantedBy[String(sid)] = newMask; nGrant++; } else ghWarn('supporter grant write failed ' + plog(sid) + ': HTTP ' + gw.status + ' (deferred)');
+            }
+          }
+        }
+        console.log('supporters: owners ' + nOwn + ' (probed ' + nProbe + ', failed ' + nFail + ') wall +' + nWall + ' -' + nDel + ' grant +' + nGrant + (APPLY_MMR ? '' : ' [dry-run]'));
+        RUN.supporters = nOwn + 'o/' + nProbe + 'p' + (nWall ? '/+' + nWall + 'w' : '') + (nDel ? '/-' + nDel + 'w' : '') + (nGrant ? '/+' + nGrant + 'g' : '');
+      } else if (nProbe) {
+        console.log('supporters: probed ' + nProbe + ' (failed ' + nFail + '), owners 0');
+        RUN.supporters = '0o/' + nProbe + 'p';
+      }
+      saveSupporters(st);
+    } catch (e) { ghWarn('supporter channel failed: ' + (e && e.message)); }
+    return spSet;
+  };
 
   RUN.consistent = consistentMatches.length;
-  if (consistentMatches.length === 0) { console.log('no consistent matches'); persistStartsSide(); await maintainTrust(); await processRedeems(null); await processCampaignGrants(); writeRunSummary(); return; }
+  if (consistentMatches.length === 0) { console.log('no consistent matches'); persistStartsSide(); await maintainTrust(); await processRedeems(null); await processCampaignGrants(); await processSupporters(null, []); writeRunSummary(); return; }
   const fresh = consistentMatches.filter(c => !processed.has(c.m));
   RUN.fresh = fresh.length;
   console.log(consistentMatches.length + ' consistent, ' + fresh.length + ' fresh (settled ' + (consistentMatches.length - fresh.length) + ')');
-  if (fresh.length === 0) { console.log('no fresh matches, skip'); persistStartsSide(); await maintainTrust(); await processRedeems(null); await processCampaignGrants(); writeRunSummary(); return; }
+  if (fresh.length === 0) { console.log('no fresh matches, skip'); persistStartsSide(); await maintainTrust(); await processRedeems(null); await processCampaignGrants(); await processSupporters(null, []); writeRunSummary(); return; }
 
   // playtest channel: no rating board exists (and must not -- lock layer 3); the TrueSkill
   // update block below is skipped wholesale, so the id is never consulted.
@@ -2145,6 +2236,10 @@ async function main() {
     for (const e of br.ents) xp[e.steamID] = e.score | 0;
   }
   const xpState = xpId ? loadXp() : {};
+  // supporter pack owners for this run's points credit (probe + wall + grant bit happen here too)
+  const spSids = [];
+  for (const c of fresh) for (const r of c.g) { spSids.push(String(r.steamID)); for (const rs of Object.values(r.roster || {})) if (rs) spSids.push(String(rs)); }   // roster = {seat: sid} (decodeRoster)
+  const spSet = await processSupporters(xp, spSids);
   // CP wallet + endless depth board (both optional like XP: absent = warn-skip locally, hard
   // fail under STRICT_BOARDS in CI). The endless settle branch refuses to settle while either is
   // missing -- settling without the debit would let read-back resurrect spent CP.
@@ -2437,7 +2532,7 @@ async function main() {
         console.log('  private-pacing ' + c.m + ': lv ' + lvP + ' needs ' + Math.round(reqMsP / 1000) + 's real time, seen ' + Math.round((nowMs - (pendP.t0 || 0)) / 1000) + 's -- deferred');
         continue;
       }
-      if (xpId) creditXpPrivate(g, rankOf, lvP, xp, changedXp, xpState, today);
+      if (xpId) creditXpPrivate(g, rankOf, lvP, xp, changedXp, xpState, today, spSet);
       console.log('  private settle ' + c.m + ': ' + g.length + ' writers, lv ' + lvP + (c.void ? ' (void majority -- XP by class only, nothing else to void)' : ''));
       processed.add(c.m); settledPrivate++;
       continue;
@@ -2448,7 +2543,7 @@ async function main() {
     const prog = matchProgressOf(g);
     const progFrac = xpProgressFrac(prog);
     if (progFrac !== 1) console.log('  progress ' + c.m + ': ' + prog + '/' + XP_CFG.progressLevels + ' levels -> points x' + progFrac);
-    if (xpId) creditXp(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers, today, progFrac, careerDet);
+    if (xpId) creditXp(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers, today, progFrac, careerDet, spSet);
     // CP (the endless-economy wallet) earns from matchmade records on the same credit classes.
     // Playtest starter wallet first: writers only (a leaver whose first-ever appearance is the
     // leave itself earns the baseline on their first finished game instead).
@@ -2748,4 +2843,4 @@ async function main() {
 if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
-module.exports = { isVoidDisp, voidByConsensus, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, RS_SOLO_VS_TRIO, RS_TRIO_WIN, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, CONFESS_MAGIC, reconcileConfessions, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan, postForm, postFormDetails, findOrCreateBoard, ghWarn, ghErr, PT_MODE, PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, ptSeedCp, ptBoardPlan, PRIVATE_XP, isPrivateMt, privateProgressOf, creditXpPrivate, CAMPAIGN_LB };
+module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, isVoidDisp, voidByConsensus, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, RS_SOLO_VS_TRIO, RS_TRIO_WIN, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, CONFESS_MAGIC, reconcileConfessions, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan, postForm, postFormDetails, findOrCreateBoard, ghWarn, ghErr, PT_MODE, PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, ptSeedCp, ptBoardPlan, PRIVATE_XP, isPrivateMt, privateProgressOf, creditXpPrivate, CAMPAIGN_LB };

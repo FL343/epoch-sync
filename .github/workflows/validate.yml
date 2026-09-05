@@ -50,6 +50,7 @@ jobs:
           RANKED_LB: ${{ secrets.RANKED_LB }}
           LP_LB: ${{ secrets.LP_LB }}
           XP_LB: ${{ secrets.XP_LB }}
+          SUPPORTER_DLC_APPID: ${{ secrets.SUPPORTER_DLC_APPID }}   # supporter pack DLC (no game ids in this repo)
           STATE_SALT: ${{ secrets.STATE_SALT }}
           # O124 seedcap consult (read-only; seedcap.yml owns seedcap.json). Observe-first
           # switch: flip to '1' after the audit soak looks clean (SEEDCAP_REJECT likewise).
@@ -63,7 +64,7 @@ jobs:
         if: steps.gate.outputs.yield != 'true'
         run: |
           state_files=""
-          for f in processed.json skill.json leavers.json xp.json starts.json signals.json groups.json confessions.json unmatched.json; do
+          for f in processed.json skill.json leavers.json xp.json starts.json signals.json groups.json confessions.json unmatched.json supporters.json; do
             [ -f "$f" ] && state_files="$state_files $f"
           done
           if [ -n "$state_files" ] && [ -n "$(git status --porcelain -- $state_files)" ]; then
