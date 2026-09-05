@@ -34,10 +34,11 @@ function buildBase(m) {
   return [
     0xB1, 3, 7,
     A.hash32(m.matchId), (m.runSeed | 0), 0, 1, 0, 1,
-    (m.durationSec | 0), (m.score | 0), 0,
+    (m.durationSec | 0), (m.score | 0), (m.dispCode | 0),
     Number(sid & 0xFFFFFFFFn) | 0, Number((sid >> 32n) & 0xFFFFFFFFn) | 0,
-    (m.startDepth | 0), (m.endDepth | 0), (m.continuesUsed | 0), (m.tokensCp | 0), (m.seasonId | 0),   // seasonId = 5th tail int (2026-09-05)
-    (m.keyId | 0), (2 | ((m.jwtPresent ? 1 : 0) << 8)), (m.jwtHashLo | 0),   // attVer 2 = seasonId layout
+    (m.startDepth | 0), (m.endDepth | 0), (m.continuesUsed | 0), (m.tokensCp | 0), (m.seasonId | 0), (m.flags | 0),   // seasonId = 5th tail int (2026-09-05); flags = 6th (2026-09-06)
+    (m.keyId | 0), (3 | ((m.jwtPresent ? 1 : 0) << 8)), (m.jwtHashLo | 0),   // attVer 3 = flags + op-stream commitment layout
+    Number(BigInt.asUintN(64, BigInt(m.opHash || 0)) & 0xffffffffn) | 0, Number((BigInt.asUintN(64, BigInt(m.opHash || 0)) >> 32n) & 0xffffffffn) | 0,   // opHash lo/hi
   ];
 }
 function sign(base, priv) {
@@ -58,7 +59,8 @@ const TABLE = {
   dev: { pubs: [kDev.pub], sealed: false },
 };
 const META = { matchId: 'solo_run_1', runSeed: 42424242, score: 555000, durationSec: 1500,
-  startDepth: 0, endDepth: 17, continuesUsed: 1, tokensCp: 0, steamId: '76561198000000001', keyId: 2026083101 };
+  startDepth: 0, endDepth: 17, continuesUsed: 1, tokensCp: 0, steamId: '76561198000000001', keyId: 2026083101,
+  flags: 1, dispCode: 0, opHash: '0xfeedfacecafebeef' };
 
 console.log('== A) verifySoloRecord ==');
 {
@@ -67,6 +69,8 @@ console.log('== A) verifySoloRecord ==');
   assert('signed with the registered sealed key verifies', v.ok === true);
   eq('decoded endDepth/score/keyName', [v.fields.endDepth, v.fields.score, v.fields.keyName], [17, 555000, '2026083101']);
   assert('sealed flag surfaced', v.sealed === true);
+  eq('decoded v3 tail: flags / dispCode / opHash (hex)', [v.fields.flags, v.fields.dispCode, v.fields.opHash], [1, 0, 'feedfacecafebeef']);
+  eq('segment flag constants exported (suspended/final/resumed, user-quit)', [A.SEG_SUSPENDED, A.SEG_FINAL, A.SEG_RESUMED, A.DISP_USER_QUIT], [1, 2, 4, 5]);
   eq('matchHash matches the client hash32 of the same matchId', v.fields.matchHash, A.hash32('solo_run_1') >>> 0);
 
   // rotation: a record signed with the PREVIOUS key of the same build id still verifies
@@ -90,7 +94,7 @@ console.log('== A) verifySoloRecord ==');
   eq('non-endless mt -> mt', A.verifySoloRecord(badMt, TABLE).reason, 'mt');
   const badPc = rec.slice(); badPc[8] = 2;
   eq('pc != 1 -> pc (solo only)', A.verifySoloRecord(badPc, TABLE).reason, 'pc');
-  const badAtt = rec.slice(); badAtt[20] = 99;   // attVer sits at [20] in the attVer-2 layout
+  const badAtt = rec.slice(); badAtt[21] = 99;   // attVer sits at [21] in the attVer-3 layout
   {
     // knife-7 second audit P2-4: an unknown attVer is a LAYOUT this cron cannot locate the sig
     //   in -- same rollout-lag family as unknown-key, so it must be pending, never destroyed.

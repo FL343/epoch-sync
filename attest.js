@@ -39,8 +39,14 @@ function hash32(s) {
 // ============================================================
 // A) solo attested record verification
 // ============================================================
-const LEDGER_MAGIC = 0xB1, LEDGER_VER = 3, MT_ENDLESS = 7, ATT_VER = 2;   // attVer 2 = seasonId in the endless tail (2026-09-05); 1 = the pre-season layout
-const BASE_LEN = 22, SIG_INTS = 16;
+const LEDGER_MAGIC = 0xB1, LEDGER_VER = 3, MT_ENDLESS = 7, ATT_VER = 3;   // attVer 3 = flags (6th tail int) + op-stream commitment (2026-09-06); 2 = seasonId tail (2026-09-05); 1 = pre-season
+const BASE_LEN = 25, SIG_INTS = 16;
+// endless tail `flags` bits (6th tail int; co-op client records write 0, guard-built solo segments set them)
+const SEG_SUSPENDED = 1;   // written by "save & quit" -> the ONE segment a later run may resume from (once)
+const SEG_FINAL = 2;       // run over / user quit (terminal segment of the run)
+const SEG_RESUMED = 4;     // this segment started from a consumed save row
+// dispCode (client DISP_CODE lockstep): 0 finished / 5 user-quit (the guard writes the truth for solo runs)
+const DISP_FINISHED = 0, DISP_USER_QUIT = 5;
 const SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
 
 function toBytes(d) {
@@ -60,7 +66,7 @@ function verifySoloRecord(d, pubTable) {
   if (d[1] !== LEDGER_VER) return { ok: false, reason: 'ver' };
   if (d[2] !== MT_ENDLESS) return { ok: false, reason: 'mt' };
   if (d[8] !== 1) return { ok: false, reason: 'pc' };
-  const keyId = d[19] | 0;
+  const keyId = d[20] | 0;
   const keyName = keyId === 0 ? 'dev' : String(keyId >>> 0);
   // roster seat 0 = the account the run belongs to (@12 lo, @13 hi). The settle caller MUST bind
   //   this to the leaderboard ROW OWNER (see soloSettleGate opts.owner) - the signature proves "a
@@ -68,9 +74,11 @@ function verifySoloRecord(d, pubTable) {
   //   binding, a sealed-key extractor could sign a record for an arbitrary steamId. (knife-7 audit.)
   const rosterSid = ((BigInt(d[13] >>> 0) << 32n) | BigInt(d[12] >>> 0)).toString();
   const fields = {
-    matchHash: d[3] >>> 0, runSeed: d[4] | 0, durationSec: d[9] | 0, score: d[10] | 0,
-    startDepth: d[14] | 0, endDepth: d[15] | 0, continuesUsed: d[16] | 0, tokensCp: d[17] | 0, seasonId: d[18] | 0,
-    keyId, keyName, attVer: d[20] & 0xff, jwtPresent: !!((d[20] >> 8) & 1), jwtHashLo: d[21] >>> 0,
+    matchHash: d[3] >>> 0, runSeed: d[4] | 0, durationSec: d[9] | 0, score: d[10] | 0, dispCode: d[11] | 0,
+    startDepth: d[14] | 0, endDepth: d[15] | 0, continuesUsed: d[16] | 0, tokensCp: d[17] | 0, seasonId: d[18] | 0, flags: d[19] | 0,
+    keyId, keyName, attVer: d[21] & 0xff, jwtPresent: !!((d[21] >> 8) & 1), jwtHashLo: d[22] >>> 0,
+    // O143-4 commitment: rolling FNV-1a 64 over the op stream the guard's authority core executed (hex, lo@23 hi@24)
+    opHash: ((BigInt(d[24] >>> 0) << 32n) | BigInt(d[23] >>> 0)).toString(16),
     rosterSid,
   };
   // attVer mismatch = a layout this cron cannot even locate the signature in. Same soft-state
@@ -233,10 +241,25 @@ function pruneUnmatchedState(state, now, ttlMs) {
   return n;
 }
 
+// ============================================================
+// C) competitive-endless save box rows (O93 knife 3.3a): plaintext header only. The body is
+//    encrypted under a build key that lives only in the guard exe; the cron never decrypts a row --
+//    it only prunes past-season rows (a stale row could otherwise show as a resumable save).
+//    Row int32[33]: [0] 0xBA | ver<<8  [1] seasonId  [2] flags (bit0 consumed)  [3] keyId  [4] nonce  [5..16] body  [17..32] sig
+// ============================================================
+const SB_MAGIC = 0xBA, SB_VER = 1, SB_CONSUMED = 1;
+function saveBoxHead(d) {
+  if (!Array.isArray(d) || d.length < 5 || (d[0] & 0xff) !== SB_MAGIC) return null;
+  return { ver: (d[0] >> 8) & 0xff, seasonId: d[1] | 0, flags: d[2] | 0, consumed: !!(d[2] & SB_CONSUMED), keyId: d[3] | 0, nonce: d[4] >>> 0 };
+}
+
 module.exports = {
   hash32,
   // A
   LEDGER_MAGIC, LEDGER_VER, MT_ENDLESS, ATT_VER, BASE_LEN, SIG_INTS,
+  // C
+  SB_MAGIC, SB_VER, SB_CONSUMED, saveBoxHead,
+  SEG_SUSPENDED, SEG_FINAL, SEG_RESUMED, DISP_FINISHED, DISP_USER_QUIT,
   verifySoloRecord, soloSettleGate, toBytes, loadPubTable,
   // B
   CONFESS_MAGIC, CONFESS_VER, CONFESS_MAX_SEATS,
