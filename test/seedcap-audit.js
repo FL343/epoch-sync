@@ -136,9 +136,11 @@ const SIDA = '76561198000000001', SIDB = '76561198000000002';
   const yml = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'seedcap.yml'), 'utf8');
   ok('[7] seedcap.yml windows runner (MSVC CLI)', /runs-on: windows-latest/.test(yml));
   ok('[7] seedcap.yml fetches the artifact repo via deploy key', /gmt-authority-dist/.test(yml) && /SEEDCAP_DIST_KEY/.test(yml));
-  ok('[7] seedcap.yml has main + playtest twin with isolated state', /SC_STATE_FILE: seedcap\.json/.test(yml) && /SC_STATE_FILE: pt-seedcap\.json/.test(yml));
-  ok('[7] seedcap.yml persists ONLY its own state files', /git add -- seedcap\.json/.test(yml) && /git add -- pt-seedcap\.json/.test(yml) && !/git add -- [^\n]*processed/.test(yml));
-  ok('[7] seedcap.yml 3-retry rebase persist', (yml.match(/until git pull --rebase/g) || []).length === 2);
+  // main + playtest twin + demo twin (third app id, 2026-09-05): every channel job keeps its own state file
+  const SC_JOBS = 3;
+  ok('[7] seedcap.yml has main + playtest + demo twins with isolated state', /SC_STATE_FILE: seedcap\.json/.test(yml) && /SC_STATE_FILE: pt-seedcap\.json/.test(yml) && /SC_STATE_FILE: demo-seedcap\.json/.test(yml));
+  ok('[7] seedcap.yml persists ONLY its own state files', /git add -- seedcap\.json/.test(yml) && /git add -- pt-seedcap\.json/.test(yml) && /git add -- demo-seedcap\.json/.test(yml) && !/git add -- [^\n]*processed/.test(yml));
+  ok('[7] seedcap.yml 3-retry rebase persist (one per job)', (yml.match(/until git pull --rebase/g) || []).length === SC_JOBS);
   const vjs = fs.readFileSync(path.join(__dirname, '..', 'validate.js'), 'utf8');
   ok('[7] validate consults veto under SEEDCAP_ENFORCE (flag-dont-settle shape)', /SEEDCAP_ENFORCE && seedcap && seedcap\.veto/.test(vjs));
   ok('[7] validate suspect refusal under SEEDCAP_REJECT', /SEEDCAP_REJECT && seedcap && seedcap\.suspects/.test(vjs));
@@ -151,10 +153,10 @@ const SIDA = '76561198000000001', SIDB = '76561198000000002';
   ok('[7] seedcap.js never deletes board entries', scjs.indexOf('DeleteLeaderboardScore') < 0);
   ok('[7] seedcap.js single board write = the offense mirror', (scjs.match(/SetLeaderboardScore/g) || []).length === 1 &&
     (scjs.match(/findOrCreateBoard\(/g) || []).length === 1 && /findOrCreateBoard\(OFFENSE_LB\)/.test(scjs));
-  ok('[7] seedcap.yml carries the mail channel on both jobs',
-    (yml.match(/RESEND_API_KEY: \$\{\{ secrets\.RESEND_API_KEY \}\}/g) || []).length === 2 &&
-    (yml.match(/FB_DIGEST_TO: \$\{\{ secrets\.FB_DIGEST_TO \}\}/g) || []).length === 2);
-  ok('[7] playtest seedcap job tags its mail', /FB_DIGEST_TAG: '\[playtest\] '/.test(yml));
+  ok('[7] seedcap.yml carries the mail channel on every job',
+    (yml.match(/RESEND_API_KEY: \$\{\{ secrets\.RESEND_API_KEY \}\}/g) || []).length === SC_JOBS &&
+    (yml.match(/FB_DIGEST_TO: \$\{\{ secrets\.FB_DIGEST_TO \}\}/g) || []).length === SC_JOBS);
+  ok('[7] playtest / demo seedcap jobs tag their mail', /FB_DIGEST_TAG: '\[playtest\] '/.test(yml) && /FB_DIGEST_TAG: '\[demo\] '/.test(yml));
   const ptyml = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'playtest.yml'), 'utf8');
   ok('[7] playtest reconcile ENFORCE armed (2026-09-01; flipping back is a deliberate act)', /SEEDCAP_ENFORCE: '1'/.test(ptyml));
   ok('[7] playtest REJECT not armed yet (2-week enforce soak first)', !/SEEDCAP_REJECT: '1'/.test(ptyml));
