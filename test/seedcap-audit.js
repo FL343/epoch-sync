@@ -201,6 +201,52 @@ const SIDA = '76561198000000001', SIDB = '76561198000000002';
     scjs2.indexOf('process.env.SEEDCAP_ENFORCE') < 0 && scjs2.indexOf('process.env.SEEDCAP_REJECT') < 0);
 }
 
+// ---- [9] reject window ladder (2026-09-05): per-account discard inside a bounded window, never permanent ----
+{
+  ok('[9] ladder 24h / 3d / 7d / 14d by conviction count, capped', [1, 2, 3, 4, 9].map(v.seedcapRejectWindowMin).join(',') === '1440,4320,10080,20160,20160');
+  ok('[9] ladder table pinned', JSON.stringify(v.SEEDCAP_REJECT_LADDER_MIN) === '[1440,4320,10080,20160]');
+  const su1 = { n: 1, t0: 5, t1: 1000, ms: [] };
+  ok('[9] active until t1 + window (end exclusive)', v.seedcapRejectActive(su1, 2439) && !v.seedcapRejectActive(su1, 2440));
+  ok('[9] t1 (latest conviction) wins over t0', v.seedcapRejectUntilMin(su1) === 2440);
+  ok('[9] legacy entry without t1 falls back to t0', v.seedcapRejectUntilMin({ n: 2, t0: 100 }) === 100 + 4320);
+  ok('[9] no entry = no window', v.seedcapRejectUntilMin(null) === null && !v.seedcapRejectActive(undefined, 0));
+  ok('[9] 4+ convictions never exceed the 14-day cap', v.seedcapRejectUntilMin({ n: 40, t1: 0 }) === 20160);
+  const stw = { suspects: {} };
+  stw.suspects.aa = { n: 1, t0: 0, t1: 1000, ms: [] };   // until 2440
+  stw.suspects.bb = { n: 3, t0: 0, t1: 100, ms: [] };    // until 10180
+  stw.suspects.cc = { n: 1, t0: 0, t1: 0, ms: [] };      // until 1440 -> expired at 2000
+  const w = sc.rejectWindowsOf(stw, 2000);
+  ok('[9] rejectWindowsOf = active only, soonest first, with time left', w.length === 2 && w[0].pid === 'aa' && w[0].leftMin === 440 && w[1].pid === 'bb' && w[1].n === 3);
+  const st2 = { audited: {}, chain: {}, suspects: {}, veto: {}, corrections: [] };
+  st2.suspects[v.pid(SIDB)] = { n: 1, t0: 1, t1: 1, ms: [] };
+  const pend9 = [{ m: 'w1', mt: 1, pc: 2, scores: [100, 7777], p: { entry: 'quick' }, tail: null, roster: { 0: SIDA, 1: SIDB }, runSeed: 21 }];
+  const stats9 = sc.applyAudit(st2, pend9, { m0: { cap: 5000 } }, new Set(), 3000);
+  ok('[9] second conviction: n=2, t1 = new conviction time, flag carries n', st2.suspects[v.pid(SIDB)].n === 2 && st2.suspects[v.pid(SIDB)].t1 === 3000 && stats9.flags[0].offenders[0].n === 2);
+  ok('[9] window restarts at the latest conviction (3 days from t=3000)', v.seedcapRejectUntilMin(st2.suspects[v.pid(SIDB)]) === 3000 + 4320);
+  const text = sc.alertMailText(['x'], stats9.flags, { veto: 1, suspects: 1 }, sc.rejectWindowsOf(st2, 3000));
+  ok('[9] mail carries per-offender n + window and the open-window list', /n=2 window=72h/.test(text) && /reject windows now open/.test(text) && /n=2 until 1970-01-06T02:00:00Z \(72h left\)/.test(text));
+  ok('[9] mail with no open window says so', /\(none\)/.test(sc.alertMailText(['x'], [], { veto: 0, suspects: 0 }, [])));
+  ok('[9] mail never carries sids outside this run\'s flags (windows are pid-only)', JSON.stringify(w).indexOf(SIDA) < 0 && JSON.stringify(w).indexOf(SIDB) < 0);
+  // validate.js wiring: consult the window (not bare membership), discard the account (never skip
+  // the match), snapshot every per-sid output pool the loop can produce, flush after the loop.
+  const vjs9 = fs.readFileSync(path.join(__dirname, '..', 'validate.js'), 'utf8');
+  ok('[9] validate consults the window, not bare suspect membership', /seedcapRejectActive\(seedcap\.suspects\[pid\(sid\)\], nowMin\)/.test(vjs9));
+  const blk = vjs9.slice(vjs9.indexOf('if (SEEDCAP_REJECT && seedcap && seedcap.suspects)'), vjs9.indexOf('// ===== endless (type 7)'));
+  ok('[9] reject block discards the account and never skips the match', blk.length > 0 && /own settlement discarded/.test(blk) && !/\bcontinue;/.test(blk));
+  const snap = vjs9.slice(vjs9.indexOf('const scSnapshotOf = '), vjs9.indexOf('const scPut = '));
+  const rest = vjs9.slice(vjs9.indexOf('const scRestore = '), vjs9.indexOf('let scPendingRestore = null;'));
+  const pools = [];
+  const declRe = /const (changed\w*|lp|xp|cp|endless\w*Best|careerDet|reveal) = \{\}/g;
+  let dm;
+  while ((dm = declRe.exec(vjs9))) if (pools.indexOf(dm[1]) < 0) pools.push(dm[1]);
+  const notSnapped = pools.filter(p => snap.indexOf(p + ': ' + p + '[sid]') < 0 && snap.indexOf(p + '[sid]') < 0);
+  const notRestored = pools.filter(p => rest.indexOf('scPut(' + p + ', sn.sid') < 0);
+  ok('[9] snapshot/restore cover every per-sid pool declared in the settle scope (' + pools.length + ')', pools.length >= 12 && notSnapped.length === 0 && notRestored.length === 0, 'snap-missing=' + notSnapped.join(',') + ' restore-missing=' + notRestored.join(','));
+  ok('[9] snapshot/restore cover the pid-keyed state too (skill + xpState, deep-cloned)', /scCloneOf\(skill\[p\]\)/.test(snap) && /scCloneOf\(xpState\[p\]\)/.test(snap) && /scPut\(skill, p, sn\.skill\)/.test(rest) && /scPut\(xpState, p, sn\.xpState\)/.test(rest));
+  ok('[9] pending restore flushed at loop top AND after the loop', (vjs9.match(/if \(scPendingRestore\) \{ scRestore\(scPendingRestore\); scPendingRestore = null; \}/g) || []).length === 2);
+  ok('[9] run summary reports the discards', /seedcap veto \/ reject-window discards/.test(vjs9));
+}
+
 try { fs.unlinkSync(process.env.SC_STATE_FILE); } catch (e) {}
 console.log(fail ? '\n[seedcap-audit] FAIL ' + fail + ' (pass ' + pass + ')' : '\n[seedcap-audit] all green (' + pass + ')');
 process.exit(fail ? 1 : 0);

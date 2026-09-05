@@ -24,7 +24,13 @@
 //                        still-unprocessed match settle later)
 //   state.suspects[pid]  pseudonymous repeat-offender ledger (moderation layer;
 //                        sids never enter this public state -- resolution goes
-//                        through the shard records via the private ops tool)
+//                        through the shard records via the private ops tool).
+//                        {n, t0, t1, ms}: n = cumulative convictions, t1 = latest.
+//                        Under SEEDCAP_REJECT the reconcile turns (n, t1) into a
+//                        reject WINDOW (24h / 3d / 7d / 14d cap, validate.js
+//                        seedcapRejectWindowMin): inside it the account's own
+//                        settlement is discarded, other seats settle; past it the
+//                        account settles again with no ops action (never permanent).
 //   state.corrections[]  already-settled over-cap endless matches -> reconcile
 //                        reverses the flagged seats' CP credit / board entry
 //   state.chain[pid:pc]  audited endless progress (endDepth -> cumulative cap)
@@ -190,12 +196,14 @@ function applyAudit(st, pending, cliMap, processed, t) {
     if (overSeats.length) {
       over++;
       st.veto[x.m] = { t, seats: overSeats };
+      const nOf = {};
       for (const seat of overSeats) {
         const sid = x.roster[seat];
         if (!sid) continue;
         const p2 = v.pid(sid);
         const su = st.suspects[p2] = st.suspects[p2] || { n: 0, t0: t, ms: [] };
         su.n++; su.t1 = t;
+        nOf[seat] = su.n;
         if (su.ms.indexOf(x.m) < 0) { su.ms.push(x.m); if (su.ms.length > SUSPECT_MATCH_KEEP) su.ms.shift(); }
       }
       if (processed.has(x.m) && x.p.entry === 'endless' && !st.corrections.some(c => c.m === x.m)) {
@@ -203,7 +211,7 @@ function applyAudit(st, pending, cliMap, processed, t) {
       }
       flags.push({
         m: x.m, t, runSeed: x.runSeed | 0, mt: x.mt | 0, cap: capEff | 0,
-        offenders: overSeats.map(s2 => ({ seat: s2, sid: x.roster[s2] ? String(x.roster[s2]) : null, score: x.scores[s2] | 0 })),
+        offenders: overSeats.map(s2 => ({ seat: s2, sid: x.roster[s2] ? String(x.roster[s2]) : null, score: x.scores[s2] | 0, n: nOf[s2] | 0 })),
       });
       // pids only in logs -- never sids (public run logs)
       console.log('::warning::seedcap OVER-CAP m=' + x.m + ' cap=' + capEff + ' scores=' + x.scores.join(',') +
@@ -262,18 +270,42 @@ function mailDecision(newOver, suspectsTotal, lastMailedSus) {
   }
   return { send: reasons.length > 0, reasons, mailedSus };
 }
-async function sendAlertMail(reasons, flags, totals) {
-  const to = process.env.SC_MAIL_TO || process.env.FB_DIGEST_TO, apiKey = process.env.RESEND_API_KEY;
-  if (!to || !apiKey) return false;   // unconfigured -> decision stays pending (mailedSus not advanced)
+// active reject windows right now (pure; pids only -- the mail goes to ops, sids come from the
+// flags of THIS run only). Sorted by expiry so the soonest-to-clear account reads first.
+function rejectWindowsOf(st, nowM) {
+  const out = [];
+  for (const p of Object.keys((st && st.suspects) || {})) {
+    const su = st.suspects[p];
+    if (!v.seedcapRejectActive(su, nowM)) continue;
+    const until = v.seedcapRejectUntilMin(su);
+    out.push({ pid: p, n: su.n | 0, until, leftMin: until - (nowM | 0) });
+  }
+  out.sort((a, b) => a.until - b.until || (a.pid < b.pid ? -1 : 1));
+  return out;
+}
+const fmtMin = (m) => new Date((m | 0) * 60000).toISOString().replace(/\.\d+Z$/, 'Z');
+function alertMailText(reasons, flags, totals, windows) {
   const lines = ['seedcap anomaly alert: ' + reasons.join(' + '), ''];
   for (const f of flags || []) {
     lines.push('OVER m=' + f.m + ' mt=' + f.mt + ' seed=' + f.runSeed + ' cap=' + f.cap + '  ' +
-      (f.offenders || []).map(o => 'seat' + o.seat + '=' + o.score + ' sid=' + (o.sid || '?')).join(' | '));
+      (f.offenders || []).map(o => 'seat' + o.seat + '=' + o.score + ' sid=' + (o.sid || '?') +
+        (o.n ? (' n=' + o.n + ' window=' + Math.round(v.seedcapRejectWindowMin(o.n) / 60) + 'h') : '')).join(' | '));
   }
-  lines.push('', 'totals: veto=' + (totals.veto | 0) + ' suspects=' + (totals.suspects | 0),
-    '', 'A wave here usually means a false-positive storm (world-model drift after a content change),',
-    'not a cheat wave -- audit before arming SEEDCAP_REJECT. The veto is flag-dont-settle and',
-    'self-heals once a flag is cleared (seedcap-review ops tool).');
+  lines.push('', 'totals: veto=' + (totals.veto | 0) + ' suspects=' + (totals.suspects | 0));
+  lines.push('', 'reject windows now open (SEEDCAP_REJECT lever; ladder 24h / 3d / 7d / 14d by conviction count, never permanent;',
+    'inside the window only the flagged account\'s own settlement is discarded, other seats settle):');
+  if (windows && windows.length) {
+    for (const w of windows) lines.push('  ' + w.pid.slice(0, 8) + ' n=' + w.n + ' until ' + fmtMin(w.until) + ' (' + Math.ceil(w.leftMin / 60) + 'h left)');
+  } else lines.push('  (none)');
+  lines.push('', 'A wave here usually means a false-positive storm (world-model drift after a content change),',
+    'not a cheat wave -- audit before trusting the windows. The veto is flag-dont-settle and',
+    'self-heals once a flag is cleared; a window clears on its own or early via the review tool.');
+  return lines.join('\n');
+}
+async function sendAlertMail(reasons, flags, totals, windows) {
+  const to = process.env.SC_MAIL_TO || process.env.FB_DIGEST_TO, apiKey = process.env.RESEND_API_KEY;
+  if (!to || !apiKey) return false;   // unconfigured -> decision stays pending (mailedSus not advanced)
+  const text = alertMailText(reasons, flags, totals, windows);
   try {
     const res = await fetch('https://api.resend.com/emails', {
       method: 'POST',
@@ -282,7 +314,7 @@ async function sendAlertMail(reasons, flags, totals) {
         from: process.env.FB_DIGEST_FROM || 'onboarding@resend.dev',
         to: [to],
         subject: (process.env.FB_DIGEST_TAG || '') + 'seedcap ALERT: ' + reasons.join(' + '),
-        text: lines.join('\n'),
+        text,
       }),
     });
     if (!res.ok) { v.ghWarn('seedcap mail failed HTTP ' + res.status); return false; }
@@ -345,7 +377,7 @@ async function main() {
   if (stats.flags && stats.flags.length) await writeOffense(st, stats.flags);
   const md = mailDecision(stats.over, Object.keys(st.suspects).length, st.mailSus | 0);
   if (md.send && await sendAlertMail(md.reasons, stats.flags,
-      { veto: Object.keys(st.veto).length, suspects: Object.keys(st.suspects).length })) {
+      { veto: Object.keys(st.veto).length, suspects: Object.keys(st.suspects).length }, rejectWindowsOf(st, nowMin()))) {
     st.mailSus = md.mailedSus;   // advance only on a delivered mail (failed send retries next run)
     console.log('seedcap: anomaly mail sent (' + md.reasons.join(' + ') + ')');
   }
@@ -356,7 +388,7 @@ async function main() {
     ' suspects=' + Object.keys(st.suspects).length + ' corrections=' + st.corrections.length);
 }
 
-module.exports = { capParamsOf, cliLineOf, chainStartBank, pickAuditable, applyAudit, pruneState, runCli, loadState, saveState, SC_STATE_FILE, AUDITED_KEEP, VETO_KEEP_MIN, offensePlanOf, writeOffense, mailDecision, sendAlertMail, OFFENSE_LB, OFFENSE_MAGIC, SC_MAIL_MIN_OVER, SC_MAIL_SUS_MIN };
+module.exports = { capParamsOf, cliLineOf, chainStartBank, pickAuditable, applyAudit, pruneState, runCli, loadState, saveState, SC_STATE_FILE, AUDITED_KEEP, VETO_KEEP_MIN, offensePlanOf, writeOffense, mailDecision, sendAlertMail, alertMailText, rejectWindowsOf, OFFENSE_LB, OFFENSE_MAGIC, SC_MAIL_MIN_OVER, SC_MAIL_SUS_MIN };
 if (require.main === module) {
   main().catch(e => { console.log('::error::seedcap run failed: ' + (e && e.stack || e)); process.exit(1); });
 }

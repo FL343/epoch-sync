@@ -90,6 +90,14 @@ absent, so a run is unaffected before it is provisioned.
   fail the run) with disjoint `pt-*.json` / `demo-*.json` state. `feedback.yml`,
   `sanctions.yml` and `seedcap.yml` carry per-channel twin jobs for the same app ids;
   `test/channel-workflows.js` pins the twins to their template so they cannot drift apart.
+- `seedcap.js` / `seedcap.yml` — per-seed score-cap audit (replays every settled/pending
+  match's seed through a compiled world model, derives the mathematical score ceiling per
+  seat). Writes only its own `seedcap.json` (`audited` / `veto` / `suspects[pid]{n,t0,t1}` /
+  `corrections` / `chain`); the reconcile reads it under two switches: `SEEDCAP_ENFORCE`
+  (over-cap match = flag-don't-settle + endless board correction) and `SEEDCAP_REJECT`
+  (a flagged account's OWN settlement is discarded inside a bounded reject window that
+  starts at its latest conviction — 24h / 3 d / 7 d / 14 d cap by conviction count, never
+  permanent; the other seats settle normally and the window clears on its own).
 
 State files committed back each run (idempotency): `processed.json`, `skill.json`,
 `leavers.json`, `xp.json` (per-player `{ lastWinDay, games }` for the daily-first bonus

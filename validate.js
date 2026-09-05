@@ -582,6 +582,7 @@ function writeRunSummary() {
       '| trust writes / deletes | ' + s('trustW', 0) + ' / ' + s('trustD', 0) + ' |',
       '| board writes rating/points/xp | ' + s('writes', '0/0 0/0 0/0') + ' |',
       '| endless settles / cp+board writes | ' + s('endless', 0) + ' / ' + s('writesEndless', '0/0 0/0') + ' |',
+      '| seedcap veto / reject-window discards | ' + s('seedcapVeto', 0) + ' / ' + s('seedcapReject', 0) + ' |',
       '| page-cap hits | ' + RUN.cap + ' |',
       '| duration | ' + ((Date.now() - (RUN.t0 || Date.now())) / 1000).toFixed(1) + 's |',
       '',
@@ -663,6 +664,31 @@ function saveLeavers(s) { try { fs.writeFileSync(LEAVERS_FILE, JSON.stringify(s,
 const SC_STATE_FILE = process.env.SC_STATE_FILE || 'seedcap.json';
 const SEEDCAP_ENFORCE = process.env.SEEDCAP_ENFORCE === '1';
 const SEEDCAP_REJECT = process.env.SEEDCAP_REJECT === '1';
+// The refusal lever is a WINDOW, not a permanent lock (2026-09-05). suspects[pid].n (cumulative
+// over-cap convictions, seedcap.js) picks the window that starts at the LATEST conviction (t1,
+// minutes since epoch): 1 -> 24h, 2 -> 3 days, 3 -> 7 days, 4+ -> 14 days, hard cap (never
+// permanent: a false positive costs at most two weeks, and the veto already blocks every
+// over-cap match on its own). Inside the window the flagged account's OWN settlement is
+// discarded -- rating / points / XP / CP / endless bests / career stay exactly as before the
+// match, as if that seat had never sat there -- while every other seat settles normally.
+// Past the window the account settles again with no ops action; the suspect entry and the
+// offense board keep the history (ops can still clear early through the review tool).
+const SEEDCAP_REJECT_LADDER_MIN = [24 * 60, 3 * 24 * 60, 7 * 24 * 60, 14 * 24 * 60];
+function seedcapRejectWindowMin(n) {
+  const k = Math.max(1, n | 0);
+  return SEEDCAP_REJECT_LADDER_MIN[Math.min(k, SEEDCAP_REJECT_LADDER_MIN.length) - 1];
+}
+// window end (minutes since epoch) of a suspect entry; null = no entry. t1 = latest conviction
+// (t0 fallback for entries written before t1 existed).
+function seedcapRejectUntilMin(su) {
+  if (!su) return null;
+  const t = (su.t1 != null ? su.t1 : su.t0) | 0;
+  return t + seedcapRejectWindowMin(su.n);
+}
+function seedcapRejectActive(su, nowMin) {
+  const u = seedcapRejectUntilMin(su);
+  return u != null && (nowMin | 0) < u;
+}
 function loadSeedcap() { try { return JSON.parse(fs.readFileSync(SC_STATE_FILE, 'utf8')) || null; } catch (e) { return null; } }
 // pending abandon confessions (see reconcileConfessions): "pid|matchKey" -> {t0, mt, ded, ex, refunded, done}
 const CONFESSIONS_FILE = process.env.CONFESSIONS_FILE || 'confessions.json';
@@ -2351,7 +2377,40 @@ async function main() {
   const today = Math.floor(Date.now() / 86400000);   // UTC day index (matches client lastWinDay) for the daily-first bonus
   const changed = {}; const changedLp = {}; const changedXp = {}; const changedCp = {}; const changedEndless = {}; const changedEndlessSeason = {}; const changedEndlessTrio = {}; const changedEndlessTrioSeason = {}; const reveal = {}; const careerDet = {}; let settled = 0, voided = 0, settledEndless = 0, settledPrivate = 0;
   const seedcap = (SEEDCAP_ENFORCE || SEEDCAP_REJECT) ? loadSeedcap() : null;   // O124 knife-9
+  // reject-window discard (see the SEEDCAP_REJECT block below): every per-account output the
+  // settle loop can produce, captured before the group settles and put back afterwards. The
+  // list is the complete set of per-sid write pools + in-memory state the write phase reads;
+  // a new per-player output added to the loop must be added here too (test pins the names).
+  const scCloneOf = (o) => (o == null ? o : JSON.parse(JSON.stringify(o)));
+  const scSnapshotOf = (sid) => {
+    const p = pid(sid);
+    return { sid, skill: scCloneOf(skill[p]), xpState: scCloneOf(xpState[p]),
+      lp: lp[sid], xp: xp[sid], cp: cp[sid],
+      endlessBest: endlessBest[sid], endlessSeasonBest: endlessSeasonBest[sid],
+      endlessTrioBest: endlessTrioBest[sid], endlessTrioSeasonBest: endlessTrioSeasonBest[sid],
+      changed: changed[sid], changedLp: changedLp[sid], changedXp: changedXp[sid], changedCp: changedCp[sid],
+      changedEndless: changedEndless[sid], changedEndlessSeason: changedEndlessSeason[sid],
+      changedEndlessTrio: changedEndlessTrio[sid], changedEndlessTrioSeason: changedEndlessTrioSeason[sid],
+      careerDet: careerDet[sid], reveal: reveal[sid] };
+  };
+  const scPut = (map, key, val) => { if (val === undefined) delete map[key]; else map[key] = val; };
+  const scRestore = (pend) => {
+    for (const sn of pend.snaps) {
+      const p = pid(sn.sid);
+      scPut(skill, p, sn.skill); scPut(xpState, p, sn.xpState);
+      scPut(lp, sn.sid, sn.lp); scPut(xp, sn.sid, sn.xp); scPut(cp, sn.sid, sn.cp);
+      scPut(endlessBest, sn.sid, sn.endlessBest); scPut(endlessSeasonBest, sn.sid, sn.endlessSeasonBest);
+      scPut(endlessTrioBest, sn.sid, sn.endlessTrioBest); scPut(endlessTrioSeasonBest, sn.sid, sn.endlessTrioSeasonBest);
+      scPut(changed, sn.sid, sn.changed); scPut(changedLp, sn.sid, sn.changedLp); scPut(changedXp, sn.sid, sn.changedXp); scPut(changedCp, sn.sid, sn.changedCp);
+      scPut(changedEndless, sn.sid, sn.changedEndless); scPut(changedEndlessSeason, sn.sid, sn.changedEndlessSeason);
+      scPut(changedEndlessTrio, sn.sid, sn.changedEndlessTrio); scPut(changedEndlessTrioSeason, sn.sid, sn.changedEndlessTrioSeason);
+      scPut(careerDet, sn.sid, sn.careerDet); scPut(reveal, sn.sid, sn.reveal);
+      console.log('  seedcap reject ' + pend.m + ': ' + plog(sn.sid) + ' settlement discarded (state restored)');
+    }
+  };
+  let scPendingRestore = null;
   for (const c of fresh) {
+    if (scPendingRestore) { scRestore(scPendingRestore); scPendingRestore = null; }
     const g = c.g;
     const matchType = g[0].d[2] | 0;   // 2=ranked; visible LP only moves for ranked (quick = MMR only)
     // sanity gate (B5 tier A): a consistent-but-impossible match is flagged, not settled, and NOT
@@ -2376,14 +2435,24 @@ async function main() {
       ghWarn('match=' + c.m + ': seedcap over-cap veto (seats ' + ((seedcap.veto[c.m].seats || []).join(',') || '?') + ') -- not settled');
       continue;
     }
-    // O124 suspect refusal (optional lever, default off): a recorded over-cap offender's
-    // matches stop settling entirely until ops clears the suspect entry (seedcap-review tool).
+    // O124 suspect refusal (optional lever, default off), window form (2026-09-05): a writer
+    // whose reject window is still open gets its OWN settlement discarded -- the group settles
+    // for everyone else exactly as usual (rank order, TrueSkill inputs, XP, CP, boards), then
+    // the flagged account's state is restored to its pre-match snapshot before anything is
+    // written (scPendingRestore, applied at the top of the next iteration / after the loop).
+    // Roster-only suspects (no record = leaver) are not touched: they earn nothing here anyway
+    // and their penalties must stand. Nothing is deferred: the match is processed.
     if (SEEDCAP_REJECT && seedcap && seedcap.suspects) {
-      const scHit = writerSids.find(sid => seedcap.suspects[pid(sid)]);
-      if (scHit) {
-        RUN.seedcapReject = (RUN.seedcapReject | 0) + 1;
-        ghWarn('match=' + c.m + ': seedcap suspect ' + plog(scHit) + ' present -- not settled');
-        continue;
+      const nowMin = Math.floor(nowMs / 60000);
+      const dropSids = writerSids.filter(sid => seedcapRejectActive(seedcap.suspects[pid(sid)], nowMin));
+      if (dropSids.length) {
+        scPendingRestore = { m: c.m, sids: dropSids, snaps: dropSids.map(scSnapshotOf) };
+        RUN.seedcapReject = (RUN.seedcapReject | 0) + dropSids.length;
+        for (const sid of dropSids) {
+          const su = seedcap.suspects[pid(sid)];
+          const left = seedcapRejectUntilMin(su) - nowMin;
+          ghWarn('match=' + c.m + ': seedcap suspect ' + plog(sid) + ' inside reject window (n=' + (su.n | 0) + ', ' + Math.ceil(left / 60) + 'h left) -- own settlement discarded, other seats settle');
+        }
       }
     }
     // ===== endless (type 7): own settle authority -- depth board + CP debit, nothing else. =====
@@ -2693,6 +2762,7 @@ async function main() {
     }
     processed.add(c.m); settled++;
   }
+  if (scPendingRestore) { scRestore(scPendingRestore); scPendingRestore = null; }
   console.log('settled ' + settled + ' (+' + settledEndless + ' endless, +' + settledPrivate + ' private), voided ' + voided + ', ' + Object.keys(changed).length + ' players changed, ' + leaverHits + ' leavers');
   RUN.endless = settledEndless;
 
@@ -2843,4 +2913,4 @@ async function main() {
 if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
-module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, isVoidDisp, voidByConsensus, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, RS_SOLO_VS_TRIO, RS_TRIO_WIN, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, CONFESS_MAGIC, reconcileConfessions, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan, postForm, postFormDetails, findOrCreateBoard, ghWarn, ghErr, PT_MODE, PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, ptSeedCp, ptBoardPlan, PRIVATE_XP, isPrivateMt, privateProgressOf, creditXpPrivate, CAMPAIGN_LB };
+module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, isVoidDisp, voidByConsensus, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, RS_SOLO_VS_TRIO, RS_TRIO_WIN, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, CONFESS_MAGIC, reconcileConfessions, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan, postForm, postFormDetails, findOrCreateBoard, ghWarn, ghErr, PT_MODE, PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, ptSeedCp, ptBoardPlan, PRIVATE_XP, isPrivateMt, privateProgressOf, creditXpPrivate, CAMPAIGN_LB, SEEDCAP_REJECT_LADDER_MIN, seedcapRejectWindowMin, seedcapRejectUntilMin, seedcapRejectActive };
