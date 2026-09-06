@@ -42,6 +42,7 @@ function hash32(s) {
 const LEDGER_MAGIC = 0xB1, LEDGER_VER = 3, MT_ENDLESS = 7, ATT_VER = 3;   // attVer 3 = flags (6th tail int) + op-stream commitment (2026-09-06); 2 = seasonId tail (2026-09-05); 1 = pre-season
 const BASE_LEN = 25, SIG_INTS = 16;
 // endless tail `flags` bits (6th tail int; co-op client records write 0, guard-built solo segments set them)
+const SEG_COMP = 8;        // team competitive segment (client-written, consensus lane; the guard never sets it -- solo sanity keeps it illegal)
 const SEG_SUSPENDED = 1;   // written by "save & quit" -> the ONE segment a later run may resume from (once)
 const SEG_FINAL = 2;       // run over / user quit (terminal segment of the run)
 const SEG_RESUMED = 4;     // this segment started from a consumed save row
@@ -259,7 +260,7 @@ module.exports = {
   LEDGER_MAGIC, LEDGER_VER, MT_ENDLESS, ATT_VER, BASE_LEN, SIG_INTS,
   // C
   SB_MAGIC, SB_VER, SB_CONSUMED, saveBoxHead,
-  SEG_SUSPENDED, SEG_FINAL, SEG_RESUMED, DISP_FINISHED, DISP_USER_QUIT,
+  SEG_SUSPENDED, SEG_FINAL, SEG_RESUMED, SEG_COMP, DISP_FINISHED, DISP_USER_QUIT,
   verifySoloRecord, soloSettleGate, toBytes, loadPubTable,
   // B
   CONFESS_MAGIC, CONFESS_VER, CONFESS_MAX_SEATS,

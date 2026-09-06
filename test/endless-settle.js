@@ -27,6 +27,7 @@ function mk7(writer, seat, o) {
   for (const sid of ros) { const p = sidPair(sid); d.push(p[0], p[1]); }
   if (!o.noTail) d.push(o.startDepth | 0, o.endDepth == null ? 6 : o.endDepth | 0, o.cont | 0, o.tokens | 0);
   if (!o.noTail && o.seasonId != null) d.push(o.seasonId | 0);   // 5th tail int (2026-09-05 season snapshot)
+  if (!o.noTail && o.seasonId != null && o.flags != null) d.push(o.flags | 0);   // 6th tail int (team competitive segment flags)
   return { steamID: writer, d, roster: decodeRoster(d), dispCode: (o.disp == null ? 0 : o.disp) };
 }
 const grp = (...rs) => rs;
@@ -51,7 +52,7 @@ eq('goalBase clamps depth<1', endlessGoalBase(0), 650);
 
 // -- tail decode --
 const clean = mk7(A, 0, { startDepth: 0, endDepth: 6, cont: 0, tokens: 0 });
-eq('tail decode (4-int legacy tail -> seasonId -1)', endlessTail(clean.d), { startDepth: 0, endDepth: 6, continuesUsed: 0, tokensCp: 0, seasonId: -1 });
+eq('tail decode (4-int legacy tail -> seasonId -1, flags 0)', endlessTail(clean.d), { startDepth: 0, endDepth: 6, continuesUsed: 0, tokensCp: 0, seasonId: -1, flags: 0 });
 eq('missing tail -> null', endlessTail(mk7(A, 0, { noTail: true }).d), null);
 
 // -- CP gain mirror (client computeCpGain): base 10 + rank bonus (valid only), ranked x2 --
@@ -185,7 +186,8 @@ eq('rosterConsensus split vote -> seat dropped', rosterConsensus(grp(mk7(A, 0, {
 {
   const { endlessAbstention, computeXpEndless, creditXpEndless, ENDLESS_XP, PRIVATE_XP } = v;
   const s1 = mk7(A, 0, { startDepth: 0, endDepth: 6, seasonId: 1 });
-  eq('tail decode with seasonId', endlessTail(s1.d), { startDepth: 0, endDepth: 6, continuesUsed: 0, tokensCp: 0, seasonId: 1 });
+  eq('tail decode with seasonId', endlessTail(s1.d), { startDepth: 0, endDepth: 6, continuesUsed: 0, tokensCp: 0, seasonId: 1, flags: 0 });
+  eq('tail decode with the 6th int (segment flags)', endlessTail(mk7(A, 0, { startDepth: 5, endDepth: 10, seasonId: 1, flags: 9 }).d).flags, 9);
   eq('5-int tail record -> [] (season in domain)', sanityFlags(grp(s1, mk7(B, 1, { startDepth: 0, endDepth: 6, seasonId: 1 }))), []);
   has('season out of domain flags', sanityFlags(grp(mk7(A, 0, { seasonId: 5000 }), mk7(B, 1, { seasonId: 5000 }))), 'season');
   not('legacy 4-int tail never flags season', sanityFlags(pair({ startDepth: 0, endDepth: 6 })), 'season');

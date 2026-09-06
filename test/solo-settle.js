@@ -7,7 +7,7 @@ const path = require('path');
 const v = require(path.join(__dirname, '..', 'validate.js'));
 const A = require(path.join(__dirname, '..', 'attest.js'));
 const { COMP, ENDLESS_COMP_LB, SAVE_BOX_LB, SOLO_FILE, soloSanity, soloChainPlan, soloMilestones, soloAdvance, soloRunKey, soloStartAttested,
-  reconcileStarts, ptBoardPlan, decodeRoster, endlessRequiredMs, ENDLESS, pid } = v;
+  reconcileStarts, ptBoardPlan, decodeRoster, endlessRequiredMs, ENDLESS, pid, soloMsSlot } = v;
 
 let failN = 0;
 const ok = (m) => console.log('  ok    ' + m);
@@ -99,7 +99,19 @@ console.log('-- chain rules --');
   eq('other run key starts fresh', soloChainPlan(st, soloRunKey('p1', 1, 778), seg({ startDepth: 0, endDepth: 3, flags: A.SEG_FINAL }), 'n0', T0), { ok: true, proven: 0 });
 }
 
-console.log('-- milestones (once per run) + resume debit + pacing --');
+console.log('-- milestones (bitmap per player x season x ladder family) + resume debit + pacing --');
+{
+  const st = { runs: {}, wait: {}, ms: {} };
+  const a = soloMsSlot(st, 'p1', 1, 'SOLO', 1000);
+  eq('slot: fresh bitmap', [a.ms, a.t], [0, 1000]);
+  eq('first run crosses 10', soloMilestones(a, 12), [[10, 40]]);
+  eq('a NEW run in the same season on the same ladder re-earns nothing (slot is not per run)', soloMilestones(soloMsSlot(st, 'p1', 1, 'SOLO', 2000), 12), []);
+  eq('another ladder family = its own bitmap', soloMilestones(soloMsSlot(st, 'p1', 1, 'DUO', 2000), 12), [[10, 40]]);
+  eq('next season = fresh bitmap', soloMilestones(soloMsSlot(st, 'p1', 2, 'SOLO', 2000), 12), [[10, 40]]);
+  eq('slot keys = pid|season|family', Object.keys(st.ms).sort(), ['p1|1|DUO', 'p1|1|SOLO', 'p1|2|SOLO']);
+  assert('slot touch refreshes t (TTL pacing)', st.ms['p1|1|SOLO'].t === 2000);
+  assert('loadSolo shape carries ms', JSON.stringify(Object.keys(v.loadSolo())).indexOf('ms') >= 0);
+}
 {
   const run = { max: 0, ms: 0, saves: {} };
   eq('depth 12 crosses 10', soloMilestones(run, 12), [[10, 40]]);
@@ -138,16 +150,18 @@ console.log('-- single-attester start registration --');
 
 console.log('-- board surface --');
 {
-  const plan = ptBoardPlan([], { prefix: 'rec_', shards: 1, xpLb: 'xpb', cpLb: 'cpb', endlessLb: 'enb', endlessTrioLb: 'entb', trustLb: 'trb', reportLb: 'rpb', compLb: 'cmp', saveBoxLb: 'sbx' });
+  const plan = ptBoardPlan([], { prefix: 'rec_', shards: 1, xpLb: 'xpb', cpLb: 'cpb', endlessLb: 'enb', endlessTrioLb: 'entb', trustLb: 'trb', reportLb: 'rpb', compLb: 'cmp', saveBoxLb: 'sbx',
+    compDuoLb: 'cmp2', saveBoxDuoLb: 'sbx2', compTrioLb: 'cmp3', saveBoxTrioLb: 'sbx3' });
   const byName = {}; for (const b of plan.create) byName[b.name] = b.trusted;
   eq('playtest plan provisions the solo ladder (trusted) + save box (client-writable)', [byName.cmp, byName.sbx], [1, 0]);
+  eq('playtest plan provisions the team ladders (trusted) + their save boxes (client-writable)', [byName.cmp2, byName.sbx2, byName.cmp3, byName.sbx3], [1, 0, 1, 0]);
 }
 
 console.log('-- wiring pins --');
 {
   const src = require('fs').readFileSync(path.join(__dirname, '..', 'validate.js'), 'utf8');
   assert('main app provisions the solo ladder + save box up-front (before the fresh-match early returns)',
-    /for \(const \[nm, trusted\] of \[\[ENDLESS_COMP_LB, true\], \[SAVE_BOX_LB, false\]\]\)/.test(src) && src.indexOf('solo boards: provisioned') < src.indexOf('no consistent matches'));
+    /for \(const \[nm, trusted\] of \[\[ENDLESS_COMP_LB, true\], \[SAVE_BOX_LB, false\], \[ENDLESS_COMP_LB_DUO, true\], \[SAVE_BOX_LB_DUO, false\], \[ENDLESS_COMP_LB_TRIO, true\], \[SAVE_BOX_LB_TRIO, false\]\]\)/.test(src) && src.indexOf('solo boards: provisioned') < src.indexOf('no consistent matches'));
   assert('solo segments enter the settle loop as their own consistent entries', /consistentMatches\.push\(\{ m, g, void: false, solo: true \}\)/.test(src) && /if \(c\.solo\) \{ if \(await soloSettle\(c\)\) settledSolo\+\+; continue; \}/.test(src));
   assert('solo settle verifies the signature and binds the row owner', /attest\.soloSettleGate\(v, \{ owner: sid, allowDevKey: soloAllowDev \}\)/.test(src));
   assert('a save point is consumed once and the resume debit rides the consume', /if \(plan\.consume\) \{[\s\S]{0,120}COMP\.RESUME_CP/.test(src));
