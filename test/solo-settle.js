@@ -162,8 +162,10 @@ console.log('-- wiring pins --');
   const src = require('fs').readFileSync(path.join(__dirname, '..', 'validate.js'), 'utf8');
   assert('main app provisions the solo ladder + save box up-front (before the fresh-match early returns)',
     /for \(const \[nm, trusted\] of \[\[ENDLESS_COMP_LB, true\], \[SAVE_BOX_LB, false\], \[ENDLESS_COMP_LB_DUO, true\], \[SAVE_BOX_LB_DUO, false\], \[ENDLESS_COMP_LB_TRIO, true\], \[SAVE_BOX_LB_TRIO, false\]\]\)/.test(src) && src.indexOf('solo boards: provisioned') < src.indexOf('no consistent matches'));
-  assert('solo segments enter the settle loop as their own consistent entries', /consistentMatches\.push\(\{ m, g, void: false, solo: true \}\)/.test(src) && /if \(c\.solo\) \{ if \(await soloSettle\(c\)\) settledSolo\+\+; continue; \}/.test(src));
-  assert('solo settle verifies the signature and binds the row owner', /attest\.soloSettleGate\(v, \{ owner: sid, allowDevKey: soloAllowDev \}\)/.test(src));
+  assert('solo segments enter the settle loop as their own consistent entries (every pc=1 record of the group; audit B-F10)', /consistentMatches\.push\(\{ m, g: solos, void: false, solo: true \}\)/.test(src) && /if \(c\.solo\) \{ if \(await soloSettle\(c\)\) settledSolo\+\+; continue; \}/.test(src));
+  assert('solo settle verifies the signature and binds the row owner (first verifying candidate wins)', /attest\.soloSettleGate\(cv, \{ owner: String\(cand\.steamID\), allowDevKey: soloAllowDev \}\)/.test(src) && /if \(!v \|\| cg\.settle \|\| cg\.pending\) \{ r = cand;/.test(src));
+  assert('audit B-F9: inside the seedcap reject window the chain still advances, only the outputs are discarded', /inside seedcap reject window -- own settlement discarded \(chain advanced to/.test(src) && (src.match(/soloAdvance\(soloState, key, f, m, plan, nowMs\);/g) || []).length >= 2);
+  assert('audit B-F4: solo ladder paging joins the on-demand base-read rule', /compComplete = br\.complete !== false/.test(src) && /readUserEntry\(compId, sid, 'solo comp'\)/.test(src) && /\|\| \(compId && !compComplete\) \|\| \(compSeasonId && !compSeasonComplete\)/.test(src));
   assert('a save point is consumed once and the resume debit rides the consume', /if \(plan\.consume\) \{[\s\S]{0,120}COMP\.RESUME_CP/.test(src));
 }
 console.log('=== ' + (failN === 0 ? 'PASS' : 'FAIL') + ' — ' + failN + ' fail (solo-settle) ===');

@@ -86,7 +86,73 @@ console.log('-- chain key: roster SET + season + runSeed --');
   plan = soloChainPlan(st, k1, { startDepth: 8, endDepth: 10, flags: A.SEG_COMP | A.SEG_RESUMED | A.SEG_FINAL }, 'm2', T0);
   eq('the same roster resumes once (consume = the save point)', plan, { ok: true, proven: 8, consume: '8' });
   soloAdvance(st, k1, { startDepth: 8, endDepth: 10, flags: A.SEG_COMP | A.SEG_RESUMED | A.SEG_FINAL }, 'm2', plan, T0);
-  eq('replaying the same save row -> save-reused', soloChainPlan(st, k1, { startDepth: 8, endDepth: 9, flags: A.SEG_COMP | A.SEG_RESUMED }, 'mY', T0), { ok: false, reason: 'after-final' });
+  eq('anything after the final segment -> after-final (the run is over)', soloChainPlan(st, k1, { startDepth: 8, endDepth: 9, flags: A.SEG_COMP | A.SEG_RESUMED }, 'mY', T0), { ok: false, reason: 'after-final' });
+  // audit E-G21: the save-reused rule on the TEAM lane, exercised for real (the old case above was already after-final) --
+  //   a second run: checkpoint -> save at 8 -> resume once (not final) -> another resumed segment from the same save point
+  const kR = teamRunKey([SA, SB], 1, 778);
+  let pR = soloChainPlan(st, kR, { startDepth: 0, endDepth: 5, flags: A.SEG_COMP }, 'n0', T0); soloAdvance(st, kR, { startDepth: 0, endDepth: 5, flags: A.SEG_COMP }, 'n0', pR, T0);
+  pR = soloChainPlan(st, kR, { startDepth: 5, endDepth: 8, flags: A.SEG_COMP | A.SEG_SUSPENDED }, 'n1', T0); soloAdvance(st, kR, { startDepth: 5, endDepth: 8, flags: A.SEG_COMP | A.SEG_SUSPENDED }, 'n1', pR, T0);
+  pR = soloChainPlan(st, kR, { startDepth: 8, endDepth: 10, flags: A.SEG_COMP | A.SEG_RESUMED }, 'n2', T0);
+  eq('team resume (not final) consumes the save point once', pR, { ok: true, proven: 8, consume: '8' });
+  soloAdvance(st, kR, { startDepth: 8, endDepth: 10, flags: A.SEG_COMP | A.SEG_RESUMED }, 'n2', pR, T0);
+  eq('replaying the same save row (a second resumed segment from depth 8) -> save-reused', soloChainPlan(st, kR, { startDepth: 8, endDepth: 11, flags: A.SEG_COMP | A.SEG_RESUMED }, 'n3', T0), { ok: false, reason: 'save-reused' });
+  eq('the same resumed segment re-sighted is idempotent (no second consume)', soloChainPlan(st, kR, { startDepth: 8, endDepth: 10, flags: A.SEG_COMP | A.SEG_RESUMED }, 'n2', T0), { ok: true, proven: 8 });
+}
+
+console.log('-- audit 2026-09-06: chain head is a floor (B-F2) / save point merge keeps `by` (B-F6) --');
+{
+  const st = { runs: {}, wait: {}, ms: {} };
+  const k = teamRunKey([SA, SB], 1, 900);
+  const T0 = 7000;
+  let plan = soloChainPlan(st, k, { startDepth: 0, endDepth: 5, flags: A.SEG_COMP }, 'r0', T0); soloAdvance(st, k, { startDepth: 0, endDepth: 5, flags: A.SEG_COMP }, 'r0', plan, T0);
+  // a rolled-back save attempt whose residual suspended records (2 of 3 ends could not retract) settled first
+  plan = soloChainPlan(st, k, { startDepth: 5, endDepth: 8, flags: A.SEG_COMP | A.SEG_SUSPENDED }, 'r1', T0);
+  eq('residual suspended segment settles (ghost save point at 8)', plan, { ok: true, proven: 5 });
+  soloAdvance(st, k, { startDepth: 5, endDepth: 8, flags: A.SEG_COMP | A.SEG_SUSPENDED }, 'r1', plan, T0);
+  eq('the retry of the same attempt (same span, new key) is a replay -> chain-back', soloChainPlan(st, k, { startDepth: 5, endDepth: 8, flags: A.SEG_COMP | A.SEG_SUSPENDED }, 'r1b', T0), { ok: false, reason: 'chain-back' });
+  plan = soloChainPlan(st, k, { startDepth: 5, endDepth: 10, flags: A.SEG_COMP }, 'r2', T0);
+  eq('the run continued: next checkpoint [5,10] overlaps the head 8 but reaches past it -> ok, proven = head, overlap noted', plan, { ok: true, proven: 8, overlap: 5 });
+  soloAdvance(st, k, { startDepth: 5, endDepth: 10, flags: A.SEG_COMP }, 'r2', plan, T0);
+  eq('head advanced to 10; the following segment chains normally', [st.runs[k].max, soloChainPlan(st, k, { startDepth: 10, endDepth: 15, flags: A.SEG_COMP }, 'r3', T0)], [10, { ok: true, proven: 10 }]);
+  eq('a second depth-0 segment on the same run is still a restart replay', soloChainPlan(st, k, { startDepth: 0, endDepth: 5, flags: A.SEG_COMP }, 'rX', T0), { ok: false, reason: 'restart' });
+  // B-F6: a second suspended segment ending at an already-consumed save point must not erase the consume mark
+  st.runs[k].saves['8'].by = 'consumed-by-r9';
+  soloAdvance(st, k, { startDepth: 5, endDepth: 8, flags: A.SEG_COMP | A.SEG_SUSPENDED }, 'r1c', { ok: true, proven: 5 }, T0 + 1);
+  eq('save point re-registration merges (keeps `by`, refreshes t)', [st.runs[k].saves['8'].by, st.runs[k].saves['8'].t], ['consumed-by-r9', T0 + 1]);
+}
+
+console.log('-- audit 2026-09-06: consensus grouping counts writers, solo lane picks pc=1 (D-F11 / B-F10 / E-G3) --');
+{
+  const { groupRecords, isEndlessMt } = v;
+  const vecOf = (r) => { const pc = r.d[8] | 0; if (pc < 1 || pc > 8 || r.d.length < 10 + pc) return 'BAD(pc=' + pc + ')'; let vv = r.d.slice(10, 10 + pc); if (isEndlessMt(r.d[2] | 0)) { const at = 11 + 3 * pc; if (r.d.length < at + 4) return 'BAD(tail)'; vv = vv.concat(r.d.slice(at, at + Math.min(6, r.d.length - at))); } return JSON.stringify(vv); };
+  const run = (recs) => groupRecords(recs, { vecOf, MAX_SEATS: 8 });
+  const trio = (o) => [mk7(SA, 0, Object.assign({ pc: 3 }, o)), mk7(SB, 1, Object.assign({ pc: 3 }, o)), mk7(SC, 2, Object.assign({ pc: 3 }, o))];
+  let g = run(trio({ startDepth: 5, endDepth: 10 }));
+  eq('3 of 3 ends agree -> consistent', [g.consistent, g.lone, g.flagged, g.consistentMatches[0].g.length], [1, 0, 0, 3]);
+  g = run(trio({ startDepth: 5, endDepth: 10 }).slice(0, 2));
+  eq('2 of 3 ends agree (third silent) -> consistent (2 writers)', [g.consistent, g.lone, g.flagged], [1, 0, 0]);
+  g = run(trio({ startDepth: 5, endDepth: 10 }).slice(0, 1));
+  eq('1 of 3 -> lone (never settles)', [g.consistent, g.lone], [0, 1]);
+  const dup = [mk7(SA, 0, { pc: 3, startDepth: 5, endDepth: 10 }), mk7(SA, 0, { pc: 3, startDepth: 5, endDepth: 10 })];   // the SAME account twice (cold reconnect double-write / results on a suspended key)
+  g = run(dup);
+  eq('the same writer twice = one voice -> lone (D-F11; used to pass as 2 consistent)', [g.consistent, g.lone], [0, 1]);
+  const diff = [mk7(SA, 0, { pc: 3, startDepth: 5, endDepth: 10 }), mk7(SB, 1, { pc: 3, startDepth: 5, endDepth: 10, scores: [4000, 9999, 3000] })];
+  g = run(diff);
+  eq('2 writers, different vectors -> inconsistent (flagged)', [g.consistent, g.flagged], [0, 1]);
+  const soloRec = mk7(SA, 0, { pc: 1, scores: [5000], rosterSids: [SA], startDepth: 0, endDepth: 5, flags: 0 });
+  const foreign = mk7(SB, 1, { pc: 2, startDepth: 0, endDepth: 5 });
+  g = run([foreign, soloRec]);
+  eq('a foreign same-key pc=2 record cannot push a pc=1 segment out of the solo lane (B-F10)', [g.soloN, g.consistentMatches[0].solo, g.consistentMatches[0].g.length, g.consistentMatches[0].g[0].steamID], [1, true, 1, SA]);
+  const SRC = fs.readFileSync(path.join(__dirname, '..', 'validate.js'), 'utf8');
+  assert('main() consumes groupRecords (single grouping path)', /const gr = groupRecords\(recs, \{ vecOf, MAX_SEATS \}\);/.test(SRC) && /const writers = new Set\(g\.map\(r => String\(r\.steamID\)\)\)\.size;/.test(SRC) && /if \(writers < 2\) \{ lone\+\+;/.test(SRC));
+}
+
+console.log('-- audit 2026-09-06 B-F7: competitive segment disposition sanity --');
+{
+  has('checkpoint segment with a non-finished disp (host-left) -> disp', sanityFlags(pair({ startDepth: 5, endDepth: 10, disp: 4 })), 'disp');
+  has('suspended segment with a quit disp -> disp', sanityFlags(pair({ startDepth: 5, endDepth: 8, flags: A.SEG_COMP | A.SEG_SUSPENDED, disp: 5 })), 'disp');
+  not('final segment may carry host-left', sanityFlags(pair({ startDepth: 5, endDepth: 8, flags: A.SEG_COMP | A.SEG_FINAL, disp: 4 })), 'disp');
+  not('clean checkpoint (finished) stays clean', sanityFlags(pair({ startDepth: 5, endDepth: 10 })), 'disp');
 }
 
 console.log('-- milestone slot per member --');
@@ -111,7 +177,8 @@ console.log('-- wiring pins (validate.js lane) --');
   assert('no continue debit in the lane (one life)', !/endlessDebits\(/.test(lane));
   assert('milestones per writer via the family slot', /soloMsSlot\(soloState, pid\(sid\), t\.seasonId, fam\.fam, nowMs\)/.test(lane));
   assert('board write = writers only, packed (endDepth, team bank), lifetime + season (season only when the run\'s season is current)', /packEndlessScore\(f\.endDepth, teamT\)/.test(lane) && /fam\.seasonId && \(t\.seasonId \| 0\) === \(seasonId \| 0\)/.test(lane));
-  assert('progress XP per segment (writers only)', /creditXpEndless\(g, f, xp, changedXp, spSet\)/.test(lane));
+  assert('progress XP per segment (writers only; audit B-F2: from the proven depth on an overlapping retry)', /creditXpEndless\(g, \{ startDepth: Math\.max\(f\.startDepth \| 0, plan\.proven \| 0\), endDepth: f\.endDepth \| 0 \}, xp, changedXp, spSet\)/.test(lane));
+  assert('audit B-F5: a reject-window writer is skipped in the milestone/ladder loop (bitmap lives outside the snapshot)', /if \(scPendingRestore && scPendingRestore\.sids\.indexOf\(sid\) >= 0\) \{ console\.log\('  endless-comp '/.test(lane));
   assert('solo lane milestones moved to the per-season family slot too', /soloMilestones\(soloMsSlot\(soloState, p, f\.seasonId, 'SOLO', nowMs\), f\.endDepth\)/.test(src));
   assert('consistency vector compares the whole 6-int tail (flags are lockstep fact)', /v = v\.concat\(r\.d\.slice\(at, at \+ Math\.min\(6, r\.d\.length - at\)\)\);/.test(src) && /JSON\.stringify\(r\.d\.slice\(at, at \+ Math\.min\(6, r\.d\.length - at\)\)\)/.test(src));
   assert('main app provisions the family surface up-front', /\[ENDLESS_COMP_LB_DUO, true\], \[SAVE_BOX_LB_DUO, false\], \[ENDLESS_COMP_LB_TRIO, true\], \[SAVE_BOX_LB_TRIO, false\]/.test(src));

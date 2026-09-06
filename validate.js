@@ -317,6 +317,9 @@ function sanityFlags(g) {
         if ((fl & attest.SEG_SUSPENDED) && (fl & attest.SEG_FINAL)) out.push('flags');
         if (t.continuesUsed !== 0 && out.indexOf('cont') < 0) out.push('cont');
         if (t.endDepth - t.startDepth > COMP.CKPT_EVERY) out.push('span');
+        // audit 2026-09-06 B-F7 (solo lane parity): a checkpoint / save segment is a clean cut -- every record carries disp finished;
+        //   only the FINAL segment may carry a run-over / host-left / quit disposition (the results write)
+        if (!(fl & attest.SEG_FINAL) && g.some(r => (r.dispCode | 0) !== attest.DISP_FINISHED)) out.push('disp');
       } else if (fl !== 0) out.push('flags');
       if (t.seasonId < -1 || t.seasonId > 4095) out.push('season');   // season snapshot domain (absent = -1 legacy; ids are small)
       // score cap scales with the claimed depth (the global matchmade cap has no meaning on an
@@ -1487,7 +1490,15 @@ function soloChainPlan(st, key, f, m, nowMs) {
   }
   if (!run) return waitOr('chain-gap');
   if ((run.max | 0) === sd) return { ok: true, proven: sd };
-  if ((run.max | 0) > sd) return { ok: false, reason: 'chain-back' };
+  if ((run.max | 0) > sd) {
+    // audit 2026-09-06 B-F2: the chain head is a FLOOR, not an equality. An overlapping segment that still reaches past the head
+    //   is the legitimate retry of a rolled-back save attempt whose residual suspended records (>=2 ends that could not retract,
+    //   or a lost ABORT) settled first -- the strict rule threw the retry away and every later segment of the run with it.
+    //   Credit only the new depth: proven = head (pacing + progress XP start there); ladder is a max, milestones a bitmap.
+    //   A segment that ends at or behind the head is a replay -> chain-back as before.
+    if ((f.endDepth | 0) > (run.max | 0)) return { ok: true, proven: run.max | 0, overlap: sd };
+    return { ok: false, reason: 'chain-back' };
+  }
   return waitOr('chain-gap');
 }
 // milestones newly crossed by this segment (bitmap on the holder: a soloMsSlot = once per player x season x ladder family). Mutates holder.ms only.
@@ -1506,7 +1517,7 @@ function soloAdvance(st, key, f, m, plan, nowMs) {
   if ((f.startDepth | 0) === 0) run.seg0 = 1;
   if (plan.consume) { run.saves[plan.consume] = run.saves[plan.consume] || {}; run.saves[plan.consume].by = m; }
   if ((f.endDepth | 0) > (run.max | 0)) run.max = f.endDepth | 0;
-  if ((f.flags | 0) & attest.SEG_SUSPENDED) run.saves[String(f.endDepth | 0)] = { t: nowMs };
+  if ((f.flags | 0) & attest.SEG_SUSPENDED) { const sk = String(f.endDepth | 0); run.saves[sk] = Object.assign(run.saves[sk] || {}, { t: nowMs }); }   // audit B-F6: merge -- never drop `by` (one save, one resume)
   if ((f.flags | 0) & attest.SEG_FINAL) run.final = 1;
   delete st.wait[m];
   return run;
@@ -1864,6 +1875,60 @@ function ptBoardPlan(names, cfg) {
   return { create, forbidden };
 }
 
+// ===== consensus grouping (audit 2026-09-06 D-F11 / B-F10 / E-G3: extracted from main() so the "N ends agree" rule is testable) =====
+//   - one voice per ACCOUNT: consensus counts distinct writers, not records. The same account writing the same key twice (cold
+//     reconnect double-write; a results record written on a suspended segment's key) used to pass as "2 consistent" = a single
+//     end settling its own claim.
+//   - the solo lane takes every pc=1 endless record of a group (guard-signed segments; soloSettle verifies signature + owner and
+//     settles the first that verifies), so a foreign same-key record can no longer push a real solo segment into the co-op lane.
+//   Returns { groups, consistentMatches, inconsistentGroups, consistent, flagged, lone, soloN }.
+function groupRecords(recs, opts) {
+  const vecOf = opts.vecOf, MAX_SEATS = opts.MAX_SEATS || 8;
+  const groups = {};
+  for (const r of recs) { const m = r.d[3] + '_' + r.d[4] + '_' + r.d[2]; (groups[m] = groups[m] || []).push(r); }
+  let consistent = 0, flagged = 0, lone = 0, soloN = 0;
+  const consistentMatches = [], inconsistentGroups = [];
+  for (const m of Object.keys(groups)) {
+    const g = groups[m];
+    // O93 solo competitive segment (pc=1 endless, guard-signed): one seat = no consensus lane. It enters
+    //   the settle loop as its own entry; the loop verifies the signature + owner binding (soloSettle).
+    const solos = isEndlessMt(g[0].d[2] | 0) ? g.filter(r => (r.d[8] | 0) === 1) : [];
+    if (solos.length) {
+      soloN++;
+      consistentMatches.push({ m, g: solos, void: false, solo: true });
+      console.log('  match=' + m + ': solo segment ' + plog(solos[0].steamID) + (g.length > solos.length ? ' (+' + (g.length - solos.length) + ' foreign non-solo record(s) ignored)' : '') + ' (attested; verified at settle)');
+      continue;
+    }
+    const writers = new Set(g.map(r => String(r.steamID))).size;
+    const vecs = g.map(vecOf);
+    let same = vecs.every(v => v === vecs[0] && v.indexOf('BAD') !== 0);
+    // M3 (2026-07-19 audit): endless groups get a second chance under zero-tail abstention --
+    // scores identical + non-zero tails identical + all-zero tails abstaining. The canonical
+    // (non-zero-tail) record is rotated to g[0]: sanity's depth-scaled score cap, the settle's
+    // endlessTail(g[0]) read and the board write all key off g[0] by convention.
+    if (!same && g.length >= 2 && isEndlessMt(g[0].d[2] | 0)) {
+      const ab = endlessAbstention(g, MAX_SEATS);
+      if (ab.same) {
+        same = true;
+        if (ab.canonIdx > 0) { const c0 = g[ab.canonIdx]; g.splice(ab.canonIdx, 1); g.unshift(c0); }
+        console.log('  match=' + m + ': endless zero-tail abstention -> canonical tail from ' + plog(g[0].steamID));
+      }
+    }
+    if (writers < 2) { lone++; console.log('  match=' + m + ': lone(' + g.length + (g.length > 1 ? ' records / 1 writer' : '') + ')'); }
+    else if (same) {
+      consistent++;
+      const cons = voidByConsensus(g.map(r => r.dispCode));
+      consistentMatches.push({ m, g, void: cons.isVoid });
+      console.log('  match=' + m + ': ' + g.length + ' consistent ok disp=[' + g.map(r => r.disp).join(',') + ']'
+        + (cons.isVoid ? ' -> consensus VOID, not settled (' + cons.voidVotes + '/' + cons.present + ')'
+          : (cons.voidVotes ? ' (VOID votes ' + cons.voidVotes + '/' + cons.present + ' below majority -> settled)' : '')));
+    }
+    else { flagged++; inconsistentGroups.push({ m, g }); ghWarn('match=' + m + ': ' + g.length + ' inconsistent/invalid (suspected forgery): ' + g.map((r, i) => plog(r.steamID) + '@' + r.shard + '=' + vecs[i]).join('  ')); }
+  }
+  console.log('reconciled: ' + Object.keys(groups).length + ' (consistent ' + consistent + ' / lone ' + lone + ' / inconsistent ' + flagged + (soloN ? ' / solo ' + soloN : '') + ')');
+  return { groups, consistentMatches, inconsistentGroups, consistent, flagged, lone, soloN };
+}
+
 async function main() {
   const missing = [];
   if (!KEY) missing.push('STEAM_PUBLISHER_KEY');
@@ -1985,47 +2050,9 @@ async function main() {
     }
     return JSON.stringify(v);
   };
-  const groups = {};
-  for (const r of recs) { const m = r.d[3] + '_' + r.d[4] + '_' + r.d[2]; (groups[m] = groups[m] || []).push(r); }
-  let consistent = 0, flagged = 0, lone = 0, soloN = 0;
-  const consistentMatches = [], inconsistentGroups = [];
-  for (const m of Object.keys(groups)) {
-    const g = groups[m];
-    // O93 solo competitive segment (pc=1 endless, guard-signed): one seat = no consensus lane. It enters
-    //   the settle loop as its own entry; the loop verifies the signature + owner binding (soloSettle).
-    if (g.length === 1 && isEndlessMt(g[0].d[2] | 0) && (g[0].d[8] | 0) === 1) {
-      soloN++;
-      consistentMatches.push({ m, g, void: false, solo: true });
-      console.log('  match=' + m + ': solo segment ' + plog(g[0].steamID) + ' (attested; verified at settle)');
-      continue;
-    }
-    const vecs = g.map(vecOf);
-    let same = vecs.every(v => v === vecs[0] && v.indexOf('BAD') !== 0);
-    // M3 (2026-07-19 audit): endless groups get a second chance under zero-tail abstention --
-    // scores identical + non-zero tails identical + all-zero tails abstaining. The canonical
-    // (non-zero-tail) record is rotated to g[0]: sanity's depth-scaled score cap, the settle's
-    // endlessTail(g[0]) read and the board write all key off g[0] by convention.
-    if (!same && g.length >= 2 && isEndlessMt(g[0].d[2] | 0)) {
-      const ab = endlessAbstention(g, MAX_SEATS);
-      if (ab.same) {
-        same = true;
-        if (ab.canonIdx > 0) { const c0 = g[ab.canonIdx]; g.splice(ab.canonIdx, 1); g.unshift(c0); }
-        console.log('  match=' + m + ': endless zero-tail abstention -> canonical tail from ' + plog(g[0].steamID));
-      }
-    }
-    if (g.length < 2) { lone++; console.log('  match=' + m + ': lone(' + g.length + ')'); }
-    else if (same) {
-      consistent++;
-      const cons = voidByConsensus(g.map(r => r.dispCode));
-      consistentMatches.push({ m, g, void: cons.isVoid });
-      console.log('  match=' + m + ': ' + g.length + ' consistent ok disp=[' + g.map(r => r.disp).join(',') + ']'
-        + (cons.isVoid ? ' -> consensus VOID, not settled (' + cons.voidVotes + '/' + cons.present + ')'
-          : (cons.voidVotes ? ' (VOID votes ' + cons.voidVotes + '/' + cons.present + ' below majority -> settled)' : '')));
-    }
-    else { flagged++; inconsistentGroups.push({ m, g }); ghWarn('match=' + m + ': ' + g.length + ' inconsistent/invalid (suspected forgery): ' + g.map((r, i) => plog(r.steamID) + '@' + r.shard + '=' + vecs[i]).join('  ')); }
-  }
-  console.log('reconciled: ' + Object.keys(groups).length + ' (consistent ' + consistent + ' / lone ' + lone + ' / inconsistent ' + flagged + (soloN ? ' / solo ' + soloN : '') + ')');
-  RUN.flagged = flagged;
+  const gr = groupRecords(recs, { vecOf, MAX_SEATS });   // audit 2026-09-06: pure, testable consensus grouping (writer-deduped)
+  const groups = gr.groups, consistentMatches = gr.consistentMatches, inconsistentGroups = gr.inconsistentGroups;
+  RUN.flagged = gr.flagged;
 
   // start/settle cross-check runs BEFORE the early returns: the very scenario it exists for
   // (a match that started and was never settled by anyone) produces no consistent matches at all,
@@ -2545,12 +2572,13 @@ async function main() {
   if (!compId) compId = await findOrCreateBoard(ENDLESS_COMP_LB, true);
   if (!compId) { strictBoard('solo comp board not found'); ghWarn('solo comp board not found (' + ENDLESS_COMP_LB + ') -> solo segments left pending'); }
   const compBest = {};
-  if (compId) { const br = await readBoardAll(compId, 'solo comp board'); for (const e of br.ents) compBest[e.steamID] = e.score | 0; }
+  let compComplete = true, compSeasonComplete = true;   // audit B-F4: a paged-out solo ladder must fall back to on-demand reads (ForceUpdate would else overwrite a deeper lifetime best with a shallower run)
+  if (compId) { const br = await readBoardAll(compId, 'solo comp board'); compComplete = br.complete !== false; for (const e of br.ents) compBest[e.steamID] = e.score | 0; }
   const compSeason = (seasonId >= 1 && compId) ? await resolveSeasonBoard(lr, ENDLESS_COMP_LB, seasonId) : { name: null, id: null };
   const compSeasonId = compSeason.id;
   if (seasonId >= 1 && compId && !compSeasonId) { strictBoard('seasonal solo comp board not found'); ghWarn('seasonal solo comp board unresolved -> solo segments left pending'); }
   const compSeasonBest = {};
-  if (compSeasonId) { const br = await readBoardAll(compSeasonId, 'seasonal solo comp board'); for (const e of br.ents) compSeasonBest[e.steamID] = e.score | 0; }
+  if (compSeasonId) { const br = await readBoardAll(compSeasonId, 'seasonal solo comp board'); compSeasonComplete = br.complete !== false; for (const e of br.ents) compSeasonBest[e.steamID] = e.score | 0; }
   let saveBoxId = byNameLb(SAVE_BOX_LB);
   if (!saveBoxId) saveBoxId = await findOrCreateBoard(SAVE_BOX_LB, false);
   if (!saveBoxId) ghWarn('save box board not found (' + SAVE_BOX_LB + ', client-writable) -> guard saves fail until it exists');
@@ -2579,7 +2607,7 @@ async function main() {
   // would silently reset his LP/XP. Fetch exactly the players this run settles (record holders +
   // roster members: leaver LP penalty targets roster sids that wrote no record). A missing entry
   // after the targeted read is a genuine new player (base 0 correct).
-  const compFamIncomplete = Object.values(compFam).some(f => (f.id && !f.complete) || (f.seasonId && !f.seasonComplete));
+  const compFamIncomplete = Object.values(compFam).some(f => (f.id && !f.complete) || (f.seasonId && !f.seasonComplete)) || (compId && !compComplete) || (compSeasonId && !compSeasonComplete);   // audit B-F4: solo ladder joins the family rule
   if ((lpId && !lpComplete) || (xpId && !xpComplete) || (cpId && !cpComplete) || (enId && !enComplete) || (enSeasonId && !enSeasonComplete) || (enTrioId && !enTrioComplete) || (enTrioSeasonId && !enTrioSeasonComplete) || compFamIncomplete) {
     const need = new Set();
     for (const c of fresh) for (const r of c.g) {
@@ -2619,6 +2647,8 @@ async function main() {
         if (fam.id && !fam.complete && fam.best[sid] == null) { const e = await readUserEntry(fam.id, sid, fam.low + ' comp'); if (e) fam.best[sid] = e.score | 0; }
         if (fam.seasonId && !fam.seasonComplete && fam.seasonBest[sid] == null) { const e = await readUserEntry(fam.seasonId, sid, 'seasonal ' + fam.low + ' comp'); if (e) fam.seasonBest[sid] = e.score | 0; }
       }
+      if (compId && !compComplete && compBest[sid] == null) { const e = await readUserEntry(compId, sid, 'solo comp'); if (e) compBest[sid] = e.score | 0; }   // audit B-F4
+      if (compSeasonId && !compSeasonComplete && compSeasonBest[sid] == null) { const e = await readUserEntry(compSeasonId, sid, 'seasonal solo comp'); if (e) compSeasonBest[sid] = e.score | 0; }
     });
     const failed = fetched.filter(x => x.status === 'rejected');
     if (failed.length) { ghErr('on-demand base reads failed (' + failed.length + '/' + need.size + ') -- abort run, do NOT settle from base 0'); process.exit(1); }
@@ -2677,9 +2707,16 @@ async function main() {
   const soloPub = attest.loadPubTable(require('path').join(__dirname, 'attest-keys.json')) || {};
   const soloAllowDev = /_test$/.test(ENDLESS_COMP_LB);   // dev-key records only ever land on a *_test ladder
   const soloSettle = async (c) => {
-    const r = c.g[0], sid = String(r.steamID), p = pid(sid), m = c.m;
-    const v = attest.verifySoloRecord(r.d, soloPub);
-    const gate = attest.soloSettleGate(v, { owner: sid, allowDevKey: soloAllowDev });
+    const m = c.m;
+    // audit 2026-09-06 B-F10: a group can hold several pc=1 records under one key (a foreign same-key record beside the real
+    //   guard-signed segment) -- settle the first candidate whose signature + owner binding verifies; judge the rest as before
+    let r = c.g[0], sid = String(r.steamID), p = pid(sid), v = null, gate = null;
+    for (const cand of c.g) {
+      const cv = attest.verifySoloRecord(cand.d, soloPub);
+      const cg = attest.soloSettleGate(cv, { owner: String(cand.steamID), allowDevKey: soloAllowDev });
+      if (!v || cg.settle || cg.pending) { r = cand; sid = String(cand.steamID); p = pid(sid); v = cv; gate = cg; }
+      if (cg.settle) break;
+    }
     if (!gate.settle) {
       if (gate.pending) { console.log('  solo ' + m + ': ' + plog(sid) + ' pending (' + gate.reason + ')'); return false; }
       recordFlag(signals, c.g, m, nowMs); sigDirty = true; trustTouched.add(sid);
@@ -2700,13 +2737,6 @@ async function main() {
       ghWarn('match=' + m + ': solo segment seedcap over-cap veto -- not settled');
       return false;
     }
-    if (SEEDCAP_REJECT && seedcap && seedcap.suspects && seedcapRejectActive(seedcap.suspects[p], Math.floor(nowMs / 60000))) {
-      RUN.seedcapReject = (RUN.seedcapReject | 0) + 1;
-      ghWarn('match=' + m + ': solo segment ' + plog(sid) + ' inside seedcap reject window -- own settlement discarded');
-      processed.add(m);
-      return false;
-    }
-    if (!cpId || !compId || (seasonId >= 1 && !compSeasonId)) { console.log('  solo ' + m + ': cp/comp/seasonal board unresolved -- left pending'); return false; }
     const key = soloRunKey(p, f.seasonId, f.runSeed);
     const plan = soloChainPlan(soloState, key, f, m, nowMs);
     if (plan.ok === null) { console.log('  solo ' + m + ': ' + plog(sid) + ' depth ' + f.startDepth + '->' + f.endDepth + ' waiting for its chain (' + plan.reason + ')'); return false; }
@@ -2716,6 +2746,18 @@ async function main() {
       processed.add(m);
       return false;
     }
+    if (SEEDCAP_REJECT && seedcap && seedcap.suspects && seedcapRejectActive(seedcap.suspects[p], Math.floor(nowMs / 60000))) {
+      // audit 2026-09-06 B-F9 (user 2026-09-07): inside the reject window the OUTPUTS are discarded (ladder / CP / XP / milestones)
+      //   but the chain keeps walking (run.max / save points), exactly like the team lane restores only the flagged account's
+      //   outputs. The old early return never advanced the chain, so every segment after the window chain-gapped 7 days later
+      //   and the whole run died -- the opposite of O187's "the window passes and the account recovers".
+      RUN.seedcapReject = (RUN.seedcapReject | 0) + 1;
+      soloAdvance(soloState, key, f, m, plan, nowMs);
+      ghWarn('match=' + m + ': solo segment ' + plog(sid) + ' inside seedcap reject window -- own settlement discarded (chain advanced to ' + f.endDepth + ', no ladder/CP/XP)');
+      processed.add(m);
+      return false;
+    }
+    if (!cpId || !compId || (seasonId >= 1 && !compSeasonId)) { console.log('  solo ' + m + ': cp/comp/seasonal board unresolved -- left pending'); return false; }
     // pacing: the segment's own start attestation (single guard attester) or its first sighting
     let pend = startsPending[m];
     if (!pend) { pend = startsPending[m] = { t0: nowMs, mt: r.d[2] | 0, roster: {}, settled: [], synth: true }; sigPlayer(signals, p, nowMs).ns += 1; sigDirty = true; }
@@ -2742,8 +2784,8 @@ async function main() {
       if (compBest[sid] == null || packed > compBest[sid]) { compBest[sid] = packed; changedComp[sid] = { s: packed, ts: f.score | 0 }; console.log('  solo best ' + m + ': ' + plog(sid) + ' depth ' + f.endDepth + ' bank ' + f.score + ' -> board ' + packed); }
       if (compSeasonId && (f.seasonId | 0) === (seasonId | 0) && (compSeasonBest[sid] == null || packed > compSeasonBest[sid])) { compSeasonBest[sid] = packed; changedCompSeason[sid] = { s: packed, ts: f.score | 0 }; console.log('  solo season best ' + m + ': ' + plog(sid) + ' depth ' + f.endDepth + ' -> board ' + packed); }
     }
-    if (xpId) creditXpEndless(c.g, { startDepth: f.startDepth, endDepth: f.endDepth }, xp, changedXp, spSet);
-    console.log('  solo settle ' + m + ': ' + plog(sid) + ' depth ' + f.startDepth + '->' + f.endDepth + ' bank ' + f.score + ' flags ' + f.flags + ((f.dispCode | 0) === attest.DISP_USER_QUIT ? ' (quit)' : '') + ' key=' + f.keyName + (v.sealed ? '' : ' [dev]'));
+    if (xpId) creditXpEndless(c.g, { startDepth: Math.max(f.startDepth | 0, plan.proven | 0), endDepth: f.endDepth }, xp, changedXp, spSet);   // audit B-F2: overlap credits new depth only
+    console.log('  solo settle ' + m + ': ' + plog(sid) + ' depth ' + f.startDepth + '->' + f.endDepth + ' bank ' + f.score + ' flags ' + f.flags + ((f.dispCode | 0) === attest.DISP_USER_QUIT ? ' (quit)' : '') + ' key=' + f.keyName + (v.sealed ? '' : ' [dev]') + (plan.overlap != null ? ' (overlap from ' + plan.overlap + ', proven ' + plan.proven + ')' : ''));
     processed.add(m);
     return true;
   };
@@ -2860,6 +2902,10 @@ async function main() {
         let teamT = 0;
         for (let i = 0; i < pc7; i++) teamT += g[0].d[10 + i] | 0;
         for (const sid of writerSids) {
+          // audit 2026-09-06 B-F5: a writer inside the seedcap reject window gets his ladder/CP restored by scRestore, but the
+          //   milestone bitmap lives in the chain state file (not in the snapshot) -> skip his outputs here entirely so a
+          //   discarded settlement cannot burn a once-per-season milestone
+          if (scPendingRestore && scPendingRestore.sids.indexOf(sid) >= 0) { console.log('  endless-comp ' + c.m + ': ' + plog(sid) + ' inside seedcap reject window -- outputs skipped'); continue; }
           for (const ms of soloMilestones(soloMsSlot(soloState, pid(sid), t.seasonId, fam.fam, nowMs), f.endDepth)) {
             cp[sid] = (cp[sid] == null ? 0 : cp[sid]) + ms[1]; changedCp[sid] = cp[sid];
             console.log('  endless-comp cp ' + c.m + ': ' + plog(sid) + ' +' + ms[1] + ' milestone depth ' + ms[0] + ' (' + fam.low + ') -> ' + cp[sid]);
@@ -2870,8 +2916,8 @@ async function main() {
             if (fam.seasonId && (t.seasonId | 0) === (seasonId | 0) && (fam.seasonBest[sid] == null || packed > fam.seasonBest[sid])) { fam.seasonBest[sid] = packed; fam.seasonChanged[sid] = { s: packed, ts: teamT }; console.log('  endless-comp season best (' + fam.low + ') ' + c.m + ': ' + plog(sid) + ' -> board ' + packed); }
           }
         }
-        if (xpId) creditXpEndless(g, f, xp, changedXp, spSet);
-        console.log('  endless-comp settle ' + c.m + ': pc ' + pc7 + ' depth ' + f.startDepth + '->' + f.endDepth + ' team ' + teamT + ' flags ' + f.flags + ' proven ' + plan.proven);
+        if (xpId) creditXpEndless(g, { startDepth: Math.max(f.startDepth | 0, plan.proven | 0), endDepth: f.endDepth | 0 }, xp, changedXp, spSet);   // audit B-F2: overlap credits new depth only
+        console.log('  endless-comp settle ' + c.m + ': pc ' + pc7 + ' depth ' + f.startDepth + '->' + f.endDepth + ' team ' + teamT + ' flags ' + f.flags + ' proven ' + plan.proven + (plan.overlap != null ? ' (overlap from ' + plan.overlap + ')' : ''));
         processed.add(c.m); settledEndlessComp++;
         continue;
       }
@@ -3379,4 +3425,4 @@ if (require.main === module) {
 }
 module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, isVoidDisp, voidByConsensus, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, RS_SOLO_VS_TRIO, RS_TRIO_WIN, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, CONFESS_MAGIC, reconcileConfessions, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan, postForm, postFormDetails, findOrCreateBoard, ghWarn, ghErr, PT_MODE, PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, ptSeedCp, ptBoardPlan, PRIVATE_XP, isPrivateMt, privateProgressOf, creditXpPrivate, ENDLESS_XP, computeXpEndless, creditXpEndless, CAMPAIGN_LB, SEEDCAP_REJECT_LADDER_MIN, seedcapRejectWindowMin, seedcapRejectUntilMin, seedcapRejectActive,
   ENDLESS_COMP_LB, SAVE_BOX_LB, SOLO_FILE, COMP, soloSanity, soloChainPlan, soloMilestones, soloAdvance, soloRunKey, soloStartAttested, loadSolo, saveSolo,
-  ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, SAVE_BOX_LB_DUO, SAVE_BOX_LB_TRIO, teamRunKey, soloMsSlot };
+  ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, SAVE_BOX_LB_DUO, SAVE_BOX_LB_TRIO, teamRunKey, soloMsSlot, groupRecords };
