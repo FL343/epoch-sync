@@ -28,6 +28,7 @@ function mk7(writer, seat, o) {
   if (!o.noTail) d.push(o.startDepth | 0, o.endDepth == null ? 6 : o.endDepth | 0, o.cont | 0, o.tokens | 0);
   if (!o.noTail && o.seasonId != null) d.push(o.seasonId | 0);   // 5th tail int (2026-09-05 season snapshot)
   if (!o.noTail && o.seasonId != null && o.flags != null) d.push(o.flags | 0);   // 6th tail int (team competitive segment flags)
+  if (!o.noTail && o.seasonId != null && o.flags != null && o.build != null) d.push(o.build | 0, o.picksLo | 0, o.picksHi | 0);   // 7th..9th (2026-09-07 perk build + pick log)
   return { steamID: writer, d, roster: decodeRoster(d), dispCode: (o.disp == null ? 0 : o.disp) };
 }
 const grp = (...rs) => rs;
@@ -52,7 +53,7 @@ eq('goalBase clamps depth<1', endlessGoalBase(0), 650);
 
 // -- tail decode --
 const clean = mk7(A, 0, { startDepth: 0, endDepth: 6, cont: 0, tokens: 0 });
-eq('tail decode (4-int legacy tail -> seasonId -1, flags 0)', endlessTail(clean.d), { startDepth: 0, endDepth: 6, continuesUsed: 0, tokensCp: 0, seasonId: -1, flags: 0 });
+eq('tail decode (4-int legacy tail -> seasonId -1, flags 0, no perks)', endlessTail(clean.d), { startDepth: 0, endDepth: 6, continuesUsed: 0, tokensCp: 0, seasonId: -1, flags: 0, build: 0, picksLo: 0, picksHi: 0 });
 eq('missing tail -> null', endlessTail(mk7(A, 0, { noTail: true }).d), null);
 
 // -- CP gain mirror (client computeCpGain): base 10 + rank bonus (valid only), ranked x2 --
@@ -186,8 +187,22 @@ eq('rosterConsensus split vote -> seat dropped', rosterConsensus(grp(mk7(A, 0, {
 {
   const { endlessAbstention, computeXpEndless, creditXpEndless, ENDLESS_XP, PRIVATE_XP } = v;
   const s1 = mk7(A, 0, { startDepth: 0, endDepth: 6, seasonId: 1 });
-  eq('tail decode with seasonId', endlessTail(s1.d), { startDepth: 0, endDepth: 6, continuesUsed: 0, tokensCp: 0, seasonId: 1, flags: 0 });
+  eq('tail decode with seasonId', endlessTail(s1.d), { startDepth: 0, endDepth: 6, continuesUsed: 0, tokensCp: 0, seasonId: 1, flags: 0, build: 0, picksLo: 0, picksHi: 0 });
   eq('tail decode with the 6th int (segment flags)', endlessTail(mk7(A, 0, { startDepth: 5, endDepth: 10, seasonId: 1, flags: 9 }).d).flags, 9);
+  // 2026-09-07: 7th..9th ints = perk build word + pick log (lo/hi); 9-int tails are consistency-compared in full (lockstep build)
+  {
+    const p9 = mk7(A, 0, { startDepth: 0, endDepth: 6, seasonId: 1, flags: 0, build: 41411, picksLo: 1567312775, picksHi: 2874452 });
+    eq('9-int tail decode (build / picksLo / picksHi)', [endlessTail(p9.d).build, endlessTail(p9.d).picksLo, endlessTail(p9.d).picksHi], [41411, 1567312775, 2874452]);
+    eq('9-int tail record length = 11 + 3pc + 9', p9.d.length, 11 + 3 * 2 + 9);
+    const p9b = mk7(B, 1, { startDepth: 0, endDepth: 6, seasonId: 1, flags: 0, build: 41411, picksLo: 1567312775, picksHi: 2874452 });
+    const p9x = mk7(B, 1, { startDepth: 0, endDepth: 6, seasonId: 1, flags: 0, build: 41412, picksLo: 1567312775, picksHi: 2874452 });
+    eq('abstention vector covers the perk ints: same build -> consistent', v.endlessAbstention([p9, p9b], 8).same, true);
+    eq('abstention vector covers the perk ints: a different build word -> inconsistent', v.endlessAbstention([p9, p9x], 8).same, false);
+    eq('a 9-int tail still passes sanity (perk ints carry no domain of their own here)', sanityFlags(grp(p9, p9b)), []);
+    // replay gate exported for the lanes: build 0 / picks 0 is trivially fine, a build without a log is not
+    eq('verifyPerkPicks exported: no perks -> ok', v.verifyPerkPicks({ build: 0, picksLo: 0, picksHi: 0, seasonId: 1, endDepth: 6 }, null, 2).ok, true);
+    eq('verifyPerkPicks exported: build without a pick log -> perk_forge', v.verifyPerkPicks({ build: 41411, picksLo: 0, picksHi: 0, seasonId: 1, endDepth: 6 }, null, 2).reason, 'perk_forge');
+  }
   eq('5-int tail record -> [] (season in domain)', sanityFlags(grp(s1, mk7(B, 1, { startDepth: 0, endDepth: 6, seasonId: 1 }))), []);
   has('season out of domain flags', sanityFlags(grp(mk7(A, 0, { seasonId: 5000 }), mk7(B, 1, { seasonId: 5000 }))), 'season');
   not('legacy 4-int tail never flags season', sanityFlags(pair({ startDepth: 0, endDepth: 6 })), 'season');

@@ -39,8 +39,13 @@ function hash32(s) {
 // ============================================================
 // A) solo attested record verification
 // ============================================================
-const LEDGER_MAGIC = 0xB1, LEDGER_VER = 3, MT_ENDLESS = 7, ATT_VER = 3;   // attVer 3 = flags (6th tail int) + op-stream commitment (2026-09-06); 2 = seasonId tail (2026-09-05); 1 = pre-season
-const BASE_LEN = 25, SIG_INTS = 16;
+const LEDGER_MAGIC = 0xB1, LEDGER_VER = 3, MT_ENDLESS = 7, ATT_VER = 4;   // attVer 4 = + perk build / pick log (2026-09-07); 3 = flags (6th tail int) + op-stream commitment (2026-09-06); 2 = seasonId tail (2026-09-05); 1 = pre-season
+const BASE_LEN = 28, SIG_INTS = 16;
+// accepted layouts: attVer -> pre-sig length. attVer sits at [21] in EVERY layout (new fields are appended after
+//   opHash, never inserted before it), so the decoder reads it first and only then knows where the signature
+//   starts. The previous layout stays accepted through the rollout window (writers only ever write ATT_VER).
+const LAYOUTS = { 3: { baseLen: 25 }, 4: { baseLen: 28 } };
+const BASE_LEN_V3 = 25;
 // endless tail `flags` bits (6th tail int; co-op client records write 0, guard-built solo segments set them)
 const SEG_COMP = 8;        // team competitive segment (client-written, consensus lane; the guard never sets it -- solo sanity keeps it illegal)
 const SEG_SUSPENDED = 1;   // written by "save & quit" -> the ONE segment a later run may resume from (once)
@@ -62,7 +67,7 @@ function pubKeyObj(pubHex) {
 // details int32[] + pubTable ({keyName: {pubs:[hex], sealed}}) -> verdict
 //   { ok, reason, pending, fields }  (ok=true only when a registered key verifies the signature)
 function verifySoloRecord(d, pubTable) {
-  if (!Array.isArray(d) || d.length < BASE_LEN + SIG_INTS) return { ok: false, reason: 'short' };
+  if (!Array.isArray(d) || d.length < BASE_LEN_V3 + SIG_INTS) return { ok: false, reason: 'short' };   // shortest accepted layout
   if ((d[0] & 0xff) !== LEDGER_MAGIC) return { ok: false, reason: 'magic' };
   if (d[1] !== LEDGER_VER) return { ok: false, reason: 'ver' };
   if (d[2] !== MT_ENDLESS) return { ok: false, reason: 'mt' };
@@ -74,34 +79,42 @@ function verifySoloRecord(d, pubTable) {
   //   guard signed this content", NOT "this account's guard signed for this account". Without the
   //   binding, a sealed-key extractor could sign a record for an arbitrary steamId. (knife-7 audit.)
   const rosterSid = ((BigInt(d[13] >>> 0) << 32n) | BigInt(d[12] >>> 0)).toString();
+  const attVer = d[21] & 0xff;
+  const lay = LAYOUTS[attVer];   // layout (= where the sig starts) is keyed by attVer, which sits at [21] in every layout
+  const v4 = attVer >= 4;
+  const pk = v4 ? ((BigInt(d[27] >>> 0) << 32n) | BigInt(d[26] >>> 0)) : 0n;
   const fields = {
     matchHash: d[3] >>> 0, runSeed: d[4] | 0, durationSec: d[9] | 0, score: d[10] | 0, dispCode: d[11] | 0,
     startDepth: d[14] | 0, endDepth: d[15] | 0, continuesUsed: d[16] | 0, tokensCp: d[17] | 0, seasonId: d[18] | 0, flags: d[19] | 0,
-    keyId, keyName, attVer: d[21] & 0xff, jwtPresent: !!((d[21] >> 8) & 1), jwtHashLo: d[22] >>> 0,
+    keyId, keyName, attVer, jwtPresent: !!((d[21] >> 8) & 1), jwtHashLo: d[22] >>> 0,
     // O143-4 commitment: rolling FNV-1a 64 over the op stream the guard's authority core executed (hex, lo@23 hi@24)
     opHash: ((BigInt(d[24] >>> 0) << 32n) | BigInt(d[23] >>> 0)).toString(16),
+    // attVer 4 (2026-09-07): perk build word @25 + pick log @26 (lo) / @27 (hi); an attVer 3 record carries no perks (0/0/0)
+    build: v4 ? (d[25] >>> 0) : 0, picksLo: v4 ? (d[26] | 0) : 0, picksHi: v4 ? (d[27] | 0) : 0, picks: pk.toString(),
     rosterSid,
   };
   // attVer mismatch = a layout this cron cannot even locate the signature in. Same soft-state
   //   family as unknown-key (client shipped first, cron update lagged): PENDING, not destroyed --
   //   a later cron that knows the layout settles it. Hard-rejecting here would burn legitimate
   //   runs during every rollout window (knife-7 second audit P2-4).
-  if (fields.attVer !== ATT_VER) return { ok: false, reason: 'att-ver', pending: true, fields };
+  if (!lay) return { ok: false, reason: 'att-ver', pending: true, fields };
+  const baseLen = lay.baseLen;
+  if (d.length < baseLen + SIG_INTS) return { ok: false, reason: 'short', fields };
   // schema contract: sig is ALWAYS the last block; future fields insert BEFORE sig. The Steam
   //   details buffer is fixed-size zero-padded, so every int after the sig must be zero -- a
   //   non-zero tail would be an unsigned writable region smuggled past the signature domain:
   //   reject. (Checked AFTER the attVer gate: a future layout moves the sig end, so only the
   //   cron matching that layout may judge the tail.) (knife-7 second audit P2-4.)
-  for (let i = BASE_LEN + SIG_INTS; i < d.length; i++) {
+  for (let i = baseLen + SIG_INTS; i < d.length; i++) {
     if ((d[i] | 0) !== 0) return { ok: false, reason: 'trailing', fields };
   }
   const ent = pubTable && pubTable[keyName];
   // unknown key = a soft state: a freshly shipped build whose key table push lagged.
   //   The record waits (pending) instead of being rejected; a later run settles it.
   if (!ent || !Array.isArray(ent.pubs) || !ent.pubs.length) return { ok: false, reason: 'unknown-key', pending: true, fields };
-  const base = d.slice(0, BASE_LEN);
+  const base = d.slice(0, baseLen);
   const sig = Buffer.alloc(64);
-  for (let i = 0; i < SIG_INTS; i++) sig.writeInt32LE(d[BASE_LEN + i] | 0, i * 4);
+  for (let i = 0; i < SIG_INTS; i++) sig.writeInt32LE(d[baseLen + i] | 0, i * 4);
   const bytes = toBytes(base);
   for (const pub of ent.pubs) {
     try { if (crypto.verify(null, bytes, pubKeyObj(pub), sig)) return { ok: true, fields, sealed: !!ent.sealed }; }
@@ -259,7 +272,7 @@ function saveBoxHead(d) {
 module.exports = {
   hash32,
   // A
-  LEDGER_MAGIC, LEDGER_VER, MT_ENDLESS, ATT_VER, BASE_LEN, SIG_INTS,
+  LEDGER_MAGIC, LEDGER_VER, MT_ENDLESS, ATT_VER, BASE_LEN, BASE_LEN_V3, LAYOUTS, SIG_INTS,
   // C
   SB_MAGIC, SB_VER, SB_CONSUMED, saveBoxHead,
   SEG_SUSPENDED, SEG_FINAL, SEG_RESUMED, SEG_COMP, DISP_FINISHED, DISP_USER_QUIT,

@@ -69,6 +69,26 @@ const SIDA = '76561198000000001', SIDB = '76561198000000002';
     'E t 42 2 0 9 0');
   ok('[2] capParamsOf carries the tail season (absent -> -1)',
     sc.capParamsOf(7, 2, { startDepth: 0, endDepth: 9, seasonId: 2 }).seasonId === 2 && sc.capParamsOf(7, 2, { startDepth: 0, endDepth: 9 }).seasonId === -1);
+  // perk build word (2026-09-07): 8th field, positional after an explicit season; omitted when 0 (pre-perk lines unchanged)
+  ok('[2] endless line + season + build (8th field)', sc.cliLineOf('t', { entry: 'endless', pc: 1, startDepth: 0, endDepth: 9, startBank: 0, seasonId: 1, build: 41411 }, 42) ===
+    'E t 42 1 0 9 0 1 41411');
+  ok('[2] endless line legacy tail + build -> explicit -1 season sentinel keeps the field positional', sc.cliLineOf('t', { entry: 'endless', pc: 2, startDepth: 0, endDepth: 9, startBank: 0, seasonId: -1, build: 5 }, 42) ===
+    'E t 42 2 0 9 0 -1 5');
+  ok('[2] build 0 leaves the line untouched', sc.cliLineOf('t', { entry: 'endless', pc: 2, startDepth: 0, endDepth: 9, startBank: 0, seasonId: 1, build: 0 }, 42) === 'E t 42 2 0 9 0 1');
+  ok('[2] capParamsOf carries the tail build (absent -> 0)',
+    sc.capParamsOf(7, 1, { startDepth: 0, endDepth: 9, seasonId: 2, build: 386 }).build === 386 && sc.capParamsOf(7, 2, { startDepth: 0, endDepth: 9, seasonId: 2 }).build === 0);
+  // CLI build-support probe: the clear-bonus perk must move the cap; an older CLI (field ignored) returns equal caps -> unsupported
+  ok('[2] PROBE_BUILD = perk id 2 lv 3 in slot 0 (386)', sc.PROBE_BUILD === 386);
+  ok('[2] cliSupportsBuild: cap rises -> true', sc.cliSupportsBuild(() => ({ map: { p0: { cap: 1000 }, p1: { cap: 1500 } }, head: 'x' })) === true);
+  ok('[2] cliSupportsBuild: equal caps (field ignored) -> false', sc.cliSupportsBuild(() => ({ map: { p0: { cap: 1000 }, p1: { cap: 1000 } }, head: 'x' })) === false);
+  ok('[2] cliSupportsBuild: CLI failure / ERR line -> false (defer, never audit with the wrong cap)',
+    sc.cliSupportsBuild(() => ({ fail: 'exit=1' })) === false && sc.cliSupportsBuild(() => ({ map: { p0: { cap: 1000 }, p1: { err: 'bad' } }, head: 'x' })) === false);
+  ok('[2] probe lines: same board, season 0, build only on p1', (() => {
+    let seen = null; sc.cliSupportsBuild((lines) => { seen = lines; return { map: { p0: { cap: 1 }, p1: { cap: 2 } } }; });
+    return JSON.stringify(seen) === JSON.stringify(['E p0 12345 1 0 1 0 0', 'E p1 12345 1 0 1 0 0 386']);
+  })());
+  ok('[2] main defers build-carrying groups when the CLI ignores the field (source pin)',
+    /if \(pending\.some\(x => x\.p && x\.p\.build\) && !cliSupportsBuild\(\)\)/.test(require('fs').readFileSync(path.join(__dirname, '..', 'seedcap.js'), 'utf8')));
 }
 
 // ---- [3] endless chain carry bound ----

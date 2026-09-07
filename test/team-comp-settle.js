@@ -49,7 +49,7 @@ eq('milestone bitmap TTL outlives a season', COMP.MS_TTL_MS, 120 * 86400000);
 
 console.log('-- tail decode --');
 eq('6-int tail: flags read', endlessTail(mk7(SA, 0, { startDepth: 5, endDepth: 10, flags: A.SEG_COMP | A.SEG_SUSPENDED }).d),
-  { startDepth: 5, endDepth: 10, continuesUsed: 0, tokensCp: 0, seasonId: 1, flags: 9 });
+  { startDepth: 5, endDepth: 10, continuesUsed: 0, tokensCp: 0, seasonId: 1, flags: 9, build: 0, picksLo: 0, picksHi: 0 });
 
 console.log('-- sanity: casual vs competitive segment --');
 not('casual co-op (flags 0) clean', sanityFlags(pair({ flags: 0, endDepth: 6 })), 'flags');
@@ -180,7 +180,7 @@ console.log('-- wiring pins (validate.js lane) --');
   assert('progress XP per segment (writers only; audit B-F2: from the proven depth on an overlapping retry)', /creditXpEndless\(g, \{ startDepth: Math\.max\(f\.startDepth \| 0, plan\.proven \| 0\), endDepth: f\.endDepth \| 0 \}, xp, changedXp, spSet\)/.test(lane));
   assert('audit B-F5: a reject-window writer is skipped in the milestone/ladder loop (bitmap lives outside the snapshot)', /if \(scPendingRestore && scPendingRestore\.sids\.indexOf\(sid\) >= 0\) \{ console\.log\('  endless-comp '/.test(lane));
   assert('solo lane milestones moved to the per-season family slot too', /soloMilestones\(soloMsSlot\(soloState, p, f\.seasonId, 'SOLO', nowMs\), f\.endDepth\)/.test(src));
-  assert('consistency vector compares the whole 6-int tail (flags are lockstep fact)', /v = v\.concat\(r\.d\.slice\(at, at \+ Math\.min\(6, r\.d\.length - at\)\)\);/.test(src) && /JSON\.stringify\(r\.d\.slice\(at, at \+ Math\.min\(6, r\.d\.length - at\)\)\)/.test(src));
+  assert('consistency vector compares the whole 9-int tail (flags + perk build / pick log are lockstep facts)', /v = v\.concat\(r\.d\.slice\(at, at \+ Math\.min\(9, r\.d\.length - at\)\)\);/.test(src) && /JSON\.stringify\(r\.d\.slice\(at, at \+ Math\.min\(9, r\.d\.length - at\)\)\)/.test(src));
   assert('main app provisions the family surface up-front', /\[ENDLESS_COMP_LB_DUO, true\], \[SAVE_BOX_LB_DUO, false\], \[ENDLESS_COMP_LB_TRIO, true\], \[SAVE_BOX_LB_TRIO, false\]/.test(src));
   assert('family boards resolved find-or-create + season twins + save boxes', /compFam\[fam\] = \{ fam, low, name: lbName, id, seasonId: season\.id, best, seasonBest, complete, seasonComplete, saveBoxId: sbId/.test(src));
   assert('on-demand base reads cover the family ladders', /compFamIncomplete/.test(src) && /fam\.best\[sid\] = e\.score \| 0/.test(src));

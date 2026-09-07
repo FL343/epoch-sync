@@ -57,8 +57,10 @@ console.log('-- chain rules --');
   const T0 = 1000000;
   let plan = soloChainPlan(st, key, seg({ startDepth: 0, endDepth: 5 }), 'm0', T0);
   eq('fresh run: depth-0 segment settles, proven 0', plan, { ok: true, proven: 0 });
-  soloAdvance(st, key, seg({ startDepth: 0, endDepth: 5 }), 'm0', plan, T0);
+  soloAdvance(st, key, seg({ startDepth: 0, endDepth: 5, picksLo: 9, picksHi: 0 }), 'm0', plan, T0);
   eq('run memory after seg0', [st.runs[key].max, st.runs[key].seg0, st.runs[key].final || 0], [5, 1, 0]);
+  eq('run memory keeps the segment\'s pick log (perk_chain input for the next segment)', st.runs[key].pk, { lo: 9, hi: 0 });
+  eq('a pick log that does not extend the remembered one -> perk_chain', v.verifyPerkPicks({ build: 0, picksLo: 10, picksHi: 0, seasonId: 1, endDepth: 10 }, st.runs[key], 1), { ok: false, reason: 'perk_chain', why: 'prefix' });
   plan = soloChainPlan(st, key, seg({ startDepth: 5, endDepth: 10 }), 'm1', T0);
   eq('checkpoint continuation settles, proven = its startDepth', plan, { ok: true, proven: 5 });
   soloAdvance(st, key, seg({ startDepth: 5, endDepth: 10 }), 'm1', plan, T0);
@@ -167,6 +169,12 @@ console.log('-- wiring pins --');
   assert('audit B-F9: inside the seedcap reject window the chain still advances, only the outputs are discarded', /inside seedcap reject window -- own settlement discarded \(chain advanced to/.test(src) && (src.match(/soloAdvance\(soloState, key, f, m, plan, nowMs\);/g) || []).length >= 2);
   assert('audit B-F4: solo ladder paging joins the on-demand base-read rule', /compComplete = br\.complete !== false/.test(src) && /readUserEntry\(compId, sid, 'solo comp'\)/.test(src) && /\|\| \(compId && !compComplete\) \|\| \(compSeasonId && !compSeasonComplete\)/.test(src));
   assert('a save point is consumed once and the resume debit rides the consume', /if \(plan\.consume\) \{[\s\S]{0,120}COMP\.RESUME_CP/.test(src));
+  // perk replay (2026-09-07): every endless lane verifies the tail's pick log against its build (solo + team comp with the
+  //   run's chain memory, casual co-op without), rejects are processed like chain rejects, and the memory keeps the log
+  assert('perk replay wired into the solo lane (chain memory) + team comp lane + casual lane; rejects processed',
+    /perks\.verifyPerkPicks\(f, soloState\.runs\[key\], 1\)/.test(src) && /perks\.verifyPerkPicks\(f, soloState\.runs\[key\], pc7\)/.test(src)
+    && /perks\.verifyPerkPicks\(\{ build: t\.build >>> 0, picksLo: t\.picksLo \| 0, picksHi: t\.picksHi \| 0, seasonId: t\.seasonId \| 0, endDepth: t\.endDepth \| 0 \}, null, pc7\)/.test(src)
+    && (src.match(/perk REJECT \(/g) || []).length === 3 && /run\.pk = \{ lo: f\.picksLo \| 0, hi: f\.picksHi \| 0 \}/.test(src));
 }
 console.log('=== ' + (failN === 0 ? 'PASS' : 'FAIL') + ' — ' + failN + ' fail (solo-settle) ===');
 if (failN) process.exit(1);

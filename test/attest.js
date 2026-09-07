@@ -62,6 +62,45 @@ const META = { matchId: 'solo_run_1', runSeed: 42424242, score: 555000, duration
   startDepth: 0, endDepth: 17, continuesUsed: 1, tokensCp: 0, steamId: '76561198000000001', keyId: 2026083101,
   flags: 1, dispCode: 0, opHash: '0xfeedfacecafebeef' };
 
+// attVer 4 layout (2026-09-07): attVer 3 base + perk build @25 + pick log lo @26 / hi @27, sig from [28]
+function buildBase4(m) {
+  const d = buildBase(m);
+  d[21] = (4 | ((m.jwtPresent ? 1 : 0) << 8));
+  const pk = BigInt.asUintN(64, BigInt(m.picks || 0));
+  d.push((m.build | 0), Number(pk & 0xffffffffn) | 0, Number((pk >> 32n) & 0xffffffffn) | 0);
+  return d;
+}
+
+console.log('== A0) layouts (attVer 3 and 4 accepted; attVer sits at [21] in both) ==');
+{
+  eq('ATT_VER 4 / BASE_LEN 28 / LAYOUTS {3:25, 4:28} / BASE_LEN_V3 25', [A.ATT_VER, A.BASE_LEN, A.LAYOUTS, A.BASE_LEN_V3], [4, 28, { 3: { baseLen: 25 }, 4: { baseLen: 28 } }, 25]);
+  const m4 = Object.assign({}, META, { build: 41411, picks: '12345678901234567' });
+  const rec4 = sign(buildBase4(m4), kSealed.priv);
+  eq('attVer 4 record length = 28 + 16', rec4.length, 44);
+  const v4 = A.verifySoloRecord(rec4, TABLE);
+  assert('attVer 4 record signed with the sealed key verifies', v4.ok === true && v4.sealed === true);
+  eq('decoded attVer 4 tail: attVer / build / picksLo / picksHi / picks', [v4.fields.attVer, v4.fields.build, v4.fields.picksLo, v4.fields.picksHi, v4.fields.picks], [4, 41411, 1567312775, 2874452, '12345678901234567']);
+  eq('attVer 4 keeps the v3 fields at their slots (endDepth / flags / opHash)', [v4.fields.endDepth, v4.fields.flags, v4.fields.opHash], [17, 1, 'feedfacecafebeef']);
+  const tb = rec4.slice(); tb[25] = 0;
+  eq('tampered build word (inside the signature domain) -> bad-sig', A.verifySoloRecord(tb, TABLE).reason, 'bad-sig');
+  const tp = rec4.slice(); tp[26] = 0;
+  eq('tampered pick log -> bad-sig', A.verifySoloRecord(tp, TABLE).reason, 'bad-sig');
+  assert('zero padding after the v4 sig still verifies', A.verifySoloRecord(rec4.concat(new Array(64 - rec4.length).fill(0)), TABLE).ok === true);
+  eq('non-zero tail after the v4 sig -> trailing', A.verifySoloRecord(rec4.concat([0, 77]), TABLE).reason, 'trailing');
+  eq('v4 record one int short -> short', A.verifySoloRecord(rec4.slice(0, 43), TABLE).reason, 'short');
+  const a5 = rec4.slice(); a5[21] = 5;
+  assert('future attVer 5 -> att-ver + pending', (() => { const r = A.verifySoloRecord(a5, TABLE); return r.ok === false && r.reason === 'att-ver' && r.pending === true; })());
+  const rec3 = sign(buildBase(META), kSealed.priv);
+  const v3 = A.verifySoloRecord(rec3, TABLE);
+  assert('attVer 3 record (41 int, sig from [25]) still verifies through the rollout window', v3.ok === true && v3.fields.attVer === 3);
+  eq('attVer 3 record decodes as no perks', [v3.fields.build, v3.fields.picksLo, v3.fields.picksHi, v3.fields.picks], [0, 0, 0, '0']);
+  eq('attVer 3 record with a non-zero int after ITS sig -> trailing (sig end is layout-relative)', A.verifySoloRecord(rec3.concat([0, 9]), TABLE).reason, 'trailing');
+  const v3as4 = rec3.slice(); v3as4[21] = 4;
+  eq('a v3 body claiming attVer 4 -> short (the v4 layout needs 44 ints; no sig relocation trick)', A.verifySoloRecord(v3as4, TABLE).reason, 'short');
+  const v3as4pad = rec3.concat([0, 0, 0]); v3as4pad[21] = 4;
+  eq('a v3 body claiming attVer 4 padded to 44 -> bad-sig (sig read from the wrong slot)', A.verifySoloRecord(v3as4pad, TABLE).reason, 'bad-sig');
+}
+
 console.log('== A) verifySoloRecord ==');
 {
   const rec = sign(buildBase(META), kSealed.priv);

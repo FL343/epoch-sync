@@ -1,0 +1,109 @@
+'use strict';
+// Unit tests for perks.js: the endless perk build replay.
+//   - the vendored client table + RNG load and derive deterministically
+//   - an honest pick log (choices taken from the derived candidates) replays to exactly its build
+//   - fail-closed rejects: forged build word, build without picks, malformed log, more draws than
+//     the depth allows, a log that does not extend the run's previous log (perk_chain)
+//   - PERKS_CFG mirrors the vendor's fallback constants (companion-repo lockstep re-pins the client side)
+//   node test/perks-replay.js
+const path = require('path');
+const perks = require(path.join(__dirname, '..', 'perks.js'));
+
+let failN = 0;
+const ok = (m) => console.log('  ok    ' + m);
+const bad = (m) => { failN++; console.log('  FAIL  ' + m); };
+const eq = (label, got, exp) => { const a = JSON.stringify(got), b = JSON.stringify(exp); if (a === b) ok(label + ' = ' + a); else bad(label + ' = ' + a + ' (EXPECT ' + b + ')'); };
+const assert = (label, cond, detail) => { if (cond) ok(label); else bad(label + (detail ? ' -- ' + detail : '')); };
+
+console.log('== vendor load ==');
+const P = perks.load();
+assert('vendor exposes the replay surface', typeof P.candidates === 'function' && typeof P.replay === 'function' && typeof P.packPicks === 'function' && typeof P.seasonSeed === 'function');
+eq('table size (11 first-release perks)', P.list().length, 11);
+eq('PERKS_CFG == vendor fallback constants', perks.PERKS_CFG, P.FALLBACK);
+eq('vendor cfg() reads PERKS_CFG', [P.drawEvery(), P.gateEvery(), P.maxDraws()], [perks.PERKS_CFG.DRAW_EVERY, perks.PERKS_CFG.GATE_EVERY, perks.PERKS_CFG.MAX_DRAWS]);
+{
+  const s = P.seasonSeed(1);
+  const a = P.candidates(s, 0, 0, 0, 0, { mode: 'solo' }), b = P.candidates(s, 0, 0, 0, 0, { mode: 'solo' });
+  eq('candidates are a pure derivation (same inputs, same cards)', a.map(c => [c.id, c.lv]), b.map(c => [c.id, c.lv]));
+  assert('a different season seed changes the draw somewhere in the first 8 draws', (() => {
+    const s2 = P.seasonSeed(2);
+    for (let k = 0; k < 8; k++) {
+      const x = P.candidates(s, P.depthOfDraw(k), 0, k, 0, { mode: 'solo' }).map(c => c.id).join(',');
+      const y = P.candidates(s2, P.depthOfDraw(k), 0, k, 0, { mode: 'solo' }).map(c => c.id).join(',');
+      if (x !== y) return true;
+    }
+    return false;
+  })());
+}
+
+// honest log: choose card `choice` at every draw k < n over season `season`, return the tail fields
+function honest(season, n, choiceFn, mode) {
+  const s = P.seasonSeed(season);
+  let build = 0, skipBank = 0;
+  const arr = P.emptyPicks();
+  for (let k = 0; k < n; k++) {
+    const cards = P.candidates(s, P.depthOfDraw(k), build, k, skipBank, { mode: mode || 'solo' });
+    const choice = choiceFn ? choiceFn(k, cards) : 1;
+    arr[k] = choice;
+    if (choice === 5) { skipBank = 1; continue; }
+    build = P.applyPick(build, cards, choice);
+    skipBank = 0;
+  }
+  const pk = P.packPicks(arr);
+  return { build: build >>> 0, picksLo: pk.lo, picksHi: pk.hi, seasonId: season, arr };
+}
+
+console.log('== verifyPerkPicks ==');
+{
+  eq('no build, no picks -> ok (pre-perk / warm-up records)', perks.verifyPerkPicks({ build: 0, picksLo: 0, picksHi: 0, seasonId: 1, endDepth: 12 }, null, 1), { ok: true, n: 0, build: 0 });
+  eq('missing fields -> ok (legacy tails read as zeros)', perks.verifyPerkPicks({}, null, 2).ok, true);
+  const h3 = honest(1, 3);
+  const f3 = Object.assign({ endDepth: 10 }, h3);
+  const v3 = perks.verifyPerkPicks(f3, null, 1);
+  assert('honest 3-draw log replays to its build (solo pool)', v3.ok === true && v3.n === 3 && v3.build === h3.build, JSON.stringify(v3));
+  assert('honest build is non-empty', h3.build !== 0);
+  eq('forged build word (any other valid build) -> perk_forge build-mismatch', perks.verifyPerkPicks(Object.assign({}, f3, { build: honest(2, 3).build === h3.build ? honest(3, 3).build : honest(2, 3).build }), null, 1), { ok: false, reason: 'perk_forge', why: 'build-mismatch' });
+  eq('build without picks -> perk_forge', perks.verifyPerkPicks({ build: h3.build, picksLo: 0, picksHi: 0, seasonId: 1, endDepth: 10 }, null, 1).why, 'build-without-picks');
+  eq('structurally invalid build word (lv 0 slot bits / high bits) -> perk_forge build-shape', perks.verifyPerkPicks(Object.assign({}, f3, { build: 0x8000000 | h3.build }), null, 1).why, 'build-shape');
+  {
+    const gap = P.emptyPicks(); gap[0] = 1; gap[2] = 1;   // hole in the log
+    const pk = P.packPicks(gap);
+    eq('malformed log (gap) -> perk_forge picks-shape', perks.verifyPerkPicks({ build: 0, picksLo: pk.lo, picksHi: pk.hi, seasonId: 1, endDepth: 10 }, null, 1).why, 'picks-shape');
+  }
+  eq('more draws than the depth allows (3 draws, depth 5 allows 2) -> perk_forge picks-count', perks.verifyPerkPicks(Object.assign({}, f3, { endDepth: 5 }), null, 1).why, 'picks-count@3');
+  eq('exactly the allowed draws at a checkpoint depth (3 draws, depth 10) -> ok', perks.verifyPerkPicks(Object.assign({}, f3, { endDepth: 10 }).ok === undefined ? f3 : f3, null, 1).ok, true);
+  assert('the season seed is part of the replay (the same log under other seasons reproduces a different build for most of them)', (() => {
+    let differ = 0;
+    for (let s = 2; s <= 13; s++) if (!perks.verifyPerkPicks(Object.assign({}, f3, { seasonId: s }), null, 1).ok) differ++;
+    return differ >= 6;
+  })());
+  // skip / banked 4th card
+  const hs = honest(1, 3, (k) => (k === 0 ? 5 : (k === 1 ? 4 : 1)));
+  const vs = perks.verifyPerkPicks(Object.assign({ endDepth: 10 }, hs), null, 1);
+  assert('skip then banked 4th card replays', vs.ok === true && vs.n === 3, JSON.stringify(vs));
+  {
+    const arr = P.emptyPicks(); arr[0] = 4;   // 4th card without a banked skip
+    const pk = P.packPicks(arr);
+    eq('4th card without a prior skip -> perk_forge pick-4-nobank', perks.verifyPerkPicks({ build: 0, picksLo: pk.lo, picksHi: pk.hi, seasonId: 1, endDepth: 5 }, null, 1).why, 'pick-4-nobank@0');
+  }
+  // co-op pool: the same log may draw different cards (pool differs by mode) -> replay must use the seat-count pool
+  const hc = honest(1, 3, null, 'coop');
+  assert('shared team build replays under the co-op pool (pc 2)', perks.verifyPerkPicks(Object.assign({ endDepth: 10 }, hc), null, 2).ok === true);
+  eq('modeOf: 1 seat solo, 2+ seats co-op', [perks.modeOf(1), perks.modeOf(2), perks.modeOf(3)], ['solo', 'coop', 'coop']);
+}
+
+console.log('== perk_chain (run memory) ==');
+{
+  const h2 = honest(1, 2), h3 = honest(1, 3);
+  assert('the 3-draw log extends the 2-draw log', perks.isPrefix(h2.picksLo, h2.picksHi, h3.picksLo, h3.picksHi) === true);
+  const run = { pk: { lo: h2.picksLo, hi: h2.picksHi } };
+  assert('next segment extending the previous log -> ok', perks.verifyPerkPicks(Object.assign({ endDepth: 10 }, h3), run, 1).ok === true);
+  assert('same log again (overlap retry) -> ok', perks.verifyPerkPicks(Object.assign({ endDepth: 10 }, h2), run, 1).ok === true);
+  const other = honest(1, 3, (k) => (k === 0 ? 2 : 1));   // first choice differs
+  eq('a log that rewrites an earlier pick -> perk_chain', perks.verifyPerkPicks(Object.assign({ endDepth: 10 }, other), run, 1), { ok: false, reason: 'perk_chain', why: 'prefix' });
+  eq('a shrunk log (perks vanished) -> perk_chain', perks.verifyPerkPicks({ build: 0, picksLo: 0, picksHi: 0, seasonId: 1, endDepth: 10 }, run, 1).reason, 'perk_chain');
+  assert('no memory (first segment / casual) -> chain rule not applied', perks.verifyPerkPicks(Object.assign({ endDepth: 10 }, other), null, 1).ok === true);
+}
+
+console.log('=== ' + (failN === 0 ? 'PASS' : 'FAIL') + ' -- ' + failN + ' fail (perks-replay) ===');
+if (failN) process.exit(1);

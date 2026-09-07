@@ -3,6 +3,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const ts = require('./trueskill.js');
 const attest = require('./attest.js');   // knife-7: solo attested-record verify + unmatched confession reconcile
+const perks = require('./perks.js');     // endless perk build replay (record tail build word + pick log; perk_forge / perk_chain)
 const campaign = require('./campaign.js');   // O159 knife-7d: Vegas campaign clear attestation -> exclusive cosmetic grants
 const supporters = require('./supporters.js');   // supporter pack: DLC ownership probe -> wall board / grant bit / points bonus
 
@@ -609,6 +610,7 @@ function writeRunSummary() {
       '| board writes rating/points/xp | ' + s('writes', '0/0 0/0 0/0') + ' |',
       '| endless settles / cp+board writes | ' + s('endless', 0) + ' (+' + s('endlessComp', 0) + ' team comp, +' + s('solo', 0) + ' solo) / ' + s('writesEndless', '0/0 0/0') + ' |',
       '| seedcap veto / reject-window discards | ' + s('seedcapVeto', 0) + ' / ' + s('seedcapReject', 0) + ' |',
+      '| perk replay rejects | ' + s('perkRej', 0) + ' |',
       '| page-cap hits | ' + RUN.cap + ' |',
       '| duration | ' + ((Date.now() - (RUN.t0 || Date.now())) / 1000).toFixed(1) + 's |',
       '',
@@ -1517,6 +1519,7 @@ function soloAdvance(st, key, f, m, plan, nowMs) {
   if ((f.startDepth | 0) === 0) run.seg0 = 1;
   if (plan.consume) { run.saves[plan.consume] = run.saves[plan.consume] || {}; run.saves[plan.consume].by = m; }
   if ((f.endDepth | 0) > (run.max | 0)) run.max = f.endDepth | 0;
+  if (f.picksLo != null) run.pk = { lo: f.picksLo | 0, hi: f.picksHi | 0 };   // perk pick log at this segment's close (perk_chain: the next segment must extend it)
   if ((f.flags | 0) & attest.SEG_SUSPENDED) { const sk = String(f.endDepth | 0); run.saves[sk] = Object.assign(run.saves[sk] || {}, { t: nowMs }); }   // audit B-F6: merge -- never drop `by` (one save, one resume)
   if ((f.flags | 0) & attest.SEG_FINAL) run.final = 1;
   delete st.wait[m];
@@ -1681,7 +1684,11 @@ function endlessTail(d) {
   if (!d || d.length < at + 4) return null;
   return { startDepth: d[at] | 0, endDepth: d[at + 1] | 0, continuesUsed: d[at + 2] | 0, tokensCp: d[at + 3] | 0,
     seasonId: d.length >= at + 5 ? (d[at + 4] | 0) : -1,
-    flags: d.length >= at + 6 ? (d[at + 5] | 0) : 0 };   // 6th int (team competitive segments): SEG_COMP | suspended/final | resumed; casual = 0
+    flags: d.length >= at + 6 ? (d[at + 5] | 0) : 0,   // 6th int (team competitive segments): SEG_COMP | suspended/final | resumed; casual = 0
+    // 7th..9th ints (2026-09-07): perk build word + pick log (lo/hi); absent (older writers, warm-up runs) = no perks
+    build: d.length >= at + 7 ? (d[at + 6] >>> 0) : 0,
+    picksLo: d.length >= at + 8 ? (d[at + 7] | 0) : 0,
+    picksHi: d.length >= at + 9 ? (d[at + 8] | 0) : 0 };
 }
 // zero-tail abstention (2026-07-19 audit M3): a cold reconnector who lands straight on results
 // never saw a verdict frame -- his GAME.endless is all zeros, so his record carries a legitimate
@@ -1697,9 +1704,9 @@ function endlessTail(d) {
 function endlessAbstention(g, maxSeats) {
   const sv = g.map(r => { const pc = r.d[8] | 0; return (pc >= 1 && pc <= (maxSeats | 0) && r.d.length >= 10 + pc) ? JSON.stringify(r.d.slice(10, 10 + pc)) : 'BAD'; });
   if (!sv.every(v => v === sv[0] && v !== 'BAD')) return { same: false, canonIdx: 0 };
-  // tail = 4 legacy ints (+ seasonId when the writers carry it); zero-tail abstention keys on the FIRST FOUR
-  //   (a cold reconnector's seasonId is a real snapshot, not a claim about the run)
-  const tv = g.map(r => { const pc = r.d[8] | 0, at = 11 + 3 * pc; return r.d.length >= at + 4 ? JSON.stringify(r.d.slice(at, at + Math.min(6, r.d.length - at))) : 'BAD'; });
+  // tail = 4 legacy ints (+ seasonId / flags / perk build + pick log when the writers carry them); zero-tail abstention
+  //   keys on the FIRST FOUR (a cold reconnector's seasonId is a real snapshot, not a claim about the run)
+  const tv = g.map(r => { const pc = r.d[8] | 0, at = 11 + 3 * pc; return r.d.length >= at + 4 ? JSON.stringify(r.d.slice(at, at + Math.min(9, r.d.length - at))) : 'BAD'; });
   if (tv.some(t => t === 'BAD')) return { same: false, canonIdx: 0 };
   const isZero = (t) => { const a = JSON.parse(t); return a[0] === 0 && a[1] === 0 && a[2] === 0 && a[3] === 0; };
   const ZERO = '__zero__';
@@ -2046,7 +2053,7 @@ async function main() {
       const at = 11 + 3 * pc;
       if (r.d.length < at + 4) return 'BAD(tail)';
       // whole tail (4 legacy / 5 with the season snapshot / 6 with the segment flags): every field is host-broadcast lockstep fact
-      v = v.concat(r.d.slice(at, at + Math.min(6, r.d.length - at)));
+      v = v.concat(r.d.slice(at, at + Math.min(9, r.d.length - at)));   // + perk build / pick log (2026-09-07): lockstep facts like the flags
     }
     return JSON.stringify(v);
   };
@@ -2746,6 +2753,15 @@ async function main() {
       processed.add(m);
       return false;
     }
+    // perk replay (2026-09-07): the pick log must reproduce the build (perk_forge) and extend the run's previous log (perk_chain).
+    //   A causal contradiction, not a statistical one -> reject + processed, like a chain reject.
+    const pv = perks.verifyPerkPicks(f, soloState.runs[key], 1);
+    if (!pv.ok) {
+      recordFlag(signals, c.g, m, nowMs); sigDirty = true; trustTouched.add(sid); RUN.perkRej = (RUN.perkRej | 0) + 1;
+      ghWarn('match=' + m + ': solo segment ' + plog(sid) + ' perk REJECT (' + pv.reason + ': ' + pv.why + ') build ' + (f.build >>> 0) + ' depth ' + f.startDepth + '->' + f.endDepth);
+      processed.add(m);
+      return false;
+    }
     if (SEEDCAP_REJECT && seedcap && seedcap.suspects && seedcapRejectActive(seedcap.suspects[p], Math.floor(nowMs / 60000))) {
       // audit 2026-09-06 B-F9 (user 2026-09-07): inside the reject window the OUTPUTS are discarded (ladder / CP / XP / milestones)
       //   but the chain keeps walking (run.max / save points), exactly like the team lane restores only the flagged account's
@@ -2873,12 +2889,20 @@ async function main() {
           continue;
         }
         const key = teamRunKey(rosterSids, t.seasonId, g[0].d[4] | 0);
-        const f = { startDepth: t.startDepth | 0, endDepth: t.endDepth | 0, flags: t.flags | 0 };
+        const f = { startDepth: t.startDepth | 0, endDepth: t.endDepth | 0, flags: t.flags | 0,
+          build: t.build >>> 0, picksLo: t.picksLo | 0, picksHi: t.picksHi | 0, seasonId: t.seasonId | 0 };   // perk tail rides the same consensus vector
         const plan = soloChainPlan(soloState, key, f, c.m, nowMs);
         if (plan.ok === null) { console.log('  endless-comp ' + c.m + ': depth ' + f.startDepth + '->' + f.endDepth + ' waiting for its chain (' + plan.reason + ')'); continue; }
         if (plan.ok === false) {
           RUN.soloRej = (RUN.soloRej | 0) + 1;
           ghWarn('match=' + c.m + ': team comp segment chain REJECT (' + plan.reason + ') depth ' + f.startDepth + '->' + f.endDepth + ' ' + rosterSids.map(plog).join('+'));
+          processed.add(c.m);
+          continue;
+        }
+        const pvT = perks.verifyPerkPicks(f, soloState.runs[key], pc7);   // shared team build: the co-op draw pool, same replay + chain rules
+        if (!pvT.ok) {
+          recordFlag(signals, g, c.m, nowMs); sigDirty = true; RUN.perkRej = (RUN.perkRej | 0) + 1;
+          ghWarn('match=' + c.m + ': team comp segment perk REJECT (' + pvT.reason + ': ' + pvT.why + ') build ' + (f.build >>> 0) + ' depth ' + f.startDepth + '->' + f.endDepth + ' ' + rosterSids.map(plog).join('+'));
           processed.add(c.m);
           continue;
         }
@@ -2919,6 +2943,15 @@ async function main() {
         if (xpId) creditXpEndless(g, { startDepth: Math.max(f.startDepth | 0, plan.proven | 0), endDepth: f.endDepth | 0 }, xp, changedXp, spSet);   // audit B-F2: overlap credits new depth only
         console.log('  endless-comp settle ' + c.m + ': pc ' + pc7 + ' depth ' + f.startDepth + '->' + f.endDepth + ' team ' + teamT + ' flags ' + f.flags + ' proven ' + plan.proven + (plan.overlap != null ? ' (overlap from ' + plan.overlap + ')' : ''));
         processed.add(c.m); settledEndlessComp++;
+        continue;
+      }
+      // casual co-op: a shared perk build (co-op draw pool) must still replay from its pick log -- no run chain here, so
+      //   only perk_forge applies (a forged build word inflates every writer's score alike; consensus alone cannot see it)
+      const pvC = perks.verifyPerkPicks({ build: t.build >>> 0, picksLo: t.picksLo | 0, picksHi: t.picksHi | 0, seasonId: t.seasonId | 0, endDepth: t.endDepth | 0 }, null, pc7);
+      if (!pvC.ok) {
+        recordFlag(signals, g, c.m, nowMs); sigDirty = true; RUN.perkRej = (RUN.perkRej | 0) + 1;
+        ghWarn('match=' + c.m + ': endless perk REJECT (' + pvC.reason + ': ' + pvC.why + ') build ' + (t.build >>> 0) + ' depth ' + t.startDepth + '->' + t.endDepth);
+        processed.add(c.m);
         continue;
       }
       // chain rule: startDepth credit only up to the deepest end depth any roster player has
@@ -3425,4 +3458,5 @@ if (require.main === module) {
 }
 module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, isVoidDisp, voidByConsensus, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, RS_SOLO_VS_TRIO, RS_TRIO_WIN, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, CONFESS_MAGIC, reconcileConfessions, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan, postForm, postFormDetails, findOrCreateBoard, ghWarn, ghErr, PT_MODE, PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, ptSeedCp, ptBoardPlan, PRIVATE_XP, isPrivateMt, privateProgressOf, creditXpPrivate, ENDLESS_XP, computeXpEndless, creditXpEndless, CAMPAIGN_LB, SEEDCAP_REJECT_LADDER_MIN, seedcapRejectWindowMin, seedcapRejectUntilMin, seedcapRejectActive,
   ENDLESS_COMP_LB, SAVE_BOX_LB, SOLO_FILE, COMP, soloSanity, soloChainPlan, soloMilestones, soloAdvance, soloRunKey, soloStartAttested, loadSolo, saveSolo,
-  ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, SAVE_BOX_LB_DUO, SAVE_BOX_LB_TRIO, teamRunKey, soloMsSlot, groupRecords };
+  ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, SAVE_BOX_LB_DUO, SAVE_BOX_LB_TRIO, teamRunKey, soloMsSlot, groupRecords,
+  PERKS_CFG: perks.PERKS_CFG, verifyPerkPicks: perks.verifyPerkPicks };
