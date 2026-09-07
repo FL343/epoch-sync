@@ -58,7 +58,7 @@ console.log('== verifyPerkPicks ==');
   eq('no build, no picks -> ok (pre-perk / warm-up records)', perks.verifyPerkPicks({ build: 0, picksLo: 0, picksHi: 0, seasonId: 1, endDepth: 12 }, null, 1), { ok: true, n: 0, build: 0 });
   eq('missing fields -> ok (legacy tails read as zeros)', perks.verifyPerkPicks({}, null, 2).ok, true);
   const h3 = honest(1, 3);
-  const f3 = Object.assign({ endDepth: 10 }, h3);
+  const f3 = Object.assign({ endDepth: 15 }, h3);   // draws at depth 5 / 10 / 15 (no start draw)
   const v3 = perks.verifyPerkPicks(f3, null, 1);
   assert('honest 3-draw log replays to its build (solo pool)', v3.ok === true && v3.n === 3 && v3.build === h3.build, JSON.stringify(v3));
   assert('honest build is non-empty', h3.build !== 0);
@@ -70,8 +70,9 @@ console.log('== verifyPerkPicks ==');
     const pk = P.packPicks(gap);
     eq('malformed log (gap) -> perk_forge picks-shape', perks.verifyPerkPicks({ build: 0, picksLo: pk.lo, picksHi: pk.hi, seasonId: 1, endDepth: 10 }, null, 1).why, 'picks-shape');
   }
-  eq('more draws than the depth allows (3 draws, depth 5 allows 2) -> perk_forge picks-count', perks.verifyPerkPicks(Object.assign({}, f3, { endDepth: 5 }), null, 1).why, 'picks-count@3');
-  eq('exactly the allowed draws at a checkpoint depth (3 draws, depth 10) -> ok', perks.verifyPerkPicks(Object.assign({}, f3, { endDepth: 10 }).ok === undefined ? f3 : f3, null, 1).ok, true);
+  eq('more draws than the depth allows (3 draws, depth 5 allows 1) -> perk_forge picks-count', perks.verifyPerkPicks(Object.assign({}, f3, { endDepth: 5 }), null, 1).why, 'picks-count@3');
+  eq('exactly the allowed draws at a checkpoint depth (3 draws, depth 15) -> ok; depth 14 allows 2 -> picks-count', [perks.verifyPerkPicks(Object.assign({}, f3, { endDepth: 15 }), null, 1).ok, perks.verifyPerkPicks(Object.assign({}, f3, { endDepth: 14 }), null, 1).why], [true, 'picks-count@3']);
+  eq('depth 0 allows no draw at all (no start draw): one pick at depth 4 -> picks-count', perks.verifyPerkPicks(Object.assign({}, honest(1, 1), { endDepth: 4 }), null, 1).why, 'picks-count@1');
   assert('the season seed is part of the replay (the same log under other seasons reproduces a different build for most of them)', (() => {
     let differ = 0;
     for (let s = 2; s <= 13; s++) if (!perks.verifyPerkPicks(Object.assign({}, f3, { seasonId: s }), null, 1).ok) differ++;
@@ -79,7 +80,7 @@ console.log('== verifyPerkPicks ==');
   })());
   // skip / banked 4th card
   const hs = honest(1, 3, (k) => (k === 0 ? 5 : (k === 1 ? 4 : 1)));
-  const vs = perks.verifyPerkPicks(Object.assign({ endDepth: 10 }, hs), null, 1);
+  const vs = perks.verifyPerkPicks(Object.assign({ endDepth: 15 }, hs), null, 1);
   assert('skip then banked 4th card replays', vs.ok === true && vs.n === 3, JSON.stringify(vs));
   {
     const arr = P.emptyPicks(); arr[0] = 4;   // 4th card without a banked skip
@@ -88,7 +89,7 @@ console.log('== verifyPerkPicks ==');
   }
   // co-op pool: the same log may draw different cards (pool differs by mode) -> replay must use the seat-count pool
   const hc = honest(1, 3, null, 'coop');
-  assert('shared team build replays under the co-op pool (pc 2)', perks.verifyPerkPicks(Object.assign({ endDepth: 10 }, hc), null, 2).ok === true);
+  assert('shared team build replays under the co-op pool (pc 2)', perks.verifyPerkPicks(Object.assign({ endDepth: 15 }, hc), null, 2).ok === true);
   eq('modeOf: 1 seat solo, 2+ seats co-op', [perks.modeOf(1), perks.modeOf(2), perks.modeOf(3)], ['solo', 'coop', 'coop']);
 }
 
@@ -97,12 +98,12 @@ console.log('== perk_chain (run memory) ==');
   const h2 = honest(1, 2), h3 = honest(1, 3);
   assert('the 3-draw log extends the 2-draw log', perks.isPrefix(h2.picksLo, h2.picksHi, h3.picksLo, h3.picksHi) === true);
   const run = { pk: { lo: h2.picksLo, hi: h2.picksHi } };
-  assert('next segment extending the previous log -> ok', perks.verifyPerkPicks(Object.assign({ endDepth: 10 }, h3), run, 1).ok === true);
+  assert('next segment extending the previous log -> ok', perks.verifyPerkPicks(Object.assign({ endDepth: 15 }, h3), run, 1).ok === true);
   assert('same log again (overlap retry) -> ok', perks.verifyPerkPicks(Object.assign({ endDepth: 10 }, h2), run, 1).ok === true);
   const other = honest(1, 3, (k) => (k === 0 ? 2 : 1));   // first choice differs
-  eq('a log that rewrites an earlier pick -> perk_chain', perks.verifyPerkPicks(Object.assign({ endDepth: 10 }, other), run, 1), { ok: false, reason: 'perk_chain', why: 'prefix' });
+  eq('a log that rewrites an earlier pick -> perk_chain', perks.verifyPerkPicks(Object.assign({ endDepth: 15 }, other), run, 1), { ok: false, reason: 'perk_chain', why: 'prefix' });
   eq('a shrunk log (perks vanished) -> perk_chain', perks.verifyPerkPicks({ build: 0, picksLo: 0, picksHi: 0, seasonId: 1, endDepth: 10 }, run, 1).reason, 'perk_chain');
-  assert('no memory (first segment / casual) -> chain rule not applied', perks.verifyPerkPicks(Object.assign({ endDepth: 10 }, other), null, 1).ok === true);
+  assert('no memory (first segment / casual) -> chain rule not applied', perks.verifyPerkPicks(Object.assign({ endDepth: 15 }, other), null, 1).ok === true);
 }
 
 console.log('=== ' + (failN === 0 ? 'PASS' : 'FAIL') + ' -- ' + failN + ' fail (perks-replay) ===');

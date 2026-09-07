@@ -174,15 +174,13 @@ window.PERKS = (() => {
   function maxDraws() { return Math.min(20, (cfg().MAX_DRAWS | 0) || FALLBACK.MAX_DRAWS); }
   function drawIdxAt(depth) {
     const d = depth | 0;
-    if (d < 0) return -1;
-    if (d === 0) return 0;
-    if (d % drawEvery() !== 0) return -1;
-    const k = d / drawEvery();
+    if (d <= 0 || d % drawEvery() !== 0) return -1;
+    const k = d / drawEvery() - 1;
     return k < maxDraws() ? k : -1;
   }
-  function depthOfDraw(k) { return (k | 0) * drawEvery(); }
+  function depthOfDraw(k) { return ((k | 0) + 1) * drawEvery(); }
   function isGateDepth(depth) { const d = depth | 0; return d > 0 && d % gateEvery() === 0; }
-  function maxDrawsByDepth(depth) { return Math.min(maxDraws(), 1 + Math.floor(Math.max(0, depth | 0) / drawEvery())); }
+  function maxDrawsByDepth(depth) { return Math.min(maxDraws(), Math.floor(Math.max(0, depth | 0) / drawEvery())); }
   function seasonSeed(seasonId) { return window.RNG.deriveSeed(seasonId | 0, SEASON_SALT); }
   function drawSeed(sSeed, depth, build) {
     const R = window.RNG;
