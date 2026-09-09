@@ -1525,6 +1525,32 @@ function soloAdvance(st, key, f, m, plan, nowMs) {
   delete st.wait[m];
   return run;
 }
+// Same-tick segment ordering (2026-09-09): the settle loop walks `fresh` in order and the chain memory
+// (soloAdvance) is updated synchronously, so two segments of one run that land in the same tick must be
+// visited predecessor-first -- the checkpoint [0,5] before the save [5,5] before the resumed [5,7] -- or the
+// later one waits a tick (or the whole CHAIN_WAIT_MS) for a predecessor that was sitting right next to it.
+// The key alone cannot order them: a resumed segment carries a brand-new matchId. Endless-family groups
+// (solo + team lanes, casual included -- harmless there) sort by (startDepth, endDepth, resumed-last, key):
+// the save [5,5] and the resumed [5,7] share a startDepth, and a resume that died on its first level is a
+// [5,5] too -- only the RESUMED flag separates it from the save it consumes. Every other match type keeps
+// today's key order in front, so the non-endless prefix of the loop is byte-for-byte unchanged.
+function segOrderOf(c) {
+  const r = c && c.g && c.g[0];
+  if (!r || !r.d || !isEndlessMt(r.d[2] | 0)) return null;
+  const t = endlessTail(r.d);
+  return t ? { sd: t.startDepth | 0, ed: t.endDepth | 0, rs: ((t.flags | 0) & attest.SEG_RESUMED) ? 1 : 0 } : { sd: 0, ed: 0, rs: 0 };
+}
+function segStartOf(c) { const o = segOrderOf(c); return o ? o.sd : -1; }
+function freshOrder(a, b) {
+  const oa = segOrderOf(a), ob = segOrderOf(b);
+  if (!oa !== !ob) return oa ? 1 : -1;            // non-endless first (key order preserved among them)
+  if (oa && ob) {
+    if (oa.sd !== ob.sd) return oa.sd - ob.sd;
+    if (oa.ed !== ob.ed) return oa.ed - ob.ed;
+    if (oa.rs !== ob.rs) return oa.rs - ob.rs;
+  }
+  return a.m < b.m ? -1 : a.m > b.m ? 1 : 0;
+}
 // ===== O140 private friend-room XP credit (match type 10) =====
 // Levels-played reader for private groups (domain 1..15 -- rooms run 3/6/9 levels, wider than
 // the matchmade 1..6 window): min-of-writers, same anti-inflation stance as matchProgressOf
@@ -2608,7 +2634,7 @@ async function main() {
     compFam[fam] = { fam, low, name: lbName, id, seasonId: season.id, best, seasonBest, complete, seasonComplete, saveBoxId: sbId, changed: null, seasonChanged: null };
   }
 
-  fresh.sort((a, b) => (a.m < b.m ? -1 : a.m > b.m ? 1 : 0));
+  fresh.sort(freshOrder);   // non-endless by key; endless segments predecessor-first (startDepth, then key) -- see freshOrder
   // On-demand base values: when a bulk read hit PAGE_CAP the maps are incomplete -- a settling
   // player missing from them may still hold an entry beyond the window, and settling from base 0
   // would silently reset his LP/XP. Fetch exactly the players this run settles (record holders +
@@ -3457,6 +3483,6 @@ if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
 module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, isVoidDisp, voidByConsensus, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, RS_SOLO_VS_TRIO, RS_TRIO_WIN, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, CONFESS_MAGIC, reconcileConfessions, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan, postForm, postFormDetails, findOrCreateBoard, ghWarn, ghErr, PT_MODE, PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, ptSeedCp, ptBoardPlan, PRIVATE_XP, isPrivateMt, privateProgressOf, creditXpPrivate, ENDLESS_XP, computeXpEndless, creditXpEndless, CAMPAIGN_LB, SEEDCAP_REJECT_LADDER_MIN, seedcapRejectWindowMin, seedcapRejectUntilMin, seedcapRejectActive,
-  ENDLESS_COMP_LB, SAVE_BOX_LB, SOLO_FILE, COMP, soloSanity, soloChainPlan, soloMilestones, soloAdvance, soloRunKey, soloStartAttested, loadSolo, saveSolo,
+  ENDLESS_COMP_LB, SAVE_BOX_LB, SOLO_FILE, COMP, soloSanity, soloChainPlan, soloMilestones, soloAdvance, soloRunKey, soloStartAttested, loadSolo, saveSolo, segOrderOf, segStartOf, freshOrder,
   ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, SAVE_BOX_LB_DUO, SAVE_BOX_LB_TRIO, teamRunKey, soloMsSlot, groupRecords,
   PERKS_CFG: perks.PERKS_CFG, verifyPerkPicks: perks.verifyPerkPicks };
