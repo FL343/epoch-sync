@@ -18,7 +18,7 @@ const assert = (label, cond, detail) => { if (cond) ok(label); else bad(label + 
 console.log('== vendor load ==');
 const P = perks.load();
 assert('vendor exposes the replay surface', typeof P.candidates === 'function' && typeof P.replay === 'function' && typeof P.packPicks === 'function' && typeof P.seasonSeed === 'function');
-eq('table size (11 first-release perks)', P.list().length, 11);
+eq('table size (11 first-release perks + 6 behaviour perks + 3 contracts, knife 3.5c1)', P.list().length, 20);
 eq('PERKS_CFG == vendor fallback constants', perks.PERKS_CFG, P.FALLBACK);
 eq('vendor cfg() reads PERKS_CFG', [P.drawEvery(), P.gateEvery(), P.maxDraws()], [perks.PERKS_CFG.DRAW_EVERY, perks.PERKS_CFG.GATE_EVERY, perks.PERKS_CFG.MAX_DRAWS]);
 {
@@ -39,10 +39,12 @@ eq('vendor cfg() reads PERKS_CFG', [P.drawEvery(), P.gateEvery(), P.maxDraws()],
 // honest log: choose card `choice` at every draw k < n over season `season`, return the tail fields
 function honest(season, n, choiceFn, mode) {
   const s = P.seasonSeed(season);
-  let build = 0, skipBank = 0;
+  let build = 0, skipBank = 0, seen = 0;   // seen = contract offers so far (the client counts them the same way: PERKS.contractsSeenBefore)
   const arr = P.emptyPicks();
+  let contractAt = -1;
   for (let k = 0; k < n; k++) {
-    const cards = P.candidates(s, P.depthOfDraw(k), build, k, skipBank, { mode: mode || 'solo' });
+    const cards = P.candidates(s, P.depthOfDraw(k), build, k, skipBank, { mode: mode || 'solo', contractsSeen: seen });
+    if (P.hasContract(cards)) { seen++; if (contractAt < 0) contractAt = k; }
     const choice = choiceFn ? choiceFn(k, cards) : 1;
     arr[k] = choice;
     if (choice === 5) { skipBank = 1; continue; }
@@ -50,7 +52,31 @@ function honest(season, n, choiceFn, mode) {
     skipBank = 0;
   }
   const pk = P.packPicks(arr);
-  return { build: build >>> 0, picksLo: pk.lo, picksHi: pk.hi, seasonId: season, arr };
+  return { build: build >>> 0, picksLo: pk.lo, picksHi: pk.hi, seasonId: season, arr, contractsSeen: seen, contractAt };
+}
+
+console.log('== contract cards (2026-09-09) ==');
+{
+  // a season where a contract shows up on the free card (index 2) at some draw k >= CONTRACT_MIN_DRAW; the chooser takes it (choice 3)
+  let found = null;
+  for (let season = 1; season < 200 && !found; season++) {
+    const h = honest(season, 8, (k, cards) => (P.hasContract(cards) ? 3 : 1));
+    if (h.contractAt >= 0) found = { season, h };
+  }
+  assert('a contract offer exists within 200 seasons x 8 draws', !!found, 'none');
+  if (found) {
+    const { season, h } = found;
+    const f = Object.assign({ endDepth: 40 }, h);
+    const v = perks.verifyPerkPicks(f, null, 1);
+    assert('honest log that picked a contract replays to its build (offer counted the same way)', v.ok === true && v.build === h.build, JSON.stringify(v));
+    assert('the contract never appears before CONTRACT_MIN_DRAW', h.contractAt >= perks.PERKS_CFG.CONTRACT_MIN_DRAW, 'at=' + h.contractAt);
+    assert('at most CONTRACT_MAX offers per run', h.contractsSeen <= perks.PERKS_CFG.CONTRACT_MAX, 'seen=' + h.contractsSeen);
+    // forged: claim the contract's build after picking card 3 at draw 0 (no contract can be offered there) -> the replay lands elsewhere
+    const early = P.emptyPicks(); early[0] = 3;
+    const pk = P.packPicks(early);
+    const vf = perks.verifyPerkPicks({ build: h.build, picksLo: pk.lo, picksHi: pk.hi, seasonId: season, endDepth: 40 }, null, 1);
+    assert('forged early contract (draw 0, card 3) -> perk_forge (build-mismatch or pick-range)', vf.ok === false && vf.reason === 'perk_forge', JSON.stringify(vf));
+  }
 }
 
 console.log('== verifyPerkPicks ==');

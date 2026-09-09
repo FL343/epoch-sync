@@ -1,11 +1,12 @@
 // generated file: comments stripped from the client-side source; regenerate with the companion repo's scripts/gen-perks-vendor.js (byte-locked there)
 window.PERKS = (() => {
   const FALLBACK = { SLOTS: 3, MAX_DRAWS: 20, DRAW_EVERY: 5, GATE_EVERY: 10, PICK_TIMEOUT_S: 20, PITY_EVERY: 3,
-    CONTRACT_MAX: 2, VALUE_MUL_CAP: 1.6, CLASS_MUL_CAP: 25, TABLE_VER: 1 };
+    CONTRACT_MAX: 2, CONTRACT_MIN_DRAW: 3, CONTRACT_P_MILLI: 350, TIME_ADD_MIN: -30, VALUE_MUL_CAP: 1.6, CLASS_MUL_CAP: 25, TABLE_VER: 1 };
   function cfg() {
     const R = window.RANKED_CONFIG;
     return (R && R.ENDLESS && R.ENDLESS.PERKS) || FALLBACK;
   }
+  function cfgNum(key) { const v = cfg()[key]; return (typeof v === 'number') ? v : FALLBACK[key]; }
   const PERK_SALT = 0x9E4B;
   const SEASON_SALT = 0x5EA5;
   const CLS_KEYS = ['gold', 'rock', 'bone', 'gem', 'cursed', 'creature', 'other'];
@@ -22,11 +23,14 @@ window.PERKS = (() => {
   };
   function clsOfItem(key) { const c = ITEM_CLS[key]; return c == null ? CLS.other : CLS[c]; }
   function clsOfCreature() { return CLS.creature; }
-  const T1_FIELDS = ['valueMul', 'clearBonusMul', 'levelTimeAdd', 'invGrant', 'strengthBonus', 'shopMul', 'flags'];
+  const T1_FIELDS = ['valueMul', 'clearBonusMul', 'levelTimeAdd', 'invGrant', 'strengthBonus', 'shopMul', 'flags',
+    'cursedMul', 'combo', 'emptyReturn', 'midas', 'drill', 'shatterBonus'];
   const VALUE_MUL_KEYS = CLS_KEYS.concat(['all']);
   const INV_KEYS = ['tnt', 'freeze'];
   const FLAG_KEYS = ['clover'];
-  const RENDER_ONLY = ['hookSpeedMul', 'pullSpeedMul', 'freezeDurMul', 'highlight'];
+  const SUB_KEYS = { combo: ['every', 'mul'], emptyReturn: ['amt', 'cap'], midas: ['n', 'value'], drill: ['lv'] };
+  const ONE_PER_TABLE = ['combo', 'emptyReturn', 'midas', 'drill'];
+  const RENDER_ONLY = ['hookSpeedMul', 'pullSpeedMul', 'freezeDurMul', 'highlight', 'laser'];
   const AXES = ['time', 'value', 'speed', 'item', 'neg', 'economy', 'collect', 'life', 'info'];
   const RARITIES = ['common', 'rare', 'epic'];
   const SCOPES = ['self', 'team', 'world'];
@@ -55,6 +59,24 @@ window.PERKS = (() => {
       lv: [{ flags: { clover: true } }, { flags: { clover: true } }, { flags: { clover: true } }], p: [{}, {}, {}] },
     { id: 11, key: 'memberCard', axis: 'economy', rarity: 'common', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, icon: '🛒',
       lv: [{ shopMul: 0.8 }, { shopMul: 0.7 }, { shopMul: 0.6 }], p: [{ a: 80 }, { a: 70 }, { a: 60 }] },
+    { id: 12, key: 'drillHook', axis: 'speed', rarity: 'epic', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, icon: '⛏',
+      lv: [{ drill: { lv: 1 } }, { drill: { lv: 2 } }, { drill: { lv: 3 }, shatterBonus: 20 }], p: [{}, {}, { a: 20 }] },
+    { id: 13, key: 'laserSight', axis: 'info', rarity: 'rare', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, icon: '🎯',
+      lv: [{ laser: 1 }, { laser: 2 }, { laser: 3 }], p: [{}, {}, {}] },
+    { id: 14, key: 'exorcist', axis: 'neg', rarity: 'rare', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, icon: '🔮',
+      lv: [{ cursedMul: -0.5 }, { cursedMul: -0.75 }, { cursedMul: -1 }], p: [{ a: 50 }, { a: 75 }, { a: 100 }] },
+    { id: 15, key: 'combo', axis: 'value', rarity: 'rare', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, icon: '🔗',
+      lv: [{ combo: { every: 4, mul: 1.5 } }, { combo: { every: 4, mul: 1.75 } }, { combo: { every: 4, mul: 2 } }], p: [{ a: 1.5 }, { a: 1.75 }, { a: 2 }] },
+    { id: 16, key: 'emptyComfort', axis: 'economy', rarity: 'common', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, icon: '🪙',
+      lv: [{ emptyReturn: { amt: 25, cap: 8 } }, { emptyReturn: { amt: 50, cap: 8 } }, { emptyReturn: { amt: 75, cap: 8 } }], p: [{ a: 25, b: 8 }, { a: 50, b: 8 }, { a: 75, b: 8 }] },
+    { id: 17, key: 'midas', axis: 'value', rarity: 'rare', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, icon: '✨',
+      lv: [{ midas: { n: 1, value: 250 } }, { midas: { n: 2, value: 250 } }, { midas: { n: 3, value: 250 } }], p: [{ a: 1, b: 250 }, { a: 2, b: 250 }, { a: 3, b: 250 }] },
+    { id: 18, key: 'greedPact', axis: 'value', rarity: 'epic', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, contract: true, icon: '📜',
+      lv: [{ valueMul: { all: 1.2 }, levelTimeAdd: -8 }, { valueMul: { all: 1.35 }, levelTimeAdd: -12 }, { valueMul: { all: 1.5 }, levelTimeAdd: -16 }], p: [{ a: 1.2, b: 8 }, { a: 1.35, b: 12 }, { a: 1.5, b: 16 }] },
+    { id: 19, key: 'glassCannon', axis: 'speed', rarity: 'epic', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, contract: true, icon: '⚡',
+      lv: [{ hookSpeedMul: 1.4, pullSpeedMul: 1.4, cursedMul: 2 }, { hookSpeedMul: 1.5, pullSpeedMul: 1.5, cursedMul: 2.5 }, { hookSpeedMul: 1.6, pullSpeedMul: 1.6, cursedMul: 3 }], p: [{ a: 40, b: 2 }, { a: 50, b: 2.5 }, { a: 60, b: 3 }] },
+    { id: 20, key: 'miserPact', axis: 'economy', rarity: 'epic', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, contract: true, icon: '💰',
+      lv: [{ shopMul: 0.5, clearBonusMul: 0 }, { shopMul: 0.4, clearBonusMul: 0 }, { shopMul: 0.3, clearBonusMul: 0 }], p: [{ a: 50 }, { a: 40 }, { a: 30 }] },
   ];
   let TABLE = LIST;
   const BY_ID = new Map();
@@ -79,6 +101,12 @@ window.PERKS = (() => {
       if (typeof p.icon !== 'string' || !p.icon) errs.push('missing icon: ' + p.key);
       if (!Array.isArray(p.lv) || p.lv.length !== 3) errs.push('lv must have 3 tiers: ' + p.key);
       if (!Array.isArray(p.p) || p.p.length !== 3) errs.push('p must have 3 tiers: ' + p.key);
+      if (p.contract != null && typeof p.contract !== 'boolean') errs.push('contract not boolean: ' + p.key);
+      if (p.contract) {
+        if (p.rarity !== 'epic') errs.push('contract must be epic: ' + p.key);
+        if (!p.rollable) errs.push('contract must be rollable: ' + p.key);
+        if (!p.modes || p.modes.solo !== p.modes.coop) errs.push('contract modes.solo must equal modes.coop: ' + p.key);
+      }
       (p.lv || []).forEach((e, k) => {
         for (const f of Object.keys(e || {})) {
           if (T1_FIELDS.indexOf(f) < 0 && RENDER_ONLY.indexOf(f) < 0) errs.push('effect field outside whitelist: ' + p.key + ' Lv' + (k + 1) + ' ' + f + ' (table/core/parity must change together)');
@@ -86,7 +114,28 @@ window.PERKS = (() => {
         if (e && e.valueMul) for (const c of Object.keys(e.valueMul)) if (VALUE_MUL_KEYS.indexOf(c) < 0) errs.push('unknown valueMul class: ' + p.key + ' ' + c);
         if (e && e.invGrant) for (const c of Object.keys(e.invGrant)) if (INV_KEYS.indexOf(c) < 0) errs.push('unknown invGrant key: ' + p.key + ' ' + c);
         if (e && e.flags) for (const c of Object.keys(e.flags)) if (FLAG_KEYS.indexOf(c) < 0) errs.push('unknown flags key: ' + p.key + ' ' + c);
+        for (const f of Object.keys(SUB_KEYS)) {
+          if (!e || e[f] == null) continue;
+          const keys = Object.keys(e[f]).sort(), want = SUB_KEYS[f].slice().sort();
+          if (JSON.stringify(keys) !== JSON.stringify(want)) errs.push('bad ' + f + ' shape: ' + p.key + ' Lv' + (k + 1) + ' keys=' + keys.join(',') + ' (want ' + want.join(',') + ')');
+          for (const sk of want) if (!(typeof e[f][sk] === 'number' && isFinite(e[f][sk]) && e[f][sk] >= 0)) errs.push('bad ' + f + '.' + sk + ' value: ' + p.key + ' Lv' + (k + 1));
+        }
+        if (e && e.combo && !(e.combo.every >= 2 && e.combo.mul >= 1)) errs.push('combo needs every>=2 && mul>=1: ' + p.key);
+        if (e && e.emptyReturn && !(e.emptyReturn.cap >= 1 && e.emptyReturn.cap <= 30)) errs.push('emptyReturn.cap must be 1..30: ' + p.key);
+        if (e && e.midas && !(e.midas.n >= 1 && e.midas.n <= 8)) errs.push('midas.n must be 1..8: ' + p.key);
+        if (e && e.drill && !(e.drill.lv >= 1 && e.drill.lv <= 3)) errs.push('drill.lv must be 1..3: ' + p.key);
+        if (e && e.shatterBonus != null && !(typeof e.shatterBonus === 'number' && e.shatterBonus >= 0 && e.shatterBonus === (e.shatterBonus | 0))) errs.push('shatterBonus must be int >= 0: ' + p.key);
+        if (e && e.laser != null && !(e.laser >= 1 && e.laser <= 3)) errs.push('laser must be 1..3: ' + p.key);
+        if (e && e.cursedMul != null && !(typeof e.cursedMul === 'number' && isFinite(e.cursedMul) && e.cursedMul !== 0)) errs.push('cursedMul must be a nonzero finite number: ' + p.key);
       });
+    }
+    for (const f of ONE_PER_TABLE) {
+      const n = TABLE.filter(p => (p.lv || []).some(e => e && e[f] != null)).length;
+      if (n > 1) errs.push('field ' + f + ' must appear on at most one perk (max semantics), found ' + n);
+    }
+    {
+      const nc = TABLE.filter(p => p.contract).length;
+      if (nc > 6) errs.push('too many contracts (' + nc + ' > 6)');
     }
     if (IT) {
       for (const k of Object.keys(IT)) if (!(k in ITEM_CLS)) errs.push('ITEMS key unclassified (add to ITEM_CLS): ' + k);
@@ -102,8 +151,18 @@ window.PERKS = (() => {
       const top3 = (m[0] || 1) * (m[1] || 1) * (m[2] || 1);
       if (top3 > C.CLASS_MUL_CAP + 1e-9) errs.push('CLASS_MUL_CAP exceeded: class ' + c + ' 3-slot product ' + top3 + ' > ' + C.CLASS_MUL_CAP);
     }
+    {
+      const neg = TABLE.map(p => Math.min.apply(null, p.lv.map(e => (e && e.levelTimeAdd < 0) ? e.levelTimeAdd : 0))).sort((a, b) => a - b);
+      const worst3 = (neg[0] || 0) + (neg[1] || 0) + (neg[2] || 0);
+      const minAdd = (typeof C.TIME_ADD_MIN === 'number') ? C.TIME_ADD_MIN : FALLBACK.TIME_ADD_MIN;
+      if (worst3 < minAdd - 1e-9) errs.push('TIME_ADD_MIN exceeded: 3-slot negative time ' + worst3 + ' < ' + minAdd);
+      const cm = TABLE.map(p => Math.max.apply(null, p.lv.map(e => (e && e.cursedMul != null) ? Math.abs(e.cursedMul) : 1))).sort((a, b) => b - a);
+      const top3c = (cm[0] || 1) * (cm[1] || 1) * (cm[2] || 1);
+      if (top3c > 3 + 1e-9) errs.push('CURSED_MUL_CAP exceeded: 3-slot |cursedMul| product ' + top3c + ' > 3');
+    }
     return errs;
   }
+  function isContract(id) { const p = get(id); return !!(p && p.contract); }
   function packBuild(slots) {
     let v = 0;
     for (let k = 0; k < 3; k++) {
@@ -227,13 +286,22 @@ window.PERKS = (() => {
     const held = slots.filter(Boolean);
     const heldIds = new Set(held.map(s => s.id));
     const heldAxes = new Set(held.map(s => get(s.id) && get(s.id).axis));
-    const pool = TABLE.filter(p => p.rollable && p.modes && p.modes[mode]);
+    const poolAll = TABLE.filter(p => p.rollable && p.modes && p.modes[mode]);
+    const pool = poolAll.filter(p => !p.contract);
+    const cPool = poolAll.filter(p => p.contract && !heldIds.has(p.id));
     const n = 3 + (skipBank ? 1 : 0);
     const k = drawIdx | 0;
     const band = Math.min(3, Math.floor(Math.max(0, depth | 0) / gateEvery()));
     const gate = k > 0 && isGateDepth(depth);
     const weights = k === 0 ? [100, 0, 0] : (gate ? RARITY_GATE[band] : RARITY_BY_BAND[band]);
     const pity = k > 0 && !gate && ((k % ((cfg().PITY_EVERY | 0) || FALLBACK.PITY_EVERY)) === ((cfg().PITY_EVERY | 0) || FALLBACK.PITY_EVERY) - 1);
+    const seen = (opts && opts.contractsSeen) | 0;
+    const cEligible = k >= cfgNum('CONTRACT_MIN_DRAW') && seen < cfgNum('CONTRACT_MAX') && cPool.length > 0;
+    const rollContract = (mk) => {
+      if (!cEligible) return null;
+      if (Math.floor(rng() * 1000) >= cfgNum('CONTRACT_P_MILLI')) return null;
+      return mk(cPool[Math.floor(rng() * cPool.length)]);
+    };
     const cards = [];
     const full = held.length >= 3;
     const upgrades = held.filter(s => s.lv < 3).map(_cardUp);
@@ -243,7 +311,9 @@ window.PERKS = (() => {
       const tgt = _replaceTarget(slots);
       const u1 = _pickUniform(rng, upgrades); if (u1) cards.push(u1);
       const u2 = _pickUniform(rng, upgrades.filter(c => _not(cards, c.id))); if (u2) cards.push(u2);
-      const r1 = _pickByRarity(rng, unheld.map(p => _cardReplace(p, tgt)), weights, pity ? 1 : 0); if (r1) cards.push(r1);
+      const cc = rollContract(p => _cardReplace(p, tgt));
+      if (cc) cards.push(cc);
+      else { const r1 = _pickByRarity(rng, unheld.map(p => _cardReplace(p, tgt)), weights, pity ? 1 : 0); if (r1) cards.push(r1); }
       while (cards.length < n) {
         const more = _pickByRarity(rng, unheld.filter(p => _not(cards, p.id)).map(p => _cardReplace(p, tgt)), weights, 0);
         if (!more) break; cards.push(more);
@@ -257,6 +327,8 @@ window.PERKS = (() => {
       let b = _pickByRarity(rng, newAxis, weights, 0);
       if (!b) b = _pickByRarity(rng, unheld.filter(p => _not(cards, p.id)).map(p => _cardNew(p, freeSlot)).concat(upgrades.filter(c => _not(cards, c.id))), weights, 0);
       if (b) cards.push(b);
+      const cc = rollContract(p => _cardNew(p, freeSlot));
+      if (cc) cards.push(cc);
       while (cards.length < n) {
         const freeC = unheld.filter(p => _not(cards, p.id)).map(p => _cardNew(p, freeSlot)).concat(upgrades.filter(c => _not(cards, c.id)));
         const c = _pickByRarity(rng, freeC, weights, (pity && cards.length === 2) ? 1 : 0);
@@ -264,6 +336,23 @@ window.PERKS = (() => {
       }
     }
     return cards;
+  }
+  function hasContract(cards) { return !!(cards && cards.some(c => isContract(c.id))); }
+  function contractsSeenBefore(sSeed, picksArr, k, opts) {
+    const mode = (opts && opts.mode) || 'solo';
+    let build = 0, skipBank = 0, seen = 0;
+    const cnt = picksCount(picksArr);
+    const kk = Math.min(k | 0, cnt < 0 ? 0 : cnt);
+    for (let j = 0; j < kk; j++) {
+      const choice = picksArr[j] | 0;
+      const cards = candidates(sSeed, depthOfDraw(j), build, j, skipBank, { mode, contractsSeen: seen });
+      if (hasContract(cards)) seen++;
+      if (choice === 5) { skipBank = 1; continue; }
+      const nb = applyPick(build, cards, choice);
+      if (nb == null) break;
+      build = nb; skipBank = 0;
+    }
+    return seen;
   }
   function applyPick(build, cards, choice) {
     const c = choice | 0;
@@ -328,25 +417,35 @@ window.PERKS = (() => {
     const n = picksCount(picksArr);
     if (n < 0) return { ok: false, why: 'picks-shape' };
     if (n > maxDrawsByDepth(endDepth)) return { ok: false, why: 'picks-count', at: n };
-    let build = 0, skipBank = 0;
+    let build = 0, skipBank = 0, seen = 0;
+    const mode = (opts && opts.mode) || 'solo';
     for (let k = 0; k < n; k++) {
       const choice = picksArr[k] | 0;
-      const cards = candidates(sSeed, depthOfDraw(k), build, k, skipBank, opts);
+      const cards = candidates(sSeed, depthOfDraw(k), build, k, skipBank, { mode, contractsSeen: seen });
+      if (hasContract(cards)) seen++;
       if (choice === 5) { skipBank = 1; continue; }
       if (choice === 4 && !skipBank) return { ok: false, why: 'pick-4-nobank', at: k };
       const nb = applyPick(build, cards, choice);
       if (nb == null) return { ok: false, why: 'pick-range', at: k };
       build = nb; skipBank = 0;
     }
-    return { ok: true, build: build >>> 0, n, skipBank };
+    return { ok: true, build: build >>> 0, n, skipBank, contractsSeen: seen };
   }
   function effOfBuild(build) {
     const e = { valueMul: {}, clearBonusMul: 1, levelTimeAdd: 0, invGrant: { tnt: 0, freeze: 0 }, strengthBonus: 0, shopMul: 1,
-      clover: false, hookSpeedMul: 1, pullSpeedMul: 1, freezeDurMul: 1, highlight: 0, slots: heldOf(build) };
+      clover: false, hookSpeedMul: 1, pullSpeedMul: 1, freezeDurMul: 1, highlight: 0, slots: heldOf(build),
+      cursedMul: 1, comboEvery: 0, comboMul: 1, emptyAmt: 0, emptyCap: 0, midasN: 0, midasValue: 0, drillLv: 0, shatterBonus: 0, laser: 0 };
     for (const c of VALUE_MUL_KEYS) e.valueMul[c] = 1;
     for (const s of e.slots) {
       const p = get(s.id); if (!p) continue;
       const L = p.lv[Math.max(0, Math.min(2, s.lv - 1))] || {};
+      if (L.cursedMul != null) e.cursedMul = e.cursedMul * L.cursedMul;
+      if (L.combo) { e.comboEvery = L.combo.every | 0; e.comboMul = +L.combo.mul; }
+      if (L.emptyReturn) { e.emptyAmt = L.emptyReturn.amt | 0; e.emptyCap = L.emptyReturn.cap | 0; }
+      if (L.midas) { e.midasN = L.midas.n | 0; e.midasValue = L.midas.value | 0; }
+      if (L.drill) e.drillLv = Math.max(e.drillLv, L.drill.lv | 0);
+      if (L.shatterBonus) e.shatterBonus = Math.max(e.shatterBonus, L.shatterBonus | 0);
+      if (L.laser) e.laser = Math.max(e.laser, L.laser | 0);
       if (L.valueMul) for (const c of VALUE_MUL_KEYS) if (L.valueMul[c] != null) e.valueMul[c] = e.valueMul[c] * L.valueMul[c];
       if (L.clearBonusMul != null) e.clearBonusMul = e.clearBonusMul * L.clearBonusMul;
       if (L.levelTimeAdd) e.levelTimeAdd += L.levelTimeAdd;
@@ -405,6 +504,7 @@ window.PERKS = (() => {
     emptyPicks, packPicks, unpackPicks, picksCount,
     drawEvery, gateEvery, maxDraws, drawIdxAt, depthOfDraw, isGateDepth, maxDrawsByDepth,
     seasonSeed, drawSeed, candidates, applyPick, replay, pickApply, restoreRun,
+    cfgNum, isContract, hasContract, contractsSeenBefore, SUB_KEYS, ONE_PER_TABLE,
     effOfBuild, valueMulOfBuild, buildOf, effOf, valueMulOf, levelTimeAddMax, NEUTRAL,
     nameKey, descKey, descParams, iconOf, rarityOf,
     _setTableForTest(list) { TABLE = list || LIST; _index(); _effCache = { build: -1, eff: effOfBuild(0) }; },
