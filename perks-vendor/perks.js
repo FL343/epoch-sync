@@ -20,6 +20,7 @@ window.PERKS = (() => {
     mysteryBag: 'other', doomBag: 'other', tntPickup: 'other', tntShard: 'other', freezeBox: 'other', slotCoin: 'other',
     chip: 'other', dice: 'other', idol: 'other',
     cobweb: 'other', vine: 'other', icicle: 'other', coral: 'other', plank: 'other',
+    safe: 'other', couponDiscount: 'other', couponFree: 'other',
   };
   function clsOfItem(key) { const c = ITEM_CLS[key]; return c == null ? CLS.other : CLS[c]; }
   function clsOfCreature() { return CLS.creature; }
