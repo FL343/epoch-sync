@@ -119,6 +119,41 @@ console.log('== verifyPerkPicks ==');
   eq('modeOf: 1 seat solo, 2+ seats co-op', [perks.modeOf(1), perks.modeOf(2), perks.modeOf(3)], ['solo', 'coop', 'coop']);
 }
 
+console.log('== season window (client knife 3.5d: table freeze by season) ==');
+{
+  // A table entry may carry seasons {from, until}; candidates filter the pool by the record's seasonId, so a perk that opens
+  // in season 2 is never offered while replaying a season-1 log -- and a season-2 log that picked it replays only as season 2.
+  const saved = P.list();
+  const extra = { id: 90, key: 'nextSeasonOnly', axis: 'value', rarity: 'common', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, icon: 'x', seasons: { from: 2 }, lv: [{}, {}, {}], p: [{}, {}, {}] };
+  P._setTableForTest(saved.concat([extra]));
+  const offered = (seasonId) => { for (let k = 0; k < 12; k++) for (const seed of [1, 2, 3]) { if (P.candidates(P.seasonSeed(seed), P.depthOfDraw(k), 0, k, 0, { mode: 'solo', seasonId }).some(c => c.id === 90)) return true; } return false; };
+  eq('seasons.from = 2: never offered at season 1, offered at season 2', [offered(1), offered(2)], [false, true]);
+  eq('vendor exposes inSeason / poolSig (the client pins the pool signature per TABLE_VER)', [typeof P.inSeason, typeof P.poolSig], ['function', 'function']);
+  // in production the season seed IS seasonSeed(seasonId) (verifyPerkPicks derives it from the record) -> build the log the same way
+  let log = null;
+  outer: for (const S of [2, 3, 4, 5]) {
+    let build = 0, skipBank = 0, seen = 0; const arr = P.emptyPicks();
+    for (let k = 0; k < 8; k++) {
+      const cards = P.candidates(P.seasonSeed(S), P.depthOfDraw(k), build, k, skipBank, { mode: 'solo', seasonId: S, contractsSeen: seen });
+      if (P.hasContract(cards)) seen++;
+      const idx = cards.findIndex(c => c.id === 90), ch = idx >= 0 ? idx + 1 : 1;
+      arr[k] = ch; build = P.applyPick(build, cards, ch); skipBank = 0;
+      if (idx >= 0) { log = { S, arr, build, n: k + 1 }; break outer; }
+    }
+  }
+  assert('a season >= 2 log that picks the new perk can be built', !!log);
+  if (log) {
+    const pk = P.packPicks(log.arr);
+    const f = { build: log.build >>> 0, picksLo: pk.lo, picksHi: pk.hi, endDepth: P.depthOfDraw(log.n - 1) };
+    // the record's seasonId drives the window: verifyPerkPicks passes it into the replay (the same log claimed for season 1 draws
+    // from the smaller pool AND from season 1's seed -> cannot reproduce the build)
+    assert('replayed as its own season (' + log.S + ') -> ok', perks.verifyPerkPicks(Object.assign({ seasonId: log.S }, f), null, 1).ok === true);
+    assert('the same log claimed for season 1 -> perk_forge', perks.verifyPerkPicks(Object.assign({ seasonId: 1 }, f), null, 1).reason === 'perk_forge');
+  }
+  P._setTableForTest(null);
+  eq('table restored', P.list().length, 20);
+}
+
 console.log('== perk_chain (run memory) ==');
 {
   const h2 = honest(1, 2), h3 = honest(1, 3);

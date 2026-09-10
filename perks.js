@@ -58,7 +58,9 @@ function verifyPerkPicks(f, run, pc) {
   if (!P.buildValid(build)) return { ok: false, reason: 'perk_forge', why: 'build-shape' };
   if (run && run.pk && !isPrefix(run.pk.lo | 0, run.pk.hi | 0, lo, hi)) return { ok: false, reason: 'perk_chain', why: 'prefix' };
   if (n === 0) return build === 0 ? { ok: true, n: 0, build: 0 } : { ok: false, reason: 'perk_forge', why: 'build-without-picks' };
-  const r = P.replay(P.seasonSeed(f.seasonId | 0), arr, f.endDepth | 0, { mode: modeOf(pc) });
+  // seasonId also selects the season window of the pool (client knife 3.5d: table entries may carry seasons {from, until};
+  //   a perk that opens next season is not offered when replaying this season's log, exactly like the client drew it)
+  const r = P.replay(P.seasonSeed(f.seasonId | 0), arr, f.endDepth | 0, { mode: modeOf(pc), seasonId: f.seasonId | 0 });
   if (!r.ok) return { ok: false, reason: 'perk_forge', why: String(r.why) + (r.at != null ? '@' + r.at : '') };
   if ((r.build >>> 0) !== build) return { ok: false, reason: 'perk_forge', why: 'build-mismatch' };
   return { ok: true, n, build };

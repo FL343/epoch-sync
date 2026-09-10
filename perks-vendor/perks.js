@@ -102,6 +102,15 @@ window.PERKS = (() => {
       if (!Array.isArray(p.lv) || p.lv.length !== 3) errs.push('lv must have 3 tiers: ' + p.key);
       if (!Array.isArray(p.p) || p.p.length !== 3) errs.push('p must have 3 tiers: ' + p.key);
       if (p.contract != null && typeof p.contract !== 'boolean') errs.push('contract not boolean: ' + p.key);
+      if (p.seasons != null) {
+        const s = p.seasons;
+        if (typeof s !== 'object' || (s.from == null && s.until == null)) errs.push('seasons needs from and/or until: ' + p.key);
+        else {
+          if (s.from != null && !(s.from === (s.from | 0) && s.from >= 0)) errs.push('seasons.from must be int >= 0: ' + p.key);
+          if (s.until != null && !(s.until === (s.until | 0) && s.until >= 0)) errs.push('seasons.until must be int >= 0: ' + p.key);
+          if (s.from != null && s.until != null && (s.from | 0) > (s.until | 0)) errs.push('seasons.from > until: ' + p.key);
+        }
+      }
       if (p.contract) {
         if (p.rarity !== 'epic') errs.push('contract must be epic: ' + p.key);
         if (!p.rollable) errs.push('contract must be rollable: ' + p.key);
@@ -163,6 +172,24 @@ window.PERKS = (() => {
     return errs;
   }
   function isContract(id) { const p = get(id); return !!(p && p.contract); }
+  function inSeason(p, seasonId) {
+    const s = p && p.seasons;
+    if (!s) return true;
+    const id = seasonId | 0;
+    if (s.from != null && id < (s.from | 0)) return false;
+    if (s.until != null && id > (s.until | 0)) return false;
+    return true;
+  }
+  function _fnv1a(str) { let h = 0x811c9dc5; for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; } return h >>> 0; }
+  function poolEntries() {
+    return TABLE.slice().sort((a, b) => (a.id | 0) - (b.id | 0)).map(p => ({
+      id: p.id | 0, key: String(p.key), axis: p.axis, rarity: p.rarity, scope: p.scope,
+      modes: { solo: !!(p.modes && p.modes.solo), coop: !!(p.modes && p.modes.coop), duel: !!(p.modes && p.modes.duel) },
+      rollable: !!p.rollable, contract: !!p.contract,
+      seasons: p.seasons ? { from: p.seasons.from == null ? null : (p.seasons.from | 0), until: p.seasons.until == null ? null : (p.seasons.until | 0) } : null,
+    }));
+  }
+  function poolSig() { return ('00000000' + _fnv1a(JSON.stringify(poolEntries())).toString(16)).slice(-8); }
   function packBuild(slots) {
     let v = 0;
     for (let k = 0; k < 3; k++) {
@@ -281,12 +308,13 @@ window.PERKS = (() => {
   function _not(cards, id) { return !cards.some(c => c.id === id); }
   function candidates(sSeed, depth, build, drawIdx, skipBank, opts) {
     const mode = (opts && opts.mode) || 'solo';
+    const sid = (opts && opts.seasonId != null) ? (opts.seasonId | 0) : 0;
     const rng = window.makeRNG(drawSeed(sSeed, depth, build));
     const slots = unpackBuild(build);
     const held = slots.filter(Boolean);
     const heldIds = new Set(held.map(s => s.id));
     const heldAxes = new Set(held.map(s => get(s.id) && get(s.id).axis));
-    const poolAll = TABLE.filter(p => p.rollable && p.modes && p.modes[mode]);
+    const poolAll = TABLE.filter(p => p.rollable && p.modes && p.modes[mode] && inSeason(p, sid));
     const pool = poolAll.filter(p => !p.contract);
     const cPool = poolAll.filter(p => p.contract && !heldIds.has(p.id));
     const n = 3 + (skipBank ? 1 : 0);
@@ -340,12 +368,13 @@ window.PERKS = (() => {
   function hasContract(cards) { return !!(cards && cards.some(c => isContract(c.id))); }
   function contractsSeenBefore(sSeed, picksArr, k, opts) {
     const mode = (opts && opts.mode) || 'solo';
+    const seasonId = (opts && opts.seasonId != null) ? (opts.seasonId | 0) : 0;
     let build = 0, skipBank = 0, seen = 0;
     const cnt = picksCount(picksArr);
     const kk = Math.min(k | 0, cnt < 0 ? 0 : cnt);
     for (let j = 0; j < kk; j++) {
       const choice = picksArr[j] | 0;
-      const cards = candidates(sSeed, depthOfDraw(j), build, j, skipBank, { mode, contractsSeen: seen });
+      const cards = candidates(sSeed, depthOfDraw(j), build, j, skipBank, { mode, contractsSeen: seen, seasonId });
       if (hasContract(cards)) seen++;
       if (choice === 5) { skipBank = 1; continue; }
       const nb = applyPick(build, cards, choice);
@@ -419,9 +448,10 @@ window.PERKS = (() => {
     if (n > maxDrawsByDepth(endDepth)) return { ok: false, why: 'picks-count', at: n };
     let build = 0, skipBank = 0, seen = 0;
     const mode = (opts && opts.mode) || 'solo';
+    const seasonId = (opts && opts.seasonId != null) ? (opts.seasonId | 0) : 0;
     for (let k = 0; k < n; k++) {
       const choice = picksArr[k] | 0;
-      const cards = candidates(sSeed, depthOfDraw(k), build, k, skipBank, { mode, contractsSeen: seen });
+      const cards = candidates(sSeed, depthOfDraw(k), build, k, skipBank, { mode, contractsSeen: seen, seasonId });
       if (hasContract(cards)) seen++;
       if (choice === 5) { skipBank = 1; continue; }
       if (choice === 4 && !skipBank) return { ok: false, why: 'pick-4-nobank', at: k };
@@ -505,6 +535,7 @@ window.PERKS = (() => {
     drawEvery, gateEvery, maxDraws, drawIdxAt, depthOfDraw, isGateDepth, maxDrawsByDepth,
     seasonSeed, drawSeed, candidates, applyPick, replay, pickApply, restoreRun,
     cfgNum, isContract, hasContract, contractsSeenBefore, SUB_KEYS, ONE_PER_TABLE,
+    inSeason, poolEntries, poolSig,
     effOfBuild, valueMulOfBuild, buildOf, effOf, valueMulOf, levelTimeAddMax, NEUTRAL,
     nameKey, descKey, descParams, iconOf, rarityOf,
     _setTableForTest(list) { TABLE = list || LIST; _index(); _effCache = { build: -1, eff: effOfBuild(0) }; },
