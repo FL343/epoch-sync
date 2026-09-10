@@ -2823,8 +2823,8 @@ async function main() {
     }
     if ((f.endDepth | 0) > 0) {
       const packed = packEndlessScore(f.endDepth, f.score);
-      if (compBest[sid] == null || packed > compBest[sid]) { compBest[sid] = packed; changedComp[sid] = { s: packed, ts: f.score | 0 }; console.log('  solo best ' + m + ': ' + plog(sid) + ' depth ' + f.endDepth + ' bank ' + f.score + ' -> board ' + packed); }
-      if (compSeasonId && (f.seasonId | 0) === (seasonId | 0) && (compSeasonBest[sid] == null || packed > compSeasonBest[sid])) { compSeasonBest[sid] = packed; changedCompSeason[sid] = { s: packed, ts: f.score | 0 }; console.log('  solo season best ' + m + ': ' + plog(sid) + ' depth ' + f.endDepth + ' -> board ' + packed); }
+      if (compBest[sid] == null || packed > compBest[sid]) { compBest[sid] = packed; changedComp[sid] = { s: packed, ts: f.score | 0, build: f.build >>> 0 }; console.log('  solo best ' + m + ': ' + plog(sid) + ' depth ' + f.endDepth + ' bank ' + f.score + ' -> board ' + packed); }
+      if (compSeasonId && (f.seasonId | 0) === (seasonId | 0) && (compSeasonBest[sid] == null || packed > compSeasonBest[sid])) { compSeasonBest[sid] = packed; changedCompSeason[sid] = { s: packed, ts: f.score | 0, build: f.build >>> 0 }; console.log('  solo season best ' + m + ': ' + plog(sid) + ' depth ' + f.endDepth + ' -> board ' + packed); }
     }
     if (xpId) creditXpEndless(c.g, { startDepth: Math.max(f.startDepth | 0, plan.proven | 0), endDepth: f.endDepth }, xp, changedXp, spSet);   // audit B-F2: overlap credits new depth only
     console.log('  solo settle ' + m + ': ' + plog(sid) + ' depth ' + f.startDepth + '->' + f.endDepth + ' bank ' + f.score + ' flags ' + f.flags + ((f.dispCode | 0) === attest.DISP_USER_QUIT ? ' (quit)' : '') + ' key=' + f.keyName + (v.sealed ? '' : ' [dev]') + (plan.overlap != null ? ' (overlap from ' + plan.overlap + ', proven ' + plan.proven + ')' : ''));
@@ -2962,8 +2962,8 @@ async function main() {
           }
           if ((f.endDepth | 0) > 0) {
             const packed = packEndlessScore(f.endDepth, teamT);
-            if (fam.best[sid] == null || packed > fam.best[sid]) { fam.best[sid] = packed; fam.changed[sid] = { s: packed, ts: teamT }; console.log('  endless-comp best (' + fam.low + ') ' + c.m + ': ' + plog(sid) + ' depth ' + f.endDepth + ' team ' + teamT + ' -> board ' + packed); }
-            if (fam.seasonId && (t.seasonId | 0) === (seasonId | 0) && (fam.seasonBest[sid] == null || packed > fam.seasonBest[sid])) { fam.seasonBest[sid] = packed; fam.seasonChanged[sid] = { s: packed, ts: teamT }; console.log('  endless-comp season best (' + fam.low + ') ' + c.m + ': ' + plog(sid) + ' -> board ' + packed); }
+            if (fam.best[sid] == null || packed > fam.best[sid]) { fam.best[sid] = packed; fam.changed[sid] = { s: packed, ts: teamT, build: f.build >>> 0 }; console.log('  endless-comp best (' + fam.low + ') ' + c.m + ': ' + plog(sid) + ' depth ' + f.endDepth + ' team ' + teamT + ' -> board ' + packed); }
+            if (fam.seasonId && (t.seasonId | 0) === (seasonId | 0) && (fam.seasonBest[sid] == null || packed > fam.seasonBest[sid])) { fam.seasonBest[sid] = packed; fam.seasonChanged[sid] = { s: packed, ts: teamT, build: f.build >>> 0 }; console.log('  endless-comp season best (' + fam.low + ') ' + c.m + ': ' + plog(sid) + ' -> board ' + packed); }
           }
         }
         if (xpId) creditXpEndless(g, { startDepth: Math.max(f.startDepth | 0, plan.proven | 0), endDepth: f.endDepth | 0 }, xp, changedXp, spSet);   // audit B-F2: overlap credits new depth only
@@ -3031,13 +3031,13 @@ async function main() {
         const packed = packEndlessScore(t.endDepth, teamScore);
         for (const sid of writerSids) {
           if (bBest[sid] == null || packed > bBest[sid]) {
-            bBest[sid] = packed; bChanged[sid] = { s: packed, ts: teamScore };
+            bBest[sid] = packed; bChanged[sid] = { s: packed, ts: teamScore, build: t.build >>> 0 };
             console.log('  endless best' + (useTrio ? ' (trio)' : '') + ' ' + c.m + ': ' + plog(sid) + ' depth ' + t.endDepth + ' team ' + teamScore + ' -> board ' + packed);
           }
           // seasonal double-write: same improved-best rule against the season board's own base
           // (fresh each season = the per-season "dig it again" ladder).
           if (bSeasonId && (bSeasonBest[sid] == null || packed > bSeasonBest[sid])) {
-            bSeasonBest[sid] = packed; bSeasonChanged[sid] = { s: packed, ts: teamScore };
+            bSeasonBest[sid] = packed; bSeasonChanged[sid] = { s: packed, ts: teamScore, build: t.build >>> 0 };
             console.log('  endless season best' + (useTrio ? ' (trio)' : '') + ' ' + c.m + ': ' + plog(sid) + ' depth ' + t.endDepth + ' -> board ' + packed);
           }
         }
@@ -3358,10 +3358,14 @@ async function main() {
     else console.log('  ok cp ' + plog(sid) + ' = ' + changedCp[sid]);
     return okFlag;
   });
-  // details carry the exact best-run team score (the packed tiebreak is /1000-saturated).
-  const wEndless = await mapPool(Object.keys(changedEndless), CONCURRENCY, async (sid) => {
+  // details carry the exact best-run team score (the packed tiebreak is /1000-saturated) and, since 2026-09-10 (client
+  //   knife 3.5d), [1] = the perk build word of that best run (3 slots x [id 7 | lv 2]; 0 = pre-perk writer / warm-up).
+  //   The hub draws it as three perk icons next to the row; the build comes from the same replay-verified record that
+  //   produced the score (the client never writes it), and being public it doubles as build-distribution data for
+  //   balancing. Every endless ladder write below (casual 2P/trio, solo/duo/trio competitive, lifetime + season) = [score, build].
+  const wEndless =await mapPool(Object.keys(changedEndless), CONCURRENCY, async (sid) => {
     const w = changedEndless[sid];
-    const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: enId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, [w.ts | 0]);
+    const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: enId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, [w.ts | 0, w.build | 0]);
     const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
     if (!okFlag) ghWarn('write endless ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
     else console.log('  ok endless ' + plog(sid) + ' = ' + w.s);
@@ -3369,7 +3373,7 @@ async function main() {
   });
   const wEndlessSeason = await mapPool(Object.keys(changedEndlessSeason), CONCURRENCY, async (sid) => {
     const w = changedEndlessSeason[sid];
-    const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: enSeasonId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, [w.ts | 0]);
+    const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: enSeasonId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, [w.ts | 0, w.build | 0]);
     const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
     if (!okFlag) ghWarn('write seasonal endless ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
     else console.log('  ok endless season ' + plog(sid) + ' = ' + w.s);
@@ -3379,7 +3383,7 @@ async function main() {
   // boards resolved, so the ids are non-null whenever the pools are non-empty.
   const wEndlessTrio = await mapPool(Object.keys(changedEndlessTrio), CONCURRENCY, async (sid) => {
     const w = changedEndlessTrio[sid];
-    const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: enTrioId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, [w.ts | 0]);
+    const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: enTrioId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, [w.ts | 0, w.build | 0]);
     const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
     if (!okFlag) ghWarn('write trio endless ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
     else console.log('  ok endless trio ' + plog(sid) + ' = ' + w.s);
@@ -3387,7 +3391,7 @@ async function main() {
   });
   const wEndlessTrioSeason = await mapPool(Object.keys(changedEndlessTrioSeason), CONCURRENCY, async (sid) => {
     const w = changedEndlessTrioSeason[sid];
-    const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: enTrioSeasonId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, [w.ts | 0]);
+    const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: enTrioSeasonId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, [w.ts | 0, w.build | 0]);
     const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
     if (!okFlag) ghWarn('write seasonal trio endless ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
     else console.log('  ok endless trio season ' + plog(sid) + ' = ' + w.s);
@@ -3404,7 +3408,7 @@ async function main() {
   // O93 solo competitive ladder writes (details = exact bank; packed tiebreak is /1000-saturated)
   const wComp = await mapPool(Object.keys(changedComp), CONCURRENCY, async (sid) => {
     const w = changedComp[sid];
-    const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: compId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, [w.ts | 0]);
+    const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: compId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, [w.ts | 0, w.build | 0]);
     const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
     if (!okFlag) ghWarn('write solo comp ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
     else console.log('  ok solo comp ' + plog(sid) + ' = ' + w.s);
@@ -3412,7 +3416,7 @@ async function main() {
   });
   const wCompSeason = await mapPool(Object.keys(changedCompSeason), CONCURRENCY, async (sid) => {
     const w = changedCompSeason[sid];
-    const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: compSeasonId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, [w.ts | 0]);
+    const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: compSeasonId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, [w.ts | 0, w.build | 0]);
     const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
     if (!okFlag) ghWarn('write seasonal solo comp ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
     else console.log('  ok solo comp season ' + plog(sid) + ' = ' + w.s);
@@ -3429,7 +3433,7 @@ async function main() {
       if (!bid) { ghWarn('write ' + label + ': board unresolved, ' + sids.length + ' row(s) dropped'); continue; }
       const wr = await mapPool(sids, CONCURRENCY, async (sid) => {
         const w = pool[sid];
-        const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: bid, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, [w.ts | 0]);
+        const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: bid, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, [w.ts | 0, w.build | 0]);
         const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
         if (!okFlag) ghWarn('write ' + label + ' ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
         else console.log('  ok ' + label + ' ' + plog(sid) + ' = ' + w.s);
