@@ -1420,6 +1420,9 @@ const SAVE_BOX_LB = process.env.SAVE_BOX_LB || 'endless_save_box_solo';        /
 //   guard-signed save boxes the HOST's guard writes (client-writable; the cron only prunes past-season rows).
 const ENDLESS_COMP_LB_DUO = process.env.ENDLESS_COMP_LB_DUO || 'endless_comp_duo';
 const ENDLESS_COMP_LB_TRIO = process.env.ENDLESS_COMP_LB_TRIO || 'endless_comp_trio';
+// composite ("overall") competitive ladder (client knife 3.5d, 2026-09-10; experimental): one score per player across the team sizes,
+//   cron-only (recomputed from the per-size bests whenever one of them moves); lifetime + season twin like the per-size ladders
+const ENDLESS_COMP_LB_OVERALL = process.env.ENDLESS_COMP_LB_OVERALL || 'endless_comp_overall';
 const SAVE_BOX_LB_DUO = process.env.SAVE_BOX_LB_DUO || 'endless_save_box_duo';
 const SAVE_BOX_LB_TRIO = process.env.SAVE_BOX_LB_TRIO || 'endless_save_box_trio';
 const SOLO_FILE = process.env.SOLO_FILE || 'endless-solo.json';   // chain memory for solo AND team runs + milestone bitmaps
@@ -1430,7 +1433,39 @@ const COMP = {
   CHAIN_WAIT_MS: Number(process.env.COMP_CHAIN_WAIT_MS || 7 * 86400000),      // unchained segment waits this long for its predecessor, then rejects
   MS_TTL_MS: Number(process.env.COMP_MS_TTL_MS || 120 * 86400000),           // milestone bitmaps (player x season x ladder family) outlive a season
   RUN_TTL_MS: Number(process.env.COMP_RUN_TTL_MS || 45 * 86400000),           // run chain memory (saves included) pruned after
+  // composite ladder weights (lockstep: client RANKED_CONFIG.ENDLESS.COMP.OVERALL; provisional -- tuned with playtest data):
+  //   K[n-1] = depth discount per team size (extra hooks make team runs deeper), M[n-1] = mixing weight (solo counts double)
+  OVERALL: { K: [1.0, 0.9, 0.8, 0.7], M: [2, 1, 1, 1] },
 };
+// Composite score in 0.01-depth units from the per-size packed bests { 1: solo, 2: duo, 3: trio, 4: quad } (0 / missing = never
+//   played that size): the M-weighted mean over the PLAYED sizes of K * depth, floored at the plain solo depth -- trying a team run
+//   can lift you but never pull you below your solo depth (the user's "lean toward solo players"); team-only players get the
+//   discounted depth. Pure function (unit-tested); the hub shows the value as depth with two decimals.
+function overallScore(bests) {
+  let num = 0, den = 0, solo = 0;
+  for (let n = 1; n <= 4; n++) {
+    const p = bests ? (bests[n] | 0) : 0;
+    if (!(p > 0)) continue;
+    const d = unpackEndlessScore(p).depth;
+    if (!(d > 0)) continue;
+    const k = COMP.OVERALL.K[n - 1] != null ? COMP.OVERALL.K[n - 1] : 0.7, m = COMP.OVERALL.M[n - 1] != null ? COMP.OVERALL.M[n - 1] : 1;
+    num += m * k * d; den += m;
+    if (n === 1) solo = d;
+  }
+  if (!den) return 0;
+  return Math.round(Math.max(solo, num / den) * 100);
+}
+// the size whose discounted depth carries the composite (ties -> the smaller size); 0 = nothing played
+function overallDominant(bests) {
+  let best = 0, at = 0;
+  for (let n = 1; n <= 4; n++) {
+    const p = bests ? (bests[n] | 0) : 0;
+    if (!(p > 0)) continue;
+    const v = (COMP.OVERALL.K[n - 1] != null ? COMP.OVERALL.K[n - 1] : 0.7) * unpackEndlessScore(p).depth;
+    if (v > best) { best = v; at = n; }
+  }
+  return at;
+}
 function loadSolo() { try { const st = JSON.parse(fs.readFileSync(SOLO_FILE, 'utf8')) || {}; st.runs = st.runs || {}; st.wait = st.wait || {}; st.ms = st.ms || {}; return st; } catch (e) { return { runs: {}, wait: {}, ms: {} }; } }
 function pruneSolo(st, nowMs) {
   for (const k of Object.keys(st.runs)) if (nowMs - (st.runs[k].t || 0) > COMP.RUN_TTL_MS) delete st.runs[k];
@@ -1891,6 +1926,7 @@ function ptBoardPlan(names, cfg) {
   add(cfg.xpLb, 1); add(cfg.cpLb, 1); add(cfg.endlessLb, 1); add(cfg.endlessTrioLb, 1);
   add(cfg.compLb, 1); add(cfg.saveBoxLb, 0);   // O93 solo competitive ladder (trusted) + guard-signed save rows (client-writable)
   add(cfg.compDuoLb, 1); add(cfg.saveBoxDuoLb, 0); add(cfg.compTrioLb, 1); add(cfg.saveBoxTrioLb, 0);   // team competitive ladders + their save boxes
+  add(cfg.compOverallLb, 1);   // composite competitive ladder (knife 3.5d; cron-only)
   add('version_gate', 1);   // authoritative-version gate (ops-written, client read-only)
   add('gate_window', 1);    // queue-gate forced window / emergency stop (ops-written, client read-only)
   add('pt_master', 1);      // playtest master switch: an active window closes the whole playtest
@@ -1990,6 +2026,7 @@ async function main() {
       endlessLb: ENDLESS_LB, endlessTrioLb: ENDLESS_LB_TRIO, trustLb: TRUST_LB, reportLb: REPORT_LB,
       compLb: ENDLESS_COMP_LB, saveBoxLb: SAVE_BOX_LB,
       compDuoLb: ENDLESS_COMP_LB_DUO, saveBoxDuoLb: SAVE_BOX_LB_DUO, compTrioLb: ENDLESS_COMP_LB_TRIO, saveBoxTrioLb: SAVE_BOX_LB_TRIO,
+      compOverallLb: ENDLESS_COMP_LB_OVERALL,
       rankedLb: RANKED_LB, lpLb: LP_LB, redeemLb: REDEEM_LB, grantLb: GRANT_LB, mirrorLb: PT_MIRROR_LB,
     });
     if (ptPlan.forbidden.length) { ghErr('playtest channel: forbidden board(s) exist on this app: ' + ptPlan.forbidden.join(', ') + ' -- refusing to run (lock layer 3)'); process.exit(1); }
@@ -2005,7 +2042,7 @@ async function main() {
   //   early returns (live e2e 2026-09-06: first save on a fresh test app id hit a missing box board).
   if (!PT_MODE) {
     const names0 = ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).map(x => String(x.name || x.Name));
-    for (const [nm, trusted] of [[ENDLESS_COMP_LB, true], [SAVE_BOX_LB, false], [ENDLESS_COMP_LB_DUO, true], [SAVE_BOX_LB_DUO, false], [ENDLESS_COMP_LB_TRIO, true], [SAVE_BOX_LB_TRIO, false]]) {
+    for (const [nm, trusted] of [[ENDLESS_COMP_LB, true], [SAVE_BOX_LB, false], [ENDLESS_COMP_LB_DUO, true], [SAVE_BOX_LB_DUO, false], [ENDLESS_COMP_LB_TRIO, true], [SAVE_BOX_LB_TRIO, false], [ENDLESS_COMP_LB_OVERALL, true]]) {
       if (names0.indexOf(nm) >= 0) continue;
       const id0 = await findOrCreateBoard(nm, trusted);
       if (id0) console.log('solo boards: provisioned ' + nm + (trusted ? ' (trusted)' : ' (client-writable)'));
@@ -2606,12 +2643,13 @@ async function main() {
   if (!compId) { strictBoard('solo comp board not found'); ghWarn('solo comp board not found (' + ENDLESS_COMP_LB + ') -> solo segments left pending'); }
   const compBest = {};
   let compComplete = true, compSeasonComplete = true;   // audit B-F4: a paged-out solo ladder must fall back to on-demand reads (ForceUpdate would else overwrite a deeper lifetime best with a shallower run)
-  if (compId) { const br = await readBoardAll(compId, 'solo comp board'); compComplete = br.complete !== false; for (const e of br.ents) compBest[e.steamID] = e.score | 0; }
+  const compDet = {}, compSeasonDet = {};   // knife 3.5d: raw row details (build word at [1]) -> the composite row inherits the dominant size's build
+  if (compId) { const br = await readBoardAll(compId, 'solo comp board'); compComplete = br.complete !== false; for (const e of br.ents) { compBest[e.steamID] = e.score | 0; compDet[e.steamID] = e.details; } }
   const compSeason = (seasonId >= 1 && compId) ? await resolveSeasonBoard(lr, ENDLESS_COMP_LB, seasonId) : { name: null, id: null };
   const compSeasonId = compSeason.id;
   if (seasonId >= 1 && compId && !compSeasonId) { strictBoard('seasonal solo comp board not found'); ghWarn('seasonal solo comp board unresolved -> solo segments left pending'); }
   const compSeasonBest = {};
-  if (compSeasonId) { const br = await readBoardAll(compSeasonId, 'seasonal solo comp board'); compSeasonComplete = br.complete !== false; for (const e of br.ents) compSeasonBest[e.steamID] = e.score | 0; }
+  if (compSeasonId) { const br = await readBoardAll(compSeasonId, 'seasonal solo comp board'); compSeasonComplete = br.complete !== false; for (const e of br.ents) { compSeasonBest[e.steamID] = e.score | 0; compSeasonDet[e.steamID] = e.details; } }
   let saveBoxId = byNameLb(SAVE_BOX_LB);
   if (!saveBoxId) saveBoxId = await findOrCreateBoard(SAVE_BOX_LB, false);
   if (!saveBoxId) ghWarn('save box board not found (' + SAVE_BOX_LB + ', client-writable) -> guard saves fail until it exists');
@@ -2622,17 +2660,25 @@ async function main() {
     let id = byNameLb(lbName);
     if (!id) id = await findOrCreateBoard(lbName, true);
     if (!id) { strictBoard('team comp board not found'); ghWarn('team comp board not found (' + lbName + ') -> ' + low + ' segments left pending'); }
-    const best = {}, seasonBest = {};
+    const best = {}, seasonBest = {}, det = {}, seasonDet = {};
     let complete = true, seasonComplete = true;
-    if (id) { const br = await readBoardAll(id, low + ' comp board'); complete = br.complete; for (const e of br.ents) best[e.steamID] = e.score | 0; }
+    if (id) { const br = await readBoardAll(id, low + ' comp board'); complete = br.complete; for (const e of br.ents) { best[e.steamID] = e.score | 0; det[e.steamID] = e.details; } }
     const season = (seasonId >= 1 && id) ? await resolveSeasonBoard(lr, lbName, seasonId) : { name: null, id: null };
     if (seasonId >= 1 && id && !season.id) { strictBoard('seasonal team comp board not found'); ghWarn('seasonal ' + low + ' comp board unresolved -> segments left pending'); }
-    if (season.id) { const br = await readBoardAll(season.id, 'seasonal ' + low + ' comp board'); seasonComplete = br.complete; for (const e of br.ents) seasonBest[e.steamID] = e.score | 0; }
+    if (season.id) { const br = await readBoardAll(season.id, 'seasonal ' + low + ' comp board'); seasonComplete = br.complete; for (const e of br.ents) { seasonBest[e.steamID] = e.score | 0; seasonDet[e.steamID] = e.details; } }
     let sbId = byNameLb(sbName);
     if (!sbId) sbId = await findOrCreateBoard(sbName, false);
     if (!sbId) ghWarn('save box board not found (' + sbName + ', client-writable) -> guard team saves fail until it exists');
-    compFam[fam] = { fam, low, name: lbName, id, seasonId: season.id, best, seasonBest, complete, seasonComplete, saveBoxId: sbId, changed: null, seasonChanged: null };
+    compFam[fam] = { fam, low, name: lbName, id, seasonId: season.id, best, seasonBest, det, seasonDet, complete, seasonComplete, saveBoxId: sbId, changed: null, seasonChanged: null };
   }
+  // composite ("overall") competitive ladder (knife 3.5d): lifetime + season twin, trusted, cron-only; rows recomputed below for every
+  //   player whose solo / duo / trio best moved this tick (no records of its own, nothing to settle -> a missing board only skips the rows)
+  let overallId = byNameLb(ENDLESS_COMP_LB_OVERALL);
+  if (!overallId) overallId = await findOrCreateBoard(ENDLESS_COMP_LB_OVERALL, true);
+  if (!overallId) ghWarn('overall comp board not found (' + ENDLESS_COMP_LB_OVERALL + ') -> composite rows skipped this tick');
+  const overallSeason = (seasonId >= 1 && overallId) ? await resolveSeasonBoard(lr, ENDLESS_COMP_LB_OVERALL, seasonId) : { name: null, id: null };
+  const overallSeasonId = overallSeason.id;
+  if (seasonId >= 1 && overallId && !overallSeasonId) ghWarn('seasonal overall comp board unresolved -> seasonal composite rows skipped this tick');
 
   fresh.sort(freshOrder);   // non-endless by key; endless segments predecessor-first (startDepth, then key) -- see freshOrder
   // On-demand base values: when a bulk read hit PAGE_CAP the maps are incomplete -- a settling
@@ -3446,6 +3492,41 @@ async function main() {
   //   be resumed (the client refuses; a resumed segment would chain into a season that no longer exists), so
   //   the publisher key deletes it and a stale row never shows as a save. Capped per run; nothing else
   //   in the cron touches the box (rows are written and consumed by the guard only).
+  // ---- composite ("overall") competitive ladder writes (knife 3.5d, experimental) ----
+  //   Every player whose solo / duo / trio best moved this tick gets the composite recomputed from the three per-size bests (the bulk maps
+  //   already carry this tick's writes) and ForceUpdated on the lifetime + season rows. details = [score, dominant size's build, size]
+  //   so the hub draws the build icons of the size that carries the score (the hub reads details[1] as the build like every endless row).
+  if (overallId || overallSeasonId) {
+    const famOf = { 2: compFam.DUO, 3: compFam.TRIO };
+    const buildOf = (n, sid, season) => {   // this tick's write carries the exact build; otherwise the bulk read's details[1]
+      const ch = n === 1 ? (season ? changedCompSeason : changedComp)[sid] : ((season ? famOf[n].seasonChanged : famOf[n].changed) || {})[sid];
+      if (ch && ch.build != null) return ch.build >>> 0;
+      const det = n === 1 ? (season ? compSeasonDet : compDet)[sid] : (season ? famOf[n].seasonDet : famOf[n].det)[sid];
+      const arr = decodeDetails(det);
+      return arr.length > 1 ? (arr[1] >>> 0) : 0;
+    };
+    const writeOverall = async (bid, season, label) => {
+      const pools = season ? [changedCompSeason, compFam.DUO.seasonChanged || {}, compFam.TRIO.seasonChanged || {}] : [changedComp, compFam.DUO.changed || {}, compFam.TRIO.changed || {}];
+      const sids = [...new Set(pools.flatMap(p => Object.keys(p)))];
+      if (!sids.length) return;
+      const wr = await mapPool(sids, CONCURRENCY, async (sid) => {
+        const bests = season
+          ? { 1: compSeasonBest[sid] | 0, 2: compFam.DUO.seasonBest[sid] | 0, 3: compFam.TRIO.seasonBest[sid] | 0 }
+          : { 1: compBest[sid] | 0, 2: compFam.DUO.best[sid] | 0, 3: compFam.TRIO.best[sid] | 0 };
+        const s = overallScore(bests);
+        if (!(s > 0)) return true;
+        const dom = overallDominant(bests);
+        const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: bid, steamid: sid, score: s, scoremethod: 'ForceUpdate', format: 'json' }, [s | 0, buildOf(dom, sid, season) | 0, dom | 0]);
+        const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
+        if (!okFlag) ghWarn('write ' + label + ' ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
+        else console.log('  ok ' + label + ' ' + plog(sid) + ' = ' + s + ' (dominant ' + dom + 'p)');
+        return okFlag;
+      });
+      console.log(label + ' writes: ' + wr.filter(x => x.status === 'fulfilled' && x.value).length + '/' + sids.length);
+    };
+    if (overallId) await writeOverall(overallId, false, 'overall comp');
+    if (overallSeasonId) await writeOverall(overallSeasonId, true, 'overall comp season');
+  }
   for (const [sbxId, sbxLabel] of [[saveBoxId, 'save box'], [compFam.DUO.saveBoxId, 'duo save box'], [compFam.TRIO.saveBoxId, 'trio save box']]) {
   if (sbxId && seasonId >= 1) {
     try {
@@ -3489,4 +3570,5 @@ if (require.main === module) {
 module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, isVoidDisp, voidByConsensus, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, RS_SOLO_VS_TRIO, RS_TRIO_WIN, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, CONFESS_MAGIC, reconcileConfessions, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan, postForm, postFormDetails, findOrCreateBoard, ghWarn, ghErr, PT_MODE, PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, ptSeedCp, ptBoardPlan, PRIVATE_XP, isPrivateMt, privateProgressOf, creditXpPrivate, ENDLESS_XP, computeXpEndless, creditXpEndless, CAMPAIGN_LB, SEEDCAP_REJECT_LADDER_MIN, seedcapRejectWindowMin, seedcapRejectUntilMin, seedcapRejectActive,
   ENDLESS_COMP_LB, SAVE_BOX_LB, SOLO_FILE, COMP, soloSanity, soloChainPlan, soloMilestones, soloAdvance, soloRunKey, soloStartAttested, loadSolo, saveSolo, segOrderOf, segStartOf, freshOrder,
   ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, SAVE_BOX_LB_DUO, SAVE_BOX_LB_TRIO, teamRunKey, soloMsSlot, groupRecords,
+  ENDLESS_COMP_LB_OVERALL, overallScore, overallDominant,   // knife 3.5d composite ladder
   PERKS_CFG: perks.PERKS_CFG, verifyPerkPicks: perks.verifyPerkPicks };
