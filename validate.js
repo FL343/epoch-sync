@@ -3493,9 +3493,12 @@ async function main() {
   //   the publisher key deletes it and a stale row never shows as a save. Capped per run; nothing else
   //   in the cron touches the box (rows are written and consumed by the guard only).
   // ---- composite ("overall") competitive ladder writes (knife 3.5d, experimental) ----
-  //   Every player whose solo / duo / trio best moved this tick gets the composite recomputed from the three per-size bests (the bulk maps
-  //   already carry this tick's writes) and ForceUpdated on the lifetime + season rows. details = [score, dominant size's build, size]
-  //   so the hub draws the build icons of the size that carries the score (the hub reads details[1] as the build like every endless row).
+  //   The composite row is DERIVED from the three per-size bests, so it is recomputed for every player the bulk reads know about (union of
+  //   the three best maps + this tick's changed pools -- the maps already carry this tick's writes); the composite board is read once per
+  //   tick and only rows that are missing or differ (score / dominant build / size) are ForceUpdated. Steady state = this tick's movers;
+  //   the first tick after rollout = the backfill for every competitive player whose bests predate the ladder (2026-09-10 hub CDP with a
+  //   real board caught the original 'movers only' rule leaving the ladder empty). details = [score, dominant size's build, size] so the
+  //   hub draws the build icons of the size that carries the score (the hub reads details[1] as the build like every endless row).
   if (overallId || overallSeasonId) {
     const famOf = { 2: compFam.DUO, 3: compFam.TRIO };
     const buildOf = (n, sid, season) => {   // this tick's write carries the exact build; otherwise the bulk read's details[1]
@@ -3507,22 +3510,35 @@ async function main() {
     };
     const writeOverall = async (bid, season, label) => {
       const pools = season ? [changedCompSeason, compFam.DUO.seasonChanged || {}, compFam.TRIO.seasonChanged || {}] : [changedComp, compFam.DUO.changed || {}, compFam.TRIO.changed || {}];
-      const sids = [...new Set(pools.flatMap(p => Object.keys(p)))];
+      const bestMaps = season ? [compSeasonBest, compFam.DUO.seasonBest || {}, compFam.TRIO.seasonBest || {}] : [compBest, compFam.DUO.best || {}, compFam.TRIO.best || {}];
+      const sids = [...new Set([...pools, ...bestMaps].flatMap(p => Object.keys(p)))];
       if (!sids.length) return;
-      const wr = await mapPool(sids, CONCURRENCY, async (sid) => {
+      const cur = {};
+      try { const br = await readBoardAll(bid, label + ' board'); for (const e of br.ents) cur[String(e.steamID)] = { s: e.score | 0, det: decodeDetails(e.details) }; }
+      catch (e) { ghWarn('read ' + label + ' board failed (' + (e && e.message) + ') -> composite rows skipped this tick'); return; }
+      const wantOf = (sid) => {
         const bests = season
           ? { 1: compSeasonBest[sid] | 0, 2: compFam.DUO.seasonBest[sid] | 0, 3: compFam.TRIO.seasonBest[sid] | 0 }
           : { 1: compBest[sid] | 0, 2: compFam.DUO.best[sid] | 0, 3: compFam.TRIO.best[sid] | 0 };
         const s = overallScore(bests);
-        if (!(s > 0)) return true;
+        if (!(s > 0)) return null;
         const dom = overallDominant(bests);
-        const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: bid, steamid: sid, score: s, scoremethod: 'ForceUpdate', format: 'json' }, [s | 0, buildOf(dom, sid, season) | 0, dom | 0]);
+        return [s | 0, buildOf(dom, sid, season) | 0, dom | 0];
+      };
+      const todo = sids.map(sid => [sid, wantOf(sid)]).filter(([sid, want]) => {
+        if (!want) return false;
+        const c = cur[sid];
+        return !c || c.s !== want[0] || (c.det[1] | 0) !== want[1] || (c.det[2] | 0) !== want[2];
+      });
+      if (!todo.length) { console.log(label + ' writes: 0/' + sids.length + ' (all composite rows current)'); return; }
+      const wr = await mapPool(todo, CONCURRENCY, async ([sid, want]) => {
+        const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: bid, steamid: sid, score: want[0], scoremethod: 'ForceUpdate', format: 'json' }, want);
         const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
         if (!okFlag) ghWarn('write ' + label + ' ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
-        else console.log('  ok ' + label + ' ' + plog(sid) + ' = ' + s + ' (dominant ' + dom + 'p)');
+        else console.log('  ok ' + label + ' ' + plog(sid) + ' = ' + want[0] + ' (dominant ' + want[2] + 'p' + (cur[sid] ? ', was ' + cur[sid].s : ', new') + ')');
         return okFlag;
       });
-      console.log(label + ' writes: ' + wr.filter(x => x.status === 'fulfilled' && x.value).length + '/' + sids.length);
+      console.log(label + ' writes: ' + wr.filter(x => x.status === 'fulfilled' && x.value).length + '/' + todo.length + ' (of ' + sids.length + ' composite candidates)');
     };
     if (overallId) await writeOverall(overallId, false, 'overall comp');
     if (overallSeasonId) await writeOverall(overallSeasonId, true, 'overall comp season');

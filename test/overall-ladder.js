@@ -42,10 +42,15 @@ const src = fs.readFileSync(path.join(__dirname, '..', 'validate.js'), 'utf8');
 assert('provisioned up-front with the solo/team ladders (trusted)', /\[ENDLESS_COMP_LB_OVERALL, true\]\]\) \{/.test(src));
 assert('playtest board plan adds the overall ladder (trusted)', /add\(cfg\.compOverallLb, 1\);/.test(src) && /compOverallLb: ENDLESS_COMP_LB_OVERALL,/.test(src));
 assert('lifetime board find-or-create + season twin via resolveSeasonBoard', /overallId = await findOrCreateBoard\(ENDLESS_COMP_LB_OVERALL, true\);/.test(src) && /resolveSeasonBoard\(lr, ENDLESS_COMP_LB_OVERALL, seasonId\)/.test(src));
-assert('recompute for every player whose solo / duo / trio best moved this tick (lifetime pools + season pools)',
-  /\[changedComp, compFam\.DUO\.changed \|\| \{\}, compFam\.TRIO\.changed \|\| \{\}\]/.test(src) && /\[changedCompSeason, compFam\.DUO\.seasonChanged \|\| \{\}, compFam\.TRIO\.seasonChanged \|\| \{\}\]/.test(src));
+assert('composite candidates = union of the three per-size best maps + this tick changed pools (lifetime + season) -> rollout backfill, not movers only',
+  /\[changedComp, compFam\.DUO\.changed \|\| \{\}, compFam\.TRIO\.changed \|\| \{\}\]/.test(src) && /\[changedCompSeason, compFam\.DUO\.seasonChanged \|\| \{\}, compFam\.TRIO\.seasonChanged \|\| \{\}\]/.test(src)
+  && /const bestMaps = season \? \[compSeasonBest, compFam\.DUO\.seasonBest \|\| \{\}, compFam\.TRIO\.seasonBest \|\| \{\}\] : \[compBest, compFam\.DUO\.best \|\| \{\}, compFam\.TRIO\.best \|\| \{\}\];/.test(src)
+  && /const sids = \[\.\.\.new Set\(\[\.\.\.pools, \.\.\.bestMaps\]\.flatMap\(p => Object\.keys\(p\)\)\)\];/.test(src));
+assert('composite board read once per tick; only rows missing or differing (score / dominant build / size) are ForceUpdated; read failure = skip, never wipe',
+  /const br = await readBoardAll\(bid, label \+ ' board'\);/.test(src) && /return !c \|\| c\.s !== want\[0\] \|\| \(c\.det\[1\] \| 0\) !== want\[1\] \|\| \(c\.det\[2\] \| 0\) !== want\[2\];/.test(src)
+  && /composite rows skipped this tick'\); return; \}/.test(src));
 assert('score from the three per-size bests via overallScore; ForceUpdate; details = [score, dominant build, size]',
-  /const s = overallScore\(bests\);/.test(src) && /\[s \| 0, buildOf\(dom, sid, season\) \| 0, dom \| 0\]\);/.test(src));
+  /const s = overallScore\(bests\);/.test(src) && /return \[s \| 0, buildOf\(dom, sid, season\) \| 0, dom \| 0\];/.test(src) && /scoremethod: 'ForceUpdate', format: 'json' \}, want\);/.test(src));
 assert('bulk reads keep raw details (build at [1]) for the dominant size when it did not change this tick',
   /compDet\[e\.steamID\] = e\.details;/.test(src) && /det\[e\.steamID\] = e\.details;/.test(src) && /const arr = decodeDetails\(det\);/.test(src));
 
