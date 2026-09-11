@@ -39,12 +39,12 @@ function hash32(s) {
 // ============================================================
 // A) solo attested record verification
 // ============================================================
-const LEDGER_MAGIC = 0xB1, LEDGER_VER = 3, MT_ENDLESS = 7, ATT_VER = 4;   // attVer 4 = + perk build / pick log (2026-09-07); 3 = flags (6th tail int) + op-stream commitment (2026-09-06); 2 = seasonId tail (2026-09-05); 1 = pre-season
-const BASE_LEN = 28, SIG_INTS = 16;
+const LEDGER_MAGIC = 0xB1, LEDGER_VER = 3, MT_ENDLESS = 7, ATT_VER = 5;   // attVer 5 = + endless affix reroll bitmap lo/hi @28/@29 (2026-09-11); 4 = perk build / pick log (2026-09-07); 3 = flags + op-stream commitment; 2 = seasonId tail; 1 = pre-season
+const BASE_LEN = 30, SIG_INTS = 16;
 // accepted layouts: attVer -> pre-sig length. attVer sits at [21] in EVERY layout (new fields are appended after
 //   opHash, never inserted before it), so the decoder reads it first and only then knows where the signature
 //   starts. The previous layout stays accepted through the rollout window (writers only ever write ATT_VER).
-const LAYOUTS = { 3: { baseLen: 25 }, 4: { baseLen: 28 } };
+const LAYOUTS = { 3: { baseLen: 25 }, 4: { baseLen: 28 }, 5: { baseLen: 30 } };
 const BASE_LEN_V3 = 25;
 // endless tail `flags` bits (6th tail int; co-op client records write 0, guard-built solo segments set them)
 const SEG_COMP = 8;        // team competitive segment (client-written, consensus lane; the guard never sets it -- solo sanity keeps it illegal)
@@ -81,8 +81,9 @@ function verifySoloRecord(d, pubTable) {
   const rosterSid = ((BigInt(d[13] >>> 0) << 32n) | BigInt(d[12] >>> 0)).toString();
   const attVer = d[21] & 0xff;
   const lay = LAYOUTS[attVer];   // layout (= where the sig starts) is keyed by attVer, which sits at [21] in every layout
-  const v4 = attVer >= 4;
+  const v4 = attVer >= 4, v5 = attVer >= 5;
   const pk = v4 ? ((BigInt(d[27] >>> 0) << 32n) | BigInt(d[26] >>> 0)) : 0n;
+  const rr = (v5 && d.length > 29) ? ((BigInt(d[29] >>> 0) << 32n) | BigInt(d[28] >>> 0)) : 0n;
   const fields = {
     matchHash: d[3] >>> 0, runSeed: d[4] | 0, durationSec: d[9] | 0, score: d[10] | 0, dispCode: d[11] | 0,
     startDepth: d[14] | 0, endDepth: d[15] | 0, continuesUsed: d[16] | 0, tokensCp: d[17] | 0, seasonId: d[18] | 0, flags: d[19] | 0,
@@ -91,6 +92,8 @@ function verifySoloRecord(d, pubTable) {
     opHash: ((BigInt(d[24] >>> 0) << 32n) | BigInt(d[23] >>> 0)).toString(16),
     // attVer 4 (2026-09-07): perk build word @25 + pick log @26 (lo) / @27 (hi); an attVer 3 record carries no perks (0/0/0)
     build: v4 ? (d[25] >>> 0) : 0, picksLo: v4 ? (d[26] | 0) : 0, picksHi: v4 ? (d[27] | 0) : 0, picks: pk.toString(),
+    // attVer 5 (2026-09-11): endless affix reroll bitmap @28 (lo) / @29 (hi) -- bit k = depth 3+3k rerolled; older layouts carry none
+    rerollLo: v5 ? (d[28] | 0) : 0, rerollHi: v5 ? (d[29] | 0) : 0, rerolls: rr.toString(),
     rosterSid,
   };
   // attVer mismatch = a layout this cron cannot even locate the signature in. Same soft-state
@@ -263,7 +266,7 @@ function pruneUnmatchedState(state, now, ttlMs) {
 //    (audit 2026-09-06 B-F11: v1 was int32[33] with a 12-int body; the plaintext head layout is unchanged and saveBoxHead reads
 //     only [0..4]. SB_VER mirrors save_box.h / mvp/test/lib/save-box.js and is pinned by mvp ledger-schema-lockstep §26.)
 // ============================================================
-const SB_MAGIC = 0xBA, SB_VER = 2, SB_CONSUMED = 1;
+const SB_MAGIC = 0xBA, SB_VER = 3, SB_CONSUMED = 1;   // v3 (2026-09-11): + reroll bitmap in the body; the cron reads only the plaintext head [0..4] (any accepted version)
 function saveBoxHead(d) {
   if (!Array.isArray(d) || d.length < 5 || (d[0] & 0xff) !== SB_MAGIC) return null;
   return { ver: (d[0] >> 8) & 0xff, seasonId: d[1] | 0, flags: d[2] | 0, consumed: !!(d[2] & SB_CONSUMED), keyId: d[3] | 0, nonce: d[4] >>> 0 };

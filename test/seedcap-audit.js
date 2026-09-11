@@ -65,6 +65,12 @@ const SIDA = '76561198000000001', SIDB = '76561198000000002';
     'E t 42 3 4 9 12346');
   ok('[2] endless line + season (7th field; 2026-09-05)', sc.cliLineOf('t', { entry: 'endless', pc: 2, startDepth: 0, endDepth: 9, startBank: 0, seasonId: 1 }, 42) ===
     'E t 42 2 0 9 0 1');
+  ok('[2] endless line + season + build + reroll bitmap (9th/10th fields; 2026-09-11)', sc.cliLineOf('t', { entry: 'endless', pc: 2, startDepth: 0, endDepth: 9, startBank: 0, seasonId: 1, build: 386, rerollLo: 5, rerollHi: 0 }, 42) ===
+    'E t 42 2 0 9 0 1 386 5 0');
+  ok('[2] endless line + rerolls without build/season -> explicit -1 season + 0 build sentinels then the bitmap', sc.cliLineOf('t', { entry: 'endless', pc: 1, startDepth: 3, endDepth: 6, startBank: 100, rerollLo: 0, rerollHi: 1 }, 42) ===
+    'E t 42 1 3 6 100 -1 0 0 1');
+  ok('[2] capParamsOf(7) carries the tail reroll bitmap', (() => { const p = sc.capParamsOf(7, 1, { startDepth: 0, endDepth: 6, seasonId: 1, build: 0, rerollLo: 3, rerollHi: 0 }); return p.rerollLo === 3 && p.rerollHi === 0; })());
+  ok('[2] cliSupportsRerolls: V probe answer parsed (rerolls=1 -> true; ERR / nothing -> false)', sc.cliSupportsRerolls(() => ({ map: { p0: { v: 'build=1 rerolls=1' } } })) === true && sc.cliSupportsRerolls(() => ({ map: { p0: { err: 'bad-kind' } } })) === false && sc.cliSupportsRerolls(() => ({ fail: 'exit=2' })) === false);
   ok('[2] endless line legacy tail (seasonId -1 -> omitted)', sc.cliLineOf('t', { entry: 'endless', pc: 2, startDepth: 0, endDepth: 9, startBank: 0, seasonId: -1 }, 42) ===
     'E t 42 2 0 9 0');
   ok('[2] capParamsOf carries the tail season (absent -> -1)',

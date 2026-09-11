@@ -92,7 +92,9 @@ function capParamsOf(mt, pc, tail) {
     return { entry: 'endless', pc, startDepth: tail ? tail.startDepth | 0 : 0, endDepth: tail ? tail.endDepth | 0 : 0,
       seasonId: (tail && tail.seasonId != null) ? (tail.seasonId | 0) : -1,
       // perk build word (2026-09-07, 7th tail int): the cap scales with the run's value/clear perks; absent = 0 = no perks
-      build: (tail && tail.build != null) ? (tail.build >>> 0) : 0 };
+      build: (tail && tail.build != null) ? (tail.build >>> 0) : 0,
+      // endless affix reroll bitmap (2026-09-11, 10th/11th tail ints): rerolled depths derive their world with it (exact cap); absent = 0
+      rerollLo: (tail && tail.rerollLo != null) ? (tail.rerollLo >>> 0) : 0, rerollHi: (tail && tail.rerollHi != null) ? (tail.rerollHi >>> 0) : 0 };
   }
   if (base === 10) {
     // O140 private friend rooms (2026-09-01): world gen is entry-agnostic (same placeItems),
@@ -117,10 +119,13 @@ function cliLineOf(tag, p, runSeed) {
     // 7th field = seasonId (>=0 season-keyed world); omitted for legacy records (-1) so the CLI takes its legacy path.
     // 8th field = perk build word (2026-09-07), positional after the season: a build on a legacy tail writes the -1
     //   season sentinel explicitly; build 0 is omitted (line unchanged for every pre-perk record).
+    // 9th/10th fields = reroll bitmap lo/hi (2026-09-11), positional after the build: a bitmap forces the season (-1) and build (0) sentinels out explicitly;
+    //   all-zero bitmap is omitted (line unchanged for every pre-reroll record).
     const bd = (p.build >>> 0) || 0;
-    const season = (p.seasonId != null && p.seasonId >= 0) ? (p.seasonId | 0) : (bd ? -1 : null);
+    const rl = (p.rerollLo >>> 0) || 0, rh = (p.rerollHi >>> 0) || 0, hasRr = !!(rl || rh);
+    const season = (p.seasonId != null && p.seasonId >= 0) ? (p.seasonId | 0) : ((bd || hasRr) ? -1 : null);
     return 'E ' + tag + ' ' + (runSeed | 0) + ' ' + p.pc + ' ' + (p.startDepth | 0) + ' ' + (p.endDepth | 0) + ' ' + Math.round(p.startBank || 0) +
-      (season != null ? (' ' + season) : '') + (bd ? (' ' + bd) : '');
+      (season != null ? (' ' + season) : '') + ((bd || hasRr) ? (' ' + bd) : '') + (hasRr ? (' ' + rl + ' ' + rh) : '');
   }
   return 'C ' + tag + ' ' + (runSeed | 0) + ' ' + p.entry + ' ' + p.pc + ' ' + (p.ts | 0) + ' ' +
     (p.isTeam ? 1 : 0) + ' ' + (p.team2 ? 1 : 0) + ' ' + p.levels + ' ' + (p.teams && p.teams.length ? p.teams.join('') : '-');
@@ -135,6 +140,12 @@ function cliSupportsBuild(run) {
   if (!r || r.fail || !r.map || !r.map.p0 || !r.map.p1 || r.map.p0.err != null || r.map.p1.err != null) return false;
   return (r.map.p1.cap | 0) > (r.map.p0.cap | 0);
 }
+// The reroll bitmap fields (2026-09-11) are read only by a CLI that answers the "V" capability probe with rerolls=1; an older CLI prints
+//   ERR bad-kind for "V" (or nothing) and would silently drop the bitmap -> groups carrying one are deferred until the CLI is refreshed.
+function cliSupportsRerolls(run) {
+  const r = (run || runCli)(['V p0']);
+  return !!(r && !r.fail && r.map && r.map.p0 && r.map.p0.v && /\brerolls=1\b/.test(r.map.p0.v));
+}
 function runCli(lines) {
   const res = spawnSync(SEEDCAP_CLI, [], { input: lines.join('\n') + '\n', maxBuffer: 1 << 24, encoding: 'utf8' });
   if ((res.status | 0) !== 0 || res.error) return { fail: 'exit=' + res.status + (res.error ? ' ' + res.error.message : '') };
@@ -146,7 +157,9 @@ function runCli(lines) {
     let m = t.match(/^CAP (\S+) (-?\d+)/);
     if (m) { map[m[1]] = { cap: +m[2] }; continue; }
     m = t.match(/^ERR (\S+) (\S+)$/);
-    if (m) map[m[1]] = { err: m[2] };
+    if (m) { map[m[1]] = { err: m[2] }; continue; }
+    m = t.match(/^V (\S+) (.*)$/);   // capability probe answer (2026-09-11)
+    if (m) map[m[1]] = { v: m[2] };
   }
   return { map, head };
 }
@@ -390,6 +403,11 @@ async function main() {
 
   let pending = pickAuditable(st, groups);
   let stats = { over: 0, okN: 0, errN: 0, flags: [] };
+  if (pending.some(x => x.p && (x.p.rerollLo || x.p.rerollHi)) && !cliSupportsRerolls()) {
+    const n = pending.length;
+    pending = pending.filter(x => !(x.p && (x.p.rerollLo || x.p.rerollHi)));
+    console.log('seedcap: CLI ignores the reroll bitmap fields -- ' + (n - pending.length) + ' reroll groups deferred until the CLI is refreshed');
+  }
   if (pending.some(x => x.p && x.p.build) && !cliSupportsBuild()) {
     const n = pending.length;
     pending = pending.filter(x => !(x.p && x.p.build));
@@ -415,7 +433,7 @@ async function main() {
     ' suspects=' + Object.keys(st.suspects).length + ' corrections=' + st.corrections.length);
 }
 
-module.exports = { capParamsOf, cliLineOf, cliSupportsBuild, PROBE_BUILD, chainStartBank, pickAuditable, applyAudit, pruneState, runCli, loadState, saveState, SC_STATE_FILE, AUDITED_KEEP, VETO_KEEP_MIN, offensePlanOf, writeOffense, mailDecision, sendAlertMail, alertMailText, rejectWindowsOf, OFFENSE_LB, OFFENSE_MAGIC, SC_MAIL_MIN_OVER, SC_MAIL_SUS_MIN };
+module.exports = { cliSupportsRerolls, capParamsOf, cliLineOf, cliSupportsBuild, PROBE_BUILD, chainStartBank, pickAuditable, applyAudit, pruneState, runCli, loadState, saveState, SC_STATE_FILE, AUDITED_KEEP, VETO_KEEP_MIN, offensePlanOf, writeOffense, mailDecision, sendAlertMail, alertMailText, rejectWindowsOf, OFFENSE_LB, OFFENSE_MAGIC, SC_MAIL_MIN_OVER, SC_MAIL_SUS_MIN };
 if (require.main === module) {
   main().catch(e => { console.log('::error::seedcap run failed: ' + (e && e.stack || e)); process.exit(1); });
 }

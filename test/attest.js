@@ -73,7 +73,7 @@ function buildBase4(m) {
 
 console.log('== A0) layouts (attVer 3 and 4 accepted; attVer sits at [21] in both) ==');
 {
-  eq('ATT_VER 4 / BASE_LEN 28 / LAYOUTS {3:25, 4:28} / BASE_LEN_V3 25', [A.ATT_VER, A.BASE_LEN, A.LAYOUTS, A.BASE_LEN_V3], [4, 28, { 3: { baseLen: 25 }, 4: { baseLen: 28 } }, 25]);
+  eq('ATT_VER 5 / BASE_LEN 30 / LAYOUTS {3:25, 4:28, 5:30} / BASE_LEN_V3 25', [A.ATT_VER, A.BASE_LEN, A.LAYOUTS, A.BASE_LEN_V3], [5, 30, { 3: { baseLen: 25 }, 4: { baseLen: 28 }, 5: { baseLen: 30 } }, 25]);
   const m4 = Object.assign({}, META, { build: 41411, picks: '12345678901234567' });
   const rec4 = sign(buildBase4(m4), kSealed.priv);
   eq('attVer 4 record length = 28 + 16', rec4.length, 44);
@@ -88,8 +88,20 @@ console.log('== A0) layouts (attVer 3 and 4 accepted; attVer sits at [21] in bot
   assert('zero padding after the v4 sig still verifies', A.verifySoloRecord(rec4.concat(new Array(64 - rec4.length).fill(0)), TABLE).ok === true);
   eq('non-zero tail after the v4 sig -> trailing', A.verifySoloRecord(rec4.concat([0, 77]), TABLE).reason, 'trailing');
   eq('v4 record one int short -> short', A.verifySoloRecord(rec4.slice(0, 43), TABLE).reason, 'short');
-  const a5 = rec4.slice(); a5[21] = 5;
-  assert('future attVer 5 -> att-ver + pending', (() => { const r = A.verifySoloRecord(a5, TABLE); return r.ok === false && r.reason === 'att-ver' && r.pending === true; })());
+  const a6 = rec4.slice(); a6[21] = 6;
+  assert('future attVer 6 -> att-ver + pending', (() => { const r = A.verifySoloRecord(a6, TABLE); return r.ok === false && r.reason === 'att-ver' && r.pending === true; })());
+  // attVer 5 layout (2026-09-11): attVer 4 base + endless affix reroll bitmap lo @28 / hi @29, sig from [30]
+  const m5 = Object.assign({}, META, { build: 41411, picks: '12345678901234567' });
+  const b5 = buildBase4(m5); b5[21] = (5 | ((m5.jwtPresent ? 1 : 0) << 8)); b5.push(5, 0x80000000 | 0);   // bits: depth 3 + 9 (lo 0b101) + depth 192 (hi bit 31)
+  const rec5 = sign(b5, kSealed.priv);
+  eq('attVer 5 record length = 30 + 16', rec5.length, 46);
+  const v5 = A.verifySoloRecord(rec5, TABLE);
+  assert('attVer 5 record signed with the sealed key verifies', v5.ok === true && v5.sealed === true);
+  eq('decoded attVer 5 tail: attVer / rerollLo / rerollHi / rerolls (+ v4 fields intact)', [v5.fields.attVer, v5.fields.rerollLo, v5.fields.rerollHi, v5.fields.rerolls, v5.fields.build, v5.fields.picks], [5, 5, -2147483648, '9223372036854775813', 41411, '12345678901234567']);
+  const tr = rec5.slice(); tr[28] = 0;
+  eq('tampered reroll bitmap (inside the signature domain) -> bad-sig', A.verifySoloRecord(tr, TABLE).reason, 'bad-sig');
+  eq('attVer 4 record decodes as no rerolls', [v4.fields.rerollLo, v4.fields.rerollHi, v4.fields.rerolls], [0, 0, '0']);
+  eq('v5 record one int short -> short', A.verifySoloRecord(rec5.slice(0, 45), TABLE).reason, 'short');
   const rec3 = sign(buildBase(META), kSealed.priv);
   const v3 = A.verifySoloRecord(rec3, TABLE);
   assert('attVer 3 record (41 int, sig from [25]) still verifies through the rollout window', v3.ok === true && v3.fields.attVer === 3);

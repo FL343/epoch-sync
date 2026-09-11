@@ -426,7 +426,7 @@ window.PERKS = (() => {
     E.skipBank = (c === 5) ? 1 : 0;
     return true;
   }
-  function restoreRun(E, build, picksArr, drawIdx) {
+  function restoreRun(E, build, picksArr, drawIdx, rerolls) {
     if (!E) return false;
     const di = drawIdx | 0;
     const arr = Array.isArray(picksArr) ? picksArr.slice(0, 20) : [];
@@ -441,6 +441,12 @@ window.PERKS = (() => {
     E.picksArr = arr;
     E.drawIdx = di;
     E.skipBank = (di > 0 && (arr[di - 1] | 0) === 5) ? 1 : 0;
+    if (rerolls !== undefined) {
+      const MPn = window.MODIFIER_PLAN;
+      const map = {};
+      if (rerolls && typeof rerolls === 'object') for (const k of Object.keys(rerolls)) if ((rerolls[k] | 0) === 1 && (!MPn || !MPn.isRerollTarget || MPn.isRerollTarget(k | 0))) map[k | 0] = 1;
+      E.affixRerolls = map;
+    }
     return true;
   }
   function replay(sSeed, picksArr, endDepth, opts) {

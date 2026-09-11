@@ -49,7 +49,7 @@ eq('milestone bitmap TTL outlives a season', COMP.MS_TTL_MS, 120 * 86400000);
 
 console.log('-- tail decode --');
 eq('6-int tail: flags read', endlessTail(mk7(SA, 0, { startDepth: 5, endDepth: 10, flags: A.SEG_COMP | A.SEG_SUSPENDED }).d),
-  { startDepth: 5, endDepth: 10, continuesUsed: 0, tokensCp: 0, seasonId: 1, flags: 9, build: 0, picksLo: 0, picksHi: 0 });
+  { startDepth: 5, endDepth: 10, continuesUsed: 0, tokensCp: 0, seasonId: 1, flags: 9, build: 0, picksLo: 0, picksHi: 0, rerollLo: 0, rerollHi: 0 });
 
 console.log('-- sanity: casual vs competitive segment --');
 not('casual co-op (flags 0) clean', sanityFlags(pair({ flags: 0, endDepth: 6 })), 'flags');

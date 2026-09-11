@@ -1555,6 +1555,7 @@ function soloAdvance(st, key, f, m, plan, nowMs) {
   if (plan.consume) { run.saves[plan.consume] = run.saves[plan.consume] || {}; run.saves[plan.consume].by = m; }
   if ((f.endDepth | 0) > (run.max | 0)) run.max = f.endDepth | 0;
   if (f.picksLo != null) run.pk = { lo: f.picksLo | 0, hi: f.picksHi | 0 };   // perk pick log at this segment's close (perk_chain: the next segment must extend it)
+  if (f.rerollLo != null) run.rr = { lo: f.rerollLo >>> 0, hi: f.rerollHi >>> 0 };   // reroll bitmap at close (rerollChain: monotone across segments)
   if ((f.flags | 0) & attest.SEG_SUSPENDED) { const sk = String(f.endDepth | 0); run.saves[sk] = Object.assign(run.saves[sk] || {}, { t: nowMs }); }   // audit B-F6: merge -- never drop `by` (one save, one resume)
   if ((f.flags | 0) & attest.SEG_FINAL) run.final = 1;
   delete st.wait[m];
@@ -1749,7 +1750,24 @@ function endlessTail(d) {
     // 7th..9th ints (2026-09-07): perk build word + pick log (lo/hi); absent (older writers, warm-up runs) = no perks
     build: d.length >= at + 7 ? (d[at + 6] >>> 0) : 0,
     picksLo: d.length >= at + 8 ? (d[at + 7] | 0) : 0,
-    picksHi: d.length >= at + 9 ? (d[at + 8] | 0) : 0 };
+    picksHi: d.length >= at + 9 ? (d[at + 8] | 0) : 0,
+    // 10th..11th ints (2026-09-11): endless affix reroll bitmap lo/hi (bit k = depth 3+3k rerolled); absent = none
+    rerollLo: d.length >= at + 10 ? (d[at + 9] | 0) : 0,
+    rerollHi: d.length >= at + 11 ? (d[at + 10] | 0) : 0 };
+}
+// endless affix reroll bitmap sanity + chain (2026-09-11): a bit may only sit at a target depth the segment could have asked about
+//   (depth 3+3k <= endDepth+1: the question is asked at the level end BEFORE the target), and a resumed segment must keep every bit the
+//   run's previous segment carried (the bitmap is monotone -- a lost bit means the resumed world was derived without a paid reroll).
+const REROLL_EVERY = 3;
+function rerollChain(f, run) {
+  const lo = (f.rerollLo | 0) >>> 0, hi = (f.rerollHi | 0) >>> 0;
+  const maxBit = Math.floor(((f.endDepth | 0) + 1 - 3) / REROLL_EVERY);
+  for (let k = 0; k < 64; k++) {
+    const on = k < 32 ? ((lo >>> k) & 1) : ((hi >>> (k - 32)) & 1);
+    if (on && k > maxBit) return 'reroll-ahead';
+  }
+  if (run && run.rr && (((run.rr.lo >>> 0) & ~lo) >>> 0 || ((run.rr.hi >>> 0) & ~hi) >>> 0)) return 'reroll-lost';
+  return null;
 }
 // zero-tail abstention (2026-07-19 audit M3): a cold reconnector who lands straight on results
 // never saw a verdict frame -- his GAME.endless is all zeros, so his record carries a legitimate
@@ -2825,6 +2843,14 @@ async function main() {
       processed.add(m);
       return false;
     }
+    // reroll chain (2026-09-11): bitmap bits only at askable target depths + monotone across the run's segments (causal, like the perk chain)
+    const rc = rerollChain(f, soloState.runs[key]);
+    if (rc) {
+      RUN.soloRej = (RUN.soloRej | 0) + 1;
+      ghWarn('match=' + m + ': solo segment ' + plog(sid) + ' reroll chain REJECT (' + rc + ') depth ' + f.startDepth + '->' + f.endDepth + ' rr=' + (f.rerollHi >>> 0).toString(16) + ':' + (f.rerollLo >>> 0).toString(16));
+      processed.add(m);
+      return false;
+    }
     // perk replay (2026-09-07): the pick log must reproduce the build (perk_forge) and extend the run's previous log (perk_chain).
     //   A causal contradiction, not a statistical one -> reject + processed, like a chain reject.
     const pv = perks.verifyPerkPicks(f, soloState.runs[key], 1);
@@ -2962,12 +2988,20 @@ async function main() {
         }
         const key = teamRunKey(rosterSids, t.seasonId, g[0].d[4] | 0);
         const f = { startDepth: t.startDepth | 0, endDepth: t.endDepth | 0, flags: t.flags | 0,
-          build: t.build >>> 0, picksLo: t.picksLo | 0, picksHi: t.picksHi | 0, seasonId: t.seasonId | 0 };   // perk tail rides the same consensus vector
+          build: t.build >>> 0, picksLo: t.picksLo | 0, picksHi: t.picksHi | 0, seasonId: t.seasonId | 0,
+          rerollLo: t.rerollLo >>> 0, rerollHi: t.rerollHi >>> 0 };   // perk tail + reroll bitmap ride the same consensus vector
         const plan = soloChainPlan(soloState, key, f, c.m, nowMs);
         if (plan.ok === null) { console.log('  endless-comp ' + c.m + ': depth ' + f.startDepth + '->' + f.endDepth + ' waiting for its chain (' + plan.reason + ')'); continue; }
         if (plan.ok === false) {
           RUN.soloRej = (RUN.soloRej | 0) + 1;
           ghWarn('match=' + c.m + ': team comp segment chain REJECT (' + plan.reason + ') depth ' + f.startDepth + '->' + f.endDepth + ' ' + rosterSids.map(plog).join('+'));
+          processed.add(c.m);
+          continue;
+        }
+        const rcT = rerollChain(f, soloState.runs[key]);
+        if (rcT) {
+          RUN.soloRej = (RUN.soloRej | 0) + 1;
+          ghWarn('match=' + c.m + ': team comp segment reroll chain REJECT (' + rcT + ') depth ' + f.startDepth + '->' + f.endDepth);
           processed.add(c.m);
           continue;
         }
@@ -3019,6 +3053,13 @@ async function main() {
       }
       // casual co-op: a shared perk build (co-op draw pool) must still replay from its pick log -- no run chain here, so
       //   only perk_forge applies (a forged build word inflates every writer's score alike; consensus alone cannot see it)
+      const rcC = rerollChain({ rerollLo: t.rerollLo >>> 0, rerollHi: t.rerollHi >>> 0, endDepth: t.endDepth | 0 }, null);
+      if (rcC) {
+        recordFlag(signals, g, c.m, nowMs); sigDirty = true; RUN.sanity = (RUN.sanity | 0) + 1;
+        ghWarn('match=' + c.m + ': endless reroll bitmap sanity REJECT (' + rcC + ') depth ' + t.startDepth + '->' + t.endDepth);
+        processed.add(c.m);
+        continue;
+      }
       const pvC = perks.verifyPerkPicks({ build: t.build >>> 0, picksLo: t.picksLo | 0, picksHi: t.picksHi | 0, seasonId: t.seasonId | 0, endDepth: t.endDepth | 0 }, null, pc7);
       if (!pvC.ok) {
         recordFlag(signals, g, c.m, nowMs); sigDirty = true; RUN.perkRej = (RUN.perkRej | 0) + 1;
@@ -3584,7 +3625,7 @@ if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
 module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, isVoidDisp, voidByConsensus, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, RS_SOLO_VS_TRIO, RS_TRIO_WIN, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, CONFESS_MAGIC, reconcileConfessions, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan, postForm, postFormDetails, findOrCreateBoard, ghWarn, ghErr, PT_MODE, PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, ptSeedCp, ptBoardPlan, PRIVATE_XP, isPrivateMt, privateProgressOf, creditXpPrivate, ENDLESS_XP, computeXpEndless, creditXpEndless, CAMPAIGN_LB, SEEDCAP_REJECT_LADDER_MIN, seedcapRejectWindowMin, seedcapRejectUntilMin, seedcapRejectActive,
-  ENDLESS_COMP_LB, SAVE_BOX_LB, SOLO_FILE, COMP, soloSanity, soloChainPlan, soloMilestones, soloAdvance, soloRunKey, soloStartAttested, loadSolo, saveSolo, segOrderOf, segStartOf, freshOrder,
+  ENDLESS_COMP_LB, SAVE_BOX_LB, SOLO_FILE, COMP, soloSanity, soloChainPlan, rerollChain, soloMilestones, soloAdvance, soloRunKey, soloStartAttested, loadSolo, saveSolo, segOrderOf, segStartOf, freshOrder,
   ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, SAVE_BOX_LB_DUO, SAVE_BOX_LB_TRIO, teamRunKey, soloMsSlot, groupRecords,
   ENDLESS_COMP_LB_OVERALL, overallScore, overallDominant,   // knife 3.5d composite ladder
   PERKS_CFG: perks.PERKS_CFG, verifyPerkPicks: perks.verifyPerkPicks };
