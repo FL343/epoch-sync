@@ -42,9 +42,10 @@ const src = fs.readFileSync(path.join(__dirname, '..', 'validate.js'), 'utf8');
 assert('provisioned up-front with the solo/team ladders (trusted)', /\[ENDLESS_COMP_LB_OVERALL, true\]\]\) \{/.test(src));
 assert('playtest board plan adds the overall ladder (trusted)', /add\(cfg\.compOverallLb, 1\);/.test(src) && /compOverallLb: ENDLESS_COMP_LB_OVERALL,/.test(src));
 assert('lifetime board find-or-create + season twin via resolveSeasonBoard', /overallId = await findOrCreateBoard\(ENDLESS_COMP_LB_OVERALL, true\);/.test(src) && /resolveSeasonBoard\(lr, ENDLESS_COMP_LB_OVERALL, seasonId\)/.test(src));
-assert('composite candidates = union of the three per-size best maps + this tick changed pools (lifetime + season) -> rollout backfill, not movers only',
-  /\[changedComp, compFam\.DUO\.changed \|\| \{\}, compFam\.TRIO\.changed \|\| \{\}\]/.test(src) && /\[changedCompSeason, compFam\.DUO\.seasonChanged \|\| \{\}, compFam\.TRIO\.seasonChanged \|\| \{\}\]/.test(src)
-  && /const bestMaps = season \? \[compSeasonBest, compFam\.DUO\.seasonBest \|\| \{\}, compFam\.TRIO\.seasonBest \|\| \{\}\] : \[compBest, compFam\.DUO\.best \|\| \{\}, compFam\.TRIO\.best \|\| \{\}\];/.test(src)
+assert('composite candidates = union of the four per-size best maps + this tick changed pools (lifetime + season) -> rollout backfill, not movers only',
+  /\[changedComp, compFam\.DUO\.changed \|\| \{\}, compFam\.TRIO\.changed \|\| \{\}, compFam\.QUAD\.changed \|\| \{\}\]/.test(src) && /\[changedCompSeason, compFam\.DUO\.seasonChanged \|\| \{\}, compFam\.TRIO\.seasonChanged \|\| \{\}, compFam\.QUAD\.seasonChanged \|\| \{\}\]/.test(src)
+  && /const bestMaps = season \? \[compSeasonBest, compFam\.DUO\.seasonBest \|\| \{\}, compFam\.TRIO\.seasonBest \|\| \{\}, compFam\.QUAD\.seasonBest \|\| \{\}\] : \[compBest, compFam\.DUO\.best \|\| \{\}, compFam\.TRIO\.best \|\| \{\}, compFam\.QUAD\.best \|\| \{\}\];/.test(src)
+  && /const famOf = \{ 2: compFam\.DUO, 3: compFam\.TRIO, 4: compFam\.QUAD \};/.test(src) && /4: compFam\.QUAD\.best\[sid\] \| 0 \}/.test(src)
   && /const sids = \[\.\.\.new Set\(\[\.\.\.pools, \.\.\.bestMaps\]\.flatMap\(p => Object\.keys\(p\)\)\)\];/.test(src));
 assert('composite board read once per tick; only rows missing or differing (score / dominant build / size) are ForceUpdated; read failure = skip, never wipe',
   /const br = await readBoardAll\(bid, label \+ ' board'\);/.test(src) && /return !c \|\| c\.s !== want\[0\] \|\| \(c\.det\[1\] \| 0\) !== want\[1\] \|\| \(c\.det\[2\] \| 0\) !== want\[2\];/.test(src)

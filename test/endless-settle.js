@@ -94,11 +94,18 @@ const pair = (o) => grp(mk7(A, 0, o), mk7(B, 1, o));
 eq('clean endless record -> []', sanityFlags(pair({ startDepth: 0, endDepth: 6 })), []);
 eq('clean resumed record (deep scores under depth-scaled cap) -> []', sanityFlags(pair({ startDepth: 15, endDepth: 22, scores: [60000, 55000] })), []);
 has('premade mask forged onto endless (0x17)', sanityFlags(pair({ mt: 0x17 })), 'mask');
-// knife-B (2026-08-13): 3 seats are now a legal co-op form; 4 stays forged
+// knife-B (2026-08-13): 3 seats are now a legal co-op form; client knife 3.7a (2026-09-12): 4 seats too (ENDLESS_MAX_PC); 5 stays forged
 const trio = (o) => grp(mk7(A, 0, Object.assign({ pc: 3, scores: [400, 300, 200], rosterSids: [A, B, C] }, o)),
                         mk7(B, 1, Object.assign({ pc: 3, scores: [400, 300, 200], rosterSids: [A, B, C] }, o)));
 eq('clean pc=3 record -> [] (knife-B trio track)', sanityFlags(trio({ startDepth: 0, endDepth: 6 })), []);
-has('pc=4 stays forged', sanityFlags(grp(mk7(A, 0, { pc: 4, scores: [1, 2, 3, 4], rosterSids: [A, B, C] }), mk7(B, 1, { pc: 4, scores: [1, 2, 3, 4], rosterSids: [A, B, C] }))), 'pc');
+const D = '76561198000000004';
+const quad = (o) => grp(mk7(A, 0, Object.assign({ pc: 4, scores: [400, 300, 200, 100], rosterSids: [A, B, C, D] }, o)),
+                        mk7(B, 1, Object.assign({ pc: 4, scores: [400, 300, 200, 100], rosterSids: [A, B, C, D] }, o)));
+eq('clean pc=4 record -> [] (knife 3.7a quad track)', sanityFlags(quad({ startDepth: 0, endDepth: 6 })), []);
+has('quad: continues in seat-4 nibble forged (mask scales with pc)', sanityFlags(quad({ cont: 1 << 16 })), 'cont');
+not('quad: seat-3 continue nibble legal', sanityFlags(quad({ cont: 1 << 12 })), 'cont');
+has('pc=5 stays forged (ENDLESS_MAX_PC 4)', sanityFlags(grp(mk7(A, 0, { pc: 5, scores: [1, 2, 3, 4, 5], rosterSids: [A, B, C] }), mk7(B, 1, { pc: 5, scores: [1, 2, 3, 4, 5], rosterSids: [A, B, C] }))), 'pc');
+eq('ENDLESS_MAX_PC exported = 4 (client registry lockstep)', v.ENDLESS_MAX_PC, 4);
 has('trio: continues in seat-3 nibble forged (mask scales with pc)', sanityFlags(trio({ cont: 1 << 12 })), 'cont');
 not('trio: seat-2 continue nibble legal', sanityFlags(trio({ cont: 1 << 8 })), 'cont');
 not('trio: score cap scales x3 (14k at depth 6 x3 players)', sanityFlags(trio({ startDepth: 0, endDepth: 6, scores: [14000, 100, 100] })), 'score');

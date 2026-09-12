@@ -38,13 +38,14 @@ console.log('=== team competitive endless settle (consensus lane, SEG_COMP) ==='
 
 console.log('-- constants + surface --');
 eq('flag bits: comp=8 beside suspended/final/resumed', [A.SEG_COMP, A.SEG_SUSPENDED, A.SEG_FINAL, A.SEG_RESUMED], [8, 1, 2, 4]);
-eq('ladder family names (lifetime; season twins via resolveSeasonBoard)', [ENDLESS_COMP_LB, ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO], ['endless_comp_solo', 'endless_comp_duo', 'endless_comp_trio']);
-eq('save box names (client-writable, guard-signed rows; the host\'s guard writes the team rows)', [SAVE_BOX_LB, SAVE_BOX_LB_DUO, SAVE_BOX_LB_TRIO], ['endless_save_box_solo', 'endless_save_box_duo', 'endless_save_box_trio']);
+eq('ladder family names (lifetime; season twins via resolveSeasonBoard)', [ENDLESS_COMP_LB, ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, v.ENDLESS_COMP_LB_QUAD], ['endless_comp_solo', 'endless_comp_duo', 'endless_comp_trio', 'endless_comp_quad']);
+eq('save box names (client-writable, guard-signed rows; the host\'s guard writes the team rows)', [SAVE_BOX_LB, SAVE_BOX_LB_DUO, SAVE_BOX_LB_TRIO, v.SAVE_BOX_LB_QUAD], ['endless_save_box_solo', 'endless_save_box_duo', 'endless_save_box_trio', 'endless_save_box_quad']);
+eq('family key by seat count (client compFamily mirror: 2 DUO / 3 TRIO / 4 QUAD)', [v.compFamKeyOf(2), v.compFamKeyOf(3), v.compFamKeyOf(4)], ['DUO', 'TRIO', 'QUAD']);
 eq('milestone bitmap TTL outlives a season', COMP.MS_TTL_MS, 120 * 86400000);
 {
-  const plan = ptBoardPlan([], { prefix: 'r_', shards: 1, compDuoLb: ENDLESS_COMP_LB_DUO, saveBoxDuoLb: SAVE_BOX_LB_DUO, compTrioLb: ENDLESS_COMP_LB_TRIO, saveBoxTrioLb: SAVE_BOX_LB_TRIO });
+  const plan = ptBoardPlan([], { prefix: 'r_', shards: 1, compDuoLb: ENDLESS_COMP_LB_DUO, saveBoxDuoLb: SAVE_BOX_LB_DUO, compTrioLb: ENDLESS_COMP_LB_TRIO, saveBoxTrioLb: SAVE_BOX_LB_TRIO, compQuadLb: v.ENDLESS_COMP_LB_QUAD, saveBoxQuadLb: v.SAVE_BOX_LB_QUAD, endlessQuadLb: v.ENDLESS_LB_QUAD });
   const byName = {}; for (const b of plan.create) byName[b.name] = b.trusted;
-  eq('playtest / demo twins provision the family surface', [byName[ENDLESS_COMP_LB_DUO], byName[SAVE_BOX_LB_DUO], byName[ENDLESS_COMP_LB_TRIO], byName[SAVE_BOX_LB_TRIO]], [1, 0, 1, 0]);
+  eq('playtest / demo twins provision the family surface (+ quad ladder / save box / casual quad board)', [byName[ENDLESS_COMP_LB_DUO], byName[SAVE_BOX_LB_DUO], byName[ENDLESS_COMP_LB_TRIO], byName[SAVE_BOX_LB_TRIO], byName[v.ENDLESS_COMP_LB_QUAD], byName[v.SAVE_BOX_LB_QUAD], byName[v.ENDLESS_LB_QUAD]], [1, 0, 1, 0, 1, 0, 1]);
 }
 
 console.log('-- tail decode --');
@@ -167,7 +168,7 @@ console.log('-- wiring pins (validate.js lane) --');
   const src = fs.readFileSync(path.join(__dirname, '..', 'validate.js'), 'utf8');
   const lane = src.slice(src.indexOf('if ((t.flags | 0) & attest.SEG_COMP) {'), src.indexOf('processed.add(c.m); settledEndlessComp++;'));
   assert('the lane branches on SEG_COMP inside the endless (type 7) settle block, before the casual chain/pacing', lane.length > 0 && src.indexOf('if ((t.flags | 0) & attest.SEG_COMP) {') < src.indexOf('let chainMax = 0;'));
-  assert('family picked by seat count (trio >= 3, else duo)', /compFam\[pc7 >= 3 \? 'TRIO' : 'DUO'\]/.test(lane));
+  assert('family picked by seat count (compFamKeyOf: 4 quad / 3 trio / else duo)', /compFam\[compFamKeyOf\(pc7\)\]/.test(lane) && /function compFamKeyOf\(pc\) \{ return pc >= 4 \? 'QUAD' : pc >= 3 \? 'TRIO' : 'DUO'; \}/.test(src));
   assert('boards are the gate (cp + family lifetime + seasonal when a season is live)', /if \(!cpId \|\| !fam\.id \|\| \(seasonId >= 1 && !fam\.seasonId\)\)/.test(lane));
   assert('incomplete roster = sanity flag, not settled', /rosterSids\.length !== pc7/.test(lane) && /recordFlag\(signals, g, c\.m, nowMs\)/.test(lane));
   assert('chain keyed by teamRunKey(roster, season, runSeed=d[4]) through the solo chain planner', /teamRunKey\(rosterSids, t\.seasonId, g\[0\]\.d\[4\] \| 0\)/.test(lane) && /soloChainPlan\(soloState, key, f, c\.m, nowMs\)/.test(lane));
@@ -184,10 +185,12 @@ console.log('-- wiring pins (validate.js lane) --');
   assert('main app provisions the family surface up-front', /\[ENDLESS_COMP_LB_DUO, true\], \[SAVE_BOX_LB_DUO, false\], \[ENDLESS_COMP_LB_TRIO, true\], \[SAVE_BOX_LB_TRIO, false\]/.test(src));
   assert('family boards resolved find-or-create + season twins + save boxes', /compFam\[fam\] = \{ fam, low, name: lbName, id, seasonId: season\.id, best, seasonBest, det, seasonDet, complete, seasonComplete, saveBoxId: sbId/.test(src));
   assert('on-demand base reads cover the family ladders', /compFamIncomplete/.test(src) && /fam\.best\[sid\] = e\.score \| 0/.test(src));
-  assert('seedcap correction deletes from the family pair for a comp segment', /const famC = \(\(tC\.flags \| 0\) & attest\.SEG_COMP\) \? compFam\[useTrioC \? 'TRIO' : 'DUO'\] : null;/.test(src) && /\] : famC \? \[/.test(src));
+  assert('seedcap correction deletes from the family pair for a comp segment (casual pair via casualLadderOf)', /const famC = \(\(tC\.flags \| 0\) & attest\.SEG_COMP\) \? compFam\[compFamKeyOf\(pcC\)\] : null;/.test(src) && /\] : famC \? \[/.test(src) && /const casC = casualLadderOf\(pcC\);/.test(src) && /\[casC\.id, casC\.best, casC\.tag\],/.test(src));
   assert('write phase writes both family pools (lifetime + season)', /for \(const \[pool, bid, label\] of \[\[fam\.changed, fam\.id, fam\.low \+ ' comp'\], \[fam\.seasonChanged, fam\.seasonId, fam\.low \+ ' comp season'\]\]\)/.test(src));
-  assert('past-season prune runs over the three save boxes', /for \(const \[sbxId, sbxLabel\] of \[\[saveBoxId, 'save box'\], \[compFam\.DUO\.saveBoxId, 'duo save box'\], \[compFam\.TRIO\.saveBoxId, 'trio save box'\]\]\)/.test(src));
-  assert('reject-window snapshot covers the family pools', /compDuoBest: compFam\.DUO\.best\[sid\]/.test(src) && /scPut\(compFam\.TRIO\.seasonBest, sn\.sid, sn\.compTrioSeasonBest\)/.test(src) && /scPut\(changedCompTrioSeason, sn\.sid, sn\.changedCompTrioSeason\)/.test(src));
+  assert('past-season prune runs over the four save boxes', /for \(const \[sbxId, sbxLabel\] of \[\[saveBoxId, 'save box'\], \[compFam\.DUO\.saveBoxId, 'duo save box'\], \[compFam\.TRIO\.saveBoxId, 'trio save box'\], \[compFam\.QUAD\.saveBoxId, 'quad save box'\]\]\)/.test(src));
+  assert('reject-window snapshot covers the family pools (duo / trio / quad)', /compDuoBest: compFam\.DUO\.best\[sid\]/.test(src) && /scPut\(compFam\.TRIO\.seasonBest, sn\.sid, sn\.compTrioSeasonBest\)/.test(src) && /scPut\(changedCompTrioSeason, sn\.sid, sn\.changedCompTrioSeason\)/.test(src)
+    && /compQuadBest: compFam\.QUAD\.best\[sid\]/.test(src) && /scPut\(compFam\.QUAD\.seasonBest, sn\.sid, sn\.compQuadSeasonBest\)/.test(src) && /scPut\(changedCompQuadSeason, sn\.sid, sn\.changedCompQuadSeason\)/.test(src)
+    && /endlessQuadBest: endlessQuadBest\[sid\]/.test(src) && /scPut\(changedEndlessQuadSeason, sn\.sid, sn\.changedEndlessQuadSeason\)/.test(src));
   assert('run summary counts the lane', /RUN\.endlessComp = settledEndlessComp;/.test(src) && /team comp, \+' \+ s\('solo', 0\)/.test(src));
   assert('sanity keeps casual flags at 0 and pins the competitive segment rules', /else if \(fl !== 0\) out\.push\('flags'\);/.test(src) && /if \(t\.endDepth - t\.startDepth > COMP\.CKPT_EVERY\) out\.push\('span'\);/.test(src));
 }
