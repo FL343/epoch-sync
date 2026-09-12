@@ -51,6 +51,7 @@ const SEG_COMP = 8;        // team competitive segment (client-written, consensu
 const SEG_SUSPENDED = 1;   // written by "save & quit" -> the ONE segment a later run may resume from (once)
 const SEG_FINAL = 2;       // run over / user quit (terminal segment of the run)
 const SEG_RESUMED = 4;     // this segment started from a consumed save row
+const SEG_CASUAL = 16;     // casual-endless SOLO run (client knife 3.7a, O218): guard-written, 3 lives + CONT continues (seat-0 nibble); the solo lane routes it to endless_board_solo (no milestones, no resume debit)
 // dispCode (client DISP_CODE lockstep): 0 finished / 5 user-quit (the guard writes the truth for solo runs)
 const DISP_FINISHED = 0, DISP_USER_QUIT = 5;
 const SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
@@ -278,7 +279,7 @@ module.exports = {
   LEDGER_MAGIC, LEDGER_VER, MT_ENDLESS, ATT_VER, BASE_LEN, BASE_LEN_V3, LAYOUTS, SIG_INTS,
   // C
   SB_MAGIC, SB_VER, SB_CONSUMED, saveBoxHead,
-  SEG_SUSPENDED, SEG_FINAL, SEG_RESUMED, SEG_COMP, DISP_FINISHED, DISP_USER_QUIT,
+  SEG_SUSPENDED, SEG_FINAL, SEG_RESUMED, SEG_COMP, SEG_CASUAL, DISP_FINISHED, DISP_USER_QUIT,
   verifySoloRecord, soloSettleGate, toBytes, loadPubTable,
   // B
   CONFESS_MAGIC, CONFESS_VER, CONFESS_MAX_SEATS,

@@ -30,7 +30,7 @@ assert('casual co-op (2P / trio) lifetime + season pools carry build (t.build = 
 // nine ladder writes = [score, build] (2P / season / trio / trio-season / quad / quad-season + solo / solo-season / family); no endless write keeps the old 1-int details
 const writes = (src.match(/postFormDetails\('\/ISteamLeaderboards\/SetLeaderboardScore\/v1\/'[^\n]*\);/g) || []);
 const withBuild = writes.filter(l => /\}, \[w\.ts \| 0, w\.build \| 0\]\);/.test(l));
-assert('9 endless ladder writes send [w.ts | 0, w.build | 0] (found ' + withBuild.length + ' of ' + writes.length + ' SetLeaderboardScore details writes; +2 quad, client knife 3.7a)', withBuild.length === 9);
+assert('11 endless ladder writes send [w.ts | 0, w.build | 0] (found ' + withBuild.length + ' of ' + writes.length + ' SetLeaderboardScore details writes; +2 quad +2 casual solo, client knife 3.7a)', withBuild.length === 11);
 assert('no endless ladder write still sends the 1-int details [w.ts | 0]', !/\}, \[w\.ts \| 0\]\);/.test(src));
 // the build word is a real number even for pre-perk writers: the tail parser defaults absent ints to 0 and the pools use >>> 0
 assert('pools coerce with >>> 0 (absent tail build -> 0, never undefined/NaN in details)', !/build: (f|t)\.build \}/.test(src));

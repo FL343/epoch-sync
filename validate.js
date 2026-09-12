@@ -1428,6 +1428,8 @@ const ENDLESS_COMP_LB_OVERALL = process.env.ENDLESS_COMP_LB_OVERALL || 'endless_
 const SAVE_BOX_LB_DUO = process.env.SAVE_BOX_LB_DUO || 'endless_save_box_duo';
 const SAVE_BOX_LB_TRIO = process.env.SAVE_BOX_LB_TRIO || 'endless_save_box_trio';
 const SAVE_BOX_LB_QUAD = process.env.SAVE_BOX_LB_QUAD || 'endless_save_box_quad';
+const SAVE_BOX_LB_CASUAL = process.env.SAVE_BOX_LB_CASUAL || 'endless_save_box_casual';   // client knife 3.7a (O218): casual solo checkpoint rows (guard-signed, casual bit); cron only prunes past seasons
+const CASUAL_LIVES = 3;   // lockstep: client RANKED_CONFIG.ENDLESS.LIVES == guard ENDLESS_LIVES (reroll-ahead slack: a casual run's depth may run ahead of its passed count by its failed levels)
 // competitive ladder family by seat count (mirrors the client's ENDLESS_LEVELS.compFamily: 2 DUO / 3 TRIO / 4 QUAD)
 function compFamKeyOf(pc) { return pc >= 4 ? 'QUAD' : pc >= 3 ? 'TRIO' : 'DUO'; }
 const SOLO_FILE = process.env.SOLO_FILE || 'endless-solo.json';   // chain memory for solo AND team runs + milestone bitmaps
@@ -1495,13 +1497,15 @@ function soloMsSlot(st, p, seasonId, fam, nowMs) {
 // structural bounds on a VERIFIED segment (flag-don't-settle; the signature already proves a guard wrote it)
 function soloSanity(f) {
   const out = [];
+  const fl = f.flags | 0, casual = !!(fl & attest.SEG_CASUAL);   // O218: guard-written casual solo run (3 lives, CONT continues, checkpoint-row saves)
   if ((f.startDepth | 0) < 0 || (f.endDepth | 0) < (f.startDepth | 0) || (f.endDepth | 0) > ENDLESS.DEPTH_CAP) out.push('depth');
   if ((f.endDepth | 0) - (f.startDepth | 0) > COMP.CKPT_EVERY) out.push('span');
-  if ((f.continuesUsed | 0) !== 0) out.push('cont');        // competitive = one life, never a continue
+  // continues: competitive = one life, never a continue; casual = the seat-0 nibble only (the guard's CONT count; the lane debits the ladder)
+  if (casual ? (((f.continuesUsed | 0) & ~0xF) !== 0) : ((f.continuesUsed | 0) !== 0)) out.push('cont');
   if ((f.tokensCp | 0) !== 0) out.push('tokens');
   if ((f.seasonId | 0) < 0 || (f.seasonId | 0) > 4095) out.push('season');
-  const fl = f.flags | 0;
-  if ((fl & ~(attest.SEG_SUSPENDED | attest.SEG_FINAL | attest.SEG_RESUMED)) !== 0 || ((fl & attest.SEG_SUSPENDED) && (fl & attest.SEG_FINAL))) out.push('flags');
+  if ((fl & ~(attest.SEG_SUSPENDED | attest.SEG_FINAL | attest.SEG_RESUMED | attest.SEG_CASUAL)) !== 0 || ((fl & attest.SEG_SUSPENDED) && (fl & attest.SEG_FINAL))) out.push('flags');
+  if (casual && (fl & attest.SEG_SUSPENDED)) out.push('flags');   // a casual save is a checkpoint ROW (the run continues), never a suspended segment
   if ((f.dispCode | 0) !== attest.DISP_FINISHED && (f.dispCode | 0) !== attest.DISP_USER_QUIT) out.push('disp');
   if ((fl & attest.SEG_SUSPENDED) && (f.dispCode | 0) !== attest.DISP_FINISHED) out.push('disp');
   const cap = endlessGoalFor(Math.max(1, f.endDepth | 0), 1) * ENDLESS.SCORE_MULT;
@@ -1518,13 +1522,23 @@ function soloChainPlan(st, key, f, m, nowMs) {
     const w = st.wait[m] || (st.wait[m] = { t0: nowMs });
     return (nowMs - (w.t0 || 0) > COMP.CHAIN_WAIT_MS) ? { ok: false, reason } : { ok: null, reason };
   };
-  if (run && run.final) return { ok: false, reason: 'after-final' };
   const sd = f.startDepth | 0, fl = f.flags | 0;
+  const casualResume = !!(fl & attest.SEG_RESUMED) && !!(fl & attest.SEG_CASUAL);
+  if (run && run.final && !casualResume) return { ok: false, reason: 'after-final' };   // O218: a casual token resume legitimately follows the run's FINAL (below)
   if (sd === 0) {
     if (run && ((run.max | 0) > 0 || run.seg0)) return { ok: false, reason: 'restart' };   // a second depth-0 segment on the same run = replay
     return { ok: true, proven: 0 };
   }
   if (fl & attest.SEG_RESUMED) {
+    if (casualResume) {
+      // O218 casual (client knife 3.7a): the save is a checkpoint-snapshot ROW the guard wrote on the shop token purchase and tombstoned
+      //   on consume -- there is no suspended segment / save point to consume. Rule = the multiplayer casual one: the resumed depth must be
+      //   a checkpoint the run has PROVEN (chain memory); the run may already be FINAL (the token revives it: one revive per row, replay
+      //   defence = the guard tombstone + processed segment keys); no resume debit (the token was paid in gold inside the run).
+      if (sd % COMP.CKPT_EVERY !== 0) return { ok: false, reason: 'resume-not-checkpoint' };
+      if (!run || (run.max | 0) < sd) return waitOr('chain-gap');
+      return { ok: true, proven: sd, revive: !!run.final };
+    }
     const sv = run && run.saves && run.saves[String(sd)];
     if (!sv) return waitOr('save-orphan');
     if (sv.by) return sv.by === m ? { ok: true, proven: sd } : { ok: false, reason: 'save-reused' };
@@ -1562,6 +1576,8 @@ function soloAdvance(st, key, f, m, plan, nowMs) {
   if (f.picksLo != null) run.pk = { lo: f.picksLo | 0, hi: f.picksHi | 0 };   // perk pick log at this segment's close (perk_chain: the next segment must extend it)
   if (f.rerollLo != null) run.rr = { lo: f.rerollLo >>> 0, hi: f.rerollHi >>> 0 };   // reroll bitmap at close (rerollChain: monotone across segments)
   if ((f.flags | 0) & attest.SEG_SUSPENDED) { const sk = String(f.endDepth | 0); run.saves[sk] = Object.assign(run.saves[sk] || {}, { t: nowMs }); }   // audit B-F6: merge -- never drop `by` (one save, one resume)
+  if (plan.revive) run.final = 0;                              // O218 casual token resume brings a FINAL run back (its own FINAL below may close it again)
+  if ((f.flags | 0) & attest.SEG_RESUMED) run.contN = 0;       // O218: the continue ladder restarts with the guard session (renderer / guard / cron alike)
   if ((f.flags | 0) & attest.SEG_FINAL) run.final = 1;
   delete st.wait[m];
   return run;
@@ -1672,6 +1688,7 @@ const ENDLESS_LB_TRIO = process.env.ENDLESS_LB_TRIO || 'endless_board_trio';
 // quad ladder (client knife 3.7a, O178 2026-09-12): 4-seat runs rank on their own board, same rule as trio (four
 // diggers outscore three). Resolved find-or-create like the trio board; unresolved = pc=4 groups left pending.
 const ENDLESS_LB_QUAD = process.env.ENDLESS_LB_QUAD || 'endless_board_quad';
+const ENDLESS_LB_SOLO = process.env.ENDLESS_LB_SOLO || 'endless_board_solo';   // client knife 3.7a (O218): casual SOLO ladder (guard-signed SEG_CASUAL segments; client boardNameFor(base, 1))
 const ENDLESS_MAX_PC = 4;   // lockstep: client registry ENDLESS_MAX_PC (private-lobby endless maxPlayers; save_box SEAT_SLOTS) -- pinned by mvp ledger-schema-lockstep
 const ENDLESS = {
   MT: 7,
@@ -1768,9 +1785,11 @@ function endlessTail(d) {
 //   (depth 3+3k <= endDepth+1: the question is asked at the level end BEFORE the target), and a resumed segment must keep every bit the
 //   run's previous segment carried (the bitmap is monotone -- a lost bit means the resumed world was derived without a paid reroll).
 const REROLL_EVERY = 3;
-function rerollChain(f, run) {
+function rerollChain(f, run, slackDepth) {
   const lo = (f.rerollLo | 0) >>> 0, hi = (f.rerollHi | 0) >>> 0;
-  const maxBit = Math.floor(((f.endDepth | 0) + 1 - 3) / REROLL_EVERY);
+  // slackDepth (O218 casual solo): a failed level advances the depth without advancing the passed count the tail carries, so the ask
+  //   depth may run ahead of endDepth by the run's lives; competitive = 0 (one life: depth == passed)
+  const maxBit = Math.floor(((f.endDepth | 0) + 1 + (slackDepth | 0) - 3) / REROLL_EVERY);
   for (let k = 0; k < 64; k++) {
     const on = k < 32 ? ((lo >>> k) & 1) : ((hi >>> (k - 32)) & 1);
     if (on && k > maxBit) return 'reroll-ahead';
@@ -1954,6 +1973,7 @@ function ptBoardPlan(names, cfg) {
   add(cfg.compLb, 1); add(cfg.saveBoxLb, 0);   // O93 solo competitive ladder (trusted) + guard-signed save rows (client-writable)
   add(cfg.compDuoLb, 1); add(cfg.saveBoxDuoLb, 0); add(cfg.compTrioLb, 1); add(cfg.saveBoxTrioLb, 0);   // team competitive ladders + their save boxes
   add(cfg.compQuadLb, 1); add(cfg.saveBoxQuadLb, 0);   // four-seat family (client knife 3.7a)
+  add(cfg.endlessSoloLb, 1); add(cfg.saveBoxCasualLb, 0);   // O218 casual solo ladder (trusted) + casual checkpoint rows (client-writable, guard-signed)
   add(cfg.compOverallLb, 1);   // composite competitive ladder (knife 3.5d; cron-only)
   add('version_gate', 1);   // authoritative-version gate (ops-written, client read-only)
   add('gate_window', 1);    // queue-gate forced window / emergency stop (ops-written, client read-only)
@@ -2055,6 +2075,7 @@ async function main() {
       compLb: ENDLESS_COMP_LB, saveBoxLb: SAVE_BOX_LB,
       compDuoLb: ENDLESS_COMP_LB_DUO, saveBoxDuoLb: SAVE_BOX_LB_DUO, compTrioLb: ENDLESS_COMP_LB_TRIO, saveBoxTrioLb: SAVE_BOX_LB_TRIO,
       compQuadLb: ENDLESS_COMP_LB_QUAD, saveBoxQuadLb: SAVE_BOX_LB_QUAD,
+      endlessSoloLb: ENDLESS_LB_SOLO, saveBoxCasualLb: SAVE_BOX_LB_CASUAL,
       compOverallLb: ENDLESS_COMP_LB_OVERALL,
       rankedLb: RANKED_LB, lpLb: LP_LB, redeemLb: REDEEM_LB, grantLb: GRANT_LB, mirrorLb: PT_MIRROR_LB,
     });
@@ -2071,7 +2092,7 @@ async function main() {
   //   early returns (live e2e 2026-09-06: first save on a fresh test app id hit a missing box board).
   if (!PT_MODE) {
     const names0 = ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).map(x => String(x.name || x.Name));
-    for (const [nm, trusted] of [[ENDLESS_COMP_LB, true], [SAVE_BOX_LB, false], [ENDLESS_COMP_LB_DUO, true], [SAVE_BOX_LB_DUO, false], [ENDLESS_COMP_LB_TRIO, true], [SAVE_BOX_LB_TRIO, false], [ENDLESS_COMP_LB_QUAD, true], [SAVE_BOX_LB_QUAD, false], [ENDLESS_COMP_LB_OVERALL, true]]) {
+    for (const [nm, trusted] of [[ENDLESS_COMP_LB, true], [SAVE_BOX_LB, false], [ENDLESS_COMP_LB_DUO, true], [SAVE_BOX_LB_DUO, false], [ENDLESS_COMP_LB_TRIO, true], [SAVE_BOX_LB_TRIO, false], [ENDLESS_COMP_LB_QUAD, true], [SAVE_BOX_LB_QUAD, false], [ENDLESS_COMP_LB_OVERALL, true], [ENDLESS_LB_SOLO, true], [SAVE_BOX_LB_CASUAL, false]]) {
       if (names0.indexOf(nm) >= 0) continue;
       const id0 = await findOrCreateBoard(nm, trusted);
       if (id0) console.log('solo boards: provisioned ' + nm + (trusted ? ' (trusted)' : ' (client-writable)'));
@@ -2689,6 +2710,20 @@ async function main() {
   //   box (guard-signed rows; the cron only prunes past-season rows). Find-or-create like the trio ladder.
   const lbListAll = (lr.json && lr.json.response && lr.json.response.leaderboards) || [];
   const byNameLb = (name) => { const f = lbListAll.find(x => String(x.name || x.Name) === name); return f ? (f.id || f.ID) : null; };
+  // O218 (client knife 3.7a) solo CASUAL ladder: pc=1 casual runs (guard-signed segments flagged SEG_CASUAL) rank on their own pair
+  //   (endless_board_solo + season twin, trusted), apart from the competitive solo ladder; find-or-create like trio / quad, strict belt.
+  let enSoloId = byNameLb(ENDLESS_LB_SOLO);
+  if (!enSoloId) enSoloId = await findOrCreateBoard(ENDLESS_LB_SOLO);
+  if (!enSoloId) { strictBoard('solo casual endless board not found'); ghWarn('solo casual endless board not found (pre-create ' + ENDLESS_LB_SOLO + ', trusted-writes) -> casual solo segments left pending'); }
+  const endlessSoloBest = {};
+  let enSoloComplete = true;
+  if (enSoloId) { const br = await readBoardAll(enSoloId, 'solo casual endless board'); enSoloComplete = br.complete; for (const e of br.ents) endlessSoloBest[e.steamID] = e.score | 0; }
+  const enSoloSeason = (seasonId >= 1 && enSoloId) ? await resolveSeasonBoard(lr, ENDLESS_LB_SOLO, seasonId) : { name: null, id: null };
+  const enSoloSeasonId = enSoloSeason.id;
+  if (seasonId >= 1 && enSoloId && !enSoloSeasonId) { strictBoard('seasonal solo casual endless board not found'); ghWarn('seasonal solo casual endless board unresolved -> casual solo segments left pending'); }
+  const endlessSoloSeasonBest = {};
+  let enSoloSeasonComplete = true;
+  if (enSoloSeasonId) { const br = await readBoardAll(enSoloSeasonId, 'seasonal solo casual endless board'); enSoloSeasonComplete = br.complete; for (const e of br.ents) endlessSoloSeasonBest[e.steamID] = e.score | 0; }
   let compId = byNameLb(ENDLESS_COMP_LB);
   if (!compId) compId = await findOrCreateBoard(ENDLESS_COMP_LB, true);
   if (!compId) { strictBoard('solo comp board not found'); ghWarn('solo comp board not found (' + ENDLESS_COMP_LB + ') -> solo segments left pending'); }
@@ -2703,6 +2738,8 @@ async function main() {
   if (compSeasonId) { const br = await readBoardAll(compSeasonId, 'seasonal solo comp board'); compSeasonComplete = br.complete !== false; for (const e of br.ents) { compSeasonBest[e.steamID] = e.score | 0; compSeasonDet[e.steamID] = e.details; } }
   let saveBoxId = byNameLb(SAVE_BOX_LB);
   if (!saveBoxId) saveBoxId = await findOrCreateBoard(SAVE_BOX_LB, false);
+  let casualSaveBoxId = byNameLb(SAVE_BOX_LB_CASUAL);   // O218: casual solo checkpoint rows (guard-signed; the cron only prunes past seasons)
+  if (!casualSaveBoxId) casualSaveBoxId = await findOrCreateBoard(SAVE_BOX_LB_CASUAL, false);
   if (!saveBoxId) ghWarn('save box board not found (' + SAVE_BOX_LB + ', client-writable) -> guard saves fail until it exists');
   // team competitive ladders (duo / trio) + their save boxes: same find-or-create shape as the solo pair, one family record each
   const compFam = {};
@@ -2739,7 +2776,7 @@ async function main() {
   // after the targeted read is a genuine new player (base 0 correct).
   const compFamIncomplete = Object.values(compFam).some(f => (f.id && !f.complete) || (f.seasonId && !f.seasonComplete)) || (compId && !compComplete) || (compSeasonId && !compSeasonComplete);   // audit B-F4: solo ladder joins the family rule
   if ((lpId && !lpComplete) || (xpId && !xpComplete) || (cpId && !cpComplete) || (enId && !enComplete) || (enSeasonId && !enSeasonComplete) || (enTrioId && !enTrioComplete) || (enTrioSeasonId && !enTrioSeasonComplete)
-      || (enQuadId && !enQuadComplete) || (enQuadSeasonId && !enQuadSeasonComplete) || compFamIncomplete) {
+      || (enQuadId && !enQuadComplete) || (enQuadSeasonId && !enQuadSeasonComplete) || (enSoloId && !enSoloComplete) || (enSoloSeasonId && !enSoloSeasonComplete) || compFamIncomplete) {
     const need = new Set();
     for (const c of fresh) for (const r of c.g) {
       need.add(String(r.steamID));
@@ -2782,6 +2819,14 @@ async function main() {
         const e = await readUserEntry(enQuadSeasonId, sid, 'seasonal quad endless');
         if (e) endlessQuadSeasonBest[sid] = e.score | 0;
       }
+      if (enSoloId && !enSoloComplete && endlessSoloBest[sid] == null) {   // O218 casual solo ladder pair
+        const e = await readUserEntry(enSoloId, sid, 'solo casual endless');
+        if (e) endlessSoloBest[sid] = e.score | 0;
+      }
+      if (enSoloSeasonId && !enSoloSeasonComplete && endlessSoloSeasonBest[sid] == null) {
+        const e = await readUserEntry(enSoloSeasonId, sid, 'seasonal solo casual endless');
+        if (e) endlessSoloSeasonBest[sid] = e.score | 0;
+      }
       for (const fam of Object.values(compFam)) {   // team competitive ladders (duo / trio, lifetime + season)
         if (fam.id && !fam.complete && fam.best[sid] == null) { const e = await readUserEntry(fam.id, sid, fam.low + ' comp'); if (e) fam.best[sid] = e.score | 0; }
         if (fam.seasonId && !fam.seasonComplete && fam.seasonBest[sid] == null) { const e = await readUserEntry(fam.seasonId, sid, 'seasonal ' + fam.low + ' comp'); if (e) fam.seasonBest[sid] = e.score | 0; }
@@ -2795,6 +2840,7 @@ async function main() {
   }
   const today = Math.floor(Date.now() / 86400000);   // UTC day index (matches client lastWinDay) for the daily-first bonus
   const changed = {}; const changedLp = {}; const changedXp = {}; const changedCp = {}; const changedEndless = {}; const changedEndlessSeason = {}; const changedEndlessTrio = {}; const changedEndlessTrioSeason = {}; const changedEndlessQuad = {}; const changedEndlessQuadSeason = {}; const reveal = {}; const careerDet = {}; let settled = 0, voided = 0, settledEndless = 0, settledPrivate = 0, settledSolo = 0, settledEndlessComp = 0;
+  const changedEndlessSolo = {}, changedEndlessSoloSeason = {};   // O218 solo casual ladder write pools (client knife 3.7a)
   const changedComp = {}, changedCompSeason = {};   // O93 solo competitive ladder write pools
   const changedCompDuo = {};         // team competitive ladder write pools (duo / trio / quad, lifetime + season)
   const changedCompDuoSeason = {};
@@ -2807,7 +2853,10 @@ async function main() {
   compFam.QUAD.changed = changedCompQuad; compFam.QUAD.seasonChanged = changedCompQuadSeason;
   // casual (co-op) endless ladder pair by seat count: 2 = the historical base board, 3 = trio, 4 = quad (client knife 3.7a).
   //   Every board-shaped dependency of a co-op settle (gate / chain memory / best map / write pool) picks this pair.
-  const casualLadderOf = (pc) => pc >= 4
+  //   1 = the casual SOLO pair (O218: guard-signed SEG_CASUAL segments settle through the solo lane, which picks this pair too).
+  const casualLadderOf = (pc) => pc <= 1
+    ? { id: enSoloId, seasonId: enSoloSeasonId, best: endlessSoloBest, seasonBest: endlessSoloSeasonBest, changed: changedEndlessSolo, seasonChanged: changedEndlessSoloSeason, label: 'solo', tag: 'endless-solo' }
+    : pc >= 4
     ? { id: enQuadId, seasonId: enQuadSeasonId, best: endlessQuadBest, seasonBest: endlessQuadSeasonBest, changed: changedEndlessQuad, seasonChanged: changedEndlessQuadSeason, label: 'quad', tag: 'endless-quad' }
     : pc >= 3
     ? { id: enTrioId, seasonId: enTrioSeasonId, best: endlessTrioBest, seasonBest: endlessTrioSeasonBest, changed: changedEndlessTrio, seasonChanged: changedEndlessTrioSeason, label: 'trio', tag: 'endless-trio' }
@@ -2825,10 +2874,12 @@ async function main() {
       endlessBest: endlessBest[sid], endlessSeasonBest: endlessSeasonBest[sid],
       endlessTrioBest: endlessTrioBest[sid], endlessTrioSeasonBest: endlessTrioSeasonBest[sid],
       endlessQuadBest: endlessQuadBest[sid], endlessQuadSeasonBest: endlessQuadSeasonBest[sid],
+      endlessSoloBest: endlessSoloBest[sid], endlessSoloSeasonBest: endlessSoloSeasonBest[sid],   // O218 casual solo ladder
       changed: changed[sid], changedLp: changedLp[sid], changedXp: changedXp[sid], changedCp: changedCp[sid],
       changedEndless: changedEndless[sid], changedEndlessSeason: changedEndlessSeason[sid],
       changedEndlessTrio: changedEndlessTrio[sid], changedEndlessTrioSeason: changedEndlessTrioSeason[sid],
       changedEndlessQuad: changedEndlessQuad[sid], changedEndlessQuadSeason: changedEndlessQuadSeason[sid],
+      changedEndlessSolo: changedEndlessSolo[sid], changedEndlessSoloSeason: changedEndlessSoloSeason[sid],
       compBest: compBest[sid], compSeasonBest: compSeasonBest[sid], changedComp: changedComp[sid], changedCompSeason: changedCompSeason[sid],   // O93 solo ladder pools
       compDuoBest: compFam.DUO.best[sid], compDuoSeasonBest: compFam.DUO.seasonBest[sid], changedCompDuo: changedCompDuo[sid], changedCompDuoSeason: changedCompDuoSeason[sid],   // team ladder pools
       compTrioBest: compFam.TRIO.best[sid], compTrioSeasonBest: compFam.TRIO.seasonBest[sid], changedCompTrio: changedCompTrio[sid], changedCompTrioSeason: changedCompTrioSeason[sid],
@@ -2844,10 +2895,12 @@ async function main() {
       scPut(endlessBest, sn.sid, sn.endlessBest); scPut(endlessSeasonBest, sn.sid, sn.endlessSeasonBest);
       scPut(endlessTrioBest, sn.sid, sn.endlessTrioBest); scPut(endlessTrioSeasonBest, sn.sid, sn.endlessTrioSeasonBest);
       scPut(endlessQuadBest, sn.sid, sn.endlessQuadBest); scPut(endlessQuadSeasonBest, sn.sid, sn.endlessQuadSeasonBest);
+      scPut(endlessSoloBest, sn.sid, sn.endlessSoloBest); scPut(endlessSoloSeasonBest, sn.sid, sn.endlessSoloSeasonBest);
       scPut(changed, sn.sid, sn.changed); scPut(changedLp, sn.sid, sn.changedLp); scPut(changedXp, sn.sid, sn.changedXp); scPut(changedCp, sn.sid, sn.changedCp);
       scPut(changedEndless, sn.sid, sn.changedEndless); scPut(changedEndlessSeason, sn.sid, sn.changedEndlessSeason);
       scPut(changedEndlessTrio, sn.sid, sn.changedEndlessTrio); scPut(changedEndlessTrioSeason, sn.sid, sn.changedEndlessTrioSeason);
       scPut(changedEndlessQuad, sn.sid, sn.changedEndlessQuad); scPut(changedEndlessQuadSeason, sn.sid, sn.changedEndlessQuadSeason);
+      scPut(changedEndlessSolo, sn.sid, sn.changedEndlessSolo); scPut(changedEndlessSoloSeason, sn.sid, sn.changedEndlessSoloSeason);
       scPut(compBest, sn.sid, sn.compBest); scPut(compSeasonBest, sn.sid, sn.compSeasonBest); scPut(changedComp, sn.sid, sn.changedComp); scPut(changedCompSeason, sn.sid, sn.changedCompSeason);
       scPut(compFam.DUO.best, sn.sid, sn.compDuoBest); scPut(compFam.DUO.seasonBest, sn.sid, sn.compDuoSeasonBest); scPut(changedCompDuo, sn.sid, sn.changedCompDuo); scPut(changedCompDuoSeason, sn.sid, sn.changedCompDuoSeason);
       scPut(compFam.TRIO.best, sn.sid, sn.compTrioBest); scPut(compFam.TRIO.seasonBest, sn.sid, sn.compTrioSeasonBest); scPut(changedCompTrio, sn.sid, sn.changedCompTrio); scPut(changedCompTrioSeason, sn.sid, sn.changedCompTrioSeason);
@@ -2881,6 +2934,7 @@ async function main() {
       return false;
     }
     const f = v.fields;
+    const casual = !!((f.flags | 0) & attest.SEG_CASUAL);   // O218: guard-written casual solo run -> own ladder pair, continue-ladder debits, no milestones, no resume debit
     const sane = soloSanity(f);
     if (sane.length) {
       recordFlag(signals, c.g, m, nowMs); sigDirty = true; trustTouched.add(sid); RUN.sanity = (RUN.sanity | 0) + 1;
@@ -2902,7 +2956,7 @@ async function main() {
       return false;
     }
     // reroll chain (2026-09-11): bitmap bits only at askable target depths + monotone across the run's segments (causal, like the perk chain)
-    const rc = rerollChain(f, soloState.runs[key]);
+    const rc = rerollChain(f, soloState.runs[key], casual ? CASUAL_LIVES : 0);   // O218: casual depth may run ahead of passed by its failed levels
     if (rc) {
       RUN.soloRej = (RUN.soloRej | 0) + 1;
       ghWarn('match=' + m + ': solo segment ' + plog(sid) + ' reroll chain REJECT (' + rc + ') depth ' + f.startDepth + '->' + f.endDepth + ' rr=' + (f.rerollHi >>> 0).toString(16) + ':' + (f.rerollLo >>> 0).toString(16));
@@ -2929,7 +2983,8 @@ async function main() {
       processed.add(m);
       return false;
     }
-    if (!cpId || !compId || (seasonId >= 1 && !compSeasonId)) { console.log('  solo ' + m + ': cp/comp/seasonal board unresolved -- left pending'); return false; }
+    const cas = casual ? casualLadderOf(1) : null;   // O218: the casual solo ladder pair (endless_board_solo + season twin)
+    if (!cpId || (casual ? (!cas.id || (seasonId >= 1 && !cas.seasonId)) : (!compId || (seasonId >= 1 && !compSeasonId)))) { console.log('  solo ' + m + ': cp/' + (casual ? 'casual-solo' : 'comp') + '/seasonal board unresolved -- left pending'); return false; }
     // pacing: the segment's own start attestation (single guard attester) or its first sighting
     let pend = startsPending[m];
     if (!pend) { pend = startsPending[m] = { t0: nowMs, mt: r.d[2] | 0, roster: {}, settled: [], synth: true }; sigPlayer(signals, p, nowMs).ns += 1; sigDirty = true; }
@@ -2947,6 +3002,21 @@ async function main() {
       cp[sid] = (cp[sid] == null ? 0 : cp[sid]) - COMP.RESUME_CP; changedCp[sid] = cp[sid];
       console.log('  solo cp ' + m + ': ' + plog(sid) + ' -' + COMP.RESUME_CP + ' resume (save@' + plan.consume + ') -> ' + cp[sid]);
     }
+    if (casual) {
+      // O218 casual solo (client knife 3.7a): continue ladder debits -- the guard's CONT count rides the tail as the seat-0 nibble,
+      //   CUMULATIVE over the guard session (the rung continues across a session's segments; a resumed session restarts it: soloAdvance
+      //   resets run.contN on RESUMED). Debit the rungs newly crossed since the run's last settled count; endlessContinueCost(k) =
+      //   client RatingStore.continueCost = guard ENDLESS_CONT_COST. No milestones (competitive-only), the ladder is the casual solo pair.
+      const n = endlessNib(f.continuesUsed, 0), prev = run.contN | 0;
+      let debit = 0; for (let k = prev + 1; k <= n; k++) debit += endlessContinueCost(k);
+      if (debit > 0) { cp[sid] = (cp[sid] == null ? 0 : cp[sid]) - debit; changedCp[sid] = cp[sid]; console.log('  solo cp ' + m + ': ' + plog(sid) + ' -' + debit + ' casual continues (rung ' + (prev + 1) + '..' + n + ') -> ' + cp[sid]); }
+      if (n > prev) run.contN = n;
+      if ((f.endDepth | 0) > 0) {
+        const packed = packEndlessScore(f.endDepth, f.score);
+        if (cas.best[sid] == null || packed > cas.best[sid]) { cas.best[sid] = packed; cas.changed[sid] = { s: packed, ts: f.score | 0, build: f.build >>> 0 }; console.log('  solo casual best ' + m + ': ' + plog(sid) + ' depth ' + f.endDepth + ' bank ' + f.score + ' -> board ' + packed); }
+        if (cas.seasonId && (f.seasonId | 0) === (seasonId | 0) && (cas.seasonBest[sid] == null || packed > cas.seasonBest[sid])) { cas.seasonBest[sid] = packed; cas.seasonChanged[sid] = { s: packed, ts: f.score | 0, build: f.build >>> 0 }; console.log('  solo casual season best ' + m + ': ' + plog(sid) + ' depth ' + f.endDepth + ' -> board ' + packed); }
+      }
+    } else {
     for (const ms of soloMilestones(soloMsSlot(soloState, p, f.seasonId, 'SOLO', nowMs), f.endDepth)) {
       cp[sid] = (cp[sid] == null ? 0 : cp[sid]) + ms[1]; changedCp[sid] = cp[sid];
       console.log('  solo cp ' + m + ': ' + plog(sid) + ' +' + ms[1] + ' milestone depth ' + ms[0] + ' -> ' + cp[sid]);
@@ -2956,8 +3026,9 @@ async function main() {
       if (compBest[sid] == null || packed > compBest[sid]) { compBest[sid] = packed; changedComp[sid] = { s: packed, ts: f.score | 0, build: f.build >>> 0 }; console.log('  solo best ' + m + ': ' + plog(sid) + ' depth ' + f.endDepth + ' bank ' + f.score + ' -> board ' + packed); }
       if (compSeasonId && (f.seasonId | 0) === (seasonId | 0) && (compSeasonBest[sid] == null || packed > compSeasonBest[sid])) { compSeasonBest[sid] = packed; changedCompSeason[sid] = { s: packed, ts: f.score | 0, build: f.build >>> 0 }; console.log('  solo season best ' + m + ': ' + plog(sid) + ' depth ' + f.endDepth + ' -> board ' + packed); }
     }
+    }
     if (xpId) creditXpEndless(c.g, { startDepth: Math.max(f.startDepth | 0, plan.proven | 0), endDepth: f.endDepth }, xp, changedXp, spSet);   // audit B-F2: overlap credits new depth only
-    console.log('  solo settle ' + m + ': ' + plog(sid) + ' depth ' + f.startDepth + '->' + f.endDepth + ' bank ' + f.score + ' flags ' + f.flags + ((f.dispCode | 0) === attest.DISP_USER_QUIT ? ' (quit)' : '') + ' key=' + f.keyName + (v.sealed ? '' : ' [dev]') + (plan.overlap != null ? ' (overlap from ' + plan.overlap + ', proven ' + plan.proven + ')' : ''));
+    console.log('  solo settle ' + m + ': ' + plog(sid) + (casual ? ' casual' : '') + ' depth ' + f.startDepth + '->' + f.endDepth + ' bank ' + f.score + ' flags ' + f.flags + ((f.dispCode | 0) === attest.DISP_USER_QUIT ? ' (quit)' : '') + ' key=' + f.keyName + (v.sealed ? '' : ' [dev]') + (plan.overlap != null ? ' (overlap from ' + plan.overlap + ', proven ' + plan.proven + ')' : '') + (plan.revive ? ' (revived by a casual token resume)' : ''));
     processed.add(m);
     return true;
   };
@@ -3569,6 +3640,25 @@ async function main() {
   const etsOk = wEndlessTrioSeason.filter(x => x.status === 'fulfilled' && x.value).length;
   const eqOk = wEndlessQuad.filter(x => x.status === 'fulfilled' && x.value).length;
   const eqsOk = wEndlessQuadSeason.filter(x => x.status === 'fulfilled' && x.value).length;
+  // O218 solo casual ladder writes (client knife 3.7a): pools only fill when the solo casual boards resolved (same gate rule as trio / quad)
+  const wEndlessSolo = await mapPool(Object.keys(changedEndlessSolo), CONCURRENCY, async (sid) => {
+    const w = changedEndlessSolo[sid];
+    const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: enSoloId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, [w.ts | 0, w.build | 0]);
+    const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
+    if (!okFlag) ghWarn('write solo casual endless ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
+    else console.log('  ok endless solo ' + plog(sid) + ' = ' + w.s);
+    return okFlag;
+  });
+  const wEndlessSoloSeason = await mapPool(Object.keys(changedEndlessSoloSeason), CONCURRENCY, async (sid) => {
+    const w = changedEndlessSoloSeason[sid];
+    const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: enSoloSeasonId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, [w.ts | 0, w.build | 0]);
+    const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
+    if (!okFlag) ghWarn('write seasonal solo casual endless ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
+    else console.log('  ok endless solo season ' + plog(sid) + ' = ' + w.s);
+    return okFlag;
+  });
+  const esoOk = wEndlessSolo.filter(x => x.status === 'fulfilled' && x.value).length;
+  const esosOk = wEndlessSoloSeason.filter(x => x.status === 'fulfilled' && x.value).length;
   // O93 solo competitive ladder writes (details = exact bank; packed tiebreak is /1000-saturated)
   const wComp = await mapPool(Object.keys(changedComp), CONCURRENCY, async (sid) => {
     const w = changedComp[sid];
@@ -3661,7 +3751,7 @@ async function main() {
     if (overallId) await writeOverall(overallId, false, 'overall comp');
     if (overallSeasonId) await writeOverall(overallSeasonId, true, 'overall comp season');
   }
-  for (const [sbxId, sbxLabel] of [[saveBoxId, 'save box'], [compFam.DUO.saveBoxId, 'duo save box'], [compFam.TRIO.saveBoxId, 'trio save box'], [compFam.QUAD.saveBoxId, 'quad save box']]) {
+  for (const [sbxId, sbxLabel] of [[saveBoxId, 'save box'], [compFam.DUO.saveBoxId, 'duo save box'], [compFam.TRIO.saveBoxId, 'trio save box'], [compFam.QUAD.saveBoxId, 'quad save box'], [casualSaveBoxId, 'casual save box']]) {
   if (sbxId && seasonId >= 1) {
     try {
       const sb = await readBoardAll(sbxId, sbxLabel);
@@ -3692,9 +3782,9 @@ async function main() {
   // above (passing the map avoids re-reading scores that global reads may still serve stale).
   await processRedeems(cp);
   await processCampaignGrants();
-  console.log('written: rating ' + rOk + '/' + wRating.length + ', points ' + pOk + '/' + wPoints.length + ', xp ' + xOk + '/' + wXp.length + ', cp ' + cOk + '/' + wCp.length + ', endless ' + eOk + '/' + wEndless.length + (wEndlessSeason.length ? (' (+season ' + esOk + '/' + wEndlessSeason.length + ')') : '') + (wEndlessTrio.length ? (' (+trio ' + etOk + '/' + wEndlessTrio.length + ')') : '') + (wEndlessTrioSeason.length ? (' (+trio-season ' + etsOk + '/' + wEndlessTrioSeason.length + ')') : '') + (wEndlessQuad.length ? (' (+quad ' + eqOk + '/' + wEndlessQuad.length + ')') : '') + (wEndlessQuadSeason.length ? (' (+quad-season ' + eqsOk + '/' + wEndlessQuadSeason.length + ')') : '') + ', state updated (idempotent)');
+  console.log('written: rating ' + rOk + '/' + wRating.length + ', points ' + pOk + '/' + wPoints.length + ', xp ' + xOk + '/' + wXp.length + ', cp ' + cOk + '/' + wCp.length + ', endless ' + eOk + '/' + wEndless.length + (wEndlessSeason.length ? (' (+season ' + esOk + '/' + wEndlessSeason.length + ')') : '') + (wEndlessTrio.length ? (' (+trio ' + etOk + '/' + wEndlessTrio.length + ')') : '') + (wEndlessTrioSeason.length ? (' (+trio-season ' + etsOk + '/' + wEndlessTrioSeason.length + ')') : '') + (wEndlessQuad.length ? (' (+quad ' + eqOk + '/' + wEndlessQuad.length + ')') : '') + (wEndlessQuadSeason.length ? (' (+quad-season ' + eqsOk + '/' + wEndlessQuadSeason.length + ')') : '') + (wEndlessSolo.length ? (' (+solo ' + esoOk + '/' + wEndlessSolo.length + ')') : '') + (wEndlessSoloSeason.length ? (' (+solo-season ' + esosOk + '/' + wEndlessSoloSeason.length + ')') : '') + ', state updated (idempotent)');
   RUN.writes = rOk + '/' + wRating.length + ' ' + pOk + '/' + wPoints.length + ' ' + xOk + '/' + wXp.length;
-  RUN.writesEndless = cOk + '/' + wCp.length + ' ' + eOk + '/' + wEndless.length + (wEndlessSeason.length ? ('+' + esOk + '/' + wEndlessSeason.length) : '') + (wEndlessTrio.length ? ('+t' + etOk + '/' + wEndlessTrio.length) : '') + (wEndlessQuad.length ? ('+q' + eqOk + '/' + wEndlessQuad.length) : '');
+  RUN.writesEndless = cOk + '/' + wCp.length + ' ' + eOk + '/' + wEndless.length + (wEndlessSeason.length ? ('+' + esOk + '/' + wEndlessSeason.length) : '') + (wEndlessTrio.length ? ('+t' + etOk + '/' + wEndlessTrio.length) : '') + (wEndlessQuad.length ? ('+q' + eqOk + '/' + wEndlessQuad.length) : '') + (wEndlessSolo.length ? ('+s' + esoOk + '/' + wEndlessSolo.length) : '');
   writeRunSummary();
 }
 
@@ -3705,5 +3795,6 @@ module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, isVoidDisp,
   ENDLESS_COMP_LB, SAVE_BOX_LB, SOLO_FILE, COMP, soloSanity, soloChainPlan, rerollChain, soloMilestones, soloAdvance, soloRunKey, soloStartAttested, loadSolo, saveSolo, segOrderOf, segStartOf, freshOrder,
   ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, SAVE_BOX_LB_DUO, SAVE_BOX_LB_TRIO, teamRunKey, soloMsSlot, groupRecords,
   ENDLESS_COMP_LB_QUAD, SAVE_BOX_LB_QUAD, ENDLESS_LB_QUAD, ENDLESS_MAX_PC, compFamKeyOf,   // client knife 3.7a (O178 four seats)
+  ENDLESS_LB_SOLO, SAVE_BOX_LB_CASUAL, CASUAL_LIVES,   // client knife 3.7a (O218 casual solo lane)
   ENDLESS_COMP_LB_OVERALL, overallScore, overallDominant,   // knife 3.5d composite ladder
   PERKS_CFG: perks.PERKS_CFG, verifyPerkPicks: perks.verifyPerkPicks };

@@ -30,6 +30,7 @@ eq('COMP pinned (resumeCp / milestones / ckpt / wait / ttl)', [COMP.RESUME_CP, C
   [20, [[10, 40], [20, 80], [30, 150]], 5, 7 * 86400000, 45 * 86400000]);
 eq('board / state names', [ENDLESS_COMP_LB, SAVE_BOX_LB, SOLO_FILE], ['endless_comp_solo', 'endless_save_box_solo', 'endless-solo.json']);
 eq('segment flag bits + quit disp (attest.js)', [A.SEG_SUSPENDED, A.SEG_FINAL, A.SEG_RESUMED, A.DISP_FINISHED, A.DISP_USER_QUIT], [1, 2, 4, 0, 5]);
+eq('casual solo lane names + bits (client knife 3.7a, O218; companion boardNameFor(base,1) / casualSaveBoardName / attest_record.h SEG_CASUAL / ENDLESS.LIVES)', [v.ENDLESS_LB_SOLO, v.SAVE_BOX_LB_CASUAL, A.SEG_CASUAL, v.CASUAL_LIVES], ['endless_board_solo', 'endless_save_box_casual', 16, 3]);
 eq('save box header decode (plaintext only)', A.saveBoxHead([0xBA | (1 << 8), 3, 1, 2026090601, 7, 9, 9, 9, 9, 9, 9, 9, 9]),
   { ver: 1, seasonId: 3, flags: 1, consumed: true, keyId: 2026090601, nonce: 7 });
 eq('save box header: wrong magic -> null', A.saveBoxHead([0xB1, 3, 1, 1, 1]), null);
@@ -41,6 +42,13 @@ assert('span > CKPT_EVERY -> span', soloSanity(seg({ startDepth: 0, endDepth: 6 
 assert('continue nibble set -> cont (one life, never a continue)', soloSanity(seg({ continuesUsed: 1 })).indexOf('cont') >= 0);
 assert('tokens -> tokens', soloSanity(seg({ tokensCp: 1 })).indexOf('tokens') >= 0);
 assert('unknown flag bit -> flags', soloSanity(seg({ flags: 8 })).indexOf('flags') >= 0);
+// O218 casual solo (client knife 3.7a): the CASUAL bit is legal, its seat-0 continue nibble is legal, a suspended casual segment is not
+eq('casual segment -> clean', soloSanity(seg({ flags: A.SEG_CASUAL })), []);
+eq('casual segment with 2 continues (seat-0 nibble) -> clean', soloSanity(seg({ flags: A.SEG_CASUAL, continuesUsed: 2 })), []);
+assert('casual continue on another seat -> cont', soloSanity(seg({ flags: A.SEG_CASUAL, continuesUsed: 1 << 4 })).indexOf('cont') >= 0);
+assert('casual + SUSPENDED -> flags (casual saves are checkpoint rows, the run continues)', soloSanity(seg({ flags: A.SEG_CASUAL | A.SEG_SUSPENDED })).indexOf('flags') >= 0);
+assert('casual + FINAL + user-quit is legal', soloSanity(seg({ flags: A.SEG_CASUAL | A.SEG_FINAL, dispCode: 5 })).length === 0);
+assert('casual + RESUMED is legal (token resume)', soloSanity(seg({ flags: A.SEG_CASUAL | A.SEG_RESUMED, startDepth: 5, endDepth: 7 })).length === 0);
 assert('SUSPENDED|FINAL together -> flags', soloSanity(seg({ flags: A.SEG_SUSPENDED | A.SEG_FINAL })).indexOf('flags') >= 0);
 assert('disp outside {finished, user-quit} -> disp', soloSanity(seg({ dispCode: 3 })).indexOf('disp') >= 0);
 assert('suspended segment with a quit disp -> disp', soloSanity(seg({ flags: A.SEG_SUSPENDED, dispCode: 5 })).indexOf('disp') >= 0);
@@ -150,20 +158,44 @@ console.log('-- single-attester start registration --');
   assert('no conviction from the endless key', res.convicted === 0 && Object.keys(leavers).length === 0);
 }
 
+console.log('-- O218 casual solo chain (client knife 3.7a): token resume from a proven checkpoint, after FINAL, no save point, ladder restart --');
+{
+  const st = { runs: {}, wait: {} };
+  const key = soloRunKey('p1', 1, 778);
+  const T0 = 2000000;
+  const C = A.SEG_CASUAL;
+  let plan = soloChainPlan(st, key, seg({ flags: C, startDepth: 0, endDepth: 5, continuesUsed: 1 }), 'c0', T0);
+  eq('casual fresh run: depth-0 segment settles', plan, { ok: true, proven: 0 });
+  soloAdvance(st, key, seg({ flags: C, startDepth: 0, endDepth: 5 }), 'c0', plan, T0);
+  plan = soloChainPlan(st, key, seg({ flags: C | A.SEG_FINAL, startDepth: 5, endDepth: 7, dispCode: 0 }), 'c1', T0);
+  eq('casual checkpoint continuation [5,7] FINAL (run over at 7)', plan, { ok: true, proven: 5 });
+  soloAdvance(st, key, seg({ flags: C | A.SEG_FINAL, startDepth: 5, endDepth: 7 }), 'c1', plan, T0);
+  eq('run is final', st.runs[key].final, 1);
+  plan = soloChainPlan(st, key, seg({ flags: C | A.SEG_RESUMED, startDepth: 5, endDepth: 9 }), 'c2', T0 + 1000);
+  eq('casual token resume from the proven checkpoint 5 AFTER final -> settles, revive, no consume', plan, { ok: true, proven: 5, revive: true });
+  const run = soloAdvance(st, key, seg({ flags: C | A.SEG_RESUMED, startDepth: 5, endDepth: 9, continuesUsed: 0 }), 'c2', plan, T0 + 1000);
+  eq('revive clears final + the continue ladder restarts (contN 0)', [run.final, run.contN | 0, run.max], [0, 0, 9]);
+  eq('casual resume at a non-checkpoint depth -> reject', soloChainPlan(st, key, seg({ flags: C | A.SEG_RESUMED, startDepth: 7, endDepth: 8 }), 'c3', T0 + 2000), { ok: false, reason: 'resume-not-checkpoint' });
+  eq('casual resume beyond the proven depth -> waits for its chain', soloChainPlan(st, key, seg({ flags: C | A.SEG_RESUMED, startDepth: 15, endDepth: 16 }), 'c4', T0 + 2000).ok, null);
+  eq('competitive resume without a save point still waits (save-orphan) -- the casual rule is flag-gated', soloChainPlan(st, key, seg({ startDepth: 5, endDepth: 6, flags: A.SEG_RESUMED }), 'c5', T0 + 2000).reason, 'save-orphan');
+  eq('competitive segment after a FINAL run still rejects (after-final)', soloChainPlan({ runs: { k: { max: 7, final: 1, saves: {} } }, wait: {} }, 'k', seg({ startDepth: 7, endDepth: 8 }), 'c6', T0), { ok: false, reason: 'after-final' });
+}
+
 console.log('-- board surface --');
 {
   const plan = ptBoardPlan([], { prefix: 'rec_', shards: 1, xpLb: 'xpb', cpLb: 'cpb', endlessLb: 'enb', endlessTrioLb: 'entb', trustLb: 'trb', reportLb: 'rpb', compLb: 'cmp', saveBoxLb: 'sbx',
-    compDuoLb: 'cmp2', saveBoxDuoLb: 'sbx2', compTrioLb: 'cmp3', saveBoxTrioLb: 'sbx3' });
+    compDuoLb: 'cmp2', saveBoxDuoLb: 'sbx2', compTrioLb: 'cmp3', saveBoxTrioLb: 'sbx3', endlessSoloLb: 'ens', saveBoxCasualLb: 'sbxc' });
   const byName = {}; for (const b of plan.create) byName[b.name] = b.trusted;
   eq('playtest plan provisions the solo ladder (trusted) + save box (client-writable)', [byName.cmp, byName.sbx], [1, 0]);
   eq('playtest plan provisions the team ladders (trusted) + their save boxes (client-writable)', [byName.cmp2, byName.sbx2, byName.cmp3, byName.sbx3], [1, 0, 1, 0]);
+  eq('playtest plan provisions the casual solo ladder (trusted) + casual save box (client-writable) [O218]', [byName.ens, byName.sbxc], [1, 0]);
 }
 
 console.log('-- wiring pins --');
 {
   const src = require('fs').readFileSync(path.join(__dirname, '..', 'validate.js'), 'utf8');
   assert('main app provisions the solo ladder + save box up-front (before the fresh-match early returns)',
-    /for \(const \[nm, trusted\] of \[\[ENDLESS_COMP_LB, true\], \[SAVE_BOX_LB, false\], \[ENDLESS_COMP_LB_DUO, true\], \[SAVE_BOX_LB_DUO, false\], \[ENDLESS_COMP_LB_TRIO, true\], \[SAVE_BOX_LB_TRIO, false\], \[ENDLESS_COMP_LB_QUAD, true\], \[SAVE_BOX_LB_QUAD, false\], \[ENDLESS_COMP_LB_OVERALL, true\]\]\)/.test(src) && src.indexOf('solo boards: provisioned') < src.indexOf('no consistent matches'));   // + overall ladder (knife 3.5d) + quad family (client knife 3.7a)
+    /for \(const \[nm, trusted\] of \[\[ENDLESS_COMP_LB, true\], \[SAVE_BOX_LB, false\], \[ENDLESS_COMP_LB_DUO, true\], \[SAVE_BOX_LB_DUO, false\], \[ENDLESS_COMP_LB_TRIO, true\], \[SAVE_BOX_LB_TRIO, false\], \[ENDLESS_COMP_LB_QUAD, true\], \[SAVE_BOX_LB_QUAD, false\], \[ENDLESS_COMP_LB_OVERALL, true\], \[ENDLESS_LB_SOLO, true\], \[SAVE_BOX_LB_CASUAL, false\]\]\)/.test(src) && src.indexOf('solo boards: provisioned') < src.indexOf('no consistent matches'));   // + overall ladder (knife 3.5d) + quad family (client knife 3.7a)
   assert('solo segments enter the settle loop as their own consistent entries (every pc=1 record of the group; audit B-F10)', /consistentMatches\.push\(\{ m, g: solos, void: false, solo: true \}\)/.test(src) && /if \(c\.solo\) \{ if \(await soloSettle\(c\)\) settledSolo\+\+; continue; \}/.test(src));
   assert('solo settle verifies the signature and binds the row owner (first verifying candidate wins)', /attest\.soloSettleGate\(cv, \{ owner: String\(cand\.steamID\), allowDevKey: soloAllowDev \}\)/.test(src) && /if \(!v \|\| cg\.settle \|\| cg\.pending\) \{ r = cand;/.test(src));
   assert('audit B-F9: inside the seedcap reject window the chain still advances, only the outputs are discarded', /inside seedcap reject window -- own settlement discarded \(chain advanced to/.test(src) && (src.match(/soloAdvance\(soloState, key, f, m, plan, nowMs\);/g) || []).length >= 2);
