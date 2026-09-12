@@ -3248,13 +3248,13 @@ async function main() {
         for (const sid of writerSids) {
           if (bBest[sid] == null || packed > bBest[sid]) {
             bBest[sid] = packed; bChanged[sid] = { s: packed, ts: teamScore, build: t.build >>> 0 };
-            console.log('  endless best' + (useTrio ? ' (trio)' : '') + ' ' + c.m + ': ' + plog(sid) + ' depth ' + t.endDepth + ' team ' + teamScore + ' -> board ' + packed);
+            console.log('  endless best' + (cas.label !== 'endless' ? ' (' + cas.label + ')' : '') + ' ' + c.m + ': ' + plog(sid) + ' depth ' + t.endDepth + ' team ' + teamScore + ' -> board ' + packed);
           }
           // seasonal double-write: same improved-best rule against the season board's own base
           // (fresh each season = the per-season "dig it again" ladder).
           if (bSeasonId && (bSeasonBest[sid] == null || packed > bSeasonBest[sid])) {
             bSeasonBest[sid] = packed; bSeasonChanged[sid] = { s: packed, ts: teamScore, build: t.build >>> 0 };
-            console.log('  endless season best' + (useTrio ? ' (trio)' : '') + ' ' + c.m + ': ' + plog(sid) + ' depth ' + t.endDepth + ' -> board ' + packed);
+            console.log('  endless season best' + (cas.label !== 'endless' ? ' (' + cas.label + ')' : '') + ' ' + c.m + ': ' + plog(sid) + ' depth ' + t.endDepth + ' -> board ' + packed);
           }
         }
       }
