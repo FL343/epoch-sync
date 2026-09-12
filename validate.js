@@ -1785,7 +1785,11 @@ function endlessTail(d) {
 //   (depth 3+3k <= endDepth+1: the question is asked at the level end BEFORE the target), and a resumed segment must keep every bit the
 //   run's previous segment carried (the bitmap is monotone -- a lost bit means the resumed world was derived without a paid reroll).
 const REROLL_EVERY = 3;
-function rerollChain(f, run, slackDepth) {
+//   casualResumeAt (O218 casual token resume, e2e 2026-09-12): the casual save row is the CHECKPOINT snapshot -- the checkpoint level's
+//   perk pick included, the NEXT level's paid reroll not (the bank was snapped before that payment too). Bits for targets beyond the
+//   resume depth were decided in the dead timeline; the resumed timeline replays those levels unrerolled and unpaid, so only bits for
+//   targets <= the resume depth must survive (competitive rows are written in the shop after the reroll page: full monotone rule).
+function rerollChain(f, run, slackDepth, casualResumeAt) {
   const lo = (f.rerollLo | 0) >>> 0, hi = (f.rerollHi | 0) >>> 0;
   // slackDepth (O218 casual solo): a failed level advances the depth without advancing the passed count the tail carries, so the ask
   //   depth may run ahead of endDepth by the run's lives; competitive = 0 (one life: depth == passed)
@@ -1794,7 +1798,16 @@ function rerollChain(f, run, slackDepth) {
     const on = k < 32 ? ((lo >>> k) & 1) : ((hi >>> (k - 32)) & 1);
     if (on && k > maxBit) return 'reroll-ahead';
   }
-  if (run && run.rr && (((run.rr.lo >>> 0) & ~lo) >>> 0 || ((run.rr.hi >>> 0) & ~hi) >>> 0)) return 'reroll-lost';
+  if (run && run.rr) {
+    let lostLo = ((run.rr.lo >>> 0) & ~lo) >>> 0, lostHi = ((run.rr.hi >>> 0) & ~hi) >>> 0;
+    if (casualResumeAt != null) {
+      const kMax = Math.floor(((casualResumeAt | 0) - 3) / REROLL_EVERY);   // bit k <-> target depth 3+3k; keep k <= kMax
+      const maskLo = kMax < 0 ? 0 : (kMax >= 31 ? 0xFFFFFFFF : (((1 << (kMax + 1)) >>> 0) - 1)) >>> 0;
+      const maskHi = kMax < 32 ? 0 : (kMax >= 63 ? 0xFFFFFFFF : (((1 << (kMax - 31)) >>> 0) - 1)) >>> 0;
+      lostLo = (lostLo & maskLo) >>> 0; lostHi = (lostHi & maskHi) >>> 0;
+    }
+    if (lostLo || lostHi) return 'reroll-lost';
+  }
   return null;
 }
 // zero-tail abstention (2026-07-19 audit M3): a cold reconnector who lands straight on results
@@ -2956,7 +2969,8 @@ async function main() {
       return false;
     }
     // reroll chain (2026-09-11): bitmap bits only at askable target depths + monotone across the run's segments (causal, like the perk chain)
-    const rc = rerollChain(f, soloState.runs[key], casual ? CASUAL_LIVES : 0);   // O218: casual depth may run ahead of passed by its failed levels
+    const rc = rerollChain(f, soloState.runs[key], casual ? CASUAL_LIVES : 0,   // O218: casual depth may run ahead of passed by its failed levels
+      (casual && ((f.flags | 0) & attest.SEG_RESUMED)) ? (f.startDepth | 0) : null);   // casual token resume: bits beyond the checkpoint depth may be lost
     if (rc) {
       RUN.soloRej = (RUN.soloRej | 0) + 1;
       ghWarn('match=' + m + ': solo segment ' + plog(sid) + ' reroll chain REJECT (' + rc + ') depth ' + f.startDepth + '->' + f.endDepth + ' rr=' + (f.rerollHi >>> 0).toString(16) + ':' + (f.rerollLo >>> 0).toString(16));

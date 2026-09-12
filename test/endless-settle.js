@@ -206,6 +206,12 @@ eq('rosterConsensus split vote -> seat dropped', rosterConsensus(grp(mk7(A, 0, {
     eq('rerollChain: bits at depth 3+9 with endDepth 9 -> ok; bit at depth 12 (k=3) with endDepth 9 -> reroll-ahead; lost bit vs run -> reroll-lost',
       [v.rerollChain({ rerollLo: 5, rerollHi: 0, endDepth: 9 }, null), v.rerollChain({ rerollLo: 8, rerollHi: 0, endDepth: 9 }, null), v.rerollChain({ rerollLo: 4, rerollHi: 0, endDepth: 14 }, { rr: { lo: 5, hi: 0 } }), v.rerollChain({ rerollLo: 13, rerollHi: 0, endDepth: 14 }, { rr: { lo: 5, hi: 0 } })],
       [null, 'reroll-ahead', 'reroll-lost', null]);
+    // O218 casual token resume (e2e 2026-09-12): row = checkpoint snapshot at depth 5 -> the dead timeline's bits for targets 6/9 (k=1,2)
+    //   may be lost; a lost bit for target 3 (k=0, decided before the checkpoint) is still a rejection; competitive keeps the full rule
+    eq('rerollChain casual resume: bits beyond the resume depth may be lost (5: k>=1 masked) / bit <= resume depth lost -> reroll-lost / resumeAt 6 keeps k=1 / competitive unchanged',
+      [v.rerollChain({ rerollLo: 1, rerollHi: 0, endDepth: 8 }, { rr: { lo: 7, hi: 0 } }, 3, 5), v.rerollChain({ rerollLo: 2, rerollHi: 0, endDepth: 8 }, { rr: { lo: 3, hi: 0 } }, 3, 5),
+       v.rerollChain({ rerollLo: 1, rerollHi: 0, endDepth: 8 }, { rr: { lo: 3, hi: 0 } }, 3, 6), v.rerollChain({ rerollLo: 1, rerollHi: 0, endDepth: 8 }, { rr: { lo: 3, hi: 0 } }, 3), v.rerollChain({ rerollLo: 1, rerollHi: 0, endDepth: 8 }, { rr: { lo: 3, hi: 0 } }, 0, 5)],
+      [null, 'reroll-lost', 'reroll-lost', 'reroll-lost', null]);
     eq('9-int tail record length = 11 + 3pc + 9', p9.d.length, 11 + 3 * 2 + 9);
     const p9b = mk7(B, 1, { startDepth: 0, endDepth: 6, seasonId: 1, flags: 0, build: 41411, picksLo: 1567312775, picksHi: 2874452 });
     const p9x = mk7(B, 1, { startDepth: 0, endDepth: 6, seasonId: 1, flags: 0, build: 41412, picksLo: 1567312775, picksHi: 2874452 });
