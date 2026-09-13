@@ -134,5 +134,24 @@ console.log('-- schedule offsets --');
   T('demo.yml on its own offset (1-59/5)', /- cron: '1-59\/5 \* \* \* \*'/.test(read('demo.yml')));
 }
 
+// ---- 4) test steps must not leak fixture output into run annotations / step summary ----
+// Fixture-driven tests deliberately trip the real ::warning:: emitters (forgery, seedcap over-cap,
+// signals eviction, page-cap) and validate.js's summary writer. Every workflow's test step wraps
+// its loop in ::stop-commands:: and drops GITHUB_STEP_SUMMARY, or a run page shows ~20 fixture
+// "warnings" + a fake populated summary that bury any real production warning (2026-09-13).
+console.log('-- test-step annotation hygiene --');
+{
+  for (const f of fs.readdirSync(WF).filter(x => /\.ya?ml$/.test(x))) {
+    const src = read(f);
+    const m = src.match(/- name: test\n[\s\S]*?run: \|\n([\s\S]*?)\n\s+- name: /);
+    if (!m) continue;   // workflows without a test step (audit/canary)
+    const step = m[1];
+    const loop = step.match(/for f in test\/[^\n]*; do echo "== \$f =="; node "\$f" \|\| exit 1; done/);
+    T(f + ': test step has the fixture loop', !!loop);
+    T(f + ': unsets GITHUB_STEP_SUMMARY before the loop', /unset GITHUB_STEP_SUMMARY[\s\S]*for f in test\//.test(step));
+    T(f + ': ::stop-commands:: opened before the loop and resumed after', /echo "::stop-commands::\$t"[\s\S]*for f in test\/[\s\S]*echo "::\$t::"/.test(step));
+  }
+}
+
 console.log(failN ? ('FAIL x' + failN) : 'ALL OK (channel-workflows)');
 process.exit(failN ? 1 : 0);

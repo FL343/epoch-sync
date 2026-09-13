@@ -40,7 +40,14 @@ jobs:
       - name: test
         if: steps.gate.outputs.yield != 'true'
         run: |
+          # Fixture-driven tests deliberately trip the real ::warning:: emitters and the step-summary
+          # writer (forgery / seedcap over-cap / signals eviction / page-cap). Stop the runner from
+          # scraping that as run annotations + summary: ~20 fixture warnings per run drowned any real
+          # production warning. Workflow commands resume after the loop; a failing test still fails.
+          unset GITHUB_STEP_SUMMARY
+          t="tests-$(date +%s%N)"; echo "::stop-commands::$t"
           for f in test/*.js; do echo "== $f =="; node "$f" || exit 1; done
+          echo "::$t::"
       - name: run
         if: steps.gate.outputs.yield != 'true'
         env:
