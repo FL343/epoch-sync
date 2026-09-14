@@ -165,7 +165,11 @@ eq('abandoner -> nothing', credit([mk11(A, 0, { disp: 5 })], 6).xp[A] == null, t
     src.indexOf('if (isPrivateMt(matchType)) {') < src.indexOf('if (isBotMt(matchType)) {') && src.indexOf('if (isBotMt(matchType)) {') < src.indexOf('if (xpId) creditXp(g, matchType'), true);
   eq('groupRecords call site passes the demo lone flag', /groupRecords\(recs, \{ vecOf, MAX_SEATS, demoLoneOk: DEMO_LONE_OK \}\)/.test(src), true);
   eq('lone lane gated on channel flag AND type 11 AND a sane vector', /writers < 2 && same && opts\.demoLoneOk && isBotMt\(g\[0\]\.d\[2\] \| 0\)/.test(src), true);
-  eq('DEMO_LONE_OK = PT_MODE && DEMO_APPID > 0 && APPID === DEMO_APPID (source pin)', /const DEMO_LONE_OK = PT_MODE && DEMO_APPID > 0 && APPID === DEMO_APPID;/.test(src), true);
+  eq('DEMO_LONE_OK = (PT_MODE && DEMO_APPID > 0 && APPID === DEMO_APPID) || ALLOW_TEST+BOT_LONE_OK dev lever (source pin)', /const DEMO_LONE_OK = \(PT_MODE && DEMO_APPID > 0 && APPID === DEMO_APPID\) \|\| \(process\.env\.ALLOW_TEST === '1' && process\.env\.BOT_LONE_OK === '1'\);/.test(src), true);
+  eq('BOT_PACE_FRAC env lever defaults to 0.5 (pinned above); without ALLOW_TEST the BOT_LONE_OK lever is inert', (() => { const p = execFileSync(process.execPath, ['-e', "process.stdout.write(String(require(process.argv[1]).DEMO_LONE_OK))", path.join(__dirname, '..', 'validate.js')], { env: Object.assign({}, process.env, { PT_MODE: '', ALLOW_TEST: '', BOT_LONE_OK: '1' }), encoding: 'utf8' }).trim(); return p; })(), 'false');
+  eq('ALLOW_TEST=1 + BOT_LONE_OK=1 (dev-key local e2e) -> true', (() => execFileSync(process.execPath, ['-e', "process.stdout.write(String(require(process.argv[1]).DEMO_LONE_OK))", path.join(__dirname, '..', 'validate.js')], { env: Object.assign({}, process.env, { PT_MODE: '', ALLOW_TEST: '1', BOT_LONE_OK: '1' }), encoding: 'utf8' }).trim())(), 'true');
+  // production workflows never set the lever (playtest/demo/validate twins)
+  for (const wf of ['playtest.yml', 'demo.yml', 'validate.yml']) { const w = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', wf), 'utf8'); eq(wf + ' does not export BOT_LONE_OK / ALLOW_TEST', !/BOT_LONE_OK|ALLOW_TEST/.test(w), true); }
   eq('start-orphan exemption names isBotMt', /if \(isEndlessMt\(p\.mt\) \|\| isPrivateMt\(p\.mt\) \|\| isBotMt\(p\.mt\)\)/.test(src), true);
   eq('summary line counts bots', /settledBots \+ ' bots/.test(src), true);
   // seedcap auditor never picks a type-11 group (compacted pc != world seat count; zero stakes)

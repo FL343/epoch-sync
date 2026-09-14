@@ -287,13 +287,16 @@ const BOT_XP = {
   MT: 11,
   base: 30, perLevel: 10, dayCapXp: 900,
   progMax: 6,                                          // d[7] progress domain = levels passed (bot matches run <= 6 levels)
-  LEVEL_SECONDS: 75, PACE_FRAC: 0.5,                   // same physical floor family as PRIVATE/ENDLESS
+  LEVEL_SECONDS: 75, PACE_FRAC: Number(process.env.BOT_PACE_FRAC || 0.5),   // same physical floor family as PRIVATE/ENDLESS (env = local e2e lever, ENDLESS_PACE_FRAC twin)
 };
 function isBotMt(mt) { return baseMt(mt) === BOT_XP.MT; }
 // demo channel identity: the demo job runs PT_MODE with APPID == DEMO_APPID (both twins export the
 // secret; playtest's APPID differs -> false there, live has no PT_MODE -> false).
 const DEMO_APPID = Number(process.env.DEMO_APPID || 0);
-const DEMO_LONE_OK = PT_MODE && DEMO_APPID > 0 && APPID === DEMO_APPID;
+// BOT_LONE_OK (dev-key runs only: ALLOW_TEST=1 gates it like the test shard read) = the same lone lane on a
+// local e2e against lbtest_pool -- the demo twin cannot be exercised from the main app id (its PT bootstrap
+// refuses an app that carries rating boards), so the lever proves the real-record path (sanity/pacing/credit).
+const DEMO_LONE_OK = (PT_MODE && DEMO_APPID > 0 && APPID === DEMO_APPID) || (process.env.ALLOW_TEST === '1' && process.env.BOT_LONE_OK === '1');
 // NOTE (extensibility): SCORE_CAP/DUR_CAP/MIN_START_AGE_MS were derived from the MATCHMADE game
 // -- originally 5 levels per matchmade run, 2-4 players, current item-value scale. A level-count
 // change or economy rework must re-derive them. Re-derived 2026-08-26 (O117, 5 -> 6 levels):
