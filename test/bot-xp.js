@@ -44,13 +44,14 @@ const duo = (o) => { o = o || {}; const base = Object.assign({ pc: 4, rosterSids
 console.log('=== O156 bot-match XP (type 11) ===');
 
 // -- constants pinned (companion repo lockstep re-pins the client-shared subset) --
-eq('config pinned (mt/base/perLevel/rankMax/fixedMult/loneMult/dayCap/progMax/levelSecs/frac)',
-  [BOT_XP.MT, BOT_XP.base, BOT_XP.perLevel, BOT_XP.rankMax, BOT_XP.fixedMult, BOT_XP.loneMult, BOT_XP.dayCapXp, BOT_XP.progMax, BOT_XP.LEVEL_SECONDS, BOT_XP.PACE_FRAC],
-  [11, 30, 10, 60, 0.35, 0.6, 0, 6, 75, 0.5]);
+eq('config pinned (mt/base/perLevel/rankMax/loneMult/dayCap/progMax/levelSecs/frac)',
+  [BOT_XP.MT, BOT_XP.base, BOT_XP.perLevel, BOT_XP.rankMax, BOT_XP.loneMult, BOT_XP.dayCapXp, BOT_XP.progMax, BOT_XP.LEVEL_SECONDS, BOT_XP.PACE_FRAC],
+  [11, 30, 10, 60, 0.6, 0, 6, 75, 0.5]);
+eq('tier multiplier ladder auto/easy/normal/hard/master', BOT_XP.tierMult, [1, 0.2, 0.35, 0.5, 0.65]);
 eq('tier table', BOT_XP.TIERS, ['auto', 'easy', 'normal', 'hard', 'master']);
 eq('isBotMt(11/0x1B/0x4B/10/7/1)', [isBotMt(11), isBotMt(0x1B), isBotMt(0x4B), isBotMt(10), isBotMt(7), isBotMt(1)], [true, true, true, false, false, false]);
 eq('botTierOf reads the mask nibble (11 -> 0, 0x2B -> 2, 0x4B -> 4)', [botTierOf(11), botTierOf(0x2B), botTierOf(0x4B)], [0, 2, 4]);
-eq('botTierMult: adaptive 1, every fixed tier fixedMult', [botTierMult(11), botTierMult(0x1B), botTierMult(0x4B)], [1, 0.35, 0.35]);
+eq('botTierMult: adaptive 1, fixed ladder easy .2 / normal .35 / hard .5 / master .65, unknown -> easy', [botTierMult(11), botTierMult(0x1B), botTierMult(0x2B), botTierMult(0x3B), botTierMult(0x4B), botTierMult(0x7B)], [1, 0.2, 0.35, 0.5, 0.65, 0.2]);
 eq('MT_ALLOWED includes 11', SANITY.MT_ALLOWED.indexOf(11) >= 0, true);
 eq('PT_MT_ALLOWED includes 11 (playtest + demo channels earn too)', PT_MT_ALLOWED.indexOf(11) >= 0, true);
 eq('bots never apply LP / never a team code / not endless / not private', [v.appliesLp(11), v.isTeamMt(11), v.isSubScoreMt(11), v.isEndlessMt(11), v.isPrivateMt(11)], [false, false, false, false, false]);
@@ -104,8 +105,8 @@ eq('lv3 n4 rank1 -> 60 + 60*(3/6) = 90', botXpGain(3, 4, 1, 1, 1, 1, 'valid'), 9
 eq('lv0 (pull-out floor) -> base 30, no rank term', botXpGain(0, 4, 1, 1, 1, 1, 'valid'), 30);
 eq('lv clamps to progMax (lv 9 -> as 6)', botXpGain(9, 4, 1, 1, 1, 1, 'valid'), 150);
 eq('lone discount x0.6 (150 -> 90)', botXpGain(6, 4, 1, 1, BOT_XP.loneMult, 1, 'valid'), 90);
-eq('fixed tier x0.35 (150 -> 53)', botXpGain(6, 4, 1, BOT_XP.fixedMult, 1, 1, 'valid'), 53);
-eq('fixed + lone (150 -> 32)', botXpGain(6, 4, 1, BOT_XP.fixedMult, BOT_XP.loneMult, 1, 'valid'), 32);
+eq('fixed tiers scale the whole gain (150 -> easy 30 / normal 53 / hard 75 / master 98)', [1, 2, 3, 4].map(t => botXpGain(6, 4, 1, BOT_XP.tierMult[t], 1, 1, 'valid')), [30, 53, 75, 98]);
+eq('hard + lone (150 -> 45)', botXpGain(6, 4, 1, BOT_XP.tierMult[3], BOT_XP.loneMult, 1, 'valid'), 45);
 eq('innocent = progress only (rank term gated on valid)', botXpGain(6, 4, 1, 1, 1, 1, 'innocent'), 90);
 eq('party mean rank 2.5 -> 90 + 60*0.5 = 120', botXpGain(6, 4, 2.5, 1, 1, 1, 'valid'), 120);
 eq('n=2 (1 human + 1 bot) rank1 -> 150, rank2 -> 90', [botXpGain(6, 2, 1, 1, 1, 1, 'valid'), botXpGain(6, 2, 2, 1, 1, 1, 'valid')], [150, 90]);
@@ -123,7 +124,9 @@ function credit(recs, lv, seedXp, seedState, today, lone) {
 eq('solo consensus-shaped call (lone=false) lv6 rank1 -> 150', credit([mk11(A, 0)], 6).xp[A], 150);
 eq('solo lone lv6 rank1 -> 90', credit([mk11(A, 0)], 6, {}, {}, 20000, true).xp[A], 90);
 eq('solo lone human last -> 90 * 0.6 = 54', credit([mk11(A, 0, { scores: [1000, 4000, 3000, 2000] })], 6, {}, {}, 20000, true).xp[A], 54);
-eq('fixed tier (hard) lone lv6 rank1 -> 32', credit([mk11(A, 0, { tier: 3 })], 6, {}, {}, 20000, true).xp[A], 32);
+eq('fixed tier (hard) lone lv6 rank1 -> 45', credit([mk11(A, 0, { tier: 3 })], 6, {}, {}, 20000, true).xp[A], 45);
+eq('fixed tier (easy) lone lv6 rank1 -> 18', credit([mk11(A, 0, { tier: 1 })], 6, {}, {}, 20000, true).xp[A], 18);
+eq('fixed tier (master) consensus lv6 rank1 -> 98', credit([mk11(A, 0, { tier: 4 })], 6).xp[A], 98);
 eq('lv0 lone (pull-out floor) -> 18', credit([mk11(A, 0)], 0, {}, {}, 20000, true).xp[A], 18);
 eq('innocent lone lv6 -> 54 (progress only)', credit([mk11(A, 0, { disp: 2 })], 6, {}, {}, 20000, true).xp[A], 54);
 eq('abandoner -> nothing', credit([mk11(A, 0, { disp: 5 })], 6, {}, {}, 20000, true).xp[A] == null, true);

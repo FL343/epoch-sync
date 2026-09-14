@@ -284,8 +284,9 @@ function isPrivateMt(mt) { return baseMt(mt) === PRIVATE_XP.MT; }
 //     party shares one factor -- nobody gains by feeding a friend the win)
 //   gain = round((P + R) * tierMult * loneMult * boostMult); innocent: P only; abandoner: 0.
 //   tierMult: the adaptive tier (code 0) pays 1.0 -- it is the anti-farm door (the bots track the
-//     player); every fixed tier pays fixedMult. The tier rides in the premade-mask nibble of
-//     d[2] so it is part of the group key = consensus-locked like the vector.
+//     player); fixed tiers pay a ladder that rises with difficulty (user 09-14: easier = less,
+//     harder = closer to full). The tier rides in the premade-mask nibble of d[2] so it is part
+//     of the group key = consensus-locked like the vector.
 //   No money term, no daily-first, no day cap (dayCapXp 0; user 09-14: the pacing floor is the
 //   only rate bound; the field stays so a cap can be re-armed by one constant).
 // Time-as-work: the settle waits max(MIN_START_AGE, lv * LEVEL_SECONDS * PACE_FRAC) of THIS
@@ -294,7 +295,7 @@ const BOT_XP = {
   MT: 11,
   base: 30, perLevel: 10,
   rankMax: 60,          // rank term ceiling at full progress (6-level 1st place: 30 + 60 + 60 = 150 ~ half a matchmade win)
-  fixedMult: 0.35,      // easy/normal/hard/master tiers
+  tierMult: [1, 0.2, 0.35, 0.5, 0.65],   // by tier code: auto / easy / normal / hard / master (client XP.BOT.TIER_MULT, lockstep)
   loneMult: 0.6,        // single-writer (one human) records
   dayCapXp: 0,          // 0 = no per-UTC-day cap (state btDay/btXp only maintained when > 0)
   progMax: 6,                                          // d[7] progress domain = levels passed (bot matches run <= 6 levels)
@@ -303,7 +304,7 @@ const BOT_XP = {
 };
 function isBotMt(mt) { return baseMt(mt) === BOT_XP.MT; }
 function botTierOf(mt) { return premadeMaskOf(mt); }                       // 0 auto .. 4 master (same nibble, this base only)
-function botTierMult(mt) { return botTierOf(mt) === 0 ? 1 : BOT_XP.fixedMult; }
+function botTierMult(mt) { const m = BOT_XP.tierMult[botTierOf(mt)]; return (m == null) ? BOT_XP.tierMult[1] : m; }   // unknown code -> easy rate (sanity rejects it anyway)
 // seat split from one record: a bot seat has no roster entry (the client writes sid '0' there)
 function botSeatSplit(r) {
   const pc = r.d[8] | 0, humans = [], bots = [];
