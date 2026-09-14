@@ -265,38 +265,77 @@ const PRIVATE_XP = {
   LEVEL_SECONDS: 75, PACE_FRAC: 0.5,                   // same physical floor family as ENDLESS
 };
 function isPrivateMt(mt) { return baseMt(mt) === PRIVATE_XP.MT; }
-// ===== O156 bot-match XP (match type 11, 2026-09-14; client knife 3.7c) =====
+// ===== O156 bot-match XP (match type 11, 2026-09-14; client knives 3.7c / 3.7d) =====
 // Matches against host-driven bots (arcade card / private-room chips / the queue's "warm-up++"
-// form). XP is the ONLY surface (same isolation as private: no TrueSkill/LP/CP/career/leaver
-// conviction/B6 signals/seedcap). The bots hold no account: the client writes the record over the
-// HUMAN seats only (compacted seat / roster / score vector, pc = human count 1..6), so the
-// record is a plain human-consensus group -- except a single human (pc=1), whose lone record has
-// no second writer by construction. That lone form settles ONLY on the demo channel
-// (DEMO_LONE_OK below): a modest, day-capped XP trickle for demo players who have nobody to
-// match with; on playtest/live a lone bot record stays 'lone' (never settles) until the
-// sidecar-attested lane lands (client knife 3.7d) -- an unsigned single-writer claim earns nothing.
+// form, solo or with a premade party). XP is the ONLY surface (same isolation as private: no
+// TrueSkill/LP/CP/career/leaver conviction/B6 signals/seedcap). The bots hold no account, but
+// since knife 3.7d the record carries the FULL seat table (pc = every seat 2..6, the score vector
+// over all seats, roster '0' at every bot seat -- the same wire form a friend room with bots
+// already writes on base 10). That is what makes the rank term verifiable: with two or more
+// humans the whole vector (bot scores included, a host-broadcast lockstep fact) is the consensus
+// key; a single human is a single writer by construction, so that lone record settles on EVERY
+// channel but at loneMult (an unverifiable claim earns a discount, not nothing) until the
+// sidecar-signed lane lands (roadmap) and lifts it to full.
 // Formula (client mirror rating-store computeGameXpBot, RANKED_CONFIG.XP.BOT, lockstep-pinned):
-//   valid/innocent: gain = round((base + perLevel * lv) * boostMult), lv = levels PASSED
-//   (0..progMax; a pull-out after zero levels still pays base -- user 09-14: prorated XP with a
-//   floor); abandoner: 0. No rank transfer (bots are not opponents anyone can farm against),
-//   no money term, no daily-first. Per-UTC-day cap dayCapXp (state btDay/btXp per pid) --
-//   the only anti-farm needed on a no-stakes track besides the pacing floor below.
+//   P = base + perLevel * lv, lv = levels PASSED (0..progMax; a pull-out after zero levels still
+//     pays base -- user 09-14: prorated XP with a floor)
+//   R = rankMax * f * lv/progMax (valid only), f = (n - rankEff)/(n - 1) over n = pc seats;
+//     rankEff = the writer's own rank, or with >= 2 humans the MEAN rank of all human seats (a
+//     party shares one factor -- nobody gains by feeding a friend the win)
+//   gain = round((P + R) * tierMult * loneMult * boostMult); innocent: P only; abandoner: 0.
+//   tierMult: the adaptive tier (code 0) pays 1.0 -- it is the anti-farm door (the bots track the
+//     player); every fixed tier pays fixedMult. The tier rides in the premade-mask nibble of
+//     d[2] so it is part of the group key = consensus-locked like the vector.
+//   No money term, no daily-first, no day cap (dayCapXp 0; user 09-14: the pacing floor is the
+//   only rate bound; the field stays so a cap can be re-armed by one constant).
 // Time-as-work: the settle waits max(MIN_START_AGE, lv * LEVEL_SECONDS * PACE_FRAC) of THIS
 // job's wall time from the first sighting (start attestation or synth pend), private family.
 const BOT_XP = {
   MT: 11,
-  base: 30, perLevel: 10, dayCapXp: 900,
+  base: 30, perLevel: 10,
+  rankMax: 60,          // rank term ceiling at full progress (6-level 1st place: 30 + 60 + 60 = 150 ~ half a matchmade win)
+  fixedMult: 0.35,      // easy/normal/hard/master tiers
+  loneMult: 0.6,        // single-writer (one human) records
+  dayCapXp: 0,          // 0 = no per-UTC-day cap (state btDay/btXp only maintained when > 0)
   progMax: 6,                                          // d[7] progress domain = levels passed (bot matches run <= 6 levels)
+  TIERS: ['auto', 'easy', 'normal', 'hard', 'master'], // tier code = (mt >> 4) & 0xF
   LEVEL_SECONDS: 75, PACE_FRAC: Number(process.env.BOT_PACE_FRAC || 0.5),   // same physical floor family as PRIVATE/ENDLESS (env = local e2e lever, ENDLESS_PACE_FRAC twin)
 };
 function isBotMt(mt) { return baseMt(mt) === BOT_XP.MT; }
-// demo channel identity: the demo job runs PT_MODE with APPID == DEMO_APPID (both twins export the
-// secret; playtest's APPID differs -> false there, live has no PT_MODE -> false).
+function botTierOf(mt) { return premadeMaskOf(mt); }                       // 0 auto .. 4 master (same nibble, this base only)
+function botTierMult(mt) { return botTierOf(mt) === 0 ? 1 : BOT_XP.fixedMult; }
+// seat split from one record: a bot seat has no roster entry (the client writes sid '0' there)
+function botSeatSplit(r) {
+  const pc = r.d[8] | 0, humans = [], bots = [];
+  for (let s = 0; s < pc; s++) ((r.roster && r.roster[s] != null) ? humans : bots).push(s);
+  return { humans, bots };
+}
+// 1-based ranks over the FULL score vector (ties share a rank, matchmade convention)
+function botRanksOf(r) {
+  const pc = r.d[8] | 0, scores = r.d.slice(10, 10 + pc).map(s => s | 0);
+  const order = scores.map((s, i) => i).sort((a, b) => (scores[b] - scores[a]) || (a - b));
+  const rank = new Array(pc).fill(1);
+  let rk = 1;
+  for (let i = 0; i < order.length; i++) { if (i > 0 && scores[order[i]] < scores[order[i - 1]]) rk = i + 1; rank[order[i]] = rk; }
+  return rank;
+}
+// effective rank for a human writer: mean over every human seat when the record holds >= 2 humans
+//   (a party -- the only way two humans share a type-11 record), else that writer's own rank
+function botRankEffOf(r, seat) {
+  const ranks = botRanksOf(r), sp = botSeatSplit(r);
+  if (sp.humans.length >= 2) { let sum = 0; for (const s of sp.humans) sum += ranks[s]; return sum / sp.humans.length; }
+  return ranks[seat | 0] || 1;
+}
+// one writer's gain (pure; client computeGameXpBot mirrors this expression order exactly)
+function botXpGain(lv, n, rankEff, tierMult, loneMult, bm, cls) {
+  const L = Math.max(0, Math.min(BOT_XP.progMax, lv | 0));
+  const P = BOT_XP.base + BOT_XP.perLevel * L;
+  const f = (n > 1) ? Math.max(0, Math.min(1, (n - rankEff) / (n - 1))) : 0;
+  const R = (cls === 'valid') ? BOT_XP.rankMax * f * (L / BOT_XP.progMax) : 0;
+  return Math.max(0, Math.round((P + R) * tierMult * loneMult * bm));
+}
+// demo channel identity (both playtest/demo twins export DEMO_APPID; kept for channel telemetry)
 const DEMO_APPID = Number(process.env.DEMO_APPID || 0);
-// BOT_LONE_OK (dev-key runs only: ALLOW_TEST=1 gates it like the test shard read) = the same lone lane on a
-// local e2e against lbtest_pool -- the demo twin cannot be exercised from the main app id (its PT bootstrap
-// refuses an app that carries rating boards), so the lever proves the real-record path (sanity/pacing/credit).
-const DEMO_LONE_OK = (PT_MODE && DEMO_APPID > 0 && APPID === DEMO_APPID) || (process.env.ALLOW_TEST === '1' && process.env.BOT_LONE_OK === '1');
 // NOTE (extensibility): SCORE_CAP/DUR_CAP/MIN_START_AGE_MS were derived from the MATCHMADE game
 // -- originally 5 levels per matchmade run, 2-4 players, current item-value scale. A level-count
 // change or economy rework must re-derive them. Re-derived 2026-08-26 (O117, 5 -> 6 levels):
@@ -371,12 +410,19 @@ function sanityFlags(g) {
     if (pc < 2 || pc > 6) out.push('pc');
     scoreCap = SANITY.SCORE_CAP * TEAM2.SCORE_MULT;
   } else if (base === BOT_XP.MT) {
-    // O156 bot matches: the record carries HUMAN seats only (bots compacted out), so pc = 1..6
-    // humans; never premade fields (bare base code). The room runs the matchmade level count with
-    // its slot round, so the score cap takes the same gamble headroom as private -- scores feed
-    // nothing here (no rank term in the XP-lite formula), a generous cap costs nothing.
-    if (mask !== 0 || trioAt !== 0) out.push('mask');
-    if (pc < 1 || pc > 6) out.push('pc');
+    // O156 bot matches (full-seat form since knife 3.7d): pc = every seat 2..6, at least one bot
+    // (roster '0') and at least one human; the premade-mask nibble carries the difficulty tier
+    // (0..4), trio field never set. The room runs the matchmade level count with its slot round,
+    // so the score cap takes the same gamble headroom as private. Each writer must sit at a
+    // HUMAN seat that names itself (a writer at a bot seat is a forged record; the generic
+    // self-seat check below only compares a roster entry that exists).
+    if (mask > 4 || trioAt !== 0) out.push('mask');
+    if (pc < 2 || pc > 6) out.push('pc');
+    else {
+      const sp = botSeatSplit(g[0]);
+      if (sp.bots.length < 1 || sp.humans.length < 1) out.push('nobot');
+      for (const r of g) { const s = r.d[5] | 0; if (!(r.roster && r.roster[s] != null)) { out.push('self-seat'); break; } }
+    }
     scoreCap = SANITY.SCORE_CAP * TEAM2.SCORE_MULT;
   } else {
     if (pc < 2 || pc > 6) out.push('pc');             // matchmade FFA lobbies are 2..6 players (O82: 5-6P with a trio present)
@@ -1716,27 +1762,35 @@ function botProgressOf(g) {
   }
   return prog < 0 ? 0 : prog;
 }
-// XP-lite credit for one bot group (client mirror computeGameXpBot, lockstep-pinned):
-//   valid/innocent: gain = round((base + perLevel*lv) * boostMult); abandoner: 0.
-// No rank/transfer term (nothing to win-trade), no money, no daily-first, no leaver factor,
-// no career counters. Day cap: per-UTC-day credited bot XP <= dayCapXp (state btDay/btXp per pid).
-function creditXpBot(g, lv, xp, changedXp, xpState, today, spSet) {
+// XP-lite credit for one bot group (client mirror computeGameXpBot, lockstep-pinned; formula in
+// the BOT_XP header). Rank/tier/human split all read from the canonical record g[0] (the
+// consensus vector / group-key mt / consensus roster); lone = single writer (loneMult).
+// No money, no daily-first, no leaver factor, no career counters. Day cap only when dayCapXp > 0.
+function creditXpBot(g, lv, xp, changedXp, xpState, today, spSet, lone) {
   const recBySeat = {};
   for (const r of g) { const s = r.d[5] | 0; if (recBySeat[s] == null) recBySeat[s] = r; }
-  const P = BOT_XP.base + BOT_XP.perLevel * Math.max(0, Math.min(BOT_XP.progMax, lv | 0));
+  const canon = g[0], n = canon.d[8] | 0, mt = canon.d[2] | 0;
+  const tierMult = botTierMult(mt), loneMult = lone ? BOT_XP.loneMult : 1;
+  const ranks = botRanksOf(canon), humans = botSeatSplit(canon).humans.length;
   for (const seatKey of Object.keys(recBySeat).map(k => k | 0).sort((a, b) => a - b)) {
     const r = recBySeat[seatKey], sid = r.steamID, p = pid(sid);
     const cls = dispClassOf(r.dispCode);
     if (cls === 'abandoner') continue;
-    const st = xpState[p] = xpState[p] || { lastWinDay: 0, games: 0 };
+    const rankEff = botRankEffOf(canon, seatKey);
     const bm = xpBoostMult(xpLevelOf(xp[sid] | 0), !!(spSet && spSet.has(String(sid))));   // pre-credit board value (same rule as creditXp, + supporter pack)
-    const gain = Math.max(0, Math.round(P * bm));
-    if ((st.btDay | 0) !== today) { st.btDay = today; st.btXp = 0; }
-    const room = Math.max(0, BOT_XP.dayCapXp - (st.btXp | 0));
-    const credited = Math.min(gain, room);
-    st.btXp = (st.btXp | 0) + credited;
+    const gain = botXpGain(lv, n, rankEff, tierMult, loneMult, bm, cls);
+    let credited = gain;
+    if (BOT_XP.dayCapXp > 0) {
+      const st = xpState[p] = xpState[p] || { lastWinDay: 0, games: 0 };
+      if ((st.btDay | 0) !== today) { st.btDay = today; st.btXp = 0; }
+      const room = Math.max(0, BOT_XP.dayCapXp - (st.btXp | 0));
+      credited = Math.min(gain, room);
+      st.btXp = (st.btXp | 0) + credited;
+    }
     if (credited > 0) { xp[sid] = (xp[sid] | 0) + credited; changedXp[sid] = xp[sid]; }
     console.log('  xp-bots ' + plog(sid) + ' ' + cls + ' lv' + (lv | 0)
+      + ' rank' + (ranks[seatKey] | 0) + '/' + n + (humans >= 2 ? ' eff' + (Math.round(rankEff * 100) / 100) : '')
+      + ' tier' + botTierOf(mt) + (lone ? ' lone' : '')
       + (bm !== 1 ? ' boost x' + bm : '') + ' +' + credited
       + (credited < gain ? ' (day-capped from ' + gain + ')' : '') + ' -> ' + (xp[sid] | 0));
   }
@@ -2123,14 +2177,15 @@ function groupRecords(recs, opts) {
         console.log('  match=' + m + ': endless zero-tail abstention -> canonical tail from ' + plog(g[0].steamID));
       }
     }
-    // O156 demo channel: a single human vs bots writes a single-writer record by construction (no
-    //   second human exists). The demo job (DEMO_LONE_OK) accepts that lone form for type 11 ONLY --
-    //   a modest day-capped XP trickle on a no-stakes track; every other channel keeps it 'lone'.
-    if (writers < 2 && same && opts.demoLoneOk && isBotMt(g[0].d[2] | 0)) {
+    // O156: a single human vs bots writes a single-writer record by construction (no second human
+    //   exists). That lone form is accepted for type 11 ONLY, on every channel (knife 3.7d, user
+    //   09-14: time-paced, discounted at BOT_XP.loneMult until the signed lane lands); opts.botLoneOk
+    //   false = the test lever for the "never settles" shape.
+    if (writers < 2 && same && opts.botLoneOk !== false && isBotMt(g[0].d[2] | 0)) {
       consistent++;
       const cons = voidByConsensus(g.map(r => r.dispCode));
-      consistentMatches.push({ m, g, void: cons.isVoid, demoLone: true });
-      console.log('  match=' + m + ': demo lone bot record accepted (single-writer lane) disp=[' + g.map(r => r.disp).join(',') + ']');
+      consistentMatches.push({ m, g, void: cons.isVoid, botLone: true });
+      console.log('  match=' + m + ': lone bot record accepted (single-writer lane) disp=[' + g.map(r => r.disp).join(',') + ']');
     }
     else if (writers < 2) { lone++; console.log('  match=' + m + ': lone(' + g.length + (g.length > 1 ? ' records / 1 writer' : '') + ')'); }
     else if (same) {
@@ -2271,7 +2326,7 @@ async function main() {
     }
     return JSON.stringify(v);
   };
-  const gr = groupRecords(recs, { vecOf, MAX_SEATS, demoLoneOk: DEMO_LONE_OK });   // audit 2026-09-06: pure, testable consensus grouping (writer-deduped); O156 demo lone bot lane
+  const gr = groupRecords(recs, { vecOf, MAX_SEATS });   // audit 2026-09-06: pure, testable consensus grouping (writer-deduped); O156 lone bot lane (type 11, every channel)
   const groups = gr.groups, consistentMatches = gr.consistentMatches, inconsistentGroups = gr.inconsistentGroups;
   RUN.flagged = gr.flagged;
 
@@ -3430,8 +3485,9 @@ async function main() {
       continue;
     }
     // ===== O156 bot matches (type 11): XP-only settle, then done. =====
-    // Same shape as private (before every competitive surface); no rank input at all. Pacing:
-    // start attestation or synth first sighting, floor scaled by levels passed.
+    // Same shape as private (before every competitive surface); ranks come from the record's own
+    // full vector inside creditXpBot (never the matchmade rankOf). Pacing: start attestation or
+    // synth first sighting, floor scaled by levels passed.
     if (isBotMt(matchType)) {
       let pendB = startsPending[c.m];
       if (!pendB) {
@@ -3445,8 +3501,8 @@ async function main() {
         console.log('  bots-pacing ' + c.m + ': lv ' + lvB + ' needs ' + Math.round(reqMsB / 1000) + 's real time, seen ' + Math.round((nowMs - (pendB.t0 || 0)) / 1000) + 's -- deferred');
         continue;
       }
-      if (xpId) creditXpBot(g, lvB, xp, changedXp, xpState, today, spSet);
-      console.log('  bots settle ' + c.m + ': ' + g.length + ' writer' + (g.length > 1 ? 's' : '') + ', lv ' + lvB + (c.demoLone ? ' (demo lone lane)' : '') + (c.void ? ' (void majority -- XP by class only, nothing else to void)' : ''));
+      if (xpId) creditXpBot(g, lvB, xp, changedXp, xpState, today, spSet, !!c.botLone);
+      console.log('  bots settle ' + c.m + ': ' + g.length + ' writer' + (g.length > 1 ? 's' : '') + ', lv ' + lvB + ' tier ' + botTierOf(matchType) + (c.botLone ? ' (lone lane x' + BOT_XP.loneMult + ')' : '') + (c.void ? ' (void majority -- XP by class only, nothing else to void)' : ''));
       processed.add(c.m); settledBots++;
       continue;
     }
@@ -3914,7 +3970,7 @@ async function main() {
 if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
-module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, isVoidDisp, voidByConsensus, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, RS_SOLO_VS_TRIO, RS_TRIO_WIN, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, CONFESS_MAGIC, reconcileConfessions, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan, postForm, postFormDetails, findOrCreateBoard, ghWarn, ghErr, PT_MODE, PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, ptSeedCp, ptBoardPlan, PRIVATE_XP, isPrivateMt, privateProgressOf, creditXpPrivate, BOT_XP, isBotMt, botProgressOf, creditXpBot, DEMO_APPID, DEMO_LONE_OK, ENDLESS_XP, computeXpEndless, creditXpEndless, CAMPAIGN_LB, SEEDCAP_REJECT_LADDER_MIN, seedcapRejectWindowMin, seedcapRejectUntilMin, seedcapRejectActive,
+module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, isVoidDisp, voidByConsensus, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, RS_SOLO_VS_TRIO, RS_TRIO_WIN, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, CONFESS_MAGIC, reconcileConfessions, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan, postForm, postFormDetails, findOrCreateBoard, ghWarn, ghErr, PT_MODE, PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, ptSeedCp, ptBoardPlan, PRIVATE_XP, isPrivateMt, privateProgressOf, creditXpPrivate, BOT_XP, isBotMt, botTierOf, botTierMult, botSeatSplit, botRanksOf, botRankEffOf, botXpGain, botProgressOf, creditXpBot, DEMO_APPID, ENDLESS_XP, computeXpEndless, creditXpEndless, CAMPAIGN_LB, SEEDCAP_REJECT_LADDER_MIN, seedcapRejectWindowMin, seedcapRejectUntilMin, seedcapRejectActive,
   ENDLESS_COMP_LB, SAVE_BOX_LB, SOLO_FILE, COMP, soloSanity, soloChainPlan, rerollChain, soloMilestones, soloAdvance, soloRunKey, soloStartAttested, loadSolo, saveSolo, segOrderOf, segStartOf, freshOrder,
   ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, SAVE_BOX_LB_DUO, SAVE_BOX_LB_TRIO, teamRunKey, soloMsSlot, groupRecords,
   ENDLESS_COMP_LB_QUAD, SAVE_BOX_LB_QUAD, ENDLESS_LB_QUAD, ENDLESS_MAX_PC, compFamKeyOf,   // client knife 3.7a (O178 four seats)

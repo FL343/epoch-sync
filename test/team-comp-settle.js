@@ -145,7 +145,7 @@ console.log('-- audit 2026-09-06: consensus grouping counts writers, solo lane p
   g = run([foreign, soloRec]);
   eq('a foreign same-key pc=2 record cannot push a pc=1 segment out of the solo lane (B-F10)', [g.soloN, g.consistentMatches[0].solo, g.consistentMatches[0].g.length, g.consistentMatches[0].g[0].steamID], [1, true, 1, SA]);
   const SRC = fs.readFileSync(path.join(__dirname, '..', 'validate.js'), 'utf8');
-  assert('main() consumes groupRecords (single grouping path)', /const gr = groupRecords\(recs, \{ vecOf, MAX_SEATS, demoLoneOk: DEMO_LONE_OK \}\);/.test(SRC) && /const writers = new Set\(g\.map\(r => String\(r\.steamID\)\)\)\.size;/.test(SRC) && /if \(writers < 2\) \{ lone\+\+;/.test(SRC));
+  assert('main() consumes groupRecords (single grouping path)', /const gr = groupRecords\(recs, \{ vecOf, MAX_SEATS \}\);/.test(SRC) && /const writers = new Set\(g\.map\(r => String\(r\.steamID\)\)\)\.size;/.test(SRC) && /if \(writers < 2\) \{ lone\+\+;/.test(SRC));
 }
 
 console.log('-- audit 2026-09-06 B-F7: competitive segment disposition sanity --');
