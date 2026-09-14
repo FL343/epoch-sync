@@ -42,6 +42,9 @@ jobs:
         env:
           STEAM_PUBLISHER_KEY: ${{ secrets.STEAM_PUBLISHER_KEY }}
           APPID: ${{ secrets.PLAYTEST_APPID }}
+          # O156 (client knife 3.7c): the demo job identifies itself by APPID == DEMO_APPID -> lone bot
+          # records settle there only (a single human vs bots has no second writer); playtest keeps them lone.
+          DEMO_APPID: ${{ secrets.DEMO_APPID }}
           LB_PREFIX: ${{ secrets.LB_PREFIX }}
           XP_LB: ${{ secrets.XP_LB }}
           # rating/points board names are consulted ONLY by the forbidden-board tripwire here

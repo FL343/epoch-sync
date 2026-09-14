@@ -187,7 +187,7 @@ function pickAuditable(st, groups) {
     const g = groups[m];
     const d0 = g[0].d;
     const mt = d0[2] | 0, pc = d0[8] | 0, base = v.baseMt(mt);
-    if (base < 1 || base > 10 || pc < 1 || pc > 8 || d0.length < 10 + pc) continue;   // 10 = O140 private (audited via capParamsOf)
+    if (base < 1 || base > 10 || pc < 1 || pc > 8 || d0.length < 10 + pc) continue;   // 10 = O140 private (audited via capParamsOf); 11 = O156 bot matches excluded (record pc = humans only != world seat count -> no derivable cap; XP-only track, zero stakes)
     const vecOf = (d) => d.slice(10, 10 + pc).join(',');
     if (!g.every(r => vecOf(r.d) === vecOf(d0))) continue;   // forgery-suspect groups are the reconcile's own flag lane
     const scores = d0.slice(10, 10 + pc).map(x => x | 0);
