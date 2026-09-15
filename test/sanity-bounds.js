@@ -1,7 +1,7 @@
 'use strict';
 // sanityFlags (B5 tier A): calibration-free structural/physical bounds, flag-don't-settle.
 const path = require('path');
-const { sanityFlags, sidPlausible, pacingDefer, SANITY } = require(path.join(__dirname, '..', 'validate.js'));
+const { sanityFlags, sidPlausible, pacingDefer, SANITY, TEAM2 } = require(path.join(__dirname, '..', 'validate.js'));
 
 let failN = 0;
 const ok = (m) => console.log('  ok    ' + m);
@@ -25,13 +25,19 @@ const grp = (...rs) => rs;
 
 console.log('=== sanityFlags (B5 tier A) ===');
 
-eq('defaults pinned (cap/floor/dur/start-age)', [SANITY.SCORE_CAP, SANITY.SCORE_FLOOR, SANITY.DUR_CAP, SANITY.MIN_START_AGE_MS], [100000, -50000, 7200, 300000]);
+eq('defaults pinned (cap/floor/dur/start-age)', [SANITY.SCORE_CAP, SANITY.SCORE_FLOOR, SANITY.DUR_CAP, SANITY.MIN_START_AGE_MS], [450000, -50000, 7200, 300000]);   // cap 100k -> 450k 2026-09-16 (client knife 3.9 second-stage wheel; NOTE block in validate.js)
+eq('team gamble headroom pinned x10 (second-stage wheel top slice)', TEAM2.SCORE_MULT, 10);
 eq('mt whitelist pinned', SANITY.MT_ALLOWED, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);   // 5/6 = mode 2; 7 = endless co-op; 8/9 = mode 2 at teamSize 3 (O82 6P matchmaking); 10 = O140 private friend rooms (XP-only); 11 = O156 bot matches (XP-only)
 
 eq('clean 3P quick -> []', sanityFlags(grp(mk(A, 0), mk(B, 1))), []);
 eq('clean ranked premade mask (mt=34, pc=4) -> []', sanityFlags(grp(mk(A, 0, { mt: 34, pc: 4 }), mk(B, 1, { mt: 34, pc: 4 }))), []);
 eq('clean team (mt=4, pc=4) -> []', sanityFlags(grp(mk(A, 0, { mt: 4, pc: 4 }), mk(B, 1, { mt: 4, pc: 4 }))), []);
 eq('shop overdraft score -100 legal', sanityFlags(grp(mk(A, 0, { scores: [-100, 50, 60] }), mk(B, 1, { scores: [-100, 50, 60] }))), []);
+// knife 3.9 (2026-09-16): FFA floor unchanged (a wager can only cost 2x a 30% stake); team codes take -SCORE_CAP (all-in double debit)
+eq('FFA score below shared floor flagged', sanityFlags(grp(mk(A, 0, { scores: [-60000, 50, 60] }), mk(B, 1, { scores: [-60000, 50, 60] }))), ['score']);
+eq('mode-1 team (mt=4, no gamble) keeps the shared floor', sanityFlags(grp(mk(A, 0, { mt: 4, pc: 4, scores: [-120000, 100, 100, 100] }), mk(B, 1, { mt: 4, pc: 4, scores: [-120000, 100, 100, 100] }))), ['score']);
+eq('mode-2 team (mt=5) all-in double-debit negative bank legal (>= -SCORE_CAP)', sanityFlags(grp(mk(A, 0, { mt: 5, pc: 4, scores: [-120000, 100, 100, 100] }), mk(B, 1, { mt: 5, pc: 4, scores: [-120000, 100, 100, 100] }))), []);
+eq('mode-2 team (mt=5) below -SCORE_CAP flagged', sanityFlags(grp(mk(A, 0, { mt: 5, pc: 4, scores: [-450001, 100, 100, 100] }), mk(B, 1, { mt: 5, pc: 4, scores: [-450001, 100, 100, 100] }))), ['score']);
 
 has('mt=0 (private, never client-reported)', sanityFlags(grp(mk(A, 0, { mt: 0 }), mk(B, 1, { mt: 0 }))), 'mt');
 has('mt=12 (unassigned code)', sanityFlags(grp(mk(A, 0, { mt: 12 }), mk(B, 1, { mt: 12 }))), 'mt');   // O140: 10 = private friend rooms (private-xp.js); O156: 11 = bot matches (bot-xp.js)

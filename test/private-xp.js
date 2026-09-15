@@ -156,9 +156,9 @@ function credit(recs, rankOf, lv, seedXp, seedState, today) {
     { m0: { cap: 100 } }, new Set(), 12345);
   eq('score 250 under eff cap 300 (100 x ' + TEAM2.SCORE_MULT + ') -> no veto', Object.keys(st.veto).length, 0);
   const st2 = { audited: {}, chain: {}, veto: {}, suspects: {}, corrections: [] };
-  sc.applyAudit(st2, pend.map(x => Object.assign({}, x, { scores: [350, 100] })),
+  sc.applyAudit(st2, pend.map(x => Object.assign({}, x, { scores: [100 * TEAM2.SCORE_MULT + 50, 100] })),
     { m0: { cap: 100 } }, new Set(), 12345);
-  eq('score 350 over eff cap 300 -> veto + suspect (offense lane feeds)', [Object.keys(st2.veto).length, Object.keys(st2.suspects).length], [1, 1]);
+  eq('score ' + (100 * TEAM2.SCORE_MULT + 50) + ' over eff cap ' + (100 * TEAM2.SCORE_MULT) + ' -> veto + suspect (offense lane feeds)', [Object.keys(st2.veto).length, Object.keys(st2.suspects).length], [1, 1]);
   eq('no corrections for private (nothing on a board to correct)', st2.corrections.length, 0);
 }
 

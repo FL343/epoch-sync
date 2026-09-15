@@ -226,7 +226,7 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
 // until real-traffic data exists. A flagged match is NOT settled and NOT marked processed:
 // if a bound turns out wrong and is loosened later, still-visible records self-heal.
 const SANITY = {
-  SCORE_CAP: Number(process.env.SANITY_SCORE_CAP || 100000),     // observed finals 4-16k; theoretical vacuum-everything ~30-50k
+  SCORE_CAP: Number(process.env.SANITY_SCORE_CAP || 450000),     // re-derived 2026-09-16 (client knife 3.9 second-stage wheel): see the NOTE block below
   SCORE_FLOOR: Number(process.env.SANITY_SCORE_FLOOR || -50000), // shop overdraft is legal (classic rule) but bounded by shop prices
   DUR_CAP: Number(process.env.SANITY_DUR_CAP || 7200),           // a 5-level match is ~10-25 min; forced settles can be short, garbage is huge
   // minimum REAL time between a match's start attestation being first sighted and its settle
@@ -237,11 +237,16 @@ const SANITY = {
   MIN_START_AGE_MS: Number(process.env.SANITY_MIN_START_AGE_MS || 300000),
   MT_ALLOWED: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],               // quick/ranked x brawl/team1/mode2 + endless co-op + O82 3V3 (8/9 joined with the 6P matchmaking client gate) + O140 private friend rooms (10, XP-only track) + O156 bot matches (11, XP-only track)
 };
-// Mode-2 (base 5/6) score headroom: the mid-run gamble round can at most triple a player's bank
-// (max table multiplier x3, bet bounded by own coins), so the generous global cap gets the same
-// x3 headroom -- without it a legit vacuum-everything run through the gamble could brush the cap.
-// The client repo pins its gamble table's max multiplier against this factor in its lockstep test.
-const TEAM2 = { SCORE_MULT: Number(process.env.TEAM2_SCORE_MULT || 3) };
+// Mode-2 (base 5/6) score headroom: the mid-run gamble round can at most multiply a player's bank
+// by x10 (client knife 3.9, 2026-09-16: the top gamble row / the red-black green pocket / the cups
+// gold ball all chain into a second-stage wheel whose top slice is x10; bet bounded by own coins),
+// so the generous global cap gets the same x10 headroom -- without it a legit vacuum-everything run
+// through the gamble could brush the cap. The same round can also END NEGATIVE: the team wheel has
+// a "double debit" slice (lose the stake twice) and the stake may be the whole bank, so the floor
+// for these codes is -SCORE_CAP (a bank can at worst flip sign once) instead of the shared shop
+// overdraft floor. The client repo pins its gamble/wheel tables' effective max multiplier against
+// this factor in its lockstep test.
+const TEAM2 = { SCORE_MULT: Number(process.env.TEAM2_SCORE_MULT || 10) };
 // ===== O140 friend-room XP (match type 10, 2026-09-01) =====
 // Invite-only private rooms earn SMALL XP (well below matchmade) so friend-only players still
 // progress. XP is the ONLY surface: no TrueSkill/LP/CP/career/leaver conviction/B6 pair signals.
@@ -342,6 +347,13 @@ const DEMO_APPID = Number(process.env.DEMO_APPID || 0);
 // change or economy rework must re-derive them. Re-derived 2026-08-26 (O117, 5 -> 6 levels):
 // theoretical vacuum-everything ~36-60k << SCORE_CAP 100k, a 6-level run ~12-30 min << DUR_CAP
 // 7200s, and a longer match only strengthens the MIN_START_AGE premise -- all three caps stand.
+// Re-derived 2026-09-16 (client knife 3.9, second-stage wheel): the classic mid-run slot round now
+// carries a jackpot wheel on triple gold -- payout 8x the bet times a wheel slice up to x5, with the
+// bet at most 30% of the bank (+5) -> one round can turn a bank B into 13B. Mid-run vacuum bank
+// ~30k -> ~390k, plus ~30k for the remaining levels => SCORE_CAP 100k -> 450k (the red-black / cups
+// variants top out lower: x2 / x3 plus a x10 wheel on a 30% stake <= 3.7B). SCORE_FLOOR stays -50k
+// for FFA codes: a losing wager costs at most 2x a 30% stake, so the bank stays >= 0.4B - 10, and the
+// shop overdraft bound is unchanged. Team-scored codes take a scaled floor (see TEAM2).
 // Mode-2 (5/6) keeps the same duration cap
 // (6 rounds + gamble + at most one sudden-death level is the same order of play time) but takes a
 // x3 score headroom for the gamble round (TEAM2 above). The client repo pins these assumptions in
@@ -357,12 +369,13 @@ function sanityFlags(g) {
   // playtest channel: the allowed set narrows to quick + endless -- a ranked-typed record has
   // no legit writer on this channel (queue guard refuses ranked), so it is flagged as forgery.
   if ((PT_MODE ? PT_MT_ALLOWED : SANITY.MT_ALLOWED).indexOf(base) < 0) out.push('mt');
-  let scoreCap = SANITY.SCORE_CAP;
+  let scoreCap = SANITY.SCORE_CAP, scoreFloor = SANITY.SCORE_FLOOR;
   if (isTeamMt(base)) {
     if (mask !== 0 || trioAt !== 0) out.push('team-mask');   // team codes never carry premade fields (pair mask OR trio)
     if (pc !== 2 * teamSizeOfMt(base)) out.push('pc');       // team modes seat exactly 2x teamSize (2v2=4 / 3v3=6)
     if (isSubScoreMt(base)) {
       scoreCap = SANITY.SCORE_CAP * TEAM2.SCORE_MULT; // gamble-round variance headroom (see TEAM2)
+      scoreFloor = -SANITY.SCORE_CAP;                 // gamble "double debit" on an all-in stake flips the bank sign once (see TEAM2)
       // sub-score outcome must be derivable: every present writer's rank claim implies the same
       // winner (rank is host-broadcast lockstep fact, exactly like the score vector) -- a conflict
       // is forgery evidence and money must NOT decide as a fallback, so the group is flagged
@@ -410,6 +423,7 @@ function sanityFlags(g) {
     if (mask !== 0 || trioAt !== 0) out.push('mask');
     if (pc < 2 || pc > 6) out.push('pc');
     scoreCap = SANITY.SCORE_CAP * TEAM2.SCORE_MULT;
+    scoreFloor = -SANITY.SCORE_CAP;
   } else if (base === BOT_XP.MT) {
     // O156 bot matches (full-seat form since knife 3.7d): pc = every seat 2..6, at least one bot
     // (roster '0') and at least one human; the premade-mask nibble carries the difficulty tier
@@ -425,6 +439,7 @@ function sanityFlags(g) {
       for (const r of g) { const s = r.d[5] | 0; if (!(r.roster && r.roster[s] != null)) { out.push('self-seat'); break; } }
     }
     scoreCap = SANITY.SCORE_CAP * TEAM2.SCORE_MULT;
+    scoreFloor = -SANITY.SCORE_CAP;
   } else {
     if (pc < 2 || pc > 6) out.push('pc');             // matchmade FFA lobbies are 2..6 players (O82: 5-6P with a trio present)
     for (let k = 0; k < 4; k++) if ((mask >> k) & 1) { if (2 * k + 1 >= pc) { out.push('mask-range'); break; } }
@@ -437,7 +452,7 @@ function sanityFlags(g) {
     }
   }
   const scores = d0.slice(10, 10 + pc);
-  for (const s of scores) if ((s | 0) > scoreCap || (s | 0) < SANITY.SCORE_FLOOR) { out.push('score'); break; }
+  for (const s of scores) if ((s | 0) > scoreCap || (s | 0) < scoreFloor) { out.push('score'); break; }
   const writers = new Set(g.map(r => String(r.steamID)));
   if (writers.size < g.length) out.push('dup-writer'); // one account can't hold two seats / write twice
   for (const r of g) {
