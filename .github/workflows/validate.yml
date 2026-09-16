@@ -66,12 +66,15 @@ jobs:
           # all boards are provisioned: a board missing from the listing is a config
           # regression -- fail loudly (e-mail) instead of silently skipping authority
           STRICT_BOARDS: '1'
+          # campaign endless (Gold Rush) mass-anomaly mail (same inbox as the seedcap alert; unset = warning only)
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          FB_DIGEST_TO: ${{ secrets.FB_DIGEST_TO }}
         run: node validate.js
       - name: persist
         if: steps.gate.outputs.yield != 'true'
         run: |
           state_files=""
-          for f in processed.json skill.json leavers.json xp.json starts.json signals.json groups.json confessions.json unmatched.json supporters.json endless-solo.json; do
+          for f in processed.json skill.json leavers.json xp.json starts.json signals.json groups.json confessions.json unmatched.json supporters.json endless-solo.json campaign-endless.json; do
             [ -f "$f" ] && state_files="$state_files $f"
           done
           if [ -n "$state_files" ] && [ -n "$(git status --porcelain -- $state_files)" ]; then

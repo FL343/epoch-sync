@@ -98,6 +98,14 @@ absent, so a run is unaffected before it is provisioned.
   (a flagged account's OWN settlement is discarded inside a bounded reject window that
   starts at its latest conviction — 24h / 3 d / 7 d / 14 d cap by conviction count, never
   permanent; the other seats settle normally and the window clears on its own).
+- `campaign-endless.js` — the single-player campaign endless (Gold Rush) lane: the guard
+  sidecar signs one run record per attempt into a client-writable box board per difficulty;
+  the reconcile verifies the signature against the sealed key table, binds the record to the
+  writer's own account, runs the boundary checks (sequence / pace / wall-clock / per-level
+  cap table `gr-caps.json` / int32 + count limits) and promotes the best run per account to
+  a trusted per-difficulty ladder. Rejections are counted into a permanent offense board and
+  a trailing-24h histogram; a burst of rejections mails the ops inbox (`campaign-endless.json`
+  keeps the settled signatures + reject histogram + last mail hour).
 
 State files committed back each run (idempotency): `processed.json`, `skill.json`,
 `leavers.json`, `xp.json` (per-player `{ lastWinDay, games }` for the daily-first bonus

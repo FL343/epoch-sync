@@ -5,6 +5,7 @@ const ts = require('./trueskill.js');
 const attest = require('./attest.js');   // knife-7: solo attested-record verify + unmatched confession reconcile
 const perks = require('./perks.js');     // endless perk build replay (record tail build word + pick log; perk_forge / perk_chain)
 const campaign = require('./campaign.js');   // O159 knife-7d: Vegas campaign clear attestation -> exclusive cosmetic grants
+const campaignEndless = require('./campaign-endless.js');   // knife 3.9b N4: Vegas Gold Rush run attestation -> per-difficulty best-only ladders + offense ledger
 const supporters = require('./supporters.js');   // supporter pack: DLC ownership probe -> wall board / grant bit / points bonus
 
 const APPID = Number(process.env.APPID);
@@ -724,6 +725,7 @@ function writeRunSummary() {
       '| endless settles / cp+board writes | ' + s('endless', 0) + ' (+' + s('endlessComp', 0) + ' team comp, +' + s('solo', 0) + ' solo) / ' + s('writesEndless', '0/0 0/0') + ' |',
       '| seedcap veto / reject-window discards | ' + s('seedcapVeto', 0) + ' / ' + s('seedcapReject', 0) + ' |',
       '| perk replay rejects | ' + s('perkRej', 0) + ' |',
+      '| campaign grants / campaign endless | ' + s('campaign', '-') + ' / ' + s('campaignEndless', '-') + ' |',
       '| page-cap hits | ' + RUN.cap + ' |',
       '| duration | ' + ((Date.now() - (RUN.t0 || Date.now())) / 1000).toFixed(1) + 's |',
       '',
@@ -1935,6 +1937,39 @@ const GRANT_LB = process.env.GRANT_LB || 'grant_box';
 // O159 knife-7d: campaign clear attestation box (client-writable; the game's guard sidecar writes signed
 //   records). Dev/e2e guards write campaign_box_test; dev-key records settle ONLY on a *_test board.
 const CAMPAIGN_LB = process.env.CAMPAIGN_LB || 'campaign_box';
+// Campaign endless (Vegas Gold Rush, companion knife 3.9b N4): the guard writes a signed run record to the client-writable
+//   per-difficulty box `campaign_endless_box_d<dif>` (only when the run beats the account's local best); the cron verifies +
+//   boundary-checks (campaign-endless.js) and settles best-only onto the trusted per-difficulty ladder `campaign_endless_d<dif>`;
+//   every rejection is appended to the permanent offense ledger `campaign_endless_offense` (score = cumulative count per
+//   account, details = latest offense). Names are prefix + dif + suffix; the '_test' suffix is what dev/e2e guards write to
+//   and the only place dev-key records may settle. Hourly reject histogram -> mass-anomaly mail (24h window).
+const CAMPAIGN_ENDLESS_BOX_PREFIX = process.env.CAMPAIGN_ENDLESS_BOX_PREFIX || 'campaign_endless_box_d';
+const CAMPAIGN_ENDLESS_LB_PREFIX = process.env.CAMPAIGN_ENDLESS_LB_PREFIX || 'campaign_endless_d';
+const CAMPAIGN_ENDLESS_SUFFIX = process.env.CAMPAIGN_ENDLESS_SUFFIX || '';
+const CAMPAIGN_ENDLESS_OFFENSE_LB = process.env.CAMPAIGN_ENDLESS_OFFENSE_LB || ('campaign_endless_offense' + (process.env.CAMPAIGN_ENDLESS_SUFFIX || ''));
+const CAMPAIGN_ENDLESS_FILE = process.env.CAMPAIGN_ENDLESS_FILE || 'campaign-endless.json';
+const CE_MAIL_MIN = Math.max(1, Number(process.env.CE_MAIL_MIN || 5));
+const CE_SETTLED_TTL_MS = Number(process.env.CE_SETTLED_TTL_MS || 120 * 86400000);   // settled-signature memory (box rows are overwritten by the guard within days)
+function loadCe() { try { const st = JSON.parse(fs.readFileSync(CAMPAIGN_ENDLESS_FILE, 'utf8')) || {}; st.settled = st.settled || {}; st.offenses = st.offenses || {}; st.rejects = st.rejects || {}; return st; } catch (e) { return { settled: {}, offenses: {}, rejects: {}, mailHour: 0 }; } }
+function saveCe(st, nowMs) {
+  for (const k of Object.keys(st.settled)) if (nowMs - (st.settled[k] | 0) * 60000 > CE_SETTLED_TTL_MS) delete st.settled[k];
+  st.rejects = campaignEndless.pruneRejects(st.rejects, Math.floor(nowMs / 3600000));
+  try { fs.writeFileSync(CAMPAIGN_ENDLESS_FILE, JSON.stringify(st, null, 0)); } catch (e) { ghWarn('write ' + CAMPAIGN_ENDLESS_FILE + ' failed: ' + (e && e.message)); }
+}
+// Ops mail (Resend; same env as the seedcap alert). Not shared with seedcap.js: that module requires this one, so a top-level
+//   import here would be circular. Unconfigured -> false (decision stays pending, retried next run).
+async function ceSendMail(subject, text) {
+  const to = process.env.SC_MAIL_TO || process.env.FB_DIGEST_TO, apiKey = process.env.RESEND_API_KEY;
+  if (!to || !apiKey) return false;
+  try {
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST', headers: { Authorization: 'Bearer ' + apiKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from: process.env.FB_DIGEST_FROM || 'onboarding@resend.dev', to: [to], subject: (process.env.FB_DIGEST_TAG || '') + subject, text }),
+    });
+    if (!res.ok) { ghWarn('campaign endless mail failed HTTP ' + res.status); return false; }
+    return true;
+  } catch (e) { ghWarn('campaign endless mail threw: ' + (e && e.message)); return false; }
+}
 const REDEEM_MAGIC = 0xCE, GRANT_MAGIC = 0xCF, GRANT_VER = 1;
 const GRANT_WORDS = 2;
 const REDEEM_CATALOG = {
@@ -2738,6 +2773,85 @@ async function main() {
       if (nPlayers || nPend || nRej) { RUN.campaign = nPlayers + 'p/' + nBits + 'b' + (nPend ? '/' + nPend + 'pend' : '') + (nRej ? '/' + nRej + 'rej' : ''); console.log('campaign grants: ' + nBits + ' bits across ' + nPlayers + ' players (pending ' + nPend + ', rejected ' + nRej + ')'); }
     } catch (e) { ghWarn('campaign channel failed: ' + (e && e.message)); }
   };
+  // Campaign endless (Gold Rush) lane: per-difficulty box -> verify + boundary plan (campaign-endless.js) -> best-only ladder;
+  //   rejected records -> permanent offense ledger + hourly histogram (mass-anomaly mail). Same signature never settles twice.
+  //   Runs on every exit path next to the campaign grants; playtest/demo never ship the campaign -> hard-disabled there.
+  const processCampaignEndless = async () => {
+    if (PT_MODE) return;
+    const list = (lr.json && lr.json.response && lr.json.response.leaderboards) || [];
+    const byName = (name) => { const f = list.find(x => String(x.name || x.Name) === name); return f ? (f.id || f.ID) : null; };
+    const ce = campaignEndless;
+    let caps = null;
+    try { caps = JSON.parse(fs.readFileSync(require('path').join(__dirname, 'gr-caps.json'), 'utf8')); } catch (e) { ghWarn('campaign endless: gr-caps.json unreadable -- lane skipped'); return; }
+    const pubTable = attest.loadPubTable(require('path').join(__dirname, 'attest-keys.json')) || {};
+    const allowDevKey = CAMPAIGN_ENDLESS_SUFFIX === '_test';
+    const st = loadCe();
+    const nowSec = Math.floor(nowMs / 1000), nowMin = Math.floor(nowMs / 60000), nowHour = Math.floor(nowMs / 3600000);
+    let nUp = 0, nSame = 0, nPend = 0, nRej = 0, nDup = 0;
+    const offenseRows = {};   // sid -> details (latest offense this run; score = cumulative count)
+    try {
+      let offId = null;
+      for (let dif = 1; dif <= 3; dif++) {
+        const boxName = CAMPAIGN_ENDLESS_BOX_PREFIX + dif + CAMPAIGN_ENDLESS_SUFFIX, lbName = CAMPAIGN_ENDLESS_LB_PREFIX + dif + CAMPAIGN_ENDLESS_SUFFIX;
+        let boxId = byName(boxName);
+        if (!boxId) boxId = await findOrCreateBoard(boxName, false);   // client-writable (the guard writes as the user)
+        const lbId = byName(lbName) || await findOrCreateBoard(lbName, true);
+        if (!boxId || !lbId) { console.log('campaign endless d' + dif + ': board absent -- skip'); continue; }
+        const box = await readBoardAll(boxId, 'campaign endless box d' + dif);
+        if (!box.ents.length) continue;
+        const lb = await readBoardAll(lbId, 'campaign endless ladder d' + dif);
+        const best = {};
+        for (const e of lb.ents) best[String(e.steamID)] = e.score | 0;
+        for (const e of box.ents) {
+          const sid = String(e.steamID);
+          const d = decodeDetails(e.detailData);
+          const sig = ce.sigHexOf(d);
+          if (sig && st.settled[sig]) { nDup++; continue; }
+          const v = ce.verifyGrRecord(d, pubTable);
+          const plan = ce.settlePlan(v, { owner: sid, allowDevKey, boxDif: dif, caps, nowSec });
+          if (!plan.ok) {
+            if (plan.pending) { nPend++; continue; }
+            nRej++;
+            const p2 = pid(sid);
+            const of = st.offenses[p2] = st.offenses[p2] || { n: 0, t0: nowMin, rs: [] };
+            of.n++; of.t1 = nowMin;
+            if (of.rs.indexOf(plan.reason) < 0) { of.rs.push(plan.reason); if (of.rs.length > 8) of.rs.shift(); }
+            st.rejects[nowHour] = (st.rejects[nowHour] | 0) + 1;
+            offenseRows[sid] = { score: of.n, details: ce.offenseDetails(nowMin, plan.fields, plan.reason) };
+            if (sig) st.settled[sig] = nowMin;
+            console.log('  campaign endless d' + dif + ' ' + plog(sid) + ': rejected (' + plan.reason + ')' + (plan.fields ? ' passes=' + plan.fields.passes + ' score=' + plan.fields.score + ' flags=' + plan.fields.fast + '/' + plan.fields.skip + '/' + plan.fields.incons : ''));
+            continue;
+          }
+          const f = plan.fields;
+          if (sig) st.settled[sig] = nowMin;
+          if (best[sid] != null && (f.score | 0) <= best[sid]) { nSame++; continue; }
+          if (!APPLY_MMR) { console.log('  campaign endless d' + dif + ' ' + plog(sid) + ': dry-run, would write ' + f.score + ' (passes ' + f.passes + ')'); continue; }
+          const w = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: lbId, steamid: sid, score: f.score | 0, scoremethod: 'ForceUpdate', format: 'json' }, ce.ladderDetails(f));
+          const wOk = w.ok && !(w.json && w.json.result && w.json.result.result && w.json.result.result !== 1);
+          if (!wOk) { ghWarn('campaign endless ladder write failed ' + plog(sid) + ': HTTP ' + w.status + ' (deferred)'); if (sig) delete st.settled[sig]; continue; }
+          best[sid] = f.score | 0; nUp++;
+          console.log('  campaign endless d' + dif + ' ' + plog(sid) + ': best ' + f.score + ' (passes ' + f.passes + ', key ' + f.keyName + (plan.flags.length ? ', signal ' + plan.flags.join('+') : '') + ')');
+        }
+      }
+      if (Object.keys(offenseRows).length && APPLY_MMR) {
+        offId = byName(CAMPAIGN_ENDLESS_OFFENSE_LB) || await findOrCreateBoard(CAMPAIGN_ENDLESS_OFFENSE_LB, true);
+        if (offId) {
+          for (const sid of Object.keys(offenseRows)) {
+            const r = offenseRows[sid];
+            const w = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: offId, steamid: sid, score: r.score | 0, scoremethod: 'ForceUpdate', format: 'json' }, r.details);
+            if (!(w.ok && !(w.json && w.json.result && w.json.result.result && w.json.result.result !== 1))) ghWarn('campaign endless offense write failed ' + plog(sid) + ': HTTP ' + w.status);
+          }
+        } else ghWarn('campaign endless offense board unavailable (count kept in state)');
+      }
+      const md = ce.mailDecision(st.rejects, nowHour, st.mailHour | 0, CE_MAIL_MIN);
+      if (md.send) {
+        const sent = await ceSendMail('campaign endless ALERT: ' + md.n + ' rejected run records in 24h', 'campaign endless (Gold Rush) lane rejected ' + md.n + ' run records in the trailing 24h (threshold ' + CE_MAIL_MIN + ').\nOffense ledger: ' + CAMPAIGN_ENDLESS_OFFENSE_LB + ' (score = cumulative count per account, details[3] = reason code).\nA wave usually means a false-positive storm (cap table / key table lag) before it means cheating -- check the reason codes first.\n');
+        if (sent) st.mailHour = nowHour;
+      }
+    } catch (e) { ghWarn('campaign endless channel failed: ' + (e && e.message)); }
+    saveCe(st, nowMs);
+    if (nUp || nSame || nPend || nRej || nDup) { RUN.campaignEndless = nUp + 'up/' + nSame + 'same' + (nPend ? '/' + nPend + 'pend' : '') + (nRej ? '/' + nRej + 'rej' : '') + (nDup ? '/' + nDup + 'dup' : ''); console.log('campaign endless: ' + nUp + ' ladder writes, ' + nSame + ' not better, ' + nPend + ' pending, ' + nRej + ' rejected, ' + nDup + ' already settled'); }
+  };
   // Supporter pack (supporters.js header): probe DLC ownership for known players (capped per run, cached in
   //   state), then reconcile the wall board (respecting the client-writable opt-out board), OR the grant bit
   //   and return the set of owner sids for this run's points credit. Every write is idempotent; failures are
@@ -2822,11 +2936,11 @@ async function main() {
   };
 
   RUN.consistent = consistentMatches.length;
-  if (consistentMatches.length === 0) { console.log('no consistent matches'); persistStartsSide(); await maintainTrust(); await processRedeems(null); await processCampaignGrants(); await processSupporters(null, []); writeRunSummary(); return; }
+  if (consistentMatches.length === 0) { console.log('no consistent matches'); persistStartsSide(); await maintainTrust(); await processRedeems(null); await processCampaignGrants(); await processCampaignEndless(); await processSupporters(null, []); writeRunSummary(); return; }
   const fresh = consistentMatches.filter(c => !processed.has(c.m));
   RUN.fresh = fresh.length;
   console.log(consistentMatches.length + ' consistent, ' + fresh.length + ' fresh (settled ' + (consistentMatches.length - fresh.length) + ')');
-  if (fresh.length === 0) { console.log('no fresh matches, skip'); persistStartsSide(); await maintainTrust(); await processRedeems(null); await processCampaignGrants(); await processSupporters(null, []); writeRunSummary(); return; }
+  if (fresh.length === 0) { console.log('no fresh matches, skip'); persistStartsSide(); await maintainTrust(); await processRedeems(null); await processCampaignGrants(); await processCampaignEndless(); await processSupporters(null, []); writeRunSummary(); return; }
 
   // playtest channel: no rating board exists (and must not -- lock layer 3); the TrueSkill
   // update block below is skipped wholesale, so the id is never consulted.
@@ -4168,7 +4282,7 @@ async function main() {
   // redeem channel last: wallet debits base on the in-memory post-settle balances just written
   // above (passing the map avoids re-reading scores that global reads may still serve stale).
   await processRedeems(cp);
-  await processCampaignGrants();
+  await processCampaignGrants(); await processCampaignEndless();
   console.log('written: rating ' + rOk + '/' + wRating.length + ', points ' + pOk + '/' + wPoints.length + ', xp ' + xOk + '/' + wXp.length + ', cp ' + cOk + '/' + wCp.length + ', endless ' + eOk + '/' + wEndless.length + (wEndlessSeason.length ? (' (+season ' + esOk + '/' + wEndlessSeason.length + ')') : '') + (wEndlessTrio.length ? (' (+trio ' + etOk + '/' + wEndlessTrio.length + ')') : '') + (wEndlessTrioSeason.length ? (' (+trio-season ' + etsOk + '/' + wEndlessTrioSeason.length + ')') : '') + (wEndlessQuad.length ? (' (+quad ' + eqOk + '/' + wEndlessQuad.length + ')') : '') + (wEndlessQuadSeason.length ? (' (+quad-season ' + eqsOk + '/' + wEndlessQuadSeason.length + ')') : '') + (wEndlessSolo.length ? (' (+solo ' + esoOk + '/' + wEndlessSolo.length + ')') : '') + (wEndlessSoloSeason.length ? (' (+solo-season ' + esosOk + '/' + wEndlessSoloSeason.length + ')') : '') + ', state updated (idempotent)');
   RUN.writes = rOk + '/' + wRating.length + ' ' + pOk + '/' + wPoints.length + ' ' + xOk + '/' + wXp.length;
   RUN.writesEndless = cOk + '/' + wCp.length + ' ' + eOk + '/' + wEndless.length + (wEndlessSeason.length ? ('+' + esOk + '/' + wEndlessSeason.length) : '') + (wEndlessTrio.length ? ('+t' + etOk + '/' + wEndlessTrio.length) : '') + (wEndlessQuad.length ? ('+q' + eqOk + '/' + wEndlessQuad.length) : '') + (wEndlessSolo.length ? ('+s' + esoOk + '/' + wEndlessSolo.length) : '');
@@ -4186,4 +4300,5 @@ module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, isVoidDisp,
   ENDLESS_LB_CLASSIC_SOLO, SAVE_BOX_LB_CLASSIC, CLASSIC, classicGoalAt, classicGoalFor, packClassicScore,   // client knife 3.9b N2 (O216 classic lane)
   ENDLESS_LB_CLASSIC_DUO, ENDLESS_LB_CLASSIC_TRIO, ENDLESS_LB_CLASSIC_QUAD, SAVE_BOX_LB_CLASSIC_DUO, SAVE_BOX_LB_CLASSIC_TRIO, SAVE_BOX_LB_CLASSIC_QUAD,   // client knife 3.9b N3 (team classic lane)
   ENDLESS_COMP_LB_OVERALL, overallScore, overallDominant,   // knife 3.5d composite ladder
+  CAMPAIGN_ENDLESS_BOX_PREFIX, CAMPAIGN_ENDLESS_LB_PREFIX, CAMPAIGN_ENDLESS_SUFFIX, CAMPAIGN_ENDLESS_OFFENSE_LB, CAMPAIGN_ENDLESS_FILE, CE_MAIL_MIN, CE_SETTLED_TTL_MS, loadCe, saveCe,   // client knife 3.9b N4 (Gold Rush lane)
   PERKS_CFG: perks.PERKS_CFG, verifyPerkPicks: perks.verifyPerkPicks };
