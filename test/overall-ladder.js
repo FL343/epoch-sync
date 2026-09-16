@@ -39,7 +39,7 @@ eq('board name default', V.ENDLESS_COMP_LB_OVERALL, process.env.ENDLESS_COMP_LB_
 
 console.log('== wiring pins (validate.js) ==');
 const src = fs.readFileSync(path.join(__dirname, '..', 'validate.js'), 'utf8');
-assert('provisioned up-front with the solo/team ladders (trusted) [+ casual solo ladder / casual save box, client knife 3.7a]', /\[ENDLESS_COMP_LB_OVERALL, true\], \[ENDLESS_LB_SOLO, true\], \[SAVE_BOX_LB_CASUAL, false\]\]\) \{/.test(src));
+assert('provisioned up-front with the solo/team ladders (trusted) [+ casual solo ladder / casual save box, client knife 3.7a]', /\[ENDLESS_COMP_LB_OVERALL, true\], \[ENDLESS_LB_SOLO, true\], \[SAVE_BOX_LB_CASUAL, false\],\s*\n\s*\[ENDLESS_LB_CLASSIC_SOLO, true\]/.test(src));   // classic surface continues the list (client knife 3.9b N3)
 assert('playtest board plan adds the overall ladder (trusted)', /add\(cfg\.compOverallLb, 1\);/.test(src) && /compOverallLb: ENDLESS_COMP_LB_OVERALL,/.test(src));
 assert('lifetime board find-or-create + season twin via resolveSeasonBoard', /overallId = await findOrCreateBoard\(ENDLESS_COMP_LB_OVERALL, true\);/.test(src) && /resolveSeasonBoard\(lr, ENDLESS_COMP_LB_OVERALL, seasonId\)/.test(src));
 assert('composite candidates = union of the four per-size best maps + this tick changed pools (lifetime + season) -> rollout backfill, not movers only',
