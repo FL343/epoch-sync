@@ -49,6 +49,24 @@ assert('casual continue on another seat -> cont', soloSanity(seg({ flags: A.SEG_
 assert('casual + SUSPENDED -> flags (casual saves are checkpoint rows, the run continues)', soloSanity(seg({ flags: A.SEG_CASUAL | A.SEG_SUSPENDED })).indexOf('flags') >= 0);
 assert('casual + FINAL + user-quit is legal', soloSanity(seg({ flags: A.SEG_CASUAL | A.SEG_FINAL, dispCode: 5 })).length === 0);
 assert('casual + RESUMED is legal (token resume)', soloSanity(seg({ flags: A.SEG_CASUAL | A.SEG_RESUMED, startDepth: 5, endDepth: 7 })).length === 0);
+// O216 classic (client knife 3.9b N2): CLASSIC bit legal; one life (any continue -> cont); no perks / rerolls (classic-perk); no suspended segment; own goal curve for the score cap
+eq('classic lane names + bits + curve (companion classicBoardName(false,1) / classicSaveBoardName / attest_record.h SEG_CLASSIC / ENDLESS.CLASSIC)', [v.ENDLESS_LB_CLASSIC_SOLO, v.SAVE_BOX_LB_CLASSIC, A.SEG_CLASSIC, v.CLASSIC.LIVES, v.CLASSIC.LEVEL_S_SOLO, v.CLASSIC.LEVEL_S_TEAM, v.CLASSIC.XP_MUL, v.CLASSIC.TIEBREAK_DIV],
+  ['endless_classic_solo', 'endless_save_box_classic', 32, 1, 60, 40, 0.5, 100000]);
+eq('classicGoalAt 1..12 = 650 / 1195 / 2010 / 3095 / 4450 / 6075 / 7970 / 10135 / 12570 / 15275 / 17980 / 20685 (linear +2705 from L10)', [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map(v.classicGoalAt),
+  [650, 1195, 2010, 3095, 4450, 6075, 7970, 10135, 12570, 15275, 17980, 20685]);
+eq('classicGoalAt(200) linear', v.classicGoalAt(200), 15275 + 2705 * 190);
+eq('classicGoalFor pc 2 = x1 / pc 3 round-half-up / pc 4 = x2', [v.classicGoalFor(2, 2), v.classicGoalFor(2, 3), v.classicGoalFor(2, 4)], [1195, Math.floor((1195 * 3 + 1) / 2), 2390]);
+eq('packClassicScore depth-major + bank/1e5 tiebreak (saturates at 9999 -> $999.9M)', [v.packClassicScore(7, 123456), v.packClassicScore(7, 2147483647)], [70001, 79999]);
+eq('classic segment -> clean', soloSanity(seg({ flags: A.SEG_CLASSIC, endDepth: 5, score: 4450 })), []);
+assert('classic continue -> cont (one life)', soloSanity(seg({ flags: A.SEG_CLASSIC, continuesUsed: 1 })).indexOf('cont') >= 0);
+assert('classic + build -> classic-perk', soloSanity(seg({ flags: A.SEG_CLASSIC, build: 135 })).indexOf('classic-perk') >= 0);
+assert('classic + reroll bitmap -> classic-perk', soloSanity(seg({ flags: A.SEG_CLASSIC, rerollLo: 1 })).indexOf('classic-perk') >= 0);
+assert('classic + SUSPENDED -> flags (classic saves are purchase-cut rows, the run continues)', soloSanity(seg({ flags: A.SEG_CLASSIC | A.SEG_SUSPENDED })).indexOf('flags') >= 0);
+assert('classic + casual together -> flags (exclusive rule sets)', soloSanity(seg({ flags: A.SEG_CLASSIC | A.SEG_CASUAL })).indexOf('flags') >= 0);
+assert('classic score above classicGoalFor x SCORE_MULT -> score', soloSanity(seg({ flags: A.SEG_CLASSIC, endDepth: 5, score: 4450 * v.ENDLESS.SCORE_MULT + 1 })).indexOf('score') >= 0);
+assert('classic score at classicGoalFor x SCORE_MULT is legal (depth 5 line 4450)', soloSanity(seg({ flags: A.SEG_CLASSIC, endDepth: 5, score: 4450 * v.ENDLESS.SCORE_MULT })).length === 0);
+assert('classic + FINAL + user-quit is legal', soloSanity(seg({ flags: A.SEG_CLASSIC | A.SEG_FINAL, dispCode: 5 })).length === 0);
+assert('classic + RESUMED at a non-checkpoint depth is legal (purchase-cut row)', soloSanity(seg({ flags: A.SEG_CLASSIC | A.SEG_RESUMED, startDepth: 7, endDepth: 9 })).length === 0);
 assert('SUSPENDED|FINAL together -> flags', soloSanity(seg({ flags: A.SEG_SUSPENDED | A.SEG_FINAL })).indexOf('flags') >= 0);
 assert('disp outside {finished, user-quit} -> disp', soloSanity(seg({ dispCode: 3 })).indexOf('disp') >= 0);
 assert('suspended segment with a quit disp -> disp', soloSanity(seg({ flags: A.SEG_SUSPENDED, dispCode: 5 })).indexOf('disp') >= 0);
@@ -78,6 +96,17 @@ console.log('-- chain rules --');
   eq('still waiting inside the window', soloChainPlan(st, key, seg({ startDepth: 15, endDepth: 20 }), 'm3', T0 + COMP.CHAIN_WAIT_MS - 1), { ok: null, reason: 'chain-gap' });
   eq('window elapsed -> chain-gap reject', soloChainPlan(st, key, seg({ startDepth: 15, endDepth: 20 }), 'm3', T0 + COMP.CHAIN_WAIT_MS + 1), { ok: false, reason: 'chain-gap' });
   eq('a segment behind the chain head -> chain-back', soloChainPlan(st, key, seg({ startDepth: 5, endDepth: 10 }), 'mY', T0), { ok: false, reason: 'chain-back' });
+  // O216 classic token resume: any proven depth (run.max >= sd), no checkpoint-multiple rule, revives a FINAL run
+  {
+    const st2 = { runs: {}, wait: {} }, k2 = 'cl';
+    const p0 = soloChainPlan(st2, k2, seg({ flags: A.SEG_CLASSIC, startDepth: 0, endDepth: 2 }), 'c0', T0); v.soloAdvance(st2, k2, seg({ flags: A.SEG_CLASSIC, startDepth: 0, endDepth: 2 }), 'c0', p0, T0);
+    const p1 = soloChainPlan(st2, k2, seg({ flags: A.SEG_CLASSIC | A.SEG_FINAL, startDepth: 2, endDepth: 3 }), 'c1', T0); v.soloAdvance(st2, k2, seg({ flags: A.SEG_CLASSIC | A.SEG_FINAL, startDepth: 2, endDepth: 3 }), 'c1', p1, T0);
+    eq('classic resume at the purchase depth 2 (not a checkpoint multiple) after FINAL -> settle + revive', soloChainPlan(st2, k2, seg({ flags: A.SEG_CLASSIC | A.SEG_RESUMED, startDepth: 2, endDepth: 4 }), 'c2', T0), { ok: true, proven: 2, revive: true });
+    eq('classic resume beyond the proven head -> chain-gap (wait)', soloChainPlan(st2, k2, seg({ flags: A.SEG_CLASSIC | A.SEG_RESUMED, startDepth: 9, endDepth: 10 }), 'c3', T0), { ok: null, reason: 'chain-gap' });
+    eq('casual resume at a non-checkpoint depth still rejects (resume-not-checkpoint)', soloChainPlan(st2, k2, seg({ flags: A.SEG_CASUAL | A.SEG_RESUMED, startDepth: 2, endDepth: 4 }), 'c4', T0), { ok: false, reason: 'resume-not-checkpoint' });
+  }
+  eq('endlessRequiredMs classic 60s levels (x PACE_FRAC) vs default band floor', [v.endlessRequiredMs({ startDepth: 0, endDepth: 10 }, 0, v.CLASSIC.LEVEL_S_SOLO), v.endlessRequiredMs({ startDepth: 0, endDepth: 10 }, 0)],
+    [10 * 60 * 1000 * v.ENDLESS.PACE_FRAC, 10 * v.ENDLESS.LEVEL_SECONDS * 1000 * v.ENDLESS.PACE_FRAC]);
   plan = soloChainPlan(st, key, seg({ startDepth: 10, endDepth: 15 }), 'm2', T0);
   eq('the missing predecessor settles normally', plan, { ok: true, proven: 10 });
   soloAdvance(st, key, seg({ startDepth: 10, endDepth: 15 }), 'm2', plan, T0);

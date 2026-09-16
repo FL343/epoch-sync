@@ -1486,7 +1486,7 @@ function computeXpEndless(startDepth, endDepth, boostMult) {
 }
 // credit for one settled type-7 group: every record WRITER (seat-deduped) except abandoners; valid and
 // innocent earn the same (no outcome to gate on). xpState is touched only for the pre-credit level read.
-function creditXpEndless(g, tail, xp, changedXp, spSet) {
+function creditXpEndless(g, tail, xp, changedXp, spSet, mult) {   // O216: classic XP x CLASSIC.XP_MUL (client classicXpMul); default 1
   const recBySeat = {};
   for (const r of g) { const s = r.d[5] | 0; if (recBySeat[s] == null) recBySeat[s] = r; }
   for (const seatKey of Object.keys(recBySeat).map(k => k | 0).sort((a, b) => a - b)) {
@@ -1494,7 +1494,7 @@ function creditXpEndless(g, tail, xp, changedXp, spSet) {
     const cls = dispClassOf(r.dispCode);
     if (cls === 'abandoner') continue;
     const bm = xpBoostMult(xpLevelOf(xp[sid] | 0), !!(spSet && spSet.has(String(sid))));
-    const gain = computeXpEndless(tail.startDepth, tail.endDepth, bm);
+    const gain = Math.round(computeXpEndless(tail.startDepth, tail.endDepth, bm) * ((mult > 0 && isFinite(mult)) ? mult : 1));
     if (gain > 0) { xp[sid] = (xp[sid] | 0) + gain; changedXp[sid] = xp[sid]; }
     console.log('  xp-endless ' + plog(sid) + ' ' + cls + ' depth ' + (tail.startDepth | 0) + '->' + (tail.endDepth | 0)
       + (bm !== 1 ? ' boost x' + bm : '') + ' +' + gain + ' -> ' + (xp[sid] | 0));
@@ -1601,17 +1601,20 @@ function soloMsSlot(st, p, seasonId, fam, nowMs) {
 function soloSanity(f) {
   const out = [];
   const fl = f.flags | 0, casual = !!(fl & attest.SEG_CASUAL);   // O218: guard-written casual solo run (3 lives, CONT continues, checkpoint-row saves)
+  const classic = !!(fl & attest.SEG_CLASSIC);   // O216: classic (nostalgia) run (1 life, no perks / rerolls / continues; purchase-cut segments)
   if ((f.startDepth | 0) < 0 || (f.endDepth | 0) < (f.startDepth | 0) || (f.endDepth | 0) > ENDLESS.DEPTH_CAP) out.push('depth');
   if ((f.endDepth | 0) - (f.startDepth | 0) > COMP.CKPT_EVERY) out.push('span');
-  // continues: competitive = one life, never a continue; casual = the seat-0 nibble only (the guard's CONT count; the lane debits the ladder)
+  // continues: competitive = one life, never a continue; casual = the seat-0 nibble only (the guard's CONT count; the lane debits the ladder); classic = never
   if (casual ? (((f.continuesUsed | 0) & ~0xF) !== 0) : ((f.continuesUsed | 0) !== 0)) out.push('cont');
+  if (classic && ((f.build >>> 0) || (f.picksLo | 0) || (f.picksHi | 0) || (f.rerollLo >>> 0) || (f.rerollHi >>> 0))) out.push('classic-perk');   // O216: classic has no perks / rerolls (fail-closed)
   if ((f.tokensCp | 0) !== 0) out.push('tokens');
   if ((f.seasonId | 0) < 0 || (f.seasonId | 0) > 4095) out.push('season');
-  if ((fl & ~(attest.SEG_SUSPENDED | attest.SEG_FINAL | attest.SEG_RESUMED | attest.SEG_CASUAL)) !== 0 || ((fl & attest.SEG_SUSPENDED) && (fl & attest.SEG_FINAL))) out.push('flags');
-  if (casual && (fl & attest.SEG_SUSPENDED)) out.push('flags');   // a casual save is a checkpoint ROW (the run continues), never a suspended segment
+  if ((fl & ~(attest.SEG_SUSPENDED | attest.SEG_FINAL | attest.SEG_RESUMED | attest.SEG_CASUAL | attest.SEG_CLASSIC)) !== 0 || ((fl & attest.SEG_SUSPENDED) && (fl & attest.SEG_FINAL))) out.push('flags');
+  if ((fl & attest.SEG_CASUAL) && (fl & attest.SEG_CLASSIC)) out.push('flags');   // O216: casual and classic are exclusive rule sets
+  if ((casual || classic) && (fl & attest.SEG_SUSPENDED)) out.push('flags');   // a casual / classic save is a checkpoint ROW (the run continues), never a suspended segment
   if ((f.dispCode | 0) !== attest.DISP_FINISHED && (f.dispCode | 0) !== attest.DISP_USER_QUIT) out.push('disp');
   if ((fl & attest.SEG_SUSPENDED) && (f.dispCode | 0) !== attest.DISP_FINISHED) out.push('disp');
-  const cap = endlessGoalFor(Math.max(1, f.endDepth | 0), 1) * ENDLESS.SCORE_MULT;
+  const cap = (classic ? classicGoalFor(Math.max(1, f.endDepth | 0), 1) : endlessGoalFor(Math.max(1, f.endDepth | 0), 1)) * ENDLESS.SCORE_MULT;   // O216: classic line (650/1195/… linear +2705)
   if ((f.score | 0) > cap || (f.score | 0) < SANITY.SCORE_FLOOR) out.push('score');
   if ((f.durationSec | 0) < 0) out.push('duration');
   return out;
@@ -1627,12 +1630,19 @@ function soloChainPlan(st, key, f, m, nowMs) {
   };
   const sd = f.startDepth | 0, fl = f.flags | 0;
   const casualResume = !!(fl & attest.SEG_RESUMED) && !!(fl & attest.SEG_CASUAL);
-  if (run && run.final && !casualResume) return { ok: false, reason: 'after-final' };   // O218: a casual token resume legitimately follows the run's FINAL (below)
+  const classicResume = !!(fl & attest.SEG_RESUMED) && !!(fl & attest.SEG_CLASSIC);   // O216: shop-token row cut at the purchase depth (any depth)
+  if (run && run.final && !casualResume && !classicResume) return { ok: false, reason: 'after-final' };   // O218/O216: a token resume legitimately follows the run's FINAL (below)
   if (sd === 0) {
     if (run && ((run.max | 0) > 0 || run.seg0)) return { ok: false, reason: 'restart' };   // a second depth-0 segment on the same run = replay
     return { ok: true, proven: 0 };
   }
   if (fl & attest.SEG_RESUMED) {
+    if (classicResume) {
+      // O216 classic: the guard cut a segment [segStart, purchaseDepth] at the shop-token purchase, so the resumed depth is any depth the run has
+      //   PROVEN (run.max >= sd) -- no checkpoint-multiple rule; replay defence = guard tombstone + processed segment keys; no resume debit.
+      if (!run || (run.max | 0) < sd) return waitOr('chain-gap');
+      return { ok: true, proven: sd, revive: !!run.final };
+    }
     if (casualResume) {
       // O218 casual (client knife 3.7a): the save is a checkpoint-snapshot ROW the guard wrote on the shop token purchase and tombstoned
       //   on consume -- there is no suspended segment / save point to consume. Rule = the multiplayer casual one: the resumed depth must be
@@ -1838,6 +1848,35 @@ const ENDLESS_LB_TRIO = process.env.ENDLESS_LB_TRIO || 'endless_board_trio';
 // diggers outscore three). Resolved find-or-create like the trio board; unresolved = pc=4 groups left pending.
 const ENDLESS_LB_QUAD = process.env.ENDLESS_LB_QUAD || 'endless_board_quad';
 const ENDLESS_LB_SOLO = process.env.ENDLESS_LB_SOLO || 'endless_board_solo';   // client knife 3.7a (O218): casual SOLO ladder (guard-signed SEG_CASUAL segments; client boardNameFor(base, 1))
+// ===== O216 classic (nostalgia) endless (client knife 3.9b N2, 2026-09-16) =====
+// Guard-signed SOLO segments flagged SEG_CLASSIC (N3: client team lane) settle on their own LIFETIME ladder endless_classic_solo (no season
+//   twin), ranked depth-major with the bank / 1e5 as the tiebreak (classic scores reach the hundreds of millions; details = [bank, 0]).
+//   Rules mirrored from the client (RANKED_CONFIG.ENDLESS.CLASSIC + src/data/classic-rules.js; pinned by the companion lockstep suite):
+//   1 life (continue nibble must be 0), no perks / rerolls (build + pick log + bitmap must be 0), the original cumulative goal line
+//   classicGoalAt(d) = 650 / 1195 / 2010 / ... / 15275 / +2705 (score cap = goalFor x SCORE_MULT), 60s solo / 40s team levels (pacing floor
+//   x PACE_FRAC), XP x0.5, no CP (no milestones, no resume debit). The save = a guard row cut at the purchase depth (any depth), so a RESUMED
+//   classic segment may start at a non-checkpoint depth: the chain only needs run.max >= startDepth (the guard cut a segment there).
+const ENDLESS_LB_CLASSIC_SOLO = process.env.ENDLESS_LB_CLASSIC_SOLO || 'endless_classic_solo';   // client ENDLESS_LEVELS.classicBoardName(false, 1)
+const SAVE_BOX_LB_CLASSIC = process.env.SAVE_BOX_LB_CLASSIC || 'endless_save_box_classic';         // guard saveBoardFor(pc, rules=2) / client classicSaveBoardName
+const CLASSIC = {
+  LIVES: 1, LEVEL_S_SOLO: 60, LEVEL_S_TEAM: 40, XP_MUL: 0.5, TIEBREAK_DIV: 100000,                      // lockstep: client RANKED_CONFIG.ENDLESS.CLASSIC
+  GOAL: { start: 375, addonStart: 275, grow: 270, earlyLevels: 9 },                                     // lockstep: src/data/classic-rules.js GOAL (goalAt)
+  SCALE_BASE_PC: 2,
+};
+function classicGoalAt(level) {
+  let goal = CLASSIC.GOAL.start + CLASSIC.GOAL.addonStart, addon = CLASSIC.GOAL.addonStart;
+  for (let d = 1; d < (level | 0); d++) { if (d <= CLASSIC.GOAL.earlyLevels) addon += CLASSIC.GOAL.grow; goal += addon; }
+  return goal;
+}
+function classicGoalFor(depth, pc) {
+  const g = classicGoalAt(Math.max(1, depth | 0)), n = Math.max(1, pc | 0);
+  if (n <= 1) return g;
+  return Math.floor((g * n + Math.floor(CLASSIC.SCALE_BASE_PC / 2)) / CLASSIC.SCALE_BASE_PC);   // client classicScaleGoal round-half-up twin
+}
+function packClassicScore(depth, score) {
+  const tb = Math.max(0, Math.min(ENDLESS.BOARD_SCALE - 1, Math.floor(Math.max(0, score | 0) / CLASSIC.TIEBREAK_DIV)));
+  return (depth | 0) * ENDLESS.BOARD_SCALE + tb;
+}
 const ENDLESS_MAX_PC = 4;   // lockstep: client registry ENDLESS_MAX_PC (private-lobby endless maxPlayers; save_box SEAT_SLOTS) -- pinned by mvp ledger-schema-lockstep
 const ENDLESS = {
   MT: 7,
@@ -2041,9 +2080,10 @@ function unpackEndlessScore(score) { const s = score | 0; return { depth: Math.f
 // credit and waits out the full span. Induction consequence: reaching depth D requires >=
 // D * LEVEL_SECONDS * PACE_FRAC of wall time across the chain no matter how records are forged,
 // while a legit crash-orphaned save (its run never settled) just settles a little later.
-function endlessRequiredMs(tail, chainMax) {
+function endlessRequiredMs(tail, chainMax, levelSeconds) {   // O216: classic passes its own level length (60 solo / 40 team); default = the band timer floor
   const proven = Math.min(tail.startDepth | 0, Math.max(0, chainMax | 0));
-  return Math.max(0, (tail.endDepth | 0) - proven) * ENDLESS.LEVEL_SECONDS * 1000 * ENDLESS.PACE_FRAC;
+  const secs = (levelSeconds > 0) ? levelSeconds : ENDLESS.LEVEL_SECONDS;
+  return Math.max(0, (tail.endDepth | 0) - proven) * secs * 1000 * ENDLESS.PACE_FRAC;
 }
 // consensus roster (seat -> sid): detectLeavers' per-seat strict-majority vote, but returning
 // every agreed seat rather than only the absent ones. CP debits target the ROSTER -- writing no
@@ -2908,10 +2948,19 @@ async function main() {
   if (seasonId >= 1 && compId && !compSeasonId) { strictBoard('seasonal solo comp board not found'); ghWarn('seasonal solo comp board unresolved -> solo segments left pending'); }
   const compSeasonBest = {};
   if (compSeasonId) { const br = await readBoardAll(compSeasonId, 'seasonal solo comp board'); compSeasonComplete = br.complete !== false; for (const e of br.ents) { compSeasonBest[e.steamID] = e.score | 0; compSeasonDet[e.steamID] = e.details; } }
+  // O216 (client knife 3.9b N2) classic solo LIFETIME ladder (SEG_CLASSIC guard segments; no season twin) + the classic save box (guard rows rules=2)
+  let enClassicSoloId = byNameLb(ENDLESS_LB_CLASSIC_SOLO);
+  if (!enClassicSoloId) enClassicSoloId = await findOrCreateBoard(ENDLESS_LB_CLASSIC_SOLO);
+  if (!enClassicSoloId) { strictBoard('classic solo endless board not found'); ghWarn('classic solo endless board not found (pre-create ' + ENDLESS_LB_CLASSIC_SOLO + ', trusted-writes) -> classic solo segments left pending'); }
+  const endlessClassicSoloBest = {};
+  let enClassicSoloComplete = true;
+  if (enClassicSoloId) { const br = await readBoardAll(enClassicSoloId, 'classic solo endless board'); enClassicSoloComplete = br.complete; for (const e of br.ents) endlessClassicSoloBest[e.steamID] = e.score | 0; }
   let saveBoxId = byNameLb(SAVE_BOX_LB);
   if (!saveBoxId) saveBoxId = await findOrCreateBoard(SAVE_BOX_LB, false);
   let casualSaveBoxId = byNameLb(SAVE_BOX_LB_CASUAL);   // O218: casual solo checkpoint rows (guard-signed; the cron only prunes past seasons)
   if (!casualSaveBoxId) casualSaveBoxId = await findOrCreateBoard(SAVE_BOX_LB_CASUAL, false);
+  let classicSaveBoxId = byNameLb(SAVE_BOX_LB_CLASSIC);   // O216: classic checkpoint rows (guard-signed rules=2; lifetime rows, no season prune -- a classic run outlives seasons)
+  if (!classicSaveBoxId) classicSaveBoxId = await findOrCreateBoard(SAVE_BOX_LB_CLASSIC, false);
   if (!saveBoxId) ghWarn('save box board not found (' + SAVE_BOX_LB + ', client-writable) -> guard saves fail until it exists');
   // team competitive ladders (duo / trio) + their save boxes: same find-or-create shape as the solo pair, one family record each
   const compFam = {};
@@ -3013,6 +3062,7 @@ async function main() {
   const today = Math.floor(Date.now() / 86400000);   // UTC day index (matches client lastWinDay) for the daily-first bonus
   const changed = {}; const changedLp = {}; const changedXp = {}; const changedCp = {}; const changedEndless = {}; const changedEndlessSeason = {}; const changedEndlessTrio = {}; const changedEndlessTrioSeason = {}; const changedEndlessQuad = {}; const changedEndlessQuadSeason = {}; const reveal = {}; const careerDet = {}; let settled = 0, voided = 0, settledEndless = 0, settledPrivate = 0, settledSolo = 0, settledEndlessComp = 0, settledBots = 0;
   const changedEndlessSolo = {}, changedEndlessSoloSeason = {};   // O218 solo casual ladder write pools (client knife 3.7a)
+  const changedEndlessClassicSolo = {};   // O216 classic solo lifetime ladder write pool (client knife 3.9b N2)
   const changedComp = {}, changedCompSeason = {};   // O93 solo competitive ladder write pools
   const changedCompDuo = {};         // team competitive ladder write pools (duo / trio / quad, lifetime + season)
   const changedCompDuoSeason = {};
@@ -3047,6 +3097,7 @@ async function main() {
       endlessTrioBest: endlessTrioBest[sid], endlessTrioSeasonBest: endlessTrioSeasonBest[sid],
       endlessQuadBest: endlessQuadBest[sid], endlessQuadSeasonBest: endlessQuadSeasonBest[sid],
       endlessSoloBest: endlessSoloBest[sid], endlessSoloSeasonBest: endlessSoloSeasonBest[sid],   // O218 casual solo ladder
+      endlessClassicSoloBest: endlessClassicSoloBest[sid], changedEndlessClassicSolo: changedEndlessClassicSolo[sid],   // O216 classic solo ladder
       changed: changed[sid], changedLp: changedLp[sid], changedXp: changedXp[sid], changedCp: changedCp[sid],
       changedEndless: changedEndless[sid], changedEndlessSeason: changedEndlessSeason[sid],
       changedEndlessTrio: changedEndlessTrio[sid], changedEndlessTrioSeason: changedEndlessTrioSeason[sid],
@@ -3068,6 +3119,7 @@ async function main() {
       scPut(endlessTrioBest, sn.sid, sn.endlessTrioBest); scPut(endlessTrioSeasonBest, sn.sid, sn.endlessTrioSeasonBest);
       scPut(endlessQuadBest, sn.sid, sn.endlessQuadBest); scPut(endlessQuadSeasonBest, sn.sid, sn.endlessQuadSeasonBest);
       scPut(endlessSoloBest, sn.sid, sn.endlessSoloBest); scPut(endlessSoloSeasonBest, sn.sid, sn.endlessSoloSeasonBest);
+      scPut(endlessClassicSoloBest, sn.sid, sn.endlessClassicSoloBest); scPut(changedEndlessClassicSolo, sn.sid, sn.changedEndlessClassicSolo);   // O216
       scPut(changed, sn.sid, sn.changed); scPut(changedLp, sn.sid, sn.changedLp); scPut(changedXp, sn.sid, sn.changedXp); scPut(changedCp, sn.sid, sn.changedCp);
       scPut(changedEndless, sn.sid, sn.changedEndless); scPut(changedEndlessSeason, sn.sid, sn.changedEndlessSeason);
       scPut(changedEndlessTrio, sn.sid, sn.changedEndlessTrio); scPut(changedEndlessTrioSeason, sn.sid, sn.changedEndlessTrioSeason);
@@ -3107,6 +3159,7 @@ async function main() {
     }
     const f = v.fields;
     const casual = !!((f.flags | 0) & attest.SEG_CASUAL);   // O218: guard-written casual solo run -> own ladder pair, continue-ladder debits, no milestones, no resume debit
+    const classic = !!((f.flags | 0) & attest.SEG_CLASSIC);   // O216: classic (nostalgia) run -> lifetime ladder, XP x0.5, no CP, 60s pacing
     const sane = soloSanity(f);
     if (sane.length) {
       recordFlag(signals, c.g, m, nowMs); sigDirty = true; trustTouched.add(sid); RUN.sanity = (RUN.sanity | 0) + 1;
@@ -3157,11 +3210,11 @@ async function main() {
       return false;
     }
     const cas = casual ? casualLadderOf(1) : null;   // O218: the casual solo ladder pair (endless_board_solo + season twin)
-    if (!cpId || (casual ? (!cas.id || (seasonId >= 1 && !cas.seasonId)) : (!compId || (seasonId >= 1 && !compSeasonId)))) { console.log('  solo ' + m + ': cp/' + (casual ? 'casual-solo' : 'comp') + '/seasonal board unresolved -- left pending'); return false; }
+    if (!cpId || (classic ? !enClassicSoloId : casual ? (!cas.id || (seasonId >= 1 && !cas.seasonId)) : (!compId || (seasonId >= 1 && !compSeasonId)))) { console.log('  solo ' + m + ': cp/' + (classic ? 'classic-solo' : casual ? 'casual-solo' : 'comp') + '/seasonal board unresolved -- left pending'); return false; }
     // pacing: the segment's own start attestation (single guard attester) or its first sighting
     let pend = startsPending[m];
     if (!pend) { pend = startsPending[m] = { t0: nowMs, mt: r.d[2] | 0, roster: {}, settled: [], synth: true }; sigPlayer(signals, p, nowMs).ns += 1; sigDirty = true; }
-    const reqMs = endlessRequiredMs({ startDepth: f.startDepth, endDepth: f.endDepth }, plan.proven);
+    const reqMs = endlessRequiredMs({ startDepth: f.startDepth, endDepth: f.endDepth }, plan.proven, classic ? CLASSIC.LEVEL_S_SOLO : 0);   // O216: classic 60s levels
     if (nowMs - (pend.t0 || 0) < reqMs) {
       console.log('  solo-pacing ' + m + ': depth ' + f.startDepth + '->' + f.endDepth + ' (proven ' + plan.proven + ') needs ' + Math.round(reqMs / 1000) + 's real time, seen ' + Math.round((nowMs - (pend.t0 || 0)) / 1000) + 's -- deferred');
       return false;
@@ -3175,7 +3228,14 @@ async function main() {
       cp[sid] = (cp[sid] == null ? 0 : cp[sid]) - COMP.RESUME_CP; changedCp[sid] = cp[sid];
       console.log('  solo cp ' + m + ': ' + plog(sid) + ' -' + COMP.RESUME_CP + ' resume (save@' + plan.consume + ') -> ' + cp[sid]);
     }
-    if (casual) {
+    if (classic) {
+      // O216 classic (client knife 3.9b N2): lifetime ladder only (depth-major, bank / 1e5 tiebreak; details [bank, 0] = the exact bank),
+      //   no CP (no milestones, no continue ladder, no resume debit), XP x0.5 below. The chain memory / save points work like casual.
+      if ((f.endDepth | 0) > 0) {
+        const packed = packClassicScore(f.endDepth, f.score);
+        if (endlessClassicSoloBest[sid] == null || packed > endlessClassicSoloBest[sid]) { endlessClassicSoloBest[sid] = packed; changedEndlessClassicSolo[sid] = { s: packed, ts: f.score | 0 }; console.log('  solo classic best ' + m + ': ' + plog(sid) + ' depth ' + f.endDepth + ' bank ' + f.score + ' -> board ' + packed); }
+      }
+    } else if (casual) {
       // O218 casual solo (client knife 3.7a): continue ladder debits -- the guard's CONT count rides the tail as the seat-0 nibble,
       //   CUMULATIVE over the guard session (the rung continues across a session's segments; a resumed session restarts it: soloAdvance
       //   resets run.contN on RESUMED). Debit the rungs newly crossed since the run's last settled count; endlessContinueCost(k) =
@@ -3200,8 +3260,8 @@ async function main() {
       if (compSeasonId && (f.seasonId | 0) === (seasonId | 0) && (compSeasonBest[sid] == null || packed > compSeasonBest[sid])) { compSeasonBest[sid] = packed; changedCompSeason[sid] = { s: packed, ts: f.score | 0, build: f.build >>> 0 }; console.log('  solo season best ' + m + ': ' + plog(sid) + ' depth ' + f.endDepth + ' -> board ' + packed); }
     }
     }
-    if (xpId) creditXpEndless(c.g, { startDepth: Math.max(f.startDepth | 0, plan.proven | 0), endDepth: f.endDepth }, xp, changedXp, spSet);   // audit B-F2: overlap credits new depth only
-    console.log('  solo settle ' + m + ': ' + plog(sid) + (casual ? ' casual' : '') + ' depth ' + f.startDepth + '->' + f.endDepth + ' bank ' + f.score + ' flags ' + f.flags + ((f.dispCode | 0) === attest.DISP_USER_QUIT ? ' (quit)' : '') + ' key=' + f.keyName + (v.sealed ? '' : ' [dev]') + (plan.overlap != null ? ' (overlap from ' + plan.overlap + ', proven ' + plan.proven + ')' : '') + (plan.revive ? ' (revived by a casual token resume)' : ''));
+    if (xpId) creditXpEndless(c.g, { startDepth: Math.max(f.startDepth | 0, plan.proven | 0), endDepth: f.endDepth }, xp, changedXp, spSet, classic ? CLASSIC.XP_MUL : 1);   // audit B-F2: overlap credits new depth only; O216 classic x0.5
+    console.log('  solo settle ' + m + ': ' + plog(sid) + (classic ? ' classic' : (casual ? ' casual' : '')) + ' depth ' + f.startDepth + '->' + f.endDepth + ' bank ' + f.score + ' flags ' + f.flags + ((f.dispCode | 0) === attest.DISP_USER_QUIT ? ' (quit)' : '') + ' key=' + f.keyName + (v.sealed ? '' : ' [dev]') + (plan.overlap != null ? ' (overlap from ' + plan.overlap + ', proven ' + plan.proven + ')' : '') + (plan.revive ? (classic ? ' (revived by a classic token resume)' : ' (revived by a casual token resume)') : ''));
     processed.add(m);
     return true;
   };
@@ -3854,6 +3914,17 @@ async function main() {
   });
   const esoOk = wEndlessSolo.filter(x => x.status === 'fulfilled' && x.value).length;
   const esosOk = wEndlessSoloSeason.filter(x => x.status === 'fulfilled' && x.value).length;
+  // O216 classic solo lifetime ladder writes (client knife 3.9b N2): details = [exact bank, 0] (the packed tiebreak is /1e5-saturated; the hub reads the bank from details)
+  const wEndlessClassicSolo = await mapPool(Object.keys(changedEndlessClassicSolo), CONCURRENCY, async (sid) => {
+    const w = changedEndlessClassicSolo[sid];
+    const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: enClassicSoloId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, [w.ts | 0, 0]);
+    const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
+    if (!okFlag) ghWarn('write classic solo endless ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
+    else console.log('  ok endless classic solo ' + plog(sid) + ' = ' + w.s);
+    return okFlag;
+  });
+  const eclOk = wEndlessClassicSolo.filter(x => x.status === 'fulfilled' && x.value).length;
+  if (Object.keys(changedEndlessClassicSolo).length) console.log('  classic solo ladder writes: ' + eclOk + '/' + Object.keys(changedEndlessClassicSolo).length);
   // O93 solo competitive ladder writes (details = exact bank; packed tiebreak is /1000-saturated)
   const wComp = await mapPool(Object.keys(changedComp), CONCURRENCY, async (sid) => {
     const w = changedComp[sid];
@@ -3991,5 +4062,6 @@ module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, isVoidDisp,
   ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, SAVE_BOX_LB_DUO, SAVE_BOX_LB_TRIO, teamRunKey, soloMsSlot, groupRecords,
   ENDLESS_COMP_LB_QUAD, SAVE_BOX_LB_QUAD, ENDLESS_LB_QUAD, ENDLESS_MAX_PC, compFamKeyOf,   // client knife 3.7a (O178 four seats)
   ENDLESS_LB_SOLO, SAVE_BOX_LB_CASUAL, CASUAL_LIVES,   // client knife 3.7a (O218 casual solo lane)
+  ENDLESS_LB_CLASSIC_SOLO, SAVE_BOX_LB_CLASSIC, CLASSIC, classicGoalAt, classicGoalFor, packClassicScore,   // client knife 3.9b N2 (O216 classic lane)
   ENDLESS_COMP_LB_OVERALL, overallScore, overallDominant,   // knife 3.5d composite ladder
   PERKS_CFG: perks.PERKS_CFG, verifyPerkPicks: perks.verifyPerkPicks };

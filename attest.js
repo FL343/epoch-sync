@@ -52,6 +52,7 @@ const SEG_SUSPENDED = 1;   // written by "save & quit" -> the ONE segment a late
 const SEG_FINAL = 2;       // run over / user quit (terminal segment of the run)
 const SEG_RESUMED = 4;     // this segment started from a consumed save row
 const SEG_CASUAL = 16;     // casual-endless SOLO run (client knife 3.7a, O218): guard-written, 3 lives + CONT continues (seat-0 nibble); the solo lane routes it to endless_board_solo (no milestones, no resume debit)
+const SEG_CLASSIC = 32;    // classic (nostalgia) endless run (client knife 3.9b N2, O216): guard-written solo (N3: client team lane); classic lane -> endless_classic_* lifetime ladders, XP x0.5, no CP, 1 life, no perks / rerolls / continues
 // dispCode (client DISP_CODE lockstep): 0 finished / 5 user-quit (the guard writes the truth for solo runs)
 const DISP_FINISHED = 0, DISP_USER_QUIT = 5;
 const SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
@@ -267,7 +268,7 @@ function pruneUnmatchedState(state, now, ttlMs) {
 //    (audit 2026-09-06 B-F11: v1 was int32[33] with a 12-int body; the plaintext head layout is unchanged and saveBoxHead reads
 //     only [0..4]. SB_VER mirrors save_box.h / mvp/test/lib/save-box.js and is pinned by mvp ledger-schema-lockstep §26.)
 // ============================================================
-const SB_MAGIC = 0xBA, SB_VER = 4, SB_CONSUMED = 1;   // v4 (2026-09-12): fourth seat + casual flag in the body (v3: reroll bitmap); the cron reads only the plaintext head [0..4] (any accepted version)
+const SB_MAGIC = 0xBA, SB_VER = 5, SB_CONSUMED = 1;   // v5 (2026-09-16, client knife 3.9b N2): four seat banks 32 bits + rules 2 bits (v4: fourth seat + casual bit; v3: reroll bitmap); the cron reads only the plaintext head [0..4] (any accepted version)
 function saveBoxHead(d) {
   if (!Array.isArray(d) || d.length < 5 || (d[0] & 0xff) !== SB_MAGIC) return null;
   return { ver: (d[0] >> 8) & 0xff, seasonId: d[1] | 0, flags: d[2] | 0, consumed: !!(d[2] & SB_CONSUMED), keyId: d[3] | 0, nonce: d[4] >>> 0 };
@@ -279,7 +280,7 @@ module.exports = {
   LEDGER_MAGIC, LEDGER_VER, MT_ENDLESS, ATT_VER, BASE_LEN, BASE_LEN_V3, LAYOUTS, SIG_INTS,
   // C
   SB_MAGIC, SB_VER, SB_CONSUMED, saveBoxHead,
-  SEG_SUSPENDED, SEG_FINAL, SEG_RESUMED, SEG_COMP, SEG_CASUAL, DISP_FINISHED, DISP_USER_QUIT,
+  SEG_SUSPENDED, SEG_FINAL, SEG_RESUMED, SEG_COMP, SEG_CASUAL, SEG_CLASSIC, DISP_FINISHED, DISP_USER_QUIT,
   verifySoloRecord, soloSettleGate, toBytes, loadPubTable,
   // B
   CONFESS_MAGIC, CONFESS_VER, CONFESS_MAX_SEATS,
