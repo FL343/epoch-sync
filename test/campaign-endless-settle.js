@@ -66,6 +66,9 @@ assert('zero-padded tail ok / non-zero tail -> trailing / unknown ver -> pending
 const signed = (over) => CE.verifyGrRecord(buildSigned(Object.assign({}, meta, over), seed), TBL);
 assert('B2 sequence: fast / skip / incons > 0 -> reject with that reason', planOf(signed({ fast: 1 })).reason === 'fast' && planOf(signed({ skip: 2 })).reason === 'skip' && planOf(signed({ incons: 1 })).reason === 'incons');
 assert('B3 pace: elapsed < 40 x passes -> pace-fast / > 600 x passes -> pace-slow / wall-clock disagreement -> clock', planOf(signed({ elapsedSec: 7 * 39 })).reason === 'pace-fast' && planOf(signed({ elapsedSec: 7 * 601 })).reason === 'pace-slow' && planOf(signed({ lastAtMin: meta.firstAtMin })).reason === 'clock');
+// regression (2026-09-17): an honest player who paused inside level 1 for ~5 minutes (open -> first pass 300s, then one more level 62s later;
+//   first/last pass one minute apart) must settle -- the old check measured the span from firstAtMin and rejected it as 'clock'.
+assert('B3 wall clock is measured from runT0 (open), not firstAtMin: pause inside level 1 -> ok', (() => { const t0Min = Math.floor(runT0 / 60); const p = planOf(signed({ passes: 2, elapsedSec: 300 + 62, firstAtMin: t0Min + 5, lastAtMin: t0Min + 6, score: 3000, endLevel: 3 })); return p.ok === true && p.reason === null; })());
 assert('B4 upper bound: score above the passes+1 cap sum -> overcap', planOf(signed({ score: 10000000 })).reason === 'overcap');
 assert('B5 lower bound: far below the summed minimum values -> lowscore SIGNAL only (shop spending is legal)', (() => { const p = planOf(signed({ score: 100 })); return p.ok === true && p.flags.indexOf('lowscore') >= 0; })());
 assert('B6 caps: passes 0 -> nopass / passes > 1e5 -> passes / dif 4 -> dif / endLevel 19 -> endlevel / runT0 before 2026-09-01 or after now+1d -> runt0',

@@ -10,7 +10,7 @@
 //   then apply the boundary sanity checks (fail-closed, every rejection is a permanent offense entry):
 //     B1 signature + registered key (unknown key / layout version -> pending) + row owner == embedded steamId
 //     B2 sequence: any fast / skip / incons count > 0 -> reject (a level's 60s timer is the only way it ends)
-//     B3 pace: elapsed within [passes x 40s, passes x 600s] and the wall-clock minutes agree
+//     B3 pace: elapsed within [passes x 40s, passes x 600s] and the wall clock agrees (lastAtMin - runT0 minutes >= floor(elapsed/60) - 1)
 //     B4 upper bound: score <= sum over the first passes+1 ring levels of CAP(dif, world, level) (gr-caps.json,
 //        byte-locked with the companion repo's generated table; the end-of-run score includes the failed level)
 //     B5 lower bound: far below the summed minimum level values -> 'lowscore' signal only (shop spending is legal)
@@ -93,11 +93,16 @@ function boundaryPlan(f, caps, opts) {
   const MIN = o.minPassSec || MIN_PASS_SEC, MAX = o.maxCreditSec || MAX_CREDIT_SEC;
   if (f.elapsedSec < f.passes * MIN) return { ok: false, reason: 'pace-fast', flags };
   if (f.elapsedSec > f.passes * MAX) return { ok: false, reason: 'pace-slow', flags };
-  if (f.passes > 1 && (f.lastAtMin - f.firstAtMin) < Math.floor(f.elapsedSec / 60) - 1) return { ok: false, reason: 'clock', flags };
+  // B3 wall clock: credited seconds (each pass interval capped at 600s) can never exceed the real span from run open
+  //   (runT0, inside the signature) to the last pass. The first interval (open -> first pass) is part of elapsedSec, so
+  //   the span must start at runT0, not at firstAtMin: measured from firstAtMin an honest player who pauses inside
+  //   level 1 for a few minutes (the level timer stops while paused) was rejected (2026-09-17 e2e overcap round
+  //   tripped this check instead of B4).
   const t0Min = Math.floor((f.runT0 | 0) / 60);
   if (f.runT0 < (o.minRunT0 != null ? o.minRunT0 : RUN_T0_FLOOR)) return { ok: false, reason: 'runt0', flags };
   if (o.nowSec != null && f.runT0 > o.nowSec + 86400) return { ok: false, reason: 'runt0', flags };
   if (f.passes > 0 && f.firstAtMin && t0Min > f.firstAtMin) return { ok: false, reason: 'runt0', flags };
+  if ((f.lastAtMin - t0Min) < Math.floor(f.elapsedSec / 60) - 1) return { ok: false, reason: 'clock', flags };   // after the runT0 window checks: a runT0 outside the window reports 'runt0', not 'clock'
   if (f.score < 0 || f.score > 0x7fffffff) return { ok: false, reason: 'score', flags };
   if (caps && caps.levels && caps.ring) {
     let cap = 0, low = 0;
