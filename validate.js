@@ -546,6 +546,11 @@ const REPORT_LB = process.env.REPORT_LB || 'report_box';
 // knife-7: host self-incrimination box (guard writes when its renderer silently dropped joiner
 //   events). Client-writable, record-only, NEVER settles (signal for review, subject = writer).
 const UNMATCHED_LB = process.env.UNMATCHED_LB || 'unmatched_box';
+// Reconnect-record mirror (client knife 3.10b): each client writes its own active-match row at match start and
+// clears it at match end; a client whose local record is lost reads its own row back to offer a rejoin. Pure
+// self-use, zero authority (the host still verifies matchId + seat on RECONNECT); provisioned on every channel
+// because test players crash too. Client-writable + friends-reads; never read by the cron.
+const ACTIVE_MATCH_LB = process.env.ACTIVE_MATCH_LB || 'active_match_box';
 const REPORT_REASON_MIN = 1, REPORT_REASON_MAX = 4;
 const REPORT_DAILY_CAP = Number(process.env.REPORT_DAILY_CAP || 20);
 // entries = [{steamID, d}] (d = decoded details ints). Returns {seen, counted, capped, bad}.
@@ -1048,10 +1053,13 @@ function seasonSeedLp(prevScore, display) {
 // id) and immune to the listing-generation lag that can hide a fresh board from
 // GetLeaderboardsForGame for over an hour -- the canonical bypass for any by-name resolution
 // that must not wait out that lag. Returns the id or null (failure -> warn).
-async function findOrCreateBoard(name, trusted) {
+// friendsReads (optional): client-written boards whose rows are only ever read back by their own
+// writer (reconnect-record mirror) are provisioned friends-reads so a public listing cannot enumerate
+// who is in a match with whom; the publisher key bypasses the restriction for ops reads.
+async function findOrCreateBoard(name, trusted, friendsReads) {
   const res = await postForm('/ISteamLeaderboards/FindOrCreateLeaderboard/v2/', {
     key: KEY, appid: APPID, name, sortmethod: 'Descending', displaytype: 'Numeric',
-    createifnotfound: 1, onlytrustedwrites: (trusted == null || trusted) ? 1 : 0, onlyfriendsreads: 0, format: 'json',
+    createifnotfound: 1, onlytrustedwrites: (trusted == null || trusted) ? 1 : 0, onlyfriendsreads: friendsReads ? 1 : 0, format: 'json',
   });
   const lb = (res.json && res.json.result && res.json.result.leaderboard) || (res.json && res.json.leaderboard) || null;
   const id = lb && (lb.leaderBoardID || lb.leaderboardID || lb.id || lb.ID);
@@ -2222,7 +2230,7 @@ function ptSeedCp(cp, changedCp, sids) {
 function ptBoardPlan(names, cfg) {
   const have = new Set(names.map(String));
   const create = [];
-  const add = (name, trusted) => { if (name && !have.has(name)) create.push({ name, trusted: trusted ? 1 : 0 }); };
+  const add = (name, trusted, friendsReads) => { if (name && !have.has(name)) create.push({ name, trusted: trusted ? 1 : 0, friendsReads: friendsReads ? 1 : 0 }); };
   for (let i = 0; i < (cfg.shards | 0); i++) add(cfg.prefix + i, 0);   // client-written record shards
   add(cfg.xpLb, 1); add(cfg.cpLb, 1); add(cfg.endlessLb, 1); add(cfg.endlessTrioLb, 1); add(cfg.endlessQuadLb, 1);
   add(cfg.compLb, 1); add(cfg.saveBoxLb, 0);   // O93 solo competitive ladder (trusted) + guard-signed save rows (client-writable)
@@ -2241,6 +2249,7 @@ function ptBoardPlan(names, cfg) {
   add(cfg.trustLb, 1); add(cfg.reportLb, 0);
   add('card_box', 0);       // cosmetic claim rows (client-writable, zero authority)
   add(UNMATCHED_LB, 0);     // knife-7 host self-incrimination box (client-writable, record-only)
+  add(ACTIVE_MATCH_LB, 0, 1);   // client knife 3.10b reconnect-record mirror (client-writable, friends-reads, self-read only)
   const forbidden = [];
   for (const n0 of names) {
     const n = String(n0);
@@ -2353,9 +2362,9 @@ async function main() {
     });
     if (ptPlan.forbidden.length) { ghErr('playtest channel: forbidden board(s) exist on this app: ' + ptPlan.forbidden.join(', ') + ' -- refusing to run (lock layer 3)'); process.exit(1); }
     for (const b of ptPlan.create) {
-      const id = await findOrCreateBoard(b.name, b.trusted);
+      const id = await findOrCreateBoard(b.name, b.trusted, b.friendsReads);
       if (!id) { ghErr('playtest bootstrap: board create failed: ' + b.name); process.exit(1); }
-      console.log('pt bootstrap: provisioned ' + b.name + (b.trusted ? ' (trusted)' : ' (client-writable)'));
+      console.log('pt bootstrap: provisioned ' + b.name + (b.trusted ? ' (trusted)' : ' (client-writable)') + (b.friendsReads ? ' (friends-reads)' : ''));
     }
   }
   // O93 solo competitive surface on the main app: the ladder (trusted) and the client-writable save box must
@@ -4292,7 +4301,7 @@ async function main() {
 if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
-module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, isVoidDisp, voidByConsensus, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, RS_SOLO_VS_TRIO, RS_TRIO_WIN, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, CONFESS_MAGIC, reconcileConfessions, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan, postForm, postFormDetails, findOrCreateBoard, ghWarn, ghErr, PT_MODE, PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, ptSeedCp, ptBoardPlan, PRIVATE_XP, isPrivateMt, privateProgressOf, creditXpPrivate, BOT_XP, isBotMt, botTierOf, botTierMult, botSeatSplit, botRanksOf, botRankEffOf, botXpGain, botProgressOf, creditXpBot, DEMO_APPID, ENDLESS_XP, computeXpEndless, creditXpEndless, CAMPAIGN_LB, SEEDCAP_REJECT_LADDER_MIN, seedcapRejectWindowMin, seedcapRejectUntilMin, seedcapRejectActive,
+module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, isVoidDisp, voidByConsensus, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, RS_SOLO_VS_TRIO, RS_TRIO_WIN, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, CONFESS_MAGIC, reconcileConfessions, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan, postForm, postFormDetails, findOrCreateBoard, ghWarn, ghErr, PT_MODE, PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, ACTIVE_MATCH_LB, ptSeedCp, ptBoardPlan, PRIVATE_XP, isPrivateMt, privateProgressOf, creditXpPrivate, BOT_XP, isBotMt, botTierOf, botTierMult, botSeatSplit, botRanksOf, botRankEffOf, botXpGain, botProgressOf, creditXpBot, DEMO_APPID, ENDLESS_XP, computeXpEndless, creditXpEndless, CAMPAIGN_LB, SEEDCAP_REJECT_LADDER_MIN, seedcapRejectWindowMin, seedcapRejectUntilMin, seedcapRejectActive,
   ENDLESS_COMP_LB, SAVE_BOX_LB, SOLO_FILE, COMP, soloSanity, soloChainPlan, rerollChain, soloMilestones, soloAdvance, soloRunKey, soloStartAttested, loadSolo, saveSolo, segOrderOf, segStartOf, freshOrder,
   ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, SAVE_BOX_LB_DUO, SAVE_BOX_LB_TRIO, teamRunKey, soloMsSlot, groupRecords,
   ENDLESS_COMP_LB_QUAD, SAVE_BOX_LB_QUAD, ENDLESS_LB_QUAD, ENDLESS_MAX_PC, compFamKeyOf,   // client knife 3.7a (O178 four seats)

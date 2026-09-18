@@ -60,17 +60,19 @@ const CFG = {
 };
 {
   const plan = ptBoardPlan([], CFG);
-  eq('empty listing -> full surface provisioned', plan.create.length, 61);   // +1 knife-7 unmatched_box
+  eq('empty listing -> full surface provisioned', plan.create.length, 62);   // +1 knife-7 unmatched_box, +1 active_match_box (client knife 3.10b)
   const byName = {}; for (const b of plan.create) byName[b.name] = b.trusted;
   T('all 50 shards planned client-writable', Array.from({ length: 50 }, (_, i) => byName['rec_' + i]).every(t => t === 0));
-  for (const [n, t] of [['xpb', 1], ['cpb', 1], ['enb', 1], ['enb3', 1], ['version_gate', 1], ['gate_window', 1], ['pt_master', 1], ['trb', 1], ['rpb', 0], ['card_box', 0], ['unmatched_box', 0]])
+  for (const [n, t] of [['xpb', 1], ['cpb', 1], ['enb', 1], ['enb3', 1], ['version_gate', 1], ['gate_window', 1], ['pt_master', 1], ['trb', 1], ['rpb', 0], ['card_box', 0], ['unmatched_box', 0], ['active_match_box', 0]])
     eq('plan ' + n + ' trusted=' + t, byName[n], t);
+  const amb = plan.create.find(b => b.name === 'active_match_box');
+  eq('active_match_box is friends-reads (self-read only mirror); every other planned board stays public-read', [amb && amb.friendsReads, plan.create.filter(b => b.friendsReads).length], [1, 1]);
   eq('nothing forbidden on a clean app', plan.forbidden, []);
 }
 {
   const plan = ptBoardPlan(['rec_0', 'rec_7', 'xpb', 'gate_window', 'unrelated'], CFG);
   T('existing boards skipped (idempotent)', plan.create.every(b => ['rec_0', 'rec_7', 'xpb', 'gate_window'].indexOf(b.name) < 0));
-  eq('plan size shrinks by the existing four', plan.create.length, 57);   // 61 - 4
+  eq('plan size shrinks by the existing four', plan.create.length, 58);   // 62 - 4
 }
 {
   const plan = ptBoardPlan(['rkb', 'lpb', 'lpb_s3', 'rdb', 'gtb', 'mrb', 'lpbX', 'xpb'], CFG);
@@ -79,7 +81,7 @@ const CFG = {
 }
 {
   const plan = ptBoardPlan([], { prefix: 'rec_', shards: 2, redeemLb: 'rdb', grantLb: 'gtb', mirrorLb: 'mrb' });
-  T('unset optional names are simply skipped', plan.create.length === 2 + 5 && plan.forbidden.length === 0);   // 2 shards + version_gate + gate_window + pt_master + card_box + unmatched_box
+  T('unset optional names are simply skipped', plan.create.length === 2 + 6 && plan.forbidden.length === 0);   // 2 shards + version_gate + gate_window + pt_master + card_box + unmatched_box + active_match_box
 }
 
 // ---- 5) source pins (the structural skips must stay wired exactly where they are) ----
