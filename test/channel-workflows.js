@@ -97,6 +97,10 @@ for (const [file, tmpl, ptJob, dmJob] of [
   T(file + ': twin digest tags [playtest] / [demo]', ePt.FB_DIGEST_TAG === "'[playtest] '" && eDm.FB_DIGEST_TAG === "'[demo] '");
   for (const k of Object.keys(ePt)) {
     if (k === 'APPID' || k === 'FB_DIGEST_TAG') continue;
+    if (k === 'SEEDCAP_CHANNEL') {   // versioned world cores: each twin names ITS channel (the window list it reads in live.json)
+      T(file + ': SEEDCAP_CHANNEL names the twin\'s own channel', ePt[k] === 'playtest' && eDm[k] === 'demo', ePt[k] + ' / ' + eDm[k]);
+      continue;
+    }
     if (/_FILE$/.test(k)) {
       const okPrefix = (/^pt-|^feedback-playtest/.test(ePt[k])) && (/^demo-|^feedback-demo/.test(eDm[k]));
       T(file + ': ' + k + ' per-channel state file', okPrefix, ePt[k] + ' / ' + eDm[k]);

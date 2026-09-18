@@ -58,6 +58,9 @@ jobs:
           LP_LB: ${{ secrets.LP_LB }}
           STATE_SALT: ${{ secrets.STATE_SALT }}
           SEEDCAP_CLI: ./authority-dist/seedcap_cli.exe
+          # versioned world cores: cores/<id>/ + live.json per-channel package windows (root CLI = fallback)
+          SEEDCAP_DIST_DIR: ./authority-dist
+          SEEDCAP_CHANNEL: ea
           SC_STATE_FILE: seedcap.json
           PROCESSED_FILE: processed.json
           SIGNALS_FILE: signals.json
@@ -108,6 +111,9 @@ jobs:
           LP_LB: ${{ secrets.LP_LB }}
           STATE_SALT: ${{ secrets.STATE_SALT }}
           SEEDCAP_CLI: ./authority-dist/seedcap_cli.exe
+          # versioned world cores: cores/<id>/ + live.json per-channel package windows (root CLI = fallback)
+          SEEDCAP_DIST_DIR: ./authority-dist
+          SEEDCAP_CHANNEL: playtest
           SC_STATE_FILE: pt-seedcap.json
           PROCESSED_FILE: pt-processed.json
           SIGNALS_FILE: pt-signals.json
@@ -162,6 +168,9 @@ jobs:
           LP_LB: ${{ secrets.LP_LB }}
           STATE_SALT: ${{ secrets.STATE_SALT }}
           SEEDCAP_CLI: ./authority-dist/seedcap_cli.exe
+          # versioned world cores: cores/<id>/ + live.json per-channel package windows (root CLI = fallback)
+          SEEDCAP_DIST_DIR: ./authority-dist
+          SEEDCAP_CHANNEL: demo
           SC_STATE_FILE: demo-seedcap.json
           PROCESSED_FILE: demo-processed.json
           SIGNALS_FILE: demo-signals.json

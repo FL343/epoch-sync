@@ -94,7 +94,8 @@ const SIDA = '76561198000000001', SIDB = '76561198000000002';
     return JSON.stringify(seen) === JSON.stringify(['E p0 12345 1 0 1 0 0', 'E p1 12345 1 0 1 0 0 386']);
   })());
   ok('[2] main defers build-carrying groups when the CLI ignores the field (source pin)',
-    /if \(pending\.some\(x => x\.p && x\.p\.build\) && !cliSupportsBuild\(\)\)/.test(require('fs').readFileSync(path.join(__dirname, '..', 'seedcap.js'), 'utf8')));
+    // probes ride the selected primary core (versioned cores: test/seedcap-cores.js)
+    /if \(pending\.some\(x => x\.p && x\.p\.build\) && !cliSupportsBuild\(runPrimary\)\)/.test(require('fs').readFileSync(path.join(__dirname, '..', 'seedcap.js'), 'utf8')));
 }
 
 // ---- [3] endless chain carry bound ----

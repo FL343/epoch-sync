@@ -50,6 +50,20 @@ const SC_STATE_FILE = process.env.SC_STATE_FILE || 'seedcap.json';
 const PROCESSED_FILE = process.env.PROCESSED_FILE || 'processed.json';   // read-only (reconcile owns it)
 const SIGNALS_FILE = process.env.SIGNALS_FILE || 'signals.json';         // read-only (reconcile owns it; carries applied-correction ids)
 const SEEDCAP_CLI = process.env.SEEDCAP_CLI || './seedcap_cli.exe';
+// Versioned world cores (2026-09-18): the artifact repo may carry one compiled core per world under
+// cores/<id>/seedcap_cli.exe plus live.json = per-channel package windows [{buildNum, core, liveAt, gateAt}].
+// A record carries no build number, so the core is picked by WHICH PACKAGE WAS LIVE when the group is
+// audited (groups are audited once, within a tick or two of being written). Around a package switch both
+// builds coexist (players mid-session on the previous build, the mandatory-update gate not raised yet):
+// inside that overlap the previous window's core is consulted too and the cap is the MAX of the two --
+// the same "uncertain branch takes the max" rule the cap itself is built on, so a score is over-cap only
+// if NEITHER world could have produced it. Overlap = from the new window's liveAt until gateAt + grace
+// (no gateAt recorded yet: capped at OVERLAP_MAX). No live.json / no channel / no window / core missing
+// on disk -> the root CLI (SEEDCAP_CLI) exactly as before, so this reads older artifact layouts unchanged.
+const SEEDCAP_DIST_DIR = process.env.SEEDCAP_DIST_DIR || path.dirname(SEEDCAP_CLI);
+const SEEDCAP_CHANNEL = process.env.SEEDCAP_CHANNEL || '';
+const OVERLAP_GRACE_MS = 12 * 3600 * 1000;
+const OVERLAP_MAX_MS = 7 * 86400 * 1000;
 const AUDITED_KEEP = Math.max(500, Number(process.env.SC_AUDITED_KEEP || 4000));
 const VETO_KEEP_MIN = Math.max(1440, Number(process.env.SC_VETO_KEEP_MIN || 43200));   // 30d
 const SUSPECT_MATCH_KEEP = 8;
@@ -146,8 +160,56 @@ function cliSupportsRerolls(run) {
   const r = (run || runCli)(['V p0']);
   return !!(r && !r.fail && r.map && r.map.p0 && r.map.p0.v && /\brerolls=1\b/.test(r.map.p0.v));
 }
-function runCli(lines) {
-  const res = spawnSync(SEEDCAP_CLI, [], { input: lines.join('\n') + '\n', maxBuffer: 1 << 24, encoding: 'utf8' });
+// ---- versioned cores: window selection (pure) ----
+// live = parsed live.json | null. Returns { primary: coreId|null, extra: [coreId], why } where null primary
+// = use the root CLI. Windows are sorted by liveAt; the primary is the latest window already live at nowMs.
+function selectCores(live, channel, nowMs) {
+  const wins = ((live && live.channels && live.channels[channel]) || [])
+    .map(w => ({ core: w && w.core ? String(w.core) : null, liveAt: Date.parse(w && w.liveAt), gateAt: (w && w.gateAt) ? Date.parse(w.gateAt) : NaN }))
+    .filter(w => Number.isFinite(w.liveAt))
+    .sort((a, b) => a.liveAt - b.liveAt);
+  let ci = -1;
+  for (let i = 0; i < wins.length; i++) if (wins[i].liveAt <= nowMs) ci = i;
+  if (ci < 0) return { primary: null, extra: [], why: wins.length ? 'before-first-window' : 'no-window' };
+  const cur = wins[ci];
+  const extra = [];
+  if (ci > 0) {
+    const prev = wins[ci - 1];
+    const hardEnd = cur.liveAt + OVERLAP_MAX_MS;
+    const end = Number.isFinite(cur.gateAt) ? Math.min(hardEnd, cur.gateAt + OVERLAP_GRACE_MS) : hardEnd;
+    // a previous window without a core (pre-core package) cannot be consulted; same core = nothing to add
+    if (nowMs < end && prev.core && prev.core !== cur.core) extra.push(prev.core);
+  }
+  return { primary: cur.core, extra, why: extra.length ? 'overlap' : 'window' };
+}
+function corePathOf(distDir, core) { return path.join(distDir, 'cores', String(core), path.basename(SEEDCAP_CLI)); }
+// Resolve the selection against the disk: [{ exe, label }] primary first. A selected core that is not on
+// disk degrades to the root CLI (primary) or is dropped (extra) with a warning -- never a hard failure.
+function resolveCores(sel, distDir, exists) {
+  const has = exists || fs.existsSync;
+  const out = [];
+  if (sel.primary && has(corePathOf(distDir, sel.primary))) out.push({ exe: corePathOf(distDir, sel.primary), label: sel.primary });
+  else {
+    if (sel.primary) v.ghWarn('seedcap: core ' + sel.primary + ' selected for channel window but missing on disk -- root CLI used');
+    out.push({ exe: SEEDCAP_CLI, label: 'root' });
+  }
+  for (const c of sel.extra) {
+    if (has(corePathOf(distDir, c))) out.push({ exe: corePathOf(distDir, c), label: c });
+    else v.ghWarn('seedcap: overlap core ' + c + ' missing on disk -- skipped (cap = primary core only)');
+  }
+  return out;
+}
+// Merge an overlap core's verdicts into the primary map: a group keeps the primary's verdict shape; when both
+// cores produced a cap the larger one wins. An overlap-core ERR (or a group it was not asked) changes nothing.
+function mergeCaps(primaryMap, extraMap) {
+  for (const k of Object.keys(extraMap || {})) {
+    const a = primaryMap[k], b = extraMap[k];
+    if (a && a.cap != null && b && b.cap != null && b.cap > a.cap) primaryMap[k] = Object.assign({}, a, { cap: b.cap, via: 'overlap' });
+  }
+  return primaryMap;
+}
+function runCli(lines, exe) {
+  const res = spawnSync(exe || SEEDCAP_CLI, [], { input: lines.join('\n') + '\n', maxBuffer: 1 << 24, encoding: 'utf8' });
   if ((res.status | 0) !== 0 || res.error) return { fail: 'exit=' + res.status + (res.error ? ' ' + res.error.message : '') };
   const map = {};
   let head = '';
@@ -370,7 +432,7 @@ function pruneState(st, applied, tNow) {
 
 async function main() {
   if (!KEY || !APPID || !PREFIX) { console.log('::error::seedcap: STEAM_PUBLISHER_KEY/APPID/LB_PREFIX unset'); process.exit(1); }
-  if (!fs.existsSync(SEEDCAP_CLI)) { console.log('::error::seedcap: CLI missing at ' + SEEDCAP_CLI); process.exit(1); }
+  if (!fs.existsSync(SEEDCAP_CLI)) { console.log('::error::seedcap: CLI missing at ' + SEEDCAP_CLI); process.exit(1); }   // root copy = the fallback for every selection miss
   const st = loadState();
   st.audited = st.audited || {};
   st.chain = st.chain || {};
@@ -401,21 +463,48 @@ async function main() {
     }
   }
 
+  // versioned cores: which compiled world(s) answer this run (root CLI when the artifact repo has no live.json yet)
+  let live = null;
+  try { live = JSON.parse(fs.readFileSync(path.join(SEEDCAP_DIST_DIR, 'live.json'), 'utf8')); } catch (e) {}
+  const sel = (live && SEEDCAP_CHANNEL) ? selectCores(live, SEEDCAP_CHANNEL, Date.now())
+    : { primary: null, extra: [], why: live ? 'no-channel' : 'no-live-json' };
+  const cores = resolveCores(sel, SEEDCAP_DIST_DIR);
+  const runOf = (exe) => (lines) => runCli(lines, exe);
+  const runPrimary = runOf(cores[0].exe);
+  console.log('seedcap: cores channel=' + (SEEDCAP_CHANNEL || '-') + ' primary=' + cores[0].label +
+    (cores.length > 1 ? ' overlap=' + cores.slice(1).map(c => c.label).join(',') : '') + ' (' + sel.why + ')');
+
   let pending = pickAuditable(st, groups);
   let stats = { over: 0, okN: 0, errN: 0, flags: [] };
-  if (pending.some(x => x.p && (x.p.rerollLo || x.p.rerollHi)) && !cliSupportsRerolls()) {
+  if (pending.some(x => x.p && (x.p.rerollLo || x.p.rerollHi)) && !cliSupportsRerolls(runPrimary)) {
     const n = pending.length;
     pending = pending.filter(x => !(x.p && (x.p.rerollLo || x.p.rerollHi)));
     console.log('seedcap: CLI ignores the reroll bitmap fields -- ' + (n - pending.length) + ' reroll groups deferred until the CLI is refreshed');
   }
-  if (pending.some(x => x.p && x.p.build) && !cliSupportsBuild()) {
+  if (pending.some(x => x.p && x.p.build) && !cliSupportsBuild(runPrimary)) {
     const n = pending.length;
     pending = pending.filter(x => !(x.p && x.p.build));
     console.log('seedcap: CLI ignores the perk build field -- ' + (n - pending.length) + ' perk groups deferred until the CLI is refreshed');
   }
   if (pending.length) {
-    const res = runCli(pending.map((x, i) => cliLineOf('m' + i, x.p, x.runSeed)));
+    const res = runPrimary(pending.map((x, i) => cliLineOf('m' + i, x.p, x.runSeed)));
     if (res.fail) { console.log('::error::seedcap: CLI run failed ' + res.fail); process.exit(1); }
+    // overlap cores: each answers only the groups it can read (capability probes per core); a failed overlap run
+    //   costs nothing but the extra headroom (the primary verdicts stand)
+    for (const c of cores.slice(1)) {
+      const run = runOf(c.exe);
+      const okRr = cliSupportsRerolls(run), okBuild = cliSupportsBuild(run);
+      const lines = [];
+      pending.forEach((x, i) => {
+        if (!okRr && x.p && (x.p.rerollLo || x.p.rerollHi)) return;
+        if (!okBuild && x.p && x.p.build) return;
+        lines.push(cliLineOf('m' + i, x.p, x.runSeed));
+      });
+      if (!lines.length) continue;
+      const r2 = run(lines);
+      if (r2.fail) { v.ghWarn('seedcap: overlap core ' + c.label + ' run failed ' + r2.fail + ' -- primary caps stand'); continue; }
+      mergeCaps(res.map, r2.map);
+    }
     console.log('seedcap: ' + res.head + ' auditing ' + pending.length + ' groups');
     stats = applyAudit(st, pending, res.map, processed, nowMin());
   }
@@ -433,7 +522,7 @@ async function main() {
     ' suspects=' + Object.keys(st.suspects).length + ' corrections=' + st.corrections.length);
 }
 
-module.exports = { cliSupportsRerolls, capParamsOf, cliLineOf, cliSupportsBuild, PROBE_BUILD, chainStartBank, pickAuditable, applyAudit, pruneState, runCli, loadState, saveState, SC_STATE_FILE, AUDITED_KEEP, VETO_KEEP_MIN, offensePlanOf, writeOffense, mailDecision, sendAlertMail, alertMailText, rejectWindowsOf, OFFENSE_LB, OFFENSE_MAGIC, SC_MAIL_MIN_OVER, SC_MAIL_SUS_MIN };
+module.exports = { selectCores, resolveCores, mergeCaps, corePathOf, OVERLAP_GRACE_MS, OVERLAP_MAX_MS, cliSupportsRerolls, capParamsOf, cliLineOf, cliSupportsBuild, PROBE_BUILD, chainStartBank, pickAuditable, applyAudit, pruneState, runCli, loadState, saveState, SC_STATE_FILE, AUDITED_KEEP, VETO_KEEP_MIN, offensePlanOf, writeOffense, mailDecision, sendAlertMail, alertMailText, rejectWindowsOf, OFFENSE_LB, OFFENSE_MAGIC, SC_MAIL_MIN_OVER, SC_MAIL_SUS_MIN };
 if (require.main === module) {
   main().catch(e => { console.log('::error::seedcap run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
