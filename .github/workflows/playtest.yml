@@ -63,14 +63,15 @@ jobs:
           SUPPORTERS_FILE: pt-supporters.json
           # O124 seedcap consult (read-only; seedcap.yml owns the file). ENFORCE armed
           # 2026-09-01 after a clean 80-match observation soak (0 over-cap, 0 suspects).
-          # SEEDCAP_REJECT stays off through a 2-week enforce soak (flip ~2026-09-15 if
-          # the anomaly-alert mail stays silent). Since 2026-09-05 the lever is a bounded
+          # SEEDCAP_REJECT armed 2026-09-18 after the 2-week enforce soak (173 audited groups:
+          # 0 over-cap, 0 veto, 0 suspects; the anomaly-alert mail never fired). The lever is a bounded
           # WINDOW (24h / 3d / 7d / 14d cap by conviction count, validate.js ladder) that
           # discards only the flagged account's own settlement and clears on its own --
           # never a permanent lock. veto alone already blocks every over-cap match and
           # self-heals if the auditor clears a flag.
           SC_STATE_FILE: pt-seedcap.json
           SEEDCAP_ENFORCE: '1'
+          SEEDCAP_REJECT: '1'
           # rating-side state is never produced in PT mode; pointed off the main files anyway
           # (belt over suspenders) and deliberately NOT persisted below.
           SKILL_FILE: pt-skill.json

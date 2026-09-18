@@ -64,10 +64,11 @@ jobs:
           SUPPORTERS_FILE: demo-supporters.json
           # O124 seedcap consult (read-only; seedcap.yml's demo twin owns the file). Enforce on
           # from day one: the demo inherits the playtest enforce soak (0 over-cap, 0 suspects);
-          # SEEDCAP_REJECT stays off (same rationale as playtest -- veto alone blocks over-cap;
-          # when armed it is the bounded 24h/3d/7d/14d per-account window, never permanent).
+          # SEEDCAP_REJECT armed 2026-09-18 together with playtest (twin env): the bounded
+          # 24h/3d/7d/14d per-account window, never permanent; veto alone already blocks over-cap.
           SC_STATE_FILE: demo-seedcap.json
           SEEDCAP_ENFORCE: '1'
+          SEEDCAP_REJECT: '1'
           # rating-side state is never produced in PT mode; pointed off the main files anyway
           # (belt over suspenders) and deliberately NOT persisted below.
           SKILL_FILE: demo-skill.json
