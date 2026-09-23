@@ -61,6 +61,7 @@ jobs:
           CONFESSIONS_FILE: demo-confessions.json
           UNMATCHED_FILE: demo-unmatched.json
           SOLO_FILE: demo-endless-solo.json
+          CHAT_MUTE_FILE: demo-chat-mute.json
           SUPPORTERS_FILE: demo-supporters.json
           # O124 seedcap consult (read-only; seedcap.yml's demo twin owns the file). Enforce on
           # from day one: the demo inherits the playtest enforce soak (0 over-cap, 0 suspects);
@@ -78,7 +79,7 @@ jobs:
       - name: persist
         run: |
           state_files=""
-          for f in demo-processed.json demo-leavers.json demo-xp.json demo-starts.json demo-signals.json demo-confessions.json demo-unmatched.json demo-supporters.json demo-endless-solo.json; do
+          for f in demo-processed.json demo-leavers.json demo-xp.json demo-starts.json demo-signals.json demo-confessions.json demo-unmatched.json demo-supporters.json demo-endless-solo.json demo-chat-mute.json; do
             [ -f "$f" ] && state_files="$state_files $f"
           done
           if [ -n "$state_files" ] && [ -n "$(git status --porcelain -- $state_files)" ]; then

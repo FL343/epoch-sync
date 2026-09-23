@@ -7,6 +7,7 @@ const perks = require('./perks.js');     // endless perk build replay (record ta
 const campaign = require('./campaign.js');   // O159 knife-7d: Vegas campaign clear attestation -> exclusive cosmetic grants
 const campaignEndless = require('./campaign-endless.js');   // knife 3.9b N4: Vegas Gold Rush run attestation -> per-difficulty best-only ladders + offense ledger
 const supporters = require('./supporters.js');   // supporter pack: DLC ownership probe -> wall board / grant bit / points bonus
+const chatMute = require('./chat-mute.js');     // chat moderation lane: report snapshots -> automatic mutes + expiry sweep + private mail digest
 
 const APPID = Number(process.env.APPID);
 const PREFIX = process.env.LB_PREFIX;
@@ -1354,6 +1355,12 @@ function loadSupporters() { try { return JSON.parse(fs.readFileSync(SUPPORTERS_F
 function saveSupporters(s) { try { fs.writeFileSync(SUPPORTERS_FILE, JSON.stringify(s, null, 0)); } catch (e) { ghWarn('write ' + SUPPORTERS_FILE + ' failed: ' + (e && e.message)); } }
 const SUPPORTER_WALL_LB = process.env.SUPPORTER_WALL_LB || supporters.SUPPORTER.WALL_LB;
 const SUPPORTER_OPTOUT_LB = process.env.SUPPORTER_OPTOUT_LB || supporters.SUPPORTER.OPTOUT_LB;
+// chat moderation lane state (HMAC pid keyed: reporter watermarks + per-target reporter sets + automatic mute expiries; never text or raw ids)
+const CHAT_MUTE_FILE = process.env.CHAT_MUTE_FILE || 'chat-mute.json';
+const CHAT_MUTE_LB = process.env.CHAT_MUTE_LB || chatMute.CHAT_MUTE.MUTE_LB;
+const CHAT_REPORT_LB = process.env.CHAT_REPORT_LB || chatMute.CHAT_MUTE.REPORT_LB;
+function loadChatMute() { try { const o = JSON.parse(fs.readFileSync(CHAT_MUTE_FILE, 'utf8')); return (o && typeof o === 'object') ? o : {}; } catch (e) { return {}; } }
+function saveChatMute(st) { try { fs.writeFileSync(CHAT_MUTE_FILE, JSON.stringify(st)); } catch (e) { ghWarn('write ' + CHAT_MUTE_FILE + ' failed: ' + (e && e.message)); } }
 function loadXp() { try { return JSON.parse(fs.readFileSync(XP_FILE, 'utf8')) || {}; } catch (e) { return {}; } }
 function saveXp(s) { try { fs.writeFileSync(XP_FILE, JSON.stringify(s, null, 0)); } catch (e) { ghWarn('write ' + XP_FILE + ' failed: ' + (e && e.message)); } }
 // per-game point formula -- lockstep mirror of the client config (asserted by the schema-lockstep test).
@@ -2943,13 +2950,70 @@ async function main() {
     } catch (e) { ghWarn('supporter channel failed: ' + (e && e.message)); }
     return spSet;
   };
+  // ---- chat moderation lane (public channel, knife 3.13c): harvest report snapshots -> automatic mutes + expiry sweep + private digest ----
+  //   Rides every tick (idempotent: reporter watermark + per-window auto memory); boards are per app id (this job's APPID) so the
+  //   playtest / demo channels get their own lane. Manual mutes are written straight onto the mute board by the ops tool (no repo list).
+  const processChatMute = async () => {
+    try {
+      const st = loadChatMute();
+      const nowUnixMin = Math.floor(nowMs / 60000);
+      const list = (lr.json && lr.json.response && lr.json.response.leaderboards) || [];
+      const byName = (name) => { const f = list.find(x => String(x.name || x.Name) === name); return f ? (f.id || f.ID) : null; };
+      const repId = byName(CHAT_REPORT_LB) || await findOrCreateBoard(CHAT_REPORT_LB, false, true);
+      const muteId = byName(CHAT_MUTE_LB) || await findOrCreateBoard(CHAT_MUTE_LB, true);
+      if (!repId || !muteId) { ghWarn('chat-mute: boards unavailable (report=' + !!repId + ' mute=' + !!muteId + ') -- lane skipped'); return; }
+      const rb = await readBoardAll(repId, 'chat report box');
+      const rows = rb.ents.map(e => ({ reporterSid: String(e.steamID), det: decodeDetails(e.detailData) }));
+      const h = chatMute.harvest(st, rows, pid, nowUnixMin);
+      chatMute.prune(st, nowUnixMin);
+      const mb = await readBoardAll(muteId, 'chat mute board');
+      const boardRows = mb.ents.map(e => ({ sid: String(e.steamID), until: e.score | 0 }));
+      const targets = Array.from(new Set(h.fresh.map(f => f.target)));
+      const p = chatMute.plan(st, boardRows, targets, pid, nowUnixMin);
+      let nW = 0, nD = 0;
+      if (APPLY_MMR) {
+        for (const w of p.writes) {
+          const r = await postForm('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: muteId, steamid: w.sid, score: w.until, scoremethod: 'ForceUpdate', format: 'json' });
+          const okW = r.ok && !(r.json && r.json.result && r.json.result.result && r.json.result.result !== 1);
+          if (okW) { st.auto[pid(w.sid)] = w.until; nW++; console.log('chat-mute: auto mute ' + plog(w.sid) + ' until=' + w.until + ' (' + w.why + ')'); }
+          else ghWarn('chat-mute: write failed ' + plog(w.sid) + ' HTTP ' + r.status);
+        }
+        for (const d of p.deletes) {
+          const r = await postForm('/ISteamLeaderboards/DeleteLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: muteId, steamid: d.sid, format: 'json' });
+          if (r.ok) nD++; else ghWarn('chat-mute: delete failed ' + plog(d.sid) + ' HTTP ' + r.status);
+        }
+      }
+      // private digest (same channel as the feedback digest; text only in the mail body, once per UTC day)
+      if (h.fresh.length && process.env.FB_DIGEST_TO && process.env.RESEND_API_KEY && !PT_MODE_MAIL_OFF) {
+        const day = new Date(nowMs).toISOString().slice(0, 10);
+        st.pendingMail = (st.pendingMail || []).concat(h.fresh).slice(-200);
+        const dg = st.digest || (st.digest = { day: '', at: 0 });
+        if (dg.day !== day || process.env.FB_DIGEST_FORCE) {
+          const lines = chatMute.digestLines(st.pendingMail, plog);
+          const res = await fetch('https://api.resend.com/emails', {
+            method: 'POST', headers: { Authorization: 'Bearer ' + process.env.RESEND_API_KEY, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ from: process.env.FB_DIGEST_FROM || 'onboarding@resend.dev', to: [process.env.FB_DIGEST_TO],
+              subject: (process.env.FB_DIGEST_TAG || '') + 'chat reports ' + day + ': ' + st.pendingMail.length + ' new',
+              text: 'Chat report snapshots since the last digest: ' + st.pendingMail.length + '\nManual mute: set-lb ' + CHAT_MUTE_LB + ' <sid> <untilUnixMin|0>; automatic rule = ' + chatMute.CHAT_MUTE.AUTO_REPORTERS + ' distinct reporters / ' + chatMute.CHAT_MUTE.WINDOW_MIN + ' min -> ' + chatMute.CHAT_MUTE.AUTO_MUTE_MIN + ' min.\n\n' + lines.join('\n\n') }),
+          });
+          if (res.ok) { st.digest = { day, at: nowUnixMin }; st.pendingMail = []; } else ghWarn('chat-mute digest send failed HTTP ' + res.status);
+        }
+      } else if (h.fresh.length) { st.pendingMail = (st.pendingMail || []).concat(h.fresh).slice(-200); }
+      if (h.fresh.length || nW || nD || p.writes.length) {
+        console.log('chat-mute: reports +' + h.fresh.length + ' (skipped ' + h.skipped + ') targets ' + targets.length + ' auto +' + nW + ' expired -' + nD + (APPLY_MMR ? '' : ' [dry-run]'));
+        RUN.chatMute = '+' + h.fresh.length + 'r' + (nW ? '/+' + nW + 'm' : '') + (nD ? '/-' + nD + 'x' : '');
+      }
+      saveChatMute(st);
+    } catch (e) { ghWarn('chat-mute lane failed: ' + (e && e.message)); }
+  };
+  const PT_MODE_MAIL_OFF = false;
 
   RUN.consistent = consistentMatches.length;
-  if (consistentMatches.length === 0) { console.log('no consistent matches'); persistStartsSide(); await maintainTrust(); await processRedeems(null); await processCampaignGrants(); await processCampaignEndless(); await processSupporters(null, []); writeRunSummary(); return; }
+  if (consistentMatches.length === 0) { console.log('no consistent matches'); persistStartsSide(); await maintainTrust(); await processRedeems(null); await processCampaignGrants(); await processCampaignEndless(); await processChatMute(); await processSupporters(null, []); writeRunSummary(); return; }
   const fresh = consistentMatches.filter(c => !processed.has(c.m));
   RUN.fresh = fresh.length;
   console.log(consistentMatches.length + ' consistent, ' + fresh.length + ' fresh (settled ' + (consistentMatches.length - fresh.length) + ')');
-  if (fresh.length === 0) { console.log('no fresh matches, skip'); persistStartsSide(); await maintainTrust(); await processRedeems(null); await processCampaignGrants(); await processCampaignEndless(); await processSupporters(null, []); writeRunSummary(); return; }
+  if (fresh.length === 0) { console.log('no fresh matches, skip'); persistStartsSide(); await maintainTrust(); await processRedeems(null); await processCampaignGrants(); await processCampaignEndless(); await processChatMute(); await processSupporters(null, []); writeRunSummary(); return; }
 
   // playtest channel: no rating board exists (and must not -- lock layer 3); the TrueSkill
   // update block below is skipped wholesale, so the id is never consulted.
@@ -2983,6 +3047,7 @@ async function main() {
   const spSids = [];
   for (const c of fresh) for (const r of c.g) { spSids.push(String(r.steamID)); for (const rs of Object.values(r.roster || {})) if (rs) spSids.push(String(rs)); }   // roster = {seat: sid} (decodeRoster)
   const spSet = await processSupporters(xp, spSids);
+  await processChatMute();
   // CP wallet + endless depth board (both optional like XP: absent = warn-skip locally, hard
   // fail under STRICT_BOARDS in CI). The endless settle branch refuses to settle while either is
   // missing -- settling without the debit would let read-back resurrect spent CP.
@@ -4301,7 +4366,7 @@ async function main() {
 if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
-module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, isVoidDisp, voidByConsensus, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, RS_SOLO_VS_TRIO, RS_TRIO_WIN, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, CONFESS_MAGIC, reconcileConfessions, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan, postForm, postFormDetails, findOrCreateBoard, ghWarn, ghErr, PT_MODE, PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, ACTIVE_MATCH_LB, ptSeedCp, ptBoardPlan, PRIVATE_XP, isPrivateMt, privateProgressOf, creditXpPrivate, BOT_XP, isBotMt, botTierOf, botTierMult, botSeatSplit, botRanksOf, botRankEffOf, botXpGain, botProgressOf, creditXpBot, DEMO_APPID, ENDLESS_XP, computeXpEndless, creditXpEndless, CAMPAIGN_LB, SEEDCAP_REJECT_LADDER_MIN, seedcapRejectWindowMin, seedcapRejectUntilMin, seedcapRejectActive,
+module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CHAT_MUTE: chatMute.CHAT_MUTE, CHAT_MUTE_FILE, CHAT_MUTE_LB, CHAT_REPORT_LB, isVoidDisp, voidByConsensus, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, RS_SOLO_VS_TRIO, RS_TRIO_WIN, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, CONFESS_MAGIC, reconcileConfessions, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan, postForm, postFormDetails, findOrCreateBoard, ghWarn, ghErr, PT_MODE, PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, ACTIVE_MATCH_LB, ptSeedCp, ptBoardPlan, PRIVATE_XP, isPrivateMt, privateProgressOf, creditXpPrivate, BOT_XP, isBotMt, botTierOf, botTierMult, botSeatSplit, botRanksOf, botRankEffOf, botXpGain, botProgressOf, creditXpBot, DEMO_APPID, ENDLESS_XP, computeXpEndless, creditXpEndless, CAMPAIGN_LB, SEEDCAP_REJECT_LADDER_MIN, seedcapRejectWindowMin, seedcapRejectUntilMin, seedcapRejectActive,
   ENDLESS_COMP_LB, SAVE_BOX_LB, SOLO_FILE, COMP, soloSanity, soloChainPlan, rerollChain, soloMilestones, soloAdvance, soloRunKey, soloStartAttested, loadSolo, saveSolo, segOrderOf, segStartOf, freshOrder,
   ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, SAVE_BOX_LB_DUO, SAVE_BOX_LB_TRIO, teamRunKey, soloMsSlot, groupRecords,
   ENDLESS_COMP_LB_QUAD, SAVE_BOX_LB_QUAD, ENDLESS_LB_QUAD, ENDLESS_MAX_PC, compFamKeyOf,   // client knife 3.7a (O178 four seats)
