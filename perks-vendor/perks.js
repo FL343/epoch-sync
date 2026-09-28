@@ -193,6 +193,14 @@ window.PERKS = (() => {
     }));
   }
   function poolSig() { return ('00000000' + _fnv1a(JSON.stringify(poolEntries())).toString(16)).slice(-8); }
+  const CAND_ALGO_VER = 1;
+  function candConstants() {
+    return { algo: CAND_ALGO_VER, perkSalt: PERK_SALT, seasonSalt: SEASON_SALT, slots: cfgNum('SLOTS'),
+      drawEvery: drawEvery(), gateEvery: gateEvery(), maxDraws: maxDraws(), pityEvery: cfgNum('PITY_EVERY'),
+      contractMax: cfgNum('CONTRACT_MAX'), contractMinDraw: cfgNum('CONTRACT_MIN_DRAW'), contractPMilli: cfgNum('CONTRACT_P_MILLI'),
+      rarityByBand: RARITY_BY_BAND, rarityGate: RARITY_GATE };
+  }
+  function candSig() { return ('00000000' + _fnv1a(JSON.stringify({ pool: poolEntries(), cand: candConstants() })).toString(16)).slice(-8); }
   function packBuild(slots) {
     let v = 0;
     for (let k = 0; k < 3; k++) {
@@ -545,6 +553,7 @@ window.PERKS = (() => {
     seasonSeed, drawSeed, candidates, applyPick, replay, pickApply, restoreRun,
     cfgNum, isContract, hasContract, contractsSeenBefore, SUB_KEYS, ONE_PER_TABLE,
     inSeason, poolEntries, poolSig,
+    candConstants, candSig, CAND_ALGO_VER,
     effOfBuild, valueMulOfBuild, buildOf, effOf, valueMulOf, levelTimeAddMax, NEUTRAL,
     nameKey, descKey, descParams, iconOf, rarityOf,
     _setTableForTest(list) { TABLE = list || LIST; _index(); _effCache = { build: -1, eff: effOfBuild(0) }; },
