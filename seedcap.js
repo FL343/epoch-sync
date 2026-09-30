@@ -41,8 +41,21 @@
 //                        account settles again with no ops action (never permanent).
 //   state.corrections[]  already-settled over-cap endless matches -> reconcile
 //                        reverses the flagged seats' CP credit / board entry
-//   state.chain[pid:pc]  audited endless progress (endDepth -> cumulative cap)
-//                        = the startBank bound for continuation sessions
+//   state.chain[pid:pc:runSeed]  audited endless progress per RUN (endDepth -> cumulative cap)
+//                        = the startBank bound for continuation sessions of that same run; only a seat
+//                        whose own account wrote the record extends its chain (knife 3.5c2a-A, 2026-09-30:
+//                        the old pid:pc key let a forged zero-score deep record lift the carry-in bound of
+//                        EVERY later run of that account; legacy keys stay a read-only fallback for 7 days)
+// Knife 3.5c2a-A (2026-09-30) audit fixes on the read side (KNIFE_35C2A §3.1):
+//   - a guard-signed SOLO record is decoded through its own layout (attest.soloTail): the team-shaped
+//     endlessTail read the solo record's keyId/attVer/opHash words as build / pick log / bitmap (O289)
+//   - the build that caps a segment is the SEGMENT-START build, replayed from the pick log with the same
+//     P.replay verifyPerkPicks uses (perks.buildAt); a session-level co-op record carries the per-draw
+//     list (CLI `builds=` token, per level the max over the builds that could be in effect); a log that
+//     does not replay is skipped (the reconcile's perk_forge already rejects it)
+//   - a solo record names the package that signed it (keyId = buildNum): that package's registered core
+//     answers it exactly (live.json window by buildNum), else the time-window selection as before
+//   - capability probes read the CLI's "V" answer (no more cap-rise probe with a hard-coded build word)
 // Failure discipline: a CLI ERR is "cannot cap" -> log and step aside
 // (fail-open); flags only ever come from a computed cap the score exceeds.
 // ============================================================
@@ -51,6 +64,7 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 const v = require('./validate.js');
 const attest = require('./attest.js');
+const perks = require('./perks.js');   // pick-log replay (segment-start build; same replay as the reconcile's perk_forge check)
 
 const KEY = process.env.STEAM_PUBLISHER_KEY;
 const APPID = process.env.APPID;
@@ -115,17 +129,40 @@ function capParamsOf(mt, pc, tail) {
     // has no perks and no rerolls by rule (the reconcile fails a non-zero build / pick log / bitmap closed as
     // 'classic-perk'), so both are forced to 0: the solo record keeps other words at those tail offsets.
     const classic = !!(tail && ((tail.flags | 0) & attest.SEG_CLASSIC));
+    // perk build (2026-09-07 tail 7th int = the build at the END of the record; knife 3.5c2a-A: the cap uses the SEGMENT-START build
+    //   replayed from the pick log -- a segment [sd, ed] earned its levels with the build after the draw at depth sd, and a satisfied
+    //   contract / slot replacement can make the end build worth LESS than the start build [real playtest segment: 198k -> 142k cap]).
+    //   Session-level co-op records (pc >= 2 without SEG_COMP: one record per session, a draw every DRAW_EVERY passed levels) also carry
+    //   the per-draw list for the CLI's builds= token (unsupported core -> the end build as before, see cliLineOf). A log that does not
+    //   replay = replayErr (pickAuditable skips the group; the reconcile rejects it as perk_forge).
+    let build = 0, builds = null, buildEnd = 0, replayErr = null;
+    if (!classic && tail) {
+      buildEnd = (tail.build != null) ? (tail.build >>> 0) : 0;
+      if (buildEnd || (tail.picksLo | 0) || (tail.picksHi | 0)) {
+        const rb = perks.buildAt(tail, tail.startDepth | 0, pc);
+        if (!rb.ok) replayErr = rb.reason + ':' + rb.why;
+        else {
+          build = rb.build >>> 0;
+          if (pc >= 2 && !((tail.flags | 0) & attest.SEG_COMP)) {
+            const rl = perks.buildsOf(tail, pc);
+            if (!rl.ok) replayErr = rl.reason + ':' + rl.why;
+            else if (rl.builds.length) builds = rl.builds;
+          }
+        }
+      }
+    }
     // seasonId (2026-09-05): the run's season snapshot from the record tail (5th int; -1 when the
     // record predates it) -- the world core replays the season-keyed boards exactly, so the cap is
     // per-run exact instead of a legacy runSeed-keyed replay.
     return { entry: 'endless', pc, startDepth: tail ? tail.startDepth | 0 : 0, endDepth: tail ? tail.endDepth | 0 : 0,
       seasonId: (tail && tail.seasonId != null) ? (tail.seasonId | 0) : -1,
-      // perk build word (2026-09-07, 7th tail int): the cap scales with the run's value/clear perks; absent = 0 = no perks
-      build: (!classic && tail && tail.build != null) ? (tail.build >>> 0) : 0,
+      build, builds, buildEnd, replayErr,
       // endless affix reroll bitmap (2026-09-11, 10th/11th tail ints): rerolled depths derive their world with it (exact cap); absent = 0
       rerollLo: (!classic && tail && tail.rerollLo != null) ? (tail.rerollLo >>> 0) : 0,
       rerollHi: (!classic && tail && tail.rerollHi != null) ? (tail.rerollHi >>> 0) : 0,
-      classic };
+      classic,
+      // guard-signed solo record: the package (buildNum) that signed it -> exact core (attest.soloTail keyId; 0 = client-written / legacy)
+      keyId: (tail && tail.keyId > 0) ? (tail.keyId | 0) : 0 };
   }
   if (base === 10) {
     // O140 private friend rooms (2026-09-01): world gen is entry-agnostic (same placeItems),
@@ -145,8 +182,15 @@ function capParamsOf(mt, pc, tail) {
   if (ts) for (let s = 0; s < pc; s++) teams.push(v.teamOfSeat(s, ts));
   return { entry: ranked ? 'ranked' : 'quick', pc, ts, isTeam, team2, levels: 6, teams };
 }
-function cliLineOf(tag, p, runSeed) {
+// caps (knife 3.5c2a-A): { builds: bool } = the answering core reads the builds= token (cliSupportsBuilds); a session-level record on a
+//   core without it falls back to the END-of-record build in the positional field (= the pre-3.5c2a-A line, no regression), with it the
+//   positional field carries the segment-start build and the token the per-draw list
+function cliLineOf(tag, p, runSeed, caps) {
   if (p.entry === 'endless') {
+    const hasList = !!(p.builds && p.builds.length);
+    const useList = hasList && !!(caps && caps.builds);
+    const bdSrc = (hasList && !useList) ? (p.buildEnd >>> 0) : (p.build >>> 0);
+    const listTok = useList ? (' builds=' + p.builds.map(b => b >>> 0).join(',')) : '';
     // 7th field = seasonId (>=0 season-keyed world); omitted for legacy records (-1) so the CLI takes its legacy path.
     // 8th field = perk build word (2026-09-07), positional after the season: a build on a legacy tail writes the -1
     //   season sentinel explicitly; build 0 is omitted (line unchanged for every pre-perk record).
@@ -154,25 +198,31 @@ function cliLineOf(tag, p, runSeed) {
     //   all-zero bitmap is omitted (line unchanged for every pre-reroll record).
     // 11th field = classic flag (2026-09-30), positional after the bitmap: a classic line writes every sentinel before
     //   it explicitly (season or -1, build, bitmap lo/hi) then 1; a non-classic line never carries it (unchanged).
-    const bd = (p.build >>> 0) || 0;
+    const bd = bdSrc || 0;
     const rl = (p.rerollLo >>> 0) || 0, rh = (p.rerollHi >>> 0) || 0, hasRr = !!(rl || rh);
     const cl = !!p.classic;
     const season = (p.seasonId != null && p.seasonId >= 0) ? (p.seasonId | 0) : ((bd || hasRr || cl) ? -1 : null);
     return 'E ' + tag + ' ' + (runSeed | 0) + ' ' + p.pc + ' ' + (p.startDepth | 0) + ' ' + (p.endDepth | 0) + ' ' + Math.round(p.startBank || 0) +
-      (season != null ? (' ' + season) : '') + ((bd || hasRr || cl) ? (' ' + bd) : '') + ((hasRr || cl) ? (' ' + rl + ' ' + rh) : '') + (cl ? ' 1' : '');
+      (season != null ? (' ' + season) : '') + ((bd || hasRr || cl) ? (' ' + bd) : '') + ((hasRr || cl) ? (' ' + rl + ' ' + rh) : '') + (cl ? ' 1' : '') + listTok;
   }
   return 'C ' + tag + ' ' + (runSeed | 0) + ' ' + p.entry + ' ' + p.pc + ' ' + (p.ts | 0) + ' ' +
     (p.isTeam ? 1 : 0) + ' ' + (p.team2 ? 1 : 0) + ' ' + p.levels + ' ' + (p.teams && p.teams.length ? p.teams.join('') : '-');
 }
 // The build field is read only by a CLI built after 2026-09-07; an older CLI silently ignores it and returns the
-//   build-0 cap, which would veto honest perk runs during the CLI rollout window. Probe once per run: the cap of a
-//   fixed board must strictly rise under a clear-bonus multiplier perk (slot 0 = id 2 lv 3 -> build word 386). Not
-//   supported -> groups carrying a build are deferred (left unaudited) until the CLI proves it reads the field.
-const PROBE_BUILD = 386;
+//   build-0 cap, which would veto honest perk runs during the CLI rollout window. Not supported -> groups carrying a
+//   build are deferred (left unaudited) until the CLI proves it reads the field. Knife 3.5c2a-A (2026-09-30): the probe
+//   reads the "V" capability answer (build=1) like the other fields -- the old "cap must rise under perk id 2 lv 3"
+//   probe pinned that perk's semantics (knife B changes it) and a table with a different clear-bonus perk would have
+//   deferred every perk run forever.
 function cliSupportsBuild(run) {
-  const r = (run || runCli)(['E p0 12345 1 0 1 0 0', 'E p1 12345 1 0 1 0 0 ' + PROBE_BUILD]);
-  if (!r || r.fail || !r.map || !r.map.p0 || !r.map.p1 || r.map.p0.err != null || r.map.p1.err != null) return false;
-  return (r.map.p1.cap | 0) > (r.map.p0.cap | 0);
+  const r = (run || runCli)(['V p0']);
+  return !!(r && !r.fail && r.map && r.map.p0 && r.map.p0.v && /\bbuild=1\b/.test(r.map.p0.v));
+}
+// The builds= per-draw list token (knife 3.5c2a-A) is read only by a CLI answering builds=1; without it a session-level co-op
+//   record is capped with its end-of-record build as before (cliLineOf fallback) -- no deferral, no regression.
+function cliSupportsBuilds(run) {
+  const r = (run || runCli)(['V p0']);
+  return !!(r && !r.fail && r.map && r.map.p0 && r.map.p0.v && /\bbuilds=1\b/.test(r.map.p0.v));
 }
 // The reroll bitmap fields (2026-09-11) are read only by a CLI that answers the "V" capability probe with rerolls=1; an older CLI prints
 //   ERR bad-kind for "V" (or nothing) and would silently drop the bitmap -> groups carrying one are deferred until the CLI is refreshed.
@@ -255,15 +305,30 @@ function runCli(lines, exe) {
 // endless continuation carry-in bound: best audited chain cap among the roster,
 // else the pre-seedcap static bound at that depth (generous fail-open for chains
 // that predate the audit -- exact from the first fully-audited session onward)
-function chainStartBank(st, rosterPids, pc, startDepth) {
+const chainKey = (pid, pc, runSeed) => pid + ':' + pc + ':' + (runSeed | 0);   // per run (knife 3.5c2a-A); legacy key = pid:pc
+const CHAIN_LEGACY_KEEP_MIN = 7 * 1440;    // legacy pid:pc entries: read-only fallback for 7 days after the first run of this code, then pruned
+const CHAIN_KEEP_MIN = 90 * 1440;          // per-run entries expire after 90 days (a run cannot be resumed past its save row's season anyway)
+function chainStartBank(st, rosterPids, pc, startDepth, runSeed) {
   if ((startDepth | 0) <= 0) return 0;
   let best = 0;
   for (const p of rosterPids) {
-    const c = st.chain[p + ':' + pc];
+    const c = st.chain[chainKey(p, pc, runSeed)] || st.chain[p + ':' + pc];   // this run's audited chain; legacy account-wide key as a transitional fallback
     if (c && (c.d | 0) >= (startDepth | 0) && c.cap > best) best = c.cap;
   }
   if (best > 0) return best;
   return Math.round(v.endlessGoalFor(startDepth | 0, pc) * v.ENDLESS.SCORE_MULT);
+}
+// tail of an endless record by its writer's layout: a guard-signed solo record (pc 1) has its own int layout (attest.soloTail; a pc=1
+//   record that is not one falls back to the team-shaped read), everything else = the client team tail (validate.endlessTail)
+function tailOf(d) {
+  if ((d[8] | 0) === 1) { const t = attest.soloTail(d); if (t) return t; }
+  return v.endlessTail(d);
+}
+// registered core of the package that signed a solo record (live.json window whose buildNum == keyId); null = unknown / pre-core package
+function coreForBuildNum(live, channel, buildNum) {
+  const wins = (live && live.channels && live.channels[channel]) || [];
+  for (const w of wins) if (w && w.core && Number(w.buildNum) === Number(buildNum)) return String(w.core);
+  return null;
 }
 
 // Seats whose account wrote one of the group's records from that very seat (writer = shard entry owner: r.w here,
@@ -296,18 +361,31 @@ function pickAuditable(st, groups) {
       // conservative tail: widest consistent interpretation (zero-tail abstention
       // rides along; a bigger depth range only ever RAISES the cap = fail-open)
       for (const r of g) {
-        const t = v.endlessTail(r.d);
-        if (!tail || (t.endDepth | 0) > (tail.endDepth | 0)) tail = t;
+        const t = tailOf(r.d);
+        if (t && (!tail || (t.endDepth | 0) > (tail.endDepth | 0))) tail = t;
       }
       if (!tail || (tail.endDepth | 0) < (tail.startDepth | 0)) continue;
     }
     const p = capParamsOf(mt, pc, tail);
     const roster = v.rosterConsensus(g);
     const rosterPids = Object.keys(roster).map(s2 => v.pid(roster[s2]));
-    if (p.entry === 'endless') p.startBank = chainStartBank(st, rosterPids, pc, p.startDepth);
-    pending.push({ m, mt, pc, scores, p, tail, roster, self: selfSeatsOf(g, roster), runSeed: d0[4] | 0 });
+    const runSeed = d0[4] | 0;
+    if (p.replayErr) { pending.push({ m, mt, pc, scores, p, tail, roster, self: [], runSeed, skip: 'perk-replay:' + p.replayErr }); continue; }   // forged pick log: not capped (reconcile perk_forge lane)
+    if (p.entry === 'endless') p.startBank = chainStartBank(st, rosterPids, pc, p.startDepth, runSeed);
+    pending.push({ m, mt, pc, scores, p, tail, roster, self: selfSeatsOf(g, roster), runSeed, keyId: (p.entry === 'endless' && p.keyId > 0) ? (p.keyId | 0) : 0 });
   }
   return pending;
+}
+// groups the pending list cannot audit (forged pick log): remembered as audited-with-error (fail-open, once), removed from the list
+function takeSkips(st, pending, t) {
+  const keep = [], skipped = [];
+  for (const x of pending) {
+    if (!x.skip) { keep.push(x); continue; }
+    st.audited[x.m] = { e: x.skip, t };
+    skipped.push(x);
+    console.log('seedcap: SKIP ' + x.skip + ' m=' + x.m);
+  }
+  return { pending: keep, skipped };
 }
 
 // ---- apply CLI verdicts onto state (pure state-machine half; testable offline) ----
@@ -360,12 +438,16 @@ function applyAudit(st, pending, cliMap, processed, t) {
     } else {
       okN++;
       if (x.p.entry === 'endless') {
-        // extend audited chains for every rostered seat (per-seat carry bound)
+        // extend the audited chain of THIS run for every seat whose own account wrote the record (knife 3.5c2a-A: a forged
+        //   zero-score deep record can only lift the chain of the run it forges, never the account's other runs; a stranger
+        //   named in a roster gets nothing)
+        const selfSet2 = new Set(x.self || []);
         for (const seatKey of Object.keys(x.roster)) {
+          if (!selfSet2.has(seatKey | 0)) continue;
           const p2 = v.pid(x.roster[seatKey]);
-          const k = p2 + ':' + x.pc;
+          const k = chainKey(p2, x.pc, x.runSeed);
           const cur = st.chain[k];
-          if (!cur || (x.tail.endDepth | 0) > (cur.d | 0)) st.chain[k] = { d: x.tail.endDepth | 0, cap: r.cap };
+          if (!cur || (x.tail.endDepth | 0) > (cur.d | 0)) st.chain[k] = { d: x.tail.endDepth | 0, cap: r.cap, t };
         }
       }
     }
@@ -473,23 +555,25 @@ function pruneState(st, applied, tNow) {
   }
   for (const m of Object.keys(st.veto)) if (tNow - (st.veto[m].t | 0) > VETO_KEEP_MIN) delete st.veto[m];
   st.corrections = st.corrections.filter(c => !applied.has(c.id));
+  // knife 3.5c2a-A chain hygiene: per-run entries expire (t stamped at write); legacy pid:pc entries (no t) stay readable for
+  //   CHAIN_LEGACY_KEEP_MIN after the first run that saw them, then go in one sweep
+  if (st.chain) {
+    let legacyN = 0;
+    for (const k of Object.keys(st.chain)) {
+      const c = st.chain[k];
+      if (k.split(':').length === 2) { legacyN++; continue; }
+      if (c && c.t > 0 && tNow - (c.t | 0) > CHAIN_KEEP_MIN) delete st.chain[k];
+    }
+    if (legacyN) {
+      if (!(st.chainLegacyT > 0)) st.chainLegacyT = tNow | 0;
+      else if (tNow - (st.chainLegacyT | 0) > CHAIN_LEGACY_KEEP_MIN) { for (const k of Object.keys(st.chain)) if (k.split(':').length === 2) delete st.chain[k]; delete st.chainLegacyT; }
+    } else if (st.chainLegacyT) delete st.chainLegacyT;
+  }
 }
-
-async function main() {
-  if (!KEY || !APPID || !PREFIX) { console.log('::error::seedcap: STEAM_PUBLISHER_KEY/APPID/LB_PREFIX unset'); process.exit(1); }
-  if (!fs.existsSync(SEEDCAP_CLI)) { console.log('::error::seedcap: CLI missing at ' + SEEDCAP_CLI); process.exit(1); }   // root copy = the fallback for every selection miss
-  const st = loadState();
-  st.audited = st.audited || {};
-  st.chain = st.chain || {};
-  st.suspects = st.suspects || {};
-  st.veto = st.veto || {};
-  st.corrections = st.corrections || [];
-  const processed = new Set(loadJsonArr(PROCESSED_FILE));
-  const signals = loadJsonObj(SIGNALS_FILE);
-  const applied = new Set((signals && signals.seedcapApplied) || []);
-
+// ---- shard read + CLI routing (shared by main() and tools/seedcap-reaudit.js; no state writes here) ----
+async function readGroups() {
   const lr = await v.getJson(v.BASE + '/ISteamLeaderboards/GetLeaderboardsForGame/v2/?key=' + KEY + '&appid=' + APPID + '&format=json');
-  if (!lr.ok) { console.log('::error::seedcap: GetLeaderboardsForGame HTTP ' + lr.status); process.exit(1); }
+  if (!lr.ok) return { fail: 'GetLeaderboardsForGame HTTP ' + lr.status };
   const boards = ((lr.json && lr.json.response && lr.json.response.leaderboards) || []);
   const shardIds = [];
   for (const b of boards) {
@@ -498,30 +582,36 @@ async function main() {
   }
   // always read EVERY shard -- listing entry counts lag and lie (2026-08-21 lesson)
   const groups = {};
+  let records = 0;
   for (const s of shardIds) {
     const rr = await v.readBoardAll(s.id, s.name);
     for (const e of rr.ents) {
       const d = v.decodeDetails(e.detailData);
       if (!d || d.length < 10 || d[0] !== 0xB1) continue;   // settle records only
+      records++;
       const m = d[3] + '_' + d[4] + '_' + d[2];
       // w = the shard entry owner (unforgeable writer) -- the only identity a conviction may rest on (selfSeatsOf)
       (groups[m] = groups[m] || []).push({ d, roster: v.decodeRoster(d), w: String(e.steamID || '') });
     }
   }
-
-  // versioned cores: which compiled world(s) answer this run (root CLI when the artifact repo has no live.json yet)
+  return { groups, shards: shardIds.length, records };
+}
+// which compiled world(s) answer this run: live.json channel window -> primary + overlap cores (root CLI when unregistered)
+function coresForNow(distDir, channel, nowMs) {
   let live = null;
-  try { live = JSON.parse(fs.readFileSync(path.join(SEEDCAP_DIST_DIR, 'live.json'), 'utf8')); } catch (e) {}
-  const sel = (live && SEEDCAP_CHANNEL) ? selectCores(live, SEEDCAP_CHANNEL, Date.now())
-    : { primary: null, extra: [], why: live ? 'no-channel' : 'no-live-json' };
-  const cores = resolveCores(sel, SEEDCAP_DIST_DIR);
+  try { live = JSON.parse(fs.readFileSync(path.join(distDir, 'live.json'), 'utf8')); } catch (e) {}
+  const sel = (live && channel) ? selectCores(live, channel, nowMs) : { primary: null, extra: [], why: live ? 'no-channel' : 'no-live-json' };
+  return { live, sel, cores: resolveCores(sel, distDir) };
+}
+// Run the CLI over a pending list: capability deferrals on the primary, overlap cores (cap = max), then the EXACT core of every
+//   guard-signed solo record whose package is registered (keyId -> live.json buildNum -> core on disk): its verdict replaces the
+//   primary/overlap one (the world that signed the record is known, nothing to envelope). Returns { pending (audited subset), map }.
+function auditPending(pendingIn, ctx) {
+  const cores = ctx.cores, live = ctx.live, channel = ctx.channel, distDir = ctx.distDir;
   const runOf = (exe) => (lines) => runCli(lines, exe);
   const runPrimary = runOf(cores[0].exe);
-  console.log('seedcap: cores channel=' + (SEEDCAP_CHANNEL || '-') + ' primary=' + cores[0].label +
-    (cores.length > 1 ? ' overlap=' + cores.slice(1).map(c => c.label).join(',') : '') + ' (' + sel.why + ')');
-
-  let pending = pickAuditable(st, groups);
-  let stats = { over: 0, okN: 0, errN: 0, flags: [] };
+  let pending = pendingIn;
+  const out = { pending: [], map: {}, deferred: 0, exact: 0, head: '' };
   if (pending.some(x => x.p && (x.p.rerollLo || x.p.rerollHi)) && !cliSupportsRerolls(runPrimary)) {
     const n = pending.length;
     pending = pending.filter(x => !(x.p && (x.p.rerollLo || x.p.rerollHi)));
@@ -537,28 +627,94 @@ async function main() {
     pending = pending.filter(x => !(x.p && x.p.classic));
     console.log('seedcap: CLI ignores the classic flag -- ' + (n - pending.length) + ' classic groups deferred until the CLI is refreshed');
   }
-  if (pending.length) {
-    const res = runPrimary(pending.map((x, i) => cliLineOf('m' + i, x.p, x.runSeed)));
-    if (res.fail) { console.log('::error::seedcap: CLI run failed ' + res.fail); process.exit(1); }
-    // overlap cores: each answers only the groups it can read (capability probes per core); a failed overlap run
-    //   costs nothing but the extra headroom (the primary verdicts stand)
-    for (const c of cores.slice(1)) {
-      const run = runOf(c.exe);
-      const okRr = cliSupportsRerolls(run), okBuild = cliSupportsBuild(run), okCl = cliSupportsClassic(run);
-      const lines = [];
-      pending.forEach((x, i) => {
-        if (!okRr && x.p && (x.p.rerollLo || x.p.rerollHi)) return;
-        if (!okBuild && x.p && x.p.build) return;
-        if (!okCl && x.p && x.p.classic) return;
-        lines.push(cliLineOf('m' + i, x.p, x.runSeed));
-      });
-      if (!lines.length) continue;
-      const r2 = run(lines);
-      if (r2.fail) { v.ghWarn('seedcap: overlap core ' + c.label + ' run failed ' + r2.fail + ' -- primary caps stand'); continue; }
-      mergeCaps(res.map, r2.map);
+  out.deferred = pendingIn.length - pending.length;
+  out.pending = pending;
+  if (!pending.length) return out;
+  const capsPrimary = { builds: cliSupportsBuilds(runPrimary) };
+  const res = runPrimary(pending.map((x, i) => cliLineOf('m' + i, x.p, x.runSeed, capsPrimary)));
+  if (res.fail) return Object.assign(out, { fail: 'CLI run failed ' + res.fail });
+  out.head = res.head;
+  // overlap cores: each answers only the groups it can read (capability probes per core); a failed overlap run
+  //   costs nothing but the extra headroom (the primary verdicts stand)
+  for (const c of cores.slice(1)) {
+    const run = runOf(c.exe);
+    const okRr = cliSupportsRerolls(run), okBuild = cliSupportsBuild(run), okCl = cliSupportsClassic(run), caps = { builds: cliSupportsBuilds(run) };
+    const lines = [];
+    pending.forEach((x, i) => {
+      if (!okRr && x.p && (x.p.rerollLo || x.p.rerollHi)) return;
+      if (!okBuild && x.p && x.p.build) return;
+      if (!okCl && x.p && x.p.classic) return;
+      lines.push(cliLineOf('m' + i, x.p, x.runSeed, caps));
+    });
+    if (!lines.length) continue;
+    const r2 = run(lines);
+    if (r2.fail) { v.ghWarn('seedcap: overlap core ' + c.label + ' run failed ' + r2.fail + ' -- primary caps stand'); continue; }
+    mergeCaps(res.map, r2.map);
+  }
+  // exact core by keyId (solo records): grouped per core exe; a core that cannot read a field skips that line (primary verdict stands)
+  const exactOf = new Map();
+  pending.forEach((x, i) => {
+    if (!(x.keyId > 0) || !live || !channel) return;
+    const c = coreForBuildNum(live, channel, x.keyId);
+    if (!c || c === cores[0].label) return;
+    const exe = corePathOf(distDir, c);
+    if (!fs.existsSync(exe)) return;
+    if (!exactOf.has(exe)) exactOf.set(exe, { label: c, idx: [] });
+    exactOf.get(exe).idx.push(i);
+  });
+  for (const [exe, ex] of exactOf) {
+    const run = runOf(exe);
+    const okRr = cliSupportsRerolls(run), okBuild = cliSupportsBuild(run), okCl = cliSupportsClassic(run), caps = { builds: cliSupportsBuilds(run) };
+    const lines = [];
+    for (const i of ex.idx) {
+      const x = pending[i];
+      if (!okRr && x.p && (x.p.rerollLo || x.p.rerollHi)) continue;
+      if (!okBuild && x.p && x.p.build) continue;
+      if (!okCl && x.p && x.p.classic) continue;
+      lines.push(cliLineOf('m' + i, x.p, x.runSeed, caps));
     }
-    console.log('seedcap: ' + res.head + ' auditing ' + pending.length + ' groups');
-    stats = applyAudit(st, pending, res.map, processed, nowMin());
+    if (!lines.length) continue;
+    const r3 = run(lines);
+    if (r3.fail) { v.ghWarn('seedcap: exact core ' + ex.label + ' run failed ' + r3.fail + ' -- window caps stand'); continue; }
+    for (const k of Object.keys(r3.map)) { if (r3.map[k] && r3.map[k].cap != null) { res.map[k] = Object.assign({}, r3.map[k], { via: 'exact:' + ex.label }); out.exact++; } }
+  }
+  out.map = res.map;
+  return out;
+}
+
+async function main() {
+  if (!KEY || !APPID || !PREFIX) { console.log('::error::seedcap: STEAM_PUBLISHER_KEY/APPID/LB_PREFIX unset'); process.exit(1); }
+  if (!fs.existsSync(SEEDCAP_CLI)) { console.log('::error::seedcap: CLI missing at ' + SEEDCAP_CLI); process.exit(1); }   // root copy = the fallback for every selection miss
+  const st = loadState();
+  st.audited = st.audited || {};
+  st.chain = st.chain || {};
+  st.suspects = st.suspects || {};
+  st.veto = st.veto || {};
+  st.corrections = st.corrections || [];
+  const processed = new Set(loadJsonArr(PROCESSED_FILE));
+  const signals = loadJsonObj(SIGNALS_FILE);
+  const applied = new Set((signals && signals.seedcapApplied) || []);
+
+  const rg = await readGroups();
+  if (rg.fail) { console.log('::error::seedcap: ' + rg.fail); process.exit(1); }
+  const groups = rg.groups;
+
+  // versioned cores: which compiled world(s) answer this run (root CLI when the artifact repo has no live.json yet)
+  const cf = coresForNow(SEEDCAP_DIST_DIR, SEEDCAP_CHANNEL, Date.now());
+  const cores = cf.cores, sel = cf.sel;
+  console.log('seedcap: cores channel=' + (SEEDCAP_CHANNEL || '-') + ' primary=' + cores[0].label +
+    (cores.length > 1 ? ' overlap=' + cores.slice(1).map(c => c.label).join(',') : '') + ' (' + sel.why + ')');
+
+  const picked = takeSkips(st, pickAuditable(st, groups), nowMin());
+  let stats = { over: 0, okN: 0, errN: 0, flags: [] };
+  let audited = { pending: [], map: {}, deferred: 0, exact: 0, head: '' };
+  if (picked.pending.length) {
+    audited = auditPending(picked.pending, { cores, live: cf.live, channel: SEEDCAP_CHANNEL, distDir: SEEDCAP_DIST_DIR });
+    if (audited.fail) { console.log('::error::seedcap: ' + audited.fail); process.exit(1); }
+    if (audited.pending.length) {
+      console.log('seedcap: ' + audited.head + ' auditing ' + audited.pending.length + ' groups' + (audited.exact ? ' (' + audited.exact + ' solo records on the core of the package that signed them)' : ''));
+      stats = applyAudit(st, audited.pending, audited.map, processed, nowMin());
+    }
   }
   if (stats.flags && stats.flags.length) await writeOffense(st, stats.flags);
   const md = mailDecision(stats.over, Object.keys(st.suspects).length, st.mailSus | 0);
@@ -569,12 +725,12 @@ async function main() {
   }
   pruneState(st, applied, nowMin());
   saveState(st);
-  console.log('seedcap: done groups=' + Object.keys(groups).length + ' audited-now=' + pending.length +
+  console.log('seedcap: done groups=' + Object.keys(groups).length + ' audited-now=' + audited.pending.length + ' skipped=' + picked.skipped.length + ' deferred=' + audited.deferred +
     ' ok=' + stats.okN + ' over=' + stats.over + ' err=' + stats.errN + ' veto=' + Object.keys(st.veto).length +
     ' suspects=' + Object.keys(st.suspects).length + ' corrections=' + st.corrections.length);
 }
 
-module.exports = { selectCores, resolveCores, mergeCaps, corePathOf, OVERLAP_GRACE_MS, OVERLAP_MAX_MS, cliSupportsRerolls, cliSupportsClassic, capParamsOf, cliLineOf, cliSupportsBuild, PROBE_BUILD, chainStartBank, selfSeatsOf, pickAuditable, applyAudit, pruneState, runCli, loadState, saveState, SC_STATE_FILE, AUDITED_KEEP, VETO_KEEP_MIN, offensePlanOf, writeOffense, mailDecision, sendAlertMail, alertMailText, rejectWindowsOf, OFFENSE_LB, OFFENSE_MAGIC, SC_MAIL_MIN_OVER, SC_MAIL_SUS_MIN };
+module.exports = { selectCores, resolveCores, mergeCaps, corePathOf, OVERLAP_GRACE_MS, OVERLAP_MAX_MS, cliSupportsRerolls, cliSupportsClassic, cliSupportsBuilds, capParamsOf, cliLineOf, cliSupportsBuild, chainKey, chainStartBank, tailOf, coreForBuildNum, selfSeatsOf, pickAuditable, takeSkips, applyAudit, pruneState, readGroups, coresForNow, auditPending, runCli, loadState, saveState, SC_STATE_FILE, AUDITED_KEEP, VETO_KEEP_MIN, CHAIN_LEGACY_KEEP_MIN, CHAIN_KEEP_MIN, offensePlanOf, writeOffense, mailDecision, sendAlertMail, alertMailText, rejectWindowsOf, OFFENSE_LB, OFFENSE_MAGIC, SC_MAIL_MIN_OVER, SC_MAIL_SUS_MIN };
 if (require.main === module) {
   main().catch(e => { console.log('::error::seedcap run failed: ' + (e && e.stack || e)); process.exit(1); });
 }

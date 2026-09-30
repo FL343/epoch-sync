@@ -101,8 +101,11 @@ const live = { v: 1, channels: {
   ok('seedcap.yml: every job hands the artifact directory over', clis === 3 && dists === 3, clis + '/' + dists);
   const src = fs.readFileSync(path.join(__dirname, '..', 'seedcap.js'), 'utf8');
   ok('main(): root CLI existence stays the hard precondition (fallback for every selection miss)', /if \(!fs\.existsSync\(SEEDCAP_CLI\)\)/.test(src));
-  ok('main(): capability probes run against the primary core', /cliSupportsRerolls\(runPrimary\)/.test(src) && /cliSupportsBuild\(runPrimary\)/.test(src) && /cliSupportsClassic\(runPrimary\)/.test(src));
-  ok('main(): overlap cores probe their own capabilities before being asked', /const okRr = cliSupportsRerolls\(run\), okBuild = cliSupportsBuild\(run\), okCl = cliSupportsClassic\(run\);/.test(src));
+  ok('auditPending(): capability probes run against the primary core', /cliSupportsRerolls\(runPrimary\)/.test(src) && /cliSupportsBuild\(runPrimary\)/.test(src) && /cliSupportsClassic\(runPrimary\)/.test(src) && /const capsPrimary = \{ builds: cliSupportsBuilds\(runPrimary\) \};/.test(src));
+  ok('auditPending(): overlap + exact cores probe their own capabilities before being asked', (src.match(/const okRr = cliSupportsRerolls\(run\), okBuild = cliSupportsBuild\(run\), okCl = cliSupportsClassic\(run\), caps = \{ builds: cliSupportsBuilds\(run\) \};/g) || []).length === 2);
+  ok('main(): cores come from coresForNow (live.json window) and the audit routine is the shared auditPending', /const cf = coresForNow\(SEEDCAP_DIST_DIR, SEEDCAP_CHANNEL, Date\.now\(\)\);/.test(src) && /function auditPending\(pendingIn, ctx\)/.test(src));
+  // knife 3.5c2a-A: a solo record's signing package (keyId = buildNum) -> that window's core, exactly (no overlap max)
+  ok('coreForBuildNum: buildNum -> window core (playtest 2026092101 -> bbbb…); unknown -> null', sc.coreForBuildNum(live, 'playtest', 2026092101) === 'bbbbbbbbbbbb' && sc.coreForBuildNum(live, 'playtest', 2026090703) === 'aaaaaaaaaaaa' && sc.coreForBuildNum(live, 'playtest', 999) === null && sc.coreForBuildNum(live, 'ea', 1) === null);
 }
 
 console.log('seedcap-cores: ' + pass + ' ok' + (fail ? ', ' + fail + ' FAIL' : ''));

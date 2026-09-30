@@ -128,6 +128,24 @@ function verifySoloRecord(d, pubTable) {
   return { ok: false, reason: 'bad-sig', fields };
 }
 
+// Layout-aware endless tail of a guard-signed SOLO record (knife 3.5c2a-A, 2026-09-30; O289): the seedcap audit used to read a
+//   pc=1 record through validate.endlessTail (team layout: 11 + 3*pc = @14..) -- whose 7th..11th ints (build / pick log / reroll
+//   bitmap @20..@24) are the solo layout's keyId / attVer / jwtHash / opHash words. Pure decode, NO signature check (the settle lane
+//   verifies; the cap only needs the fields), NO pending/soft states: null when the ints are not a solo record at all.
+//   Returns the same field names validate.endlessTail returns (+ keyId / attVer), so the two tails are interchangeable downstream.
+function soloTail(d) {
+  if (!Array.isArray(d) || d.length < BASE_LEN_V3) return null;
+  if ((d[0] & 0xff) !== LEDGER_MAGIC || d[1] !== LEDGER_VER || d[2] !== MT_ENDLESS || d[8] !== 1) return null;
+  const attVer = d[21] & 0xff;
+  const v4 = attVer >= 4, v5 = attVer >= 5;
+  return {
+    startDepth: d[14] | 0, endDepth: d[15] | 0, continuesUsed: d[16] | 0, tokensCp: d[17] | 0, seasonId: d[18] | 0, flags: d[19] | 0,
+    build: (v4 && d.length > 25) ? (d[25] >>> 0) : 0, picksLo: (v4 && d.length > 26) ? (d[26] | 0) : 0, picksHi: (v4 && d.length > 27) ? (d[27] | 0) : 0,
+    rerollLo: (v5 && d.length > 28) ? (d[28] | 0) : 0, rerollHi: (v5 && d.length > 29) ? (d[29] | 0) : 0,
+    keyId: d[20] | 0, attVer,
+  };
+}
+
 // Production gate for the solo board: a sealed (shipped) build key is required, AND the record
 //   must belong to the account that wrote the row.
 //   - opts.owner: the leaderboard ROW OWNER's raw steamId (Steam-authenticated). REQUIRED when
@@ -281,7 +299,7 @@ module.exports = {
   // C
   SB_MAGIC, SB_VER, SB_CONSUMED, saveBoxHead,
   SEG_SUSPENDED, SEG_FINAL, SEG_RESUMED, SEG_COMP, SEG_CASUAL, SEG_CLASSIC, DISP_FINISHED, DISP_USER_QUIT,
-  verifySoloRecord, soloSettleGate, toBytes, loadPubTable,
+  verifySoloRecord, soloSettleGate, soloTail, toBytes, loadPubTable,
   // B
   CONFESS_MAGIC, CONFESS_VER, CONFESS_MAX_SEATS,
   decodeUnmatched, reconcileUnmatched, pruneUnmatchedState,

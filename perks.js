@@ -66,4 +66,37 @@ function verifyPerkPicks(f, run, pc) {
   return { ok: true, n, build };
 }
 
-module.exports = { PERKS_CFG, VENDOR_DIR, VENDOR_FILES, load, modeOf, isPrefix, verifyPerkPicks };
+// Build in effect at the START of a level after `depth` passed levels (knife 3.5c2a-A, 2026-09-30; seedcap segment-start build):
+//   replay of the first m = min(n, floor(depth / DRAW_EVERY)) picks of the SAME log through the SAME P.replay verifyPerkPicks uses
+//   (candidate rule changes -- knife 5.10a season variants -- reach both callers at once). The record tail's build word is the build at
+//   the END of the record; a segment [sd, ed] earns its levels with the build after the draw at depth sd (and, for a session-level
+//   record, one per draw: buildsOf). A log that does not replay is the reconcile's perk_forge -> { ok: false } (caller steps aside).
+function buildAt(f, depth, pc) {
+  const P = load();
+  const lo = (f && f.picksLo) | 0, hi = (f && f.picksHi) | 0;
+  const arr = P.unpackPicks(lo, hi);
+  const n = P.picksCount(arr);
+  if (n < 0) return { ok: false, reason: 'perk_forge', why: 'picks-shape' };
+  const m = Math.min(n, P.maxDrawsByDepth(depth | 0));
+  const cut = arr.slice(0, m);
+  while (cut.length < 20) cut.push(0);
+  const r = P.replay(P.seasonSeed(f.seasonId | 0), cut, depth | 0, { mode: modeOf(pc), seasonId: f.seasonId | 0 });
+  if (!r.ok) return { ok: false, reason: 'perk_forge', why: String(r.why) + (r.at != null ? '@' + r.at : '') };
+  return { ok: true, build: r.build >>> 0, n: m, total: n };
+}
+// Per-draw build list b_k (k = 1..n; the build after draw k = at depth k * DRAW_EVERY) for a session-level record -> seedcap CLI builds= token
+function buildsOf(f, pc) {
+  const P = load();
+  const arr = P.unpackPicks((f && f.picksLo) | 0, (f && f.picksHi) | 0);
+  const n = P.picksCount(arr);
+  if (n < 0) return { ok: false, reason: 'perk_forge', why: 'picks-shape' };
+  const builds = [];
+  for (let k = 1; k <= n; k++) {
+    const r = buildAt(f, k * P.drawEvery(), pc);
+    if (!r.ok) return r;
+    builds.push(r.build);
+  }
+  return { ok: true, builds, n };
+}
+
+module.exports = { PERKS_CFG, VENDOR_DIR, VENDOR_FILES, load, modeOf, isPrefix, verifyPerkPicks, buildAt, buildsOf };

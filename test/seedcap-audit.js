@@ -29,7 +29,27 @@ function mkRec(mt, seed, pc, scores, roster, tail, wr) {
   for (let i = 0; i < pc; i++) d.push(scores[i] | 0);
   d.push(0);   // disp
   for (let i = 0; i < pc; i++) { const si = sidInts(roster[i] || '0'); d.push(si[0], si[1]); }
-  if (tail) d.push(tail.startDepth | 0, tail.endDepth | 0, 0, 0);
+  if (tail) {
+    d.push(tail.startDepth | 0, tail.endDepth | 0, 0, 0);
+    // knife 3.5c2a-A: optional extended team tail (season / flags / build / pick log / reroll bitmap) in record order
+    if (tail.seasonId != null || tail.flags != null || tail.build != null || tail.picksLo != null) {
+      d.push(tail.seasonId == null ? 0 : (tail.seasonId | 0), tail.flags | 0);
+      if (tail.build != null || tail.picksLo != null) d.push(tail.build >>> 0, tail.picksLo | 0, tail.picksHi | 0, tail.rerollLo | 0, tail.rerollHi | 0);
+    }
+  }
+  const r = { d, roster: v.decodeRoster(d) };
+  if (wr) r.w = String(wr.w);
+  return r;
+}
+// guard-signed SOLO record (attest layout attVer 5, BASE_LEN 30 + 16 sig ints): the tail sits at fixed offsets (@14..@19), keyId @20,
+//   attVer @21, build @25, pick log @26/@27, reroll bitmap @28/@29 -- the ints the team-shaped read would misinterpret (O289)
+function mkSolo(seed, score, sid, t, wr) {
+  const d = new Array(46).fill(0);
+  d[0] = 0xB1; d[1] = 3; d[2] = 7; d[3] = 4321; d[4] = seed | 0; d[5] = 0; d[6] = 1; d[7] = 0; d[8] = 1; d[9] = 300; d[10] = score | 0; d[11] = 0;
+  const si = sidInts(sid); d[12] = si[0]; d[13] = si[1];
+  d[14] = t.startDepth | 0; d[15] = t.endDepth | 0; d[16] = t.continuesUsed | 0; d[17] = t.tokensCp | 0; d[18] = t.seasonId | 0; d[19] = t.flags | 0;
+  d[20] = t.keyId | 0; d[21] = 5; d[22] = 7; d[23] = 11; d[24] = 13;
+  d[25] = t.build >>> 0; d[26] = t.picksLo | 0; d[27] = t.picksHi | 0; d[28] = t.rerollLo | 0; d[29] = t.rerollHi | 0;
   const r = { d, roster: v.decodeRoster(d) };
   if (wr) r.w = String(wr.w);
   return r;
@@ -84,14 +104,16 @@ const SIDA = '76561198000000001', SIDB = '76561198000000002', SIDX = '7656119800
   ok('[2] endless line legacy tail + build -> explicit -1 season sentinel keeps the field positional', sc.cliLineOf('t', { entry: 'endless', pc: 2, startDepth: 0, endDepth: 9, startBank: 0, seasonId: -1, build: 5 }, 42) ===
     'E t 42 2 0 9 0 -1 5');
   ok('[2] build 0 leaves the line untouched', sc.cliLineOf('t', { entry: 'endless', pc: 2, startDepth: 0, endDepth: 9, startBank: 0, seasonId: 1, build: 0 }, 42) === 'E t 42 2 0 9 0 1');
-  ok('[2] capParamsOf carries the tail build (absent -> 0)',
-    sc.capParamsOf(7, 1, { startDepth: 0, endDepth: 9, seasonId: 2, build: 386 }).build === 386 && sc.capParamsOf(7, 2, { startDepth: 0, endDepth: 9, seasonId: 2 }).build === 0);
+  // knife 3.5c2a-A: p.build = the replayed SEGMENT-START build (a build word without a pick log cannot replay = 0 -- an honest record
+  //   always carries the log; the end-of-record word is kept as buildEnd for cores without the builds= token); absent -> 0 / 0
+  ok('[2] capParamsOf: build word without a pick log -> start build 0, buildEnd keeps the word; absent -> 0',
+    (() => { const a = sc.capParamsOf(7, 1, { startDepth: 0, endDepth: 9, seasonId: 2, build: 386 }), b = sc.capParamsOf(7, 2, { startDepth: 0, endDepth: 9, seasonId: 2 }); return a.build === 0 && a.buildEnd === 386 && b.build === 0 && b.buildEnd === 0; })());
   // classic (nostalgia) segments (2026-09-30): SEG_CLASSIC in the flags word -> classic world; build / bitmap forced to 0
   //   (a classic run has neither by rule, and the signed solo record keeps other words at those tail offsets)
   const pcl = sc.capParamsOf(7, 1, { startDepth: 0, endDepth: 3, seasonId: 0, flags: 32 | 2, build: 2026092701, rerollLo: 123, rerollHi: 456 });
   ok('[2] classic flags -> classic world, garbage build / bitmap words dropped', pcl.classic === true && pcl.build === 0 && pcl.rerollLo === 0 && pcl.rerollHi === 0);
   const pmod = sc.capParamsOf(7, 2, { startDepth: 0, endDepth: 9, seasonId: 1, flags: 8, build: 386, rerollLo: 5, rerollHi: 0 });
-  ok('[2] non-classic flags leave build / bitmap untouched', pmod.classic === false && pmod.build === 386 && pmod.rerollLo === 5);
+  ok('[2] non-classic flags leave the build word (buildEnd) / bitmap untouched', pmod.classic === false && pmod.buildEnd === 386 && pmod.rerollLo === 5);
   ok('[2] classic line = explicit sentinels then 1 (11th field)', sc.cliLineOf('t', Object.assign({}, pcl, { startBank: 0 }), 42) === 'E t 42 1 0 3 0 0 0 0 0 1');
   ok('[2] classic line on a legacy tail keeps the -1 season sentinel', sc.cliLineOf('t', { entry: 'endless', pc: 2, startDepth: 5, endDepth: 6, startBank: 7, seasonId: -1, classic: true }, 42) === 'E t 42 2 5 6 7 -1 0 0 0 1');
   ok('[2] classic capability probe', sc.cliSupportsClassic(() => ({ map: { p0: { v: 'build=1 rerolls=1 classic=1' } } })) === true &&
@@ -99,17 +121,15 @@ const SIDA = '76561198000000001', SIDB = '76561198000000002', SIDX = '7656119800
   const scsrc = fs.readFileSync(path.join(__dirname, '..', 'seedcap.js'), 'utf8');
   ok('[2] classic groups deferred when the primary CLI cannot read the flag', /x\.p\.classic\) && !cliSupportsClassic\(runPrimary\)/.test(scsrc));
   ok('[2] overlap cores skip classic lines they cannot read', /if \(!okCl && x\.p && x\.p\.classic\) return;/.test(scsrc));
-  // CLI build-support probe: the clear-bonus perk must move the cap; an older CLI (field ignored) returns equal caps -> unsupported
-  ok('[2] PROBE_BUILD = perk id 2 lv 3 in slot 0 (386)', sc.PROBE_BUILD === 386);
-  ok('[2] cliSupportsBuild: cap rises -> true', sc.cliSupportsBuild(() => ({ map: { p0: { cap: 1000 }, p1: { cap: 1500 } }, head: 'x' })) === true);
-  ok('[2] cliSupportsBuild: equal caps (field ignored) -> false', sc.cliSupportsBuild(() => ({ map: { p0: { cap: 1000 }, p1: { cap: 1000 } }, head: 'x' })) === false);
-  ok('[2] cliSupportsBuild: CLI failure / ERR line -> false (defer, never audit with the wrong cap)',
-    sc.cliSupportsBuild(() => ({ fail: 'exit=1' })) === false && sc.cliSupportsBuild(() => ({ map: { p0: { cap: 1000 }, p1: { err: 'bad' } }, head: 'x' })) === false);
-  ok('[2] probe lines: same board, season 0, build only on p1', (() => {
-    let seen = null; sc.cliSupportsBuild((lines) => { seen = lines; return { map: { p0: { cap: 1 }, p1: { cap: 2 } } }; });
-    return JSON.stringify(seen) === JSON.stringify(['E p0 12345 1 0 1 0 0', 'E p1 12345 1 0 1 0 0 386']);
-  })());
-  ok('[2] main defers build-carrying groups when the CLI ignores the field (source pin)',
+  // CLI build-support probe (knife 3.5c2a-A): the "V" answer's build=1 token, no cap-rise probe with a hard-coded perk word
+  //   (that probe pinned perk id 2's clear-bonus semantics; knife B changes it -> every perk run would have been deferred)
+  ok('[2] cliSupportsBuild: V answer build=1 -> true', sc.cliSupportsBuild(() => ({ map: { p0: { v: 'build=1 rerolls=1 classic=1 builds=1 absidx=1' } } })) === true);
+  ok('[2] cliSupportsBuild: V answer without build=1 / ERR / failure -> false (defer, never audit with the wrong cap)',
+    sc.cliSupportsBuild(() => ({ map: { p0: { v: 'rerolls=1' } } })) === false && sc.cliSupportsBuild(() => ({ fail: 'exit=1' })) === false && sc.cliSupportsBuild(() => ({ map: { p0: { err: 'bad-kind' } } })) === false);
+  ok('[2] probe line = V p0 (no cap probe)', (() => { let seen = null; sc.cliSupportsBuild((lines) => { seen = lines; return { map: { p0: { v: 'build=1' } } }; }); return JSON.stringify(seen) === JSON.stringify(['V p0']); })());
+  ok('[2] cliSupportsBuilds: V answer builds=1 (per-draw list token)', sc.cliSupportsBuilds(() => ({ map: { p0: { v: 'build=1 rerolls=1 classic=1 builds=1 absidx=1' } } })) === true && sc.cliSupportsBuilds(() => ({ map: { p0: { v: 'build=1 rerolls=1 classic=1' } } })) === false);
+  ok('[2] no PROBE_BUILD constant left (source + export)', sc.PROBE_BUILD === undefined && !/PROBE_BUILD/.test(require('fs').readFileSync(path.join(__dirname, '..', 'seedcap.js'), 'utf8')));
+  ok('[2] auditPending defers build-carrying groups when the CLI ignores the field (source pin)',
     // probes ride the selected primary core (versioned cores: test/seedcap-cores.js)
     /if \(pending\.some\(x => x\.p && x\.p\.build\) && !cliSupportsBuild\(runPrimary\)\)/.test(require('fs').readFileSync(path.join(__dirname, '..', 'seedcap.js'), 'utf8')));
 }
@@ -171,8 +191,9 @@ const SIDA = '76561198000000001', SIDB = '76561198000000002', SIDX = '7656119800
   ok('[5] over-cap -> veto with seats', st.veto.over1 && st.veto.over1.seats.join(',') === '1' && st.veto.eover.seats.join(',') === '0');
   ok('[5] suspect ledger by pid (over seat only)', !!st.suspects[v.pid(SIDB)] && st.suspects[v.pid(SIDB)].n === 1 && !st.suspects[v.pid(SIDA)] === false && st.suspects[v.pid(SIDA)].n === 1);
   ok('[5] correction queued ONLY for processed endless over-cap', st.corrections.length === 1 && st.corrections[0].m === 'eover' && st.corrections[0].seats.join(',') === '0');
-  ok('[5] honest endless extends both chains', st.chain[v.pid(SIDA) + ':2'] && st.chain[v.pid(SIDA) + ':2'].d === 8 && st.chain[v.pid(SIDB) + ':2'].cap === 40000);
-  ok('[5] over-cap endless does NOT extend chain', st.chain[v.pid(SIDA) + ':2'].d === 8);
+  ok('[5] honest endless extends both (self-written) chains under the per-run key pid:pc:runSeed', st.chain[sc.chainKey(v.pid(SIDA), 2, 4)] && st.chain[sc.chainKey(v.pid(SIDA), 2, 4)].d === 8 && st.chain[sc.chainKey(v.pid(SIDB), 2, 4)].cap === 40000 && st.chain[sc.chainKey(v.pid(SIDB), 2, 4)].t === 1000);
+  ok('[5] over-cap endless does NOT extend chain', st.chain[sc.chainKey(v.pid(SIDA), 2, 4)].d === 8 && !st.chain[sc.chainKey(v.pid(SIDA), 2, 5)]);
+  ok('[5] no legacy pid:pc key written any more', !st.chain[v.pid(SIDA) + ':2'] && !st.chain[v.pid(SIDB) + ':2']);
   ok('[5] ERR remembered fail-open (audited, no veto/suspect)', st.audited.err1 && st.audited.err1.e === 'bad-depths' && !st.veto.err1);
   ok('[5] all audited recorded', Object.keys(st.audited).length === 5);
   // idempotence: a re-run must not double-count (audited gate lives in pickAuditable)
@@ -345,6 +366,100 @@ const SIDA = '76561198000000001', SIDB = '76561198000000002', SIDX = '7656119800
   ok('[10] shard read carries the entry owner into every group record', /push\(\{ d, roster: v\.decodeRoster\(d\), w: String\(e\.steamID \|\| ''\) \}\)/.test(scsrc10));
 }
 
+
+// ---- [11] O289 (knife 3.5c2a-A): a guard-signed solo record is read through its own layout ----
+{
+  const t = { startDepth: 5, endDepth: 10, continuesUsed: 0, tokensCp: 0, seasonId: 2, flags: 2, keyId: 2026093001, build: 386, picksLo: 0, picksHi: 0, rerollLo: 5, rerollHi: 0 };
+  const r = mkSolo(99, 8000, SIDA, t, { w: SIDA });
+  const team = v.endlessTail(r.d), solo = sc.tailOf(r.d);
+  ok('[11] team-shaped read of a solo record takes keyId/attVer/opHash words as build/picks/bitmap (the bug)', team.build === 2026093001 && team.picksLo === 5 && team.rerollLo === 11);
+  ok('[11] tailOf(pc=1) = attest.soloTail: build/picks/bitmap from @25..@29, keyId @20, same first six fields', solo.build === 386 && solo.picksLo === 0 && solo.rerollLo === 5 && solo.rerollHi === 0 && solo.keyId === 2026093001 && solo.attVer === 5 &&
+    solo.startDepth === team.startDepth && solo.endDepth === team.endDepth && solo.seasonId === team.seasonId && solo.flags === team.flags);
+  ok('[11] tailOf(pc>=2) = the client team tail', sc.tailOf(mkRec(7, 9, 2, [1, 2], [SIDA, SIDB], { startDepth: 0, endDepth: 6 }).d).endDepth === 6);
+  ok('[11] a pc=1 record that is not a solo layout (magic/mt) falls back to the team read', (() => { const d = r.d.slice(); d[2] = 1; return sc.tailOf(d).startDepth === 5; })());
+  const st = { audited: {}, chain: {} };
+  const pend = sc.pickAuditable(st, { solo1: [r] });
+  ok('[11] pickAuditable: solo group carries keyId (exact core routing) + build from the solo layout', pend.length === 1 && pend[0].keyId === 2026093001 && pend[0].p.keyId === 2026093001 && pend[0].p.rerollLo === 5);
+  ok('[11] pickAuditable: pc>=2 groups carry keyId 0 (client-written)', sc.pickAuditable(st, { c: [mkRec(7, 9, 2, [1, 2], [SIDA, SIDB], { startDepth: 0, endDepth: 6 })] })[0].keyId === 0);
+}
+
+// ---- [12] segment-start build (knife 3.5c2a-A): the cap uses the build in effect at the segment start, replayed from the pick log ----
+{
+  const perks = require('../perks.js');
+  const P = perks.load();
+  // honest solo log over season 1: choose card 1 at every draw; n draws -> build after each draw
+  const honest = (season, n, mode) => {
+    const s = P.seasonSeed(season);
+    let build = 0, skipBank = 0, seen = 0;
+    const arr = P.emptyPicks();
+    const after = [];
+    for (let k = 0; k < n; k++) {
+      const cards = P.candidates(s, P.depthOfDraw(k), build, k, skipBank, { mode: mode || 'solo', contractsSeen: seen });
+      if (P.hasContract(cards)) seen++;
+      arr[k] = 1; build = P.applyPick(build, cards, 1); skipBank = 0; after.push(build >>> 0);
+    }
+    const pk = P.packPicks(arr);
+    return { build: build >>> 0, picksLo: pk.lo, picksHi: pk.hi, seasonId: season, after };
+  };
+  const h = honest(1, 2, 'solo');
+  const bA = perks.buildAt(Object.assign({ startDepth: 5 }, h), 5, 1), bB = perks.buildAt(Object.assign({}, h), 10, 1), b0 = perks.buildAt(Object.assign({}, h), 0, 1);
+  ok('[12] perks.buildAt: depth 0 -> 0 / depth 5 -> build after draw 1 / depth 10 -> build after draw 2 (== end build)', b0.ok && b0.build === 0 && bA.ok && bA.build === h.after[0] && bB.ok && bB.build === h.after[1] && bB.build === h.build && h.after[0] !== h.after[1]);
+  const p1 = sc.capParamsOf(7, 1, { startDepth: 5, endDepth: 10, seasonId: 1, flags: 2, build: h.build, picksLo: h.picksLo, picksHi: h.picksHi, rerollLo: 0, rerollHi: 0 });
+  ok('[12] solo segment [5,10]: p.build = SEGMENT-START build (after draw 1), not the end build; buildEnd keeps the end build; no per-draw list', p1.build === h.after[0] && p1.buildEnd === h.build && p1.builds === null && !p1.replayErr);
+  const hc = honest(1, 2, 'coop');
+  const p2 = sc.capParamsOf(7, 2, { startDepth: 0, endDepth: 12, seasonId: 1, flags: 0, build: hc.build, picksLo: hc.picksLo, picksHi: hc.picksHi });
+  ok('[12] co-op session record (pc 2, no COMP flag): builds = per-draw list [after draw 1, after draw 2], p.build = start build 0, buildEnd = end build', JSON.stringify(p2.builds) === JSON.stringify(hc.after) && p2.build === 0 && p2.buildEnd === hc.build);
+  const p3 = sc.capParamsOf(7, 2, { startDepth: 0, endDepth: 12, seasonId: 1, flags: 8, build: hc.build, picksLo: hc.picksLo, picksHi: hc.picksHi });
+  ok('[12] team COMPETITIVE segment (flags COMP): no per-draw list (segment lane, start build)', p3.builds === null && p3.build === 0);
+  const forged = sc.capParamsOf(7, 1, { startDepth: 5, endDepth: 10, seasonId: 1, flags: 2, build: h.build, picksLo: 4, picksHi: 0 });   // choice 4 without a skip bank = pick-4-nobank
+  ok('[12] a pick log that does not replay -> replayErr (perk_forge), no cap params trusted', /perk_forge/.test(String(forged.replayErr)));
+  const st = { audited: {}, chain: {} };
+  const rF = mkSolo(77, 100, SIDA, { startDepth: 5, endDepth: 10, seasonId: 1, flags: 2, keyId: 1, build: h.build, picksLo: 4, picksHi: 0 }, { w: SIDA });
+  const pend = sc.pickAuditable(st, { forged: [rF] });
+  ok('[12] pickAuditable marks the group skip (not capped)', pend.length === 1 && /^perk-replay:perk_forge/.test(pend[0].skip || ''));
+  const tk = sc.takeSkips(st, pend, 4242);
+  ok('[12] takeSkips: skipped group remembered as audited-with-error once (fail-open), removed from the list', tk.pending.length === 0 && tk.skipped.length === 1 && st.audited.forged && /perk-replay/.test(st.audited.forged.e) && st.audited.forged.t === 4242);
+  ok('[12] classic segments never replay (build / list forced 0 / null)', (() => { const pc = sc.capParamsOf(7, 1, { startDepth: 0, endDepth: 3, seasonId: 1, flags: 32, build: 386, picksLo: 4, picksHi: 0 }); return pc.classic === true && pc.build === 0 && pc.builds === null && !pc.replayErr; })());
+  ok('[12] no build / no picks -> build 0, no replay (legacy records untouched)', (() => { const pc = sc.capParamsOf(7, 2, { startDepth: 0, endDepth: 6, seasonId: -1 }); return pc.build === 0 && pc.builds === null && !pc.replayErr; })());
+}
+
+// ---- [13] chain per run (knife 3.5c2a-A): pid:pc:runSeed keys, self-written seats only, legacy fallback + pruning ----
+{
+  const A = v.pid(SIDA), B = v.pid(SIDB);
+  const st = { audited: {}, chain: {}, suspects: {}, veto: {}, corrections: [] };
+  st.chain[sc.chainKey(A, 2, 77)] = { d: 10, cap: 5000, t: 100 };
+  ok('[13] chainStartBank reads THIS run\'s chain', sc.chainStartBank(st, [A], 2, 10, 77) === 5000);
+  ok('[13] another run of the same account does not inherit it (static bound)', sc.chainStartBank(st, [A], 2, 10, 78) === Math.round(v.endlessGoalFor(10, 2) * v.ENDLESS.SCORE_MULT));
+  st.chain[A + ':2'] = { d: 10, cap: 9000 };   // legacy account-wide key (pre-knife audits)
+  ok('[13] legacy pid:pc key = transitional read-only fallback (only when this run has no chain of its own)', sc.chainStartBank(st, [A], 2, 10, 78) === 9000 && sc.chainStartBank(st, [A], 2, 10, 77) === 5000);
+  // applyAudit: only self-written seats extend; roster seat 1 (B) did not write -> no chain for B
+  const pend = [{ m: 'eok2', mt: 7, pc: 2, scores: [500, 600], p: { entry: 'endless' }, tail: { startDepth: 0, endDepth: 8 }, roster: { 0: SIDA, 1: SIDB }, self: [0], runSeed: 91 }];
+  sc.applyAudit(st, pend, { m0: { cap: 40000 } }, new Set(), 2000);
+  ok('[13] honest audit extends only the self-written seat\'s run chain', st.chain[sc.chainKey(A, 2, 91)] && st.chain[sc.chainKey(A, 2, 91)].d === 8 && !st.chain[sc.chainKey(B, 2, 91)]);
+  ok('[13] a forged deep record can only lift the chain of the run it forges (pid:pc key never written)', Object.keys(st.chain).filter(k => k.split(':').length === 2).length === 1);
+  // pruning: first run stamps chainLegacyT; after CHAIN_LEGACY_KEEP_MIN the legacy keys go; per-run entries expire after CHAIN_KEEP_MIN
+  sc.pruneState(st, new Set(), 3000);
+  ok('[13] prune: legacy keys kept on first sight, chainLegacyT stamped', st.chain[A + ':2'] && st.chainLegacyT === 3000);
+  sc.pruneState(st, new Set(), 3000 + sc.CHAIN_LEGACY_KEEP_MIN + 1);
+  ok('[13] prune: legacy keys gone after CHAIN_LEGACY_KEEP_MIN, per-run keys kept', !st.chain[A + ':2'] && !st.chainLegacyT && st.chain[sc.chainKey(A, 2, 91)]);
+  sc.pruneState(st, new Set(), 2000 + sc.CHAIN_KEEP_MIN + 1);
+  ok('[13] prune: per-run entries expire after CHAIN_KEEP_MIN (t stamped at write)', !st.chain[sc.chainKey(A, 2, 91)] && !st.chain[sc.chainKey(A, 2, 77)]);
+}
+
+// ---- [14] CLI line builds= token + exact core by keyId (knife 3.5c2a-A) ----
+{
+  const p = { entry: 'endless', pc: 2, startDepth: 0, endDepth: 22, startBank: 0, seasonId: 1, build: 0, builds: [7, 9], buildEnd: 9 };
+  ok('[14] core reads builds= -> positional start build + per-draw list token', sc.cliLineOf('t', p, 42, { builds: true }) === 'E t 42 2 0 22 0 1 builds=7,9');
+  ok('[14] core without builds= -> END-of-record build in the positional field (pre-knife line, no regression)', sc.cliLineOf('t', p, 42, { builds: false }) === 'E t 42 2 0 22 0 1 9' && sc.cliLineOf('t', p, 42) === 'E t 42 2 0 22 0 1 9');
+  ok('[14] segment record (no list): positional start build as before', sc.cliLineOf('t', { entry: 'endless', pc: 1, startDepth: 5, endDepth: 10, startBank: 100, seasonId: 1, build: 386, builds: null, buildEnd: 999 }, 42, { builds: true }) === 'E t 42 1 5 10 100 1 386');
+  ok('[14] classic line unchanged (sentinels then 1; list never present)', sc.cliLineOf('t', { entry: 'endless', pc: 1, startDepth: 0, endDepth: 3, startBank: 0, seasonId: 0, build: 0, builds: null, classic: true }, 42, { builds: true }) === 'E t 42 1 0 3 0 0 0 0 0 1');
+  const live = { v: 1, channels: { demo: [ { buildNum: 2026090703, core: 'aaaaaaaaaaaa', liveAt: '2026-09-07T00:00:00.000Z', gateAt: null }, { buildNum: 2026093001, core: 'bbbbbbbbbbbb', liveAt: '2026-09-29T17:29:39.201Z', gateAt: null }, { buildNum: 2026070100, core: null, liveAt: '2026-07-01T00:00:00.000Z', gateAt: null } ] } };
+  ok('[14] coreForBuildNum: registered package -> its core; unknown / pre-core package -> null', sc.coreForBuildNum(live, 'demo', 2026093001) === 'bbbbbbbbbbbb' && sc.coreForBuildNum(live, 'demo', 2026090703) === 'aaaaaaaaaaaa' && sc.coreForBuildNum(live, 'demo', 2026070100) === null && sc.coreForBuildNum(live, 'demo', 1) === null && sc.coreForBuildNum(live, 'nope', 2026093001) === null && sc.coreForBuildNum(null, 'demo', 2026093001) === null);
+  const src = require('fs').readFileSync(path.join(__dirname, '..', 'seedcap.js'), 'utf8');
+  ok('[14] auditPending routes solo records to the core of the package that signed them (keyId -> live window -> disk), exact verdict replaces window/overlap', /const c = coreForBuildNum\(live, channel, x\.keyId\);/.test(src) && /res\.map\[k\] = Object\.assign\(\{\}, r3\.map\[k\], \{ via: 'exact:' \+ ex\.label \}\)/.test(src) && /if \(!\(x\.keyId > 0\) \|\| !live \|\| !channel\) return;/.test(src));
+  ok('[14] main(): readGroups -> takeSkips(pickAuditable) -> auditPending -> applyAudit (shared with tools/seedcap-reaudit.js)', /const picked = takeSkips\(st, pickAuditable\(st, groups\), nowMin\(\)\);/.test(src) && /audited = auditPending\(picked\.pending, \{ cores, live: cf\.live, channel: SEEDCAP_CHANNEL, distDir: SEEDCAP_DIST_DIR \}\);/.test(src) && /stats = applyAudit\(st, audited\.pending, audited\.map, processed, nowMin\(\)\);/.test(src));
+  ok('[14] reaudit tool exists, is read-only (no saveState / writeOffense / sendAlertMail) and shares the audit routine', (() => { let t = ''; try { t = require('fs').readFileSync(path.join(__dirname, '..', 'tools', 'seedcap-reaudit.js'), 'utf8'); } catch (e) { return false; } return /sc\.readGroups\(\)/.test(t) && /sc\.auditPending\(/.test(t) && /sc\.applyAudit\(/.test(t) && !/saveState\(/.test(t) && !/writeOffense\(/.test(t) && !/sendAlertMail\(/.test(t); })());
+}
 try { fs.unlinkSync(process.env.SC_STATE_FILE); } catch (e) {}
 console.log(fail ? '\n[seedcap-audit] FAIL ' + fail + ' (pass ' + pass + ')' : '\n[seedcap-audit] all green (' + pass + ')');
 process.exit(fail ? 1 : 0);

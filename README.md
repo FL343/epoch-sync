@@ -98,6 +98,17 @@ absent, so a run is unaffected before it is provisioned.
   (a flagged account's OWN settlement is discarded inside a bounded reject window that
   starts at its latest conviction — 24h / 3 d / 7 d / 14 d cap by conviction count, never
   permanent; the other seats settle normally and the window clears on its own).
+  Read-side rules (2026-09-30): a guard-signed solo record is decoded through its own int layout
+  (`attest.soloTail`); the build that caps a segment is the segment-START build replayed from the
+  pick log (`perks.buildAt`, the same replay as the perk_forge check), a session-level co-op record
+  hands the per-draw list to the CLI (`builds=` token, capability-probed); the endless chain memory
+  is per run (`pid:pc:runSeed`) and only a self-written seat extends it; a solo record's signing
+  package (keyId = buildNum) selects that package's registered core exactly.
+- `tools/seedcap-reaudit.js` — READ-ONLY re-audit of the live shards through the same functions the
+  seedcap job runs, on a scratch state (never saves, never writes a board, never mails). Run it with
+  the job's environment before pushing any seedcap rule change or a new compiled core
+  (`--cli=<new exe> --old-cli=<current core>` compares the caps); it exits 1 when any honest-looking
+  group ends up over cap.
 - `campaign-endless.js` — the single-player campaign endless (Gold Rush) lane: the guard
   sidecar signs one run record per attempt into a client-writable box board per difficulty;
   the reconcile verifies the signature against the sealed key table, binds the record to the

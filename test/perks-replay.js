@@ -167,5 +167,23 @@ console.log('== perk_chain (run memory) ==');
   assert('no memory (first segment / casual) -> chain rule not applied', perks.verifyPerkPicks(Object.assign({ endDepth: 15 }, other), null, 1).ok === true);
 }
 
+
+console.log('== segment-start build / per-draw list (knife 3.5c2a-A, seedcap) ==');
+{
+  const h1 = honest(1, 1), h2 = honest(1, 2), h3 = honest(1, 3);
+  const f = Object.assign({}, h3);
+  const at = (d) => perks.buildAt(f, d, 1);
+  assert('buildAt(depth 0) = 0 (no draw yet)', at(0).ok && at(0).build === 0 && at(0).n === 0);
+  eq('buildAt(depth 5) = build after draw 1', at(5).build, h1.build);
+  eq('buildAt(depth 7) = still after draw 1 (draws only at multiples of DRAW_EVERY)', at(7).build, h1.build);
+  eq('buildAt(depth 10) = build after draw 2', at(10).build, h2.build);
+  eq('buildAt(depth 15) = end build (== verifyPerkPicks build)', at(15).build, h3.build);
+  eq('buildAt(depth 40) = end build (log exhausted)', at(40).build, h3.build);
+  eq('buildsOf = [after 1, after 2, after 3]', perks.buildsOf(f, 1).builds, [h1.build, h2.build, h3.build]);
+  assert('buildAt agrees with verifyPerkPicks at the end depth (same P.replay)', perks.verifyPerkPicks(Object.assign({ endDepth: 15 }, f), null, 1).build === at(15).build);
+  assert('forged log (pick 4 without skip bank) -> perk_forge at every depth', !perks.buildAt({ picksLo: 4, picksHi: 0, seasonId: 1 }, 5, 1).ok && perks.buildAt({ picksLo: 4, picksHi: 0, seasonId: 1 }, 5, 1).reason === 'perk_forge' && !perks.buildsOf({ picksLo: 4, picksHi: 0, seasonId: 1 }, 1).ok);
+  assert('malformed log (gap) -> picks-shape', perks.buildAt({ picksLo: (1 << 6) | 0, picksHi: 0, seasonId: 1 }, 10, 1).why === 'picks-shape');
+  assert('co-op mode replays the co-op pool (mode by pc)', (() => { const c2 = honest(1, 2, null, 'coop'); return perks.buildAt(Object.assign({}, c2), 10, 2).build === c2.build; })());
+}
 console.log('=== ' + (failN === 0 ? 'PASS' : 'FAIL') + ' -- ' + failN + ' fail (perks-replay) ===');
 if (failN) process.exit(1);
