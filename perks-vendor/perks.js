@@ -1,7 +1,7 @@
 // generated file: comments stripped from the client-side source; regenerate with the companion repo's scripts/gen-perks-vendor.js (byte-locked there)
 window.PERKS = (() => {
   const FALLBACK = { SLOTS: 3, MAX_DRAWS: 20, DRAW_EVERY: 5, GATE_EVERY: 10, PICK_TIMEOUT_S: 20, PITY_EVERY: 3,
-    CONTRACT_MAX: 2, CONTRACT_MIN_DRAW: 3, CONTRACT_P_MILLI: 350, TIME_ADD_MIN: -30, VALUE_MUL_CAP: 1.6, CLASS_MUL_CAP: 25, TABLE_VER: 1 };
+    CONTRACT_MAX: 2, CONTRACT_MIN_DRAW: 3, CONTRACT_P_MILLI: 350, TIME_ADD_MIN: -20, VALUE_MUL_CAP: 1.9, CLASS_MUL_CAP: 20, TABLE_VER: 1 };
   function cfg() {
     const R = window.RANKED_CONFIG;
     return (R && R.ENDLESS && R.ENDLESS.PERKS) || FALLBACK;
@@ -9,12 +9,14 @@ window.PERKS = (() => {
   function cfgNum(key) { const v = cfg()[key]; return (typeof v === 'number') ? v : FALLBACK[key]; }
   const PERK_SALT = 0x9E4B;
   const SEASON_SALT = 0x5EA5;
-  const CLS_KEYS = ['gold', 'rock', 'bone', 'gem', 'cursed', 'creature', 'other'];
+  const CLS_KEYS = ['gold', 'rock', 'bone', 'gem', 'cursed', 'creature', 'other', 'relic'];
   const CLS = {}; CLS_KEYS.forEach((k, i) => { CLS[k] = i; });
+  const CLASS_TOTAL_CAP = { gold: 1.5, rock: 6, bone: 40, gem: 3 };
+  const CURSED_FLIP_MIN = -1;
   const ITEM_CLS = {
     goldSmall: 'gold', goldMid: 'gold', goldLarge: 'gold', goldHuge: 'gold',
     rockSmall: 'rock', rockLarge: 'rock',
-    bone: 'bone', skull: 'bone', boneAncient: 'bone', skullAncient: 'bone',
+    bone: 'bone', skull: 'bone', boneAncient: 'relic', skullAncient: 'relic',
     diamond: 'gem', gemTurquoise: 'gem', pearl: 'gem', opal: 'gem',
     cursedSkull: 'cursed',
     mysteryBag: 'other', doomBag: 'other', tntPickup: 'other', tntShard: 'other', freezeBox: 'other', slotCoin: 'other',
@@ -33,7 +35,7 @@ window.PERKS = (() => {
   const FLAG_KEYS = ['clover'];
   const SUB_KEYS = { combo: ['every', 'mul'], emptyReturn: ['amt', 'cap'], midas: ['n', 'value'], drill: ['lv'] };
   const ONE_PER_TABLE = ['combo', 'emptyReturn', 'midas', 'drill'];
-  const RENDER_ONLY = ['hookSpeedMul', 'pullSpeedMul', 'freezeDurMul', 'highlight', 'laser'];
+  const RENDER_ONLY = ['hookSpeedMul', 'pullSpeedMul', 'freezeDurMul', 'highlight', 'laser', 'emptyPullMul'];
   const AXES = ['time', 'value', 'speed', 'item', 'neg', 'economy', 'collect', 'life', 'info'];
   const RARITIES = ['common', 'rare', 'epic'];
   const SCOPES = ['self', 'team', 'world'];
@@ -42,18 +44,18 @@ window.PERKS = (() => {
   const LIST = [
     { id: 1, key: 'timekeeper', axis: 'time', rarity: 'common', scope: 'team', modes: { solo: true, coop: true, duel: false }, rollable: true, icon: '⏱',
       lv: [{ levelTimeAdd: 10 }, { levelTimeAdd: 15 }, { levelTimeAdd: 20 }], p: [{ a: 10 }, { a: 15 }, { a: 20 }] },
-    { id: 2, key: 'timeIsMoney', axis: 'time', rarity: 'common', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, icon: '💸',
-      lv: [{ clearBonusMul: 2 }, { clearBonusMul: 3 }, { clearBonusMul: 4 }], p: [{ a: 2 }, { a: 3 }, { a: 4 }] },
+    { id: 2, key: 'timeIsMoney', axis: 'time', rarity: 'common', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, icon: '⏳',
+      lv: [{ levelTimeAdd: -5, valueMul: { all: 1.12 } }, { levelTimeAdd: -5, valueMul: { all: 1.16 } }, { levelTimeAdd: -5, valueMul: { all: 1.2 } }], p: [{ a: 1.12, b: 5 }, { a: 1.16, b: 5 }, { a: 1.2, b: 5 }] },
     { id: 3, key: 'rockLover', axis: 'value', rarity: 'common', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, icon: '🪨',
-      lv: [{ valueMul: { rock: 3, gold: 0.8 } }, { valueMul: { rock: 4, gold: 0.8 } }, { valueMul: { rock: 5, gold: 0.8 } }], p: [{ a: 3 }, { a: 4 }, { a: 5 }] },
+      lv: [{ valueMul: { rock: 3.5, gold: 0.92 } }, { valueMul: { rock: 4, gold: 0.92 } }, { valueMul: { rock: 4.5, gold: 0.92 } }], p: [{ a: 3.5, b: 8, c: 6 }, { a: 4, b: 8, c: 6 }, { a: 4.5, b: 8, c: 6 }] },
     { id: 4, key: 'boneDealer', axis: 'value', rarity: 'common', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, icon: '💀',
-      lv: [{ valueMul: { bone: 10, gem: 0.8 } }, { valueMul: { bone: 15, gem: 0.8 } }, { valueMul: { bone: 20, gem: 0.8 } }], p: [{ a: 10 }, { a: 15 }, { a: 20 }] },
+      lv: [{ valueMul: { bone: 10, relic: 1.75 } }, { valueMul: { bone: 15, relic: 2 } }, { valueMul: { bone: 20, relic: 2.25 } }], p: [{ a: 10, b: 1.75, c: 40 }, { a: 15, b: 2, c: 40 }, { a: 20, b: 2.25, c: 40 }] },
     { id: 5, key: 'pyrotechnician', axis: 'item', rarity: 'common', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, icon: '🧨',
       lv: [{ invGrant: { tnt: 1 } }, { invGrant: { tnt: 2 } }, { invGrant: { tnt: 3 } }], p: [{ a: 1 }, { a: 2 }, { a: 3 }] },
     { id: 6, key: 'coldStorage', axis: 'item', rarity: 'common', scope: 'self', modes: { solo: false, coop: true, duel: true }, rollable: true, icon: '❄',
       lv: [{ invGrant: { freeze: 1 }, freezeDurMul: 1.5 }, { invGrant: { freeze: 1 }, freezeDurMul: 2 }, { invGrant: { freeze: 1 }, freezeDurMul: 2.5 }], p: [{ a: 1.5 }, { a: 2 }, { a: 2.5 }] },
     { id: 7, key: 'strengthTraining', axis: 'speed', rarity: 'common', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, icon: '💪',
-      lv: [{ strengthBonus: 2, hookSpeedMul: 0.9 }, { strengthBonus: 3, hookSpeedMul: 0.9 }, { strengthBonus: 4, hookSpeedMul: 0.9 }], p: [{ a: 2 }, { a: 3 }, { a: 4 }] },
+      lv: [{ strengthBonus: 3 }, { strengthBonus: 5 }, { strengthBonus: 7 }], p: [{ a: 3 }, { a: 5 }, { a: 7 }] },
     { id: 8, key: 'quickHands', axis: 'speed', rarity: 'common', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, icon: '🚀',
       lv: [{ hookSpeedMul: 1.25, pullSpeedMul: 1.25 }, { hookSpeedMul: 1.35, pullSpeedMul: 1.35 }, { hookSpeedMul: 1.45, pullSpeedMul: 1.45 }], p: [{ a: 25 }, { a: 35 }, { a: 45 }] },
     { id: 9, key: 'eagleEye', axis: 'info', rarity: 'common', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, icon: '👁',
@@ -71,13 +73,14 @@ window.PERKS = (() => {
     { id: 15, key: 'combo', axis: 'value', rarity: 'rare', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, icon: '🔗',
       lv: [{ combo: { every: 4, mul: 1.5 } }, { combo: { every: 4, mul: 1.75 } }, { combo: { every: 4, mul: 2 } }], p: [{ a: 1.5 }, { a: 1.75 }, { a: 2 }] },
     { id: 16, key: 'emptyComfort', axis: 'economy', rarity: 'common', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, icon: '🪙',
-      lv: [{ emptyReturn: { amt: 25, cap: 8 } }, { emptyReturn: { amt: 50, cap: 8 } }, { emptyReturn: { amt: 75, cap: 8 } }], p: [{ a: 25, b: 8 }, { a: 50, b: 8 }, { a: 75, b: 8 }] },
+      lv: [{ emptyReturn: { amt: 60, cap: 6 } }, { emptyReturn: { amt: 100, cap: 6 } }, { emptyReturn: { amt: 130, cap: 6 } }], p: [{ a: 60, b: 6 }, { a: 100, b: 6 }, { a: 130, b: 6 }] },
     { id: 17, key: 'midas', axis: 'value', rarity: 'rare', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, icon: '✨',
-      lv: [{ midas: { n: 1, value: 250 } }, { midas: { n: 2, value: 250 } }, { midas: { n: 3, value: 250 } }], p: [{ a: 1, b: 250 }, { a: 2, b: 250 }, { a: 3, b: 250 }] },
+      lv: [{ midas: { n: 3, value: 400 } }, { midas: { n: 4, value: 450 } }, { midas: { n: 5, value: 500 } }], p: [{ a: 3, b: 400 }, { a: 4, b: 450 }, { a: 5, b: 500 }] },
     { id: 18, key: 'greedPact', axis: 'value', rarity: 'epic', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, contract: true, icon: '📜',
-      lv: [{ valueMul: { all: 1.2 }, levelTimeAdd: -8 }, { valueMul: { all: 1.35 }, levelTimeAdd: -12 }, { valueMul: { all: 1.5 }, levelTimeAdd: -16 }], p: [{ a: 1.2, b: 8 }, { a: 1.35, b: 12 }, { a: 1.5, b: 16 }] },
+      lv: [{ valueMul: { all: 1.28 }, levelTimeAdd: -10 }, { valueMul: { all: 1.42 }, levelTimeAdd: -13 }, { valueMul: { all: 1.55 }, levelTimeAdd: -15 }], p: [{ a: 1.28, b: 10 }, { a: 1.42, b: 13 }, { a: 1.55, b: 15 }] },
     { id: 19, key: 'glassCannon', axis: 'speed', rarity: 'epic', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, contract: true, icon: '⚡',
-      lv: [{ hookSpeedMul: 1.4, pullSpeedMul: 1.4, cursedMul: 2 }, { hookSpeedMul: 1.5, pullSpeedMul: 1.5, cursedMul: 2.5 }, { hookSpeedMul: 1.6, pullSpeedMul: 1.6, cursedMul: 3 }], p: [{ a: 40, b: 2 }, { a: 50, b: 2.5 }, { a: 60, b: 3 }] },
+      lv: [{ hookSpeedMul: 1.5, pullSpeedMul: 1.5, strengthBonus: 2, cursedMul: 2, emptyPullMul: 0.35 }, { hookSpeedMul: 1.75, pullSpeedMul: 1.75, strengthBonus: 3, cursedMul: 2.5, emptyPullMul: 0.28 },
+        { hookSpeedMul: 2, pullSpeedMul: 2, strengthBonus: 5, cursedMul: 3, emptyPullMul: 0.22 }], p: [{ a: 50, b: 2, c: 2, d: 35 }, { a: 75, b: 2.5, c: 3, d: 28 }, { a: 100, b: 3, c: 5, d: 22 }] },
     { id: 20, key: 'miserPact', axis: 'economy', rarity: 'epic', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, contract: true, icon: '💰',
       lv: [{ shopMul: 0.5, clearBonusMul: 0 }, { shopMul: 0.4, clearBonusMul: 0 }, { shopMul: 0.3, clearBonusMul: 0 }], p: [{ a: 50 }, { a: 40 }, { a: 30 }] },
   ];
@@ -153,7 +156,17 @@ window.PERKS = (() => {
       for (const k of Object.keys(IT)) if (!(k in ITEM_CLS)) errs.push('ITEMS key unclassified (add to ITEM_CLS): ' + k);
       for (const k of Object.keys(ITEM_CLS)) if (!(k in IT)) errs.push('ITEM_CLS ghost key (no such item): ' + k);
       for (const k of Object.keys(IT)) if (IT[k].isCursed && ITEM_CLS[k] !== 'cursed') errs.push('isCursed item must be class cursed: ' + k);
+      for (const k of Object.keys(IT)) if (ITEM_CLS[k] === 'relic' && IT[k].bonusKey) errs.push('relic item must not carry a bonusKey: ' + k);
     }
+    for (const c of Object.keys(CLASS_TOTAL_CAP)) {
+      if (CLS_KEYS.indexOf(c) < 0) errs.push('CLASS_TOTAL_CAP unknown class: ' + c);
+      else if (!(typeof CLASS_TOTAL_CAP[c] === 'number' && isFinite(CLASS_TOTAL_CAP[c]) && CLASS_TOTAL_CAP[c] > 0)) errs.push('CLASS_TOTAL_CAP must be > 0: ' + c);
+      if (c === 'creature' || c === 'relic' || c === 'cursed' || c === 'other') errs.push('CLASS_TOTAL_CAP must not cap class: ' + c);
+    }
+    if (!(CURSED_FLIP_MIN < 0)) errs.push('CURSED_FLIP_MIN must be negative');
+    for (const p of TABLE) (p.lv || []).forEach((e, k) => {
+      if (e && e.emptyPullMul != null && !(typeof e.emptyPullMul === 'number' && e.emptyPullMul > 0 && e.emptyPullMul <= 1)) errs.push('emptyPullMul must be in (0, 1]: ' + p.key + ' Lv' + (k + 1));
+    });
     const C = cfg();
     const allMax = TABLE.map(p => Math.max.apply(null, p.lv.map(e => (e.valueMul && e.valueMul.all) || 1))).sort((a, b) => b - a);
     const top3All = (allMax[0] || 1) * (allMax[1] || 1) * (allMax[2] || 1);
@@ -480,7 +493,7 @@ window.PERKS = (() => {
   }
   function effOfBuild(build) {
     const e = { valueMul: {}, clearBonusMul: 1, levelTimeAdd: 0, invGrant: { tnt: 0, freeze: 0 }, strengthBonus: 0, shopMul: 1,
-      clover: false, hookSpeedMul: 1, pullSpeedMul: 1, freezeDurMul: 1, highlight: 0, slots: heldOf(build),
+      clover: false, hookSpeedMul: 1, pullSpeedMul: 1, emptyPullMul: 1, freezeDurMul: 1, highlight: 0, slots: heldOf(build),
       cursedMul: 1, comboEvery: 0, comboMul: 1, emptyAmt: 0, emptyCap: 0, midasN: 0, midasValue: 0, drillLv: 0, shatterBonus: 0, laser: 0 };
     for (const c of VALUE_MUL_KEYS) e.valueMul[c] = 1;
     for (const s of e.slots) {
@@ -502,6 +515,7 @@ window.PERKS = (() => {
       if (L.flags && L.flags.clover) e.clover = true;
       if (L.hookSpeedMul != null) e.hookSpeedMul = e.hookSpeedMul * L.hookSpeedMul;
       if (L.pullSpeedMul != null) e.pullSpeedMul = e.pullSpeedMul * L.pullSpeedMul;
+      if (L.emptyPullMul != null) e.emptyPullMul = e.emptyPullMul * L.emptyPullMul;
       if (L.freezeDurMul != null) e.freezeDurMul = e.freezeDurMul * L.freezeDurMul;
       if (L.highlight) e.highlight = e.highlight ? Math.min(e.highlight, L.highlight) : L.highlight;
     }
@@ -520,6 +534,32 @@ window.PERKS = (() => {
       if (ck && vm[ck] != null) m = m * vm[ck];
     }
     return m;
+  }
+  function clsMulOfBuild(build, cls) {
+    let m = 1;
+    const ck = CLS_KEYS[cls | 0];
+    if (!ck) return m;
+    for (const s of heldOf(build)) {
+      const p = get(s.id); if (!p) continue;
+      const L = p.lv[Math.max(0, Math.min(2, s.lv - 1))] || {};
+      if (L.valueMul && L.valueMul[ck] != null) m = m * L.valueMul[ck];
+    }
+    return m;
+  }
+  function allMulOfBuild(build) {
+    let m = 1;
+    for (const s of heldOf(build)) {
+      const p = get(s.id); if (!p) continue;
+      const L = p.lv[Math.max(0, Math.min(2, s.lv - 1))] || {};
+      if (L.valueMul && L.valueMul.all != null) m = m * L.valueMul.all;
+    }
+    return m;
+  }
+  function classCapOf(build, cls) {
+    if (isEmpty(build)) return 0;
+    const ck = CLS_KEYS[cls | 0];
+    const v = ck ? CLASS_TOTAL_CAP[ck] : 0;
+    return (typeof v === 'number' && v > 0) ? v : 0;
   }
   function buildOf(seat) {
     const G = window.GAME;
@@ -555,6 +595,7 @@ window.PERKS = (() => {
     inSeason, poolEntries, poolSig,
     candConstants, candSig, CAND_ALGO_VER,
     effOfBuild, valueMulOfBuild, buildOf, effOf, valueMulOf, levelTimeAddMax, NEUTRAL,
+    CLASS_TOTAL_CAP, CURSED_FLIP_MIN, clsMulOfBuild, allMulOfBuild, classCapOf,
     nameKey, descKey, descParams, iconOf, rarityOf,
     _setTableForTest(list) { TABLE = list || LIST; _index(); _effCache = { build: -1, eff: effOfBuild(0) }; },
   };

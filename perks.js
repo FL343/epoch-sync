@@ -21,7 +21,9 @@ const path = require('path');
 // CONTRACT_MIN_DRAW / CONTRACT_P_MILLI / TIME_ADD_MIN (2026-09-09): contract cards -- the free card of a draw at index >= CONTRACT_MIN_DRAW
 //   may be a contract (CONTRACT_P_MILLI per mille, at most CONTRACT_MAX offers per run); the replay counts the offers itself, so a log that
 //   claims a contract at an earlier draw (or a third one) cannot reproduce its build (perk_forge). TIME_ADD_MIN = table-level tripwire only.
-const PERKS_CFG = { SLOTS: 3, MAX_DRAWS: 20, DRAW_EVERY: 5, GATE_EVERY: 10, PICK_TIMEOUT_S: 20, PITY_EVERY: 3, CONTRACT_MAX: 2, CONTRACT_MIN_DRAW: 3, CONTRACT_P_MILLI: 350, TIME_ADD_MIN: -30, VALUE_MUL_CAP: 1.6, CLASS_MUL_CAP: 25, TABLE_VER: 1 };
+// 2026-10-01: table caps retuned with the perk value table (TIME_ADD_MIN -30 -> -20, VALUE_MUL_CAP 1.6 -> 1.9, CLASS_MUL_CAP 25 -> 20). None of the three feeds
+//   candidates() (the candidate signature is unchanged), so in-chain pick logs replay exactly as before.
+const PERKS_CFG = { SLOTS: 3, MAX_DRAWS: 20, DRAW_EVERY: 5, GATE_EVERY: 10, PICK_TIMEOUT_S: 20, PITY_EVERY: 3, CONTRACT_MAX: 2, CONTRACT_MIN_DRAW: 3, CONTRACT_P_MILLI: 350, TIME_ADD_MIN: -20, VALUE_MUL_CAP: 1.9, CLASS_MUL_CAP: 20, TABLE_VER: 1 };
 const VENDOR_DIR = path.join(__dirname, 'perks-vendor');
 const VENDOR_FILES = ['rng.js', 'perks.js'];   // load order: the table module reads window.RNG / window.makeRNG
 
