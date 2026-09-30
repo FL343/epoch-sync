@@ -23,15 +23,18 @@ const ok = (m, c, d) => { if (c) pass++; else { fail++; console.log('  FAIL ' + 
 
 // ---- synthetic record builder (schema v3 + endless tail; mirrors result-reporter) ----
 function sidInts(sid) { const b = BigInt(sid); return [Number(b & 0xFFFFFFFFn) | 0, Number((b >> 32n) & 0xFFFFFFFFn) | 0]; }
-function mkRec(mt, seed, pc, scores, roster, tail) {
-  const d = [0xB1, 3, mt, 1234, seed | 0, 0, 1, 0, pc, 300];
+// wr = { w, seat }: the shard entry owner (writer) and the record's own seat (d[5]); absent = no writer identity
+function mkRec(mt, seed, pc, scores, roster, tail, wr) {
+  const d = [0xB1, 3, mt, 1234, seed | 0, wr ? (wr.seat | 0) : 0, 1, 0, pc, 300];
   for (let i = 0; i < pc; i++) d.push(scores[i] | 0);
   d.push(0);   // disp
   for (let i = 0; i < pc; i++) { const si = sidInts(roster[i] || '0'); d.push(si[0], si[1]); }
   if (tail) d.push(tail.startDepth | 0, tail.endDepth | 0, 0, 0);
-  return { d, roster: v.decodeRoster(d) };
+  const r = { d, roster: v.decodeRoster(d) };
+  if (wr) r.w = String(wr.w);
+  return r;
 }
-const SIDA = '76561198000000001', SIDB = '76561198000000002';
+const SIDA = '76561198000000001', SIDB = '76561198000000002', SIDX = '76561198000000009';
 
 // ---- [1] mt -> cap params mapping ----
 {
@@ -83,6 +86,19 @@ const SIDA = '76561198000000001', SIDB = '76561198000000002';
   ok('[2] build 0 leaves the line untouched', sc.cliLineOf('t', { entry: 'endless', pc: 2, startDepth: 0, endDepth: 9, startBank: 0, seasonId: 1, build: 0 }, 42) === 'E t 42 2 0 9 0 1');
   ok('[2] capParamsOf carries the tail build (absent -> 0)',
     sc.capParamsOf(7, 1, { startDepth: 0, endDepth: 9, seasonId: 2, build: 386 }).build === 386 && sc.capParamsOf(7, 2, { startDepth: 0, endDepth: 9, seasonId: 2 }).build === 0);
+  // classic (nostalgia) segments (2026-09-30): SEG_CLASSIC in the flags word -> classic world; build / bitmap forced to 0
+  //   (a classic run has neither by rule, and the signed solo record keeps other words at those tail offsets)
+  const pcl = sc.capParamsOf(7, 1, { startDepth: 0, endDepth: 3, seasonId: 0, flags: 32 | 2, build: 2026092701, rerollLo: 123, rerollHi: 456 });
+  ok('[2] classic flags -> classic world, garbage build / bitmap words dropped', pcl.classic === true && pcl.build === 0 && pcl.rerollLo === 0 && pcl.rerollHi === 0);
+  const pmod = sc.capParamsOf(7, 2, { startDepth: 0, endDepth: 9, seasonId: 1, flags: 8, build: 386, rerollLo: 5, rerollHi: 0 });
+  ok('[2] non-classic flags leave build / bitmap untouched', pmod.classic === false && pmod.build === 386 && pmod.rerollLo === 5);
+  ok('[2] classic line = explicit sentinels then 1 (11th field)', sc.cliLineOf('t', Object.assign({}, pcl, { startBank: 0 }), 42) === 'E t 42 1 0 3 0 0 0 0 0 1');
+  ok('[2] classic line on a legacy tail keeps the -1 season sentinel', sc.cliLineOf('t', { entry: 'endless', pc: 2, startDepth: 5, endDepth: 6, startBank: 7, seasonId: -1, classic: true }, 42) === 'E t 42 2 5 6 7 -1 0 0 0 1');
+  ok('[2] classic capability probe', sc.cliSupportsClassic(() => ({ map: { p0: { v: 'build=1 rerolls=1 classic=1' } } })) === true &&
+    sc.cliSupportsClassic(() => ({ map: { p0: { v: 'build=1 rerolls=1' } } })) === false && sc.cliSupportsClassic(() => ({ fail: 'exit=1' })) === false);
+  const scsrc = fs.readFileSync(path.join(__dirname, '..', 'seedcap.js'), 'utf8');
+  ok('[2] classic groups deferred when the primary CLI cannot read the flag', /x\.p\.classic\) && !cliSupportsClassic\(runPrimary\)/.test(scsrc));
+  ok('[2] overlap cores skip classic lines they cannot read', /if \(!okCl && x\.p && x\.p\.classic\) return;/.test(scsrc));
   // CLI build-support probe: the clear-bonus perk must move the cap; an older CLI (field ignored) returns equal caps -> unsupported
   ok('[2] PROBE_BUILD = perk id 2 lv 3 in slot 0 (386)', sc.PROBE_BUILD === 386);
   ok('[2] cliSupportsBuild: cap rises -> true', sc.cliSupportsBuild(() => ({ map: { p0: { cap: 1000 }, p1: { cap: 1500 } }, head: 'x' })) === true);
@@ -127,17 +143,27 @@ const SIDA = '76561198000000001', SIDB = '76561198000000002';
   ok('[4] endless widest tail wins (fail-open on range)', e.tail.endDepth === 8);
   ok('[4] endless gets a startBank', typeof e.p.startBank === 'number');
   ok('[4] roster consensus threads through', e.roster[0] === SIDA && e.roster[1] === SIDB);
+  ok('[4] records without a writer identity prove no seat (fail closed)', e.self.length === 0);
+  // self-written seats: writer at its own seat (d[5]) whose roster entry is the writer itself
+  const gSelf = { s1: [mkRec(1, 30, 2, [100, 200], [SIDA, SIDB], null, { w: SIDA, seat: 0 }), mkRec(1, 30, 2, [100, 200], [SIDA, SIDB], null, { w: SIDB, seat: 1 })],
+    s2: [mkRec(1, 31, 2, [100, 200], [SIDB, SIDA], null, { w: SIDX, seat: 0 })],       // writer X claims the victim sits at X's own seat
+    s3: [mkRec(1, 32, 2, [100, 200], [SIDX, SIDB], null, { w: SIDX, seat: 0 })] };     // writer X names itself + a stranger
+  const ps = sc.pickAuditable({ audited: {}, chain: {} }, gSelf);
+  const selfOf = (m) => ps.find(x => x.m === m).self.join(',');
+  ok('[4] both writers at their own seats -> both self-written', selfOf('s1') === '0,1', selfOf('s1'));
+  ok('[4] a roster that puts somebody else at the writer\'s seat proves nothing', selfOf('s2') === '');
+  ok('[4] a lone writer is self-written only at its own seat', selfOf('s3') === '0', selfOf('s3'));
 }
 
 // ---- [5] applyAudit state machine ----
 {
   const st = { audited: {}, chain: {}, suspects: {}, veto: {}, corrections: [] };
   const pend = [
-    { m: 'ok1', mt: 1, pc: 2, scores: [100, 200], p: { entry: 'quick' }, tail: null, roster: { 0: SIDA, 1: SIDB }, runSeed: 1 },
-    { m: 'over1', mt: 1, pc: 2, scores: [100, 99999], p: { entry: 'quick' }, tail: null, roster: { 0: SIDA, 1: SIDB }, runSeed: 2 },
+    { m: 'ok1', mt: 1, pc: 2, scores: [100, 200], p: { entry: 'quick' }, tail: null, roster: { 0: SIDA, 1: SIDB }, self: [0, 1], runSeed: 1 },
+    { m: 'over1', mt: 1, pc: 2, scores: [100, 99999], p: { entry: 'quick' }, tail: null, roster: { 0: SIDA, 1: SIDB }, self: [0, 1], runSeed: 2 },
     { m: 'err1', mt: 1, pc: 2, scores: [1, 1], p: { entry: 'quick' }, tail: null, roster: {}, runSeed: 3 },
-    { m: 'eok', mt: 7, pc: 2, scores: [500, 600], p: { entry: 'endless' }, tail: { startDepth: 0, endDepth: 8 }, roster: { 0: SIDA, 1: SIDB }, runSeed: 4 },
-    { m: 'eover', mt: 7, pc: 2, scores: [88888, 1], p: { entry: 'endless' }, tail: { startDepth: 0, endDepth: 5 }, roster: { 0: SIDA, 1: SIDB }, runSeed: 5 },
+    { m: 'eok', mt: 7, pc: 2, scores: [500, 600], p: { entry: 'endless' }, tail: { startDepth: 0, endDepth: 8 }, roster: { 0: SIDA, 1: SIDB }, self: [0, 1], runSeed: 4 },
+    { m: 'eover', mt: 7, pc: 2, scores: [88888, 1], p: { entry: 'endless' }, tail: { startDepth: 0, endDepth: 5 }, roster: { 0: SIDA, 1: SIDB }, self: [0, 1], runSeed: 5 },
   ];
   const cli = { m0: { cap: 5000 }, m1: { cap: 5000 }, m2: { err: 'bad-depths' }, m3: { cap: 40000 }, m4: { cap: 40000 } };
   const stats = sc.applyAudit(st, pend, cli, new Set(['eover']), 1000);
@@ -205,8 +231,8 @@ const SIDA = '76561198000000001', SIDB = '76561198000000002';
   const st = { audited: {}, chain: {}, suspects: {}, veto: {}, corrections: [] };
   st.suspects[v.pid(SIDB)] = { n: 5, t0: 1, ms: [] };   // prior offenses: plan must mirror the ABSOLUTE ledger, not this run's count
   const pend = [
-    { m: 'ov1', mt: 1, pc: 2, scores: [100, 7777], p: { entry: 'quick' }, tail: null, roster: { 0: SIDA, 1: SIDB }, runSeed: 11 },
-    { m: 'ov2', mt: 7, pc: 2, scores: [8888, 1], p: { entry: 'endless' }, tail: { startDepth: 0, endDepth: 3 }, roster: { 0: SIDB, 1: SIDA }, runSeed: 12 },
+    { m: 'ov1', mt: 1, pc: 2, scores: [100, 7777], p: { entry: 'quick' }, tail: null, roster: { 0: SIDA, 1: SIDB }, self: [0, 1], runSeed: 11 },
+    { m: 'ov2', mt: 7, pc: 2, scores: [8888, 1], p: { entry: 'endless' }, tail: { startDepth: 0, endDepth: 3 }, roster: { 0: SIDB, 1: SIDA }, self: [0, 1], runSeed: 12 },
   ];
   const stats = sc.applyAudit(st, pend, { m0: { cap: 5000 }, m1: { cap: 6000 } }, new Set(), 2000);
   ok('[8] flags carry sid-resolved offenders + match cap/seed/mt', stats.flags.length === 2 &&
@@ -254,7 +280,7 @@ const SIDA = '76561198000000001', SIDB = '76561198000000002';
   ok('[9] rejectWindowsOf = active only, soonest first, with time left', w.length === 2 && w[0].pid === 'aa' && w[0].leftMin === 440 && w[1].pid === 'bb' && w[1].n === 3);
   const st2 = { audited: {}, chain: {}, suspects: {}, veto: {}, corrections: [] };
   st2.suspects[v.pid(SIDB)] = { n: 1, t0: 1, t1: 1, ms: [] };
-  const pend9 = [{ m: 'w1', mt: 1, pc: 2, scores: [100, 7777], p: { entry: 'quick' }, tail: null, roster: { 0: SIDA, 1: SIDB }, runSeed: 21 }];
+  const pend9 = [{ m: 'w1', mt: 1, pc: 2, scores: [100, 7777], p: { entry: 'quick' }, tail: null, roster: { 0: SIDA, 1: SIDB }, self: [0, 1], runSeed: 21 }];
   const stats9 = sc.applyAudit(st2, pend9, { m0: { cap: 5000 } }, new Set(), 3000);
   ok('[9] second conviction: n=2, t1 = new conviction time, flag carries n', st2.suspects[v.pid(SIDB)].n === 2 && st2.suspects[v.pid(SIDB)].t1 === 3000 && stats9.flags[0].offenders[0].n === 2);
   ok('[9] window restarts at the latest conviction (3 days from t=3000)', v.seedcapRejectUntilMin(st2.suspects[v.pid(SIDB)]) === 3000 + 4320);
@@ -280,6 +306,43 @@ const SIDA = '76561198000000001', SIDB = '76561198000000002';
   ok('[9] snapshot/restore cover the pid-keyed state too (skill + xpState, deep-cloned)', /scCloneOf\(skill\[p\]\)/.test(snap) && /scCloneOf\(xpState\[p\]\)/.test(snap) && /scPut\(skill, p, sn\.skill\)/.test(rest) && /scPut\(xpState, p, sn\.xpState\)/.test(rest));
   ok('[9] pending restore flushed at loop top AND after the loop', (vjs9.match(/if \(scPendingRestore\) \{ scRestore\(scPendingRestore\); scPendingRestore = null; \}/g) || []).length === 2);
   ok('[9] run summary reports the discards', /seedcap veto \/ reject-window discards/.test(vjs9));
+}
+
+// ---- [10] conviction needs a self-written seat (2026-09-30): a roster is self-reported, the shard entry owner is not ----
+{
+  // one fake over-cap record written by X that names a stranger (SIDB) at seat 1: vetoed, nobody but a writer convicted
+  const st = { audited: {}, chain: {}, suspects: {}, veto: {}, corrections: [] };
+  const groups = {
+    frame: [mkRec(1, 41, 2, [100, 999999], [SIDX, SIDB], null, { w: SIDX, seat: 0 })],
+    frameOwnSeat: [mkRec(1, 42, 2, [999999, 1], [SIDB, SIDX], null, { w: SIDX, seat: 0 })],   // X claims the stranger sits at X's own seat
+    selfOver: [mkRec(1, 43, 2, [999999, 1], [SIDX, SIDB], null, { w: SIDX, seat: 0 })],       // X's own seat over-cap -> X convicted
+    team: [mkRec(1, 44, 2, [100, 999999], [SIDA, SIDB], null, { w: SIDA, seat: 0 }), mkRec(1, 44, 2, [100, 999999], [SIDA, SIDB], null, { w: SIDB, seat: 1 })],
+  };
+  const pend = sc.pickAuditable(st, groups);
+  const cli = {}; pend.forEach((x, i) => { cli['m' + i] = { cap: 5000 }; });
+  const stats = sc.applyAudit(st, pend, cli, new Set(), 4000);
+  const fOf = (m) => stats.flags.find(f => f.m === m);
+  ok('[10] every over-cap group still vetoed (no settlement gain either way)', ['frame', 'frameOwnSeat', 'selfOver', 'team'].every(m => st.veto[m]), Object.keys(st.veto).join(','));
+  ok('[10] framing a stranger convicts nobody', fOf('frame').offenders.length === 0 && fOf('frame').unattributed.length === 1 && fOf('frame').unattributed[0].seat === 1);
+  ok('[10] a stranger placed at the writer\'s own seat is not convicted', fOf('frameOwnSeat').offenders.length === 0 && fOf('frameOwnSeat').unattributed[0].seat === 0);
+  ok('[10] a writer over cap at its own seat IS convicted', fOf('selfOver').offenders.length === 1 && fOf('selfOver').offenders[0].sid === SIDX);
+  ok('[10] consensus team group: the over-cap seat wrote its own record -> convicted', fOf('team').offenders.length === 1 && fOf('team').offenders[0].sid === SIDB);
+  // suspect ledger: X (selfOver) and SIDB (team, self-written) only; SIDB is NOT charged for the two frame attempts
+  ok('[10] suspect ledger holds only self-written convictions', st.suspects[v.pid(SIDX)] && st.suspects[v.pid(SIDX)].n === 1 &&
+    st.suspects[v.pid(SIDB)] && st.suspects[v.pid(SIDB)].n === 1 && !st.suspects[v.pid(SIDA)], JSON.stringify(Object.keys(st.suspects).length));
+  const plan = sc.offensePlanOf(st, stats.flags);
+  ok('[10] offense board plan names only convicted writers', Object.keys(plan).sort().join(',') === [SIDB, SIDX].sort().join(','));
+  const text = sc.alertMailText(['x'], [fOf('frame')], { veto: 1, suspects: 0 }, []);
+  ok('[10] ops mail shows the unattributed over-cap seat without a sid', /seat1=999999 \(not self-written: vetoed, nobody convicted\)/.test(text) && text.indexOf(SIDB) < 0);
+  // mutation self-check: the same inputs without writer identities convict nobody at all (fail closed)
+  const st0 = { audited: {}, chain: {}, suspects: {}, veto: {}, corrections: [] };
+  const bare = {}; for (const m of Object.keys(groups)) bare[m] = groups[m].map(r => ({ d: r.d, roster: r.roster }));
+  const pend0 = sc.pickAuditable(st0, bare);
+  const cli0 = {}; pend0.forEach((x, i) => { cli0['m' + i] = { cap: 5000 }; });
+  sc.applyAudit(st0, pend0, cli0, new Set(), 4000);
+  ok('[10] no writer identity -> no conviction (fail closed), vetoes unchanged', Object.keys(st0.suspects).length === 0 && Object.keys(st0.veto).length === 4);
+  const scsrc10 = fs.readFileSync(path.join(__dirname, '..', 'seedcap.js'), 'utf8');
+  ok('[10] shard read carries the entry owner into every group record', /push\(\{ d, roster: v\.decodeRoster\(d\), w: String\(e\.steamID \|\| ''\) \}\)/.test(scsrc10));
 }
 
 try { fs.unlinkSync(process.env.SC_STATE_FILE); } catch (e) {}

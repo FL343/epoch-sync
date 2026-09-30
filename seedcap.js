@@ -26,6 +26,14 @@
 //                        sids never enter this public state -- resolution goes
 //                        through the shard records via the private ops tool).
 //                        {n, t0, t1, ms}: n = cumulative convictions, t1 = latest.
+//                        Attribution (2026-09-30): an over-cap seat convicts its
+//                        account only when that account WROTE a record of the group
+//                        from that very seat (the shard entry owner is the one
+//                        unforgeable identity -- the reconcile's self-seat rule).
+//                        A roster is self-reported: without this, anyone could write
+//                        one fake over-cap record naming a stranger and open a reject
+//                        window on them. Unattributed over-cap seats still veto the
+//                        match (no settlement gain) and show up in the ops mail.
 //                        Under SEEDCAP_REJECT the reconcile turns (n, t1) into a
 //                        reject WINDOW (24h / 3d / 7d / 14d cap, validate.js
 //                        seedcapRejectWindowMin): inside it the account's own
@@ -42,6 +50,7 @@ const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const v = require('./validate.js');
+const attest = require('./attest.js');
 
 const KEY = process.env.STEAM_PUBLISHER_KEY;
 const APPID = process.env.APPID;
@@ -100,15 +109,23 @@ function loadJsonObj(p) { try { return JSON.parse(fs.readFileSync(p, 'utf8')); }
 function capParamsOf(mt, pc, tail) {
   const base = v.baseMt(mt);
   if (base === 7) {
+    // classic (nostalgia) run (2026-09-30): the segment flags carry SEG_CLASSIC (the flags word sits at the same
+    // offset in the client team tail and in the guard-signed solo record), so the world core must replay the
+    // classic board set (classic pool / curve / items, no slot coins) instead of the modern one. A classic run
+    // has no perks and no rerolls by rule (the reconcile fails a non-zero build / pick log / bitmap closed as
+    // 'classic-perk'), so both are forced to 0: the solo record keeps other words at those tail offsets.
+    const classic = !!(tail && ((tail.flags | 0) & attest.SEG_CLASSIC));
     // seasonId (2026-09-05): the run's season snapshot from the record tail (5th int; -1 when the
     // record predates it) -- the world core replays the season-keyed boards exactly, so the cap is
     // per-run exact instead of a legacy runSeed-keyed replay.
     return { entry: 'endless', pc, startDepth: tail ? tail.startDepth | 0 : 0, endDepth: tail ? tail.endDepth | 0 : 0,
       seasonId: (tail && tail.seasonId != null) ? (tail.seasonId | 0) : -1,
       // perk build word (2026-09-07, 7th tail int): the cap scales with the run's value/clear perks; absent = 0 = no perks
-      build: (tail && tail.build != null) ? (tail.build >>> 0) : 0,
+      build: (!classic && tail && tail.build != null) ? (tail.build >>> 0) : 0,
       // endless affix reroll bitmap (2026-09-11, 10th/11th tail ints): rerolled depths derive their world with it (exact cap); absent = 0
-      rerollLo: (tail && tail.rerollLo != null) ? (tail.rerollLo >>> 0) : 0, rerollHi: (tail && tail.rerollHi != null) ? (tail.rerollHi >>> 0) : 0 };
+      rerollLo: (!classic && tail && tail.rerollLo != null) ? (tail.rerollLo >>> 0) : 0,
+      rerollHi: (!classic && tail && tail.rerollHi != null) ? (tail.rerollHi >>> 0) : 0,
+      classic };
   }
   if (base === 10) {
     // O140 private friend rooms (2026-09-01): world gen is entry-agnostic (same placeItems),
@@ -135,11 +152,14 @@ function cliLineOf(tag, p, runSeed) {
     //   season sentinel explicitly; build 0 is omitted (line unchanged for every pre-perk record).
     // 9th/10th fields = reroll bitmap lo/hi (2026-09-11), positional after the build: a bitmap forces the season (-1) and build (0) sentinels out explicitly;
     //   all-zero bitmap is omitted (line unchanged for every pre-reroll record).
+    // 11th field = classic flag (2026-09-30), positional after the bitmap: a classic line writes every sentinel before
+    //   it explicitly (season or -1, build, bitmap lo/hi) then 1; a non-classic line never carries it (unchanged).
     const bd = (p.build >>> 0) || 0;
     const rl = (p.rerollLo >>> 0) || 0, rh = (p.rerollHi >>> 0) || 0, hasRr = !!(rl || rh);
-    const season = (p.seasonId != null && p.seasonId >= 0) ? (p.seasonId | 0) : ((bd || hasRr) ? -1 : null);
+    const cl = !!p.classic;
+    const season = (p.seasonId != null && p.seasonId >= 0) ? (p.seasonId | 0) : ((bd || hasRr || cl) ? -1 : null);
     return 'E ' + tag + ' ' + (runSeed | 0) + ' ' + p.pc + ' ' + (p.startDepth | 0) + ' ' + (p.endDepth | 0) + ' ' + Math.round(p.startBank || 0) +
-      (season != null ? (' ' + season) : '') + ((bd || hasRr) ? (' ' + bd) : '') + (hasRr ? (' ' + rl + ' ' + rh) : '');
+      (season != null ? (' ' + season) : '') + ((bd || hasRr || cl) ? (' ' + bd) : '') + ((hasRr || cl) ? (' ' + rl + ' ' + rh) : '') + (cl ? ' 1' : '');
   }
   return 'C ' + tag + ' ' + (runSeed | 0) + ' ' + p.entry + ' ' + p.pc + ' ' + (p.ts | 0) + ' ' +
     (p.isTeam ? 1 : 0) + ' ' + (p.team2 ? 1 : 0) + ' ' + p.levels + ' ' + (p.teams && p.teams.length ? p.teams.join('') : '-');
@@ -159,6 +179,12 @@ function cliSupportsBuild(run) {
 function cliSupportsRerolls(run) {
   const r = (run || runCli)(['V p0']);
   return !!(r && !r.fail && r.map && r.map.p0 && r.map.p0.v && /\brerolls=1\b/.test(r.map.p0.v));
+}
+// The classic flag (11th E field, 2026-09-30) is read only by a CLI that answers "V" with classic=1; an older CLI would drop
+//   it and cap a classic run against the modern world -> classic groups are deferred until the CLI proves it reads the field.
+function cliSupportsClassic(run) {
+  const r = (run || runCli)(['V p0']);
+  return !!(r && !r.fail && r.map && r.map.p0 && r.map.p0.v && /\bclassic=1\b/.test(r.map.p0.v));
 }
 // ---- versioned cores: window selection (pure) ----
 // live = parsed live.json | null. Returns { primary: coreId|null, extra: [coreId], why } where null primary
@@ -240,8 +266,20 @@ function chainStartBank(st, rosterPids, pc, startDepth) {
   return Math.round(v.endlessGoalFor(startDepth | 0, pc) * v.ENDLESS.SCORE_MULT);
 }
 
+// Seats whose account wrote one of the group's records from that very seat (writer = shard entry owner: r.w here,
+//   r.steamID in the reconcile's record shape; the record's own seat = d[5]) -- the only seats a verdict may
+//   convict. A record carrying no writer identity (synthetic input) proves nothing: fail closed.
+function selfSeatsOf(g, roster) {
+  const out = [];
+  for (const seatKey of Object.keys(roster || {})) {
+    const s = seatKey | 0, sid = String(roster[seatKey]);
+    if (g.some(r => { const wr = r && (r.w || r.steamID); return !!wr && String(wr) === sid && !!r.d && ((r.d[5] | 0) === s); })) out.push(s);
+  }
+  return out.sort((a, b) => a - b);
+}
+
 // ---- pick auditable groups (consistent score vector; audited-once) ----
-// groups: m -> [{d, roster}]; pure (reads st.audited/st.chain, mutates nothing)
+// groups: m -> [{d, roster, w}] (w = writing account); pure (reads st.audited/st.chain, mutates nothing)
 function pickAuditable(st, groups) {
   const pending = [];
   for (const m of Object.keys(groups)) {
@@ -267,7 +305,7 @@ function pickAuditable(st, groups) {
     const roster = v.rosterConsensus(g);
     const rosterPids = Object.keys(roster).map(s2 => v.pid(roster[s2]));
     if (p.entry === 'endless') p.startBank = chainStartBank(st, rosterPids, pc, p.startDepth);
-    pending.push({ m, mt, pc, scores, p, tail, roster, runSeed: d0[4] | 0 });
+    pending.push({ m, mt, pc, scores, p, tail, roster, self: selfSeatsOf(g, roster), runSeed: d0[4] | 0 });
   }
   return pending;
 }
@@ -292,11 +330,15 @@ function applyAudit(st, pending, cliMap, processed, t) {
     st.audited[x.m] = { c: capEff, s: Math.max.apply(null, x.scores), o: overSeats.length ? 1 : 0, t };
     if (overSeats.length) {
       over++;
+      // the veto (no settlement) and the correction (reverse a settled gain) stay on every over-cap seat; a
+      //   CONVICTION (suspect ledger -> reject window, offense board) only on a self-written seat (selfSeatsOf)
       st.veto[x.m] = { t, seats: overSeats };
+      const selfSet = new Set(x.self || []);
+      const blamed = overSeats.filter(s2 => selfSet.has(s2) && x.roster[s2]);
+      const unblamed = overSeats.filter(s2 => blamed.indexOf(s2) < 0);
       const nOf = {};
-      for (const seat of overSeats) {
+      for (const seat of blamed) {
         const sid = x.roster[seat];
-        if (!sid) continue;
         const p2 = v.pid(sid);
         const su = st.suspects[p2] = st.suspects[p2] || { n: 0, t0: t, ms: [] };
         su.n++; su.t1 = t;
@@ -308,11 +350,13 @@ function applyAudit(st, pending, cliMap, processed, t) {
       }
       flags.push({
         m: x.m, t, runSeed: x.runSeed | 0, mt: x.mt | 0, cap: capEff | 0,
-        offenders: overSeats.map(s2 => ({ seat: s2, sid: x.roster[s2] ? String(x.roster[s2]) : null, score: x.scores[s2] | 0, n: nOf[s2] | 0 })),
+        offenders: blamed.map(s2 => ({ seat: s2, sid: String(x.roster[s2]), score: x.scores[s2] | 0, n: nOf[s2] | 0 })),
+        unattributed: unblamed.map(s2 => ({ seat: s2, score: x.scores[s2] | 0 })),
       });
       // pids only in logs -- never sids (public run logs)
       console.log('::warning::seedcap OVER-CAP m=' + x.m + ' cap=' + capEff + ' scores=' + x.scores.join(',') +
-        ' seats=' + overSeats.join(',') + ' pids=' + overSeats.map(s2 => x.roster[s2] ? v.pid(x.roster[s2]).slice(0, 8) : '?').join(','));
+        ' seats=' + overSeats.join(',') + ' pids=' + blamed.map(s2 => v.pid(x.roster[s2]).slice(0, 8)).join(',') +
+        (unblamed.length ? ' unattributed=' + unblamed.join(',') + ' (not self-written)' : ''));
     } else {
       okN++;
       if (x.p.entry === 'endless') {
@@ -386,7 +430,8 @@ function alertMailText(reasons, flags, totals, windows) {
   for (const f of flags || []) {
     lines.push('OVER m=' + f.m + ' mt=' + f.mt + ' seed=' + f.runSeed + ' cap=' + f.cap + '  ' +
       (f.offenders || []).map(o => 'seat' + o.seat + '=' + o.score + ' sid=' + (o.sid || '?') +
-        (o.n ? (' n=' + o.n + ' window=' + Math.round(v.seedcapRejectWindowMin(o.n) / 60) + 'h') : '')).join(' | '));
+        (o.n ? (' n=' + o.n + ' window=' + Math.round(v.seedcapRejectWindowMin(o.n) / 60) + 'h') : '')).concat(
+        (f.unattributed || []).map(u => 'seat' + u.seat + '=' + u.score + ' (not self-written: vetoed, nobody convicted)')).join(' | '));
   }
   lines.push('', 'totals: veto=' + (totals.veto | 0) + ' suspects=' + (totals.suspects | 0));
   lines.push('', 'reject windows now open (SEEDCAP_REJECT lever; ladder 24h / 3d / 7d / 14d by conviction count, never permanent;',
@@ -459,7 +504,8 @@ async function main() {
       const d = v.decodeDetails(e.detailData);
       if (!d || d.length < 10 || d[0] !== 0xB1) continue;   // settle records only
       const m = d[3] + '_' + d[4] + '_' + d[2];
-      (groups[m] = groups[m] || []).push({ d, roster: v.decodeRoster(d) });
+      // w = the shard entry owner (unforgeable writer) -- the only identity a conviction may rest on (selfSeatsOf)
+      (groups[m] = groups[m] || []).push({ d, roster: v.decodeRoster(d), w: String(e.steamID || '') });
     }
   }
 
@@ -486,6 +532,11 @@ async function main() {
     pending = pending.filter(x => !(x.p && x.p.build));
     console.log('seedcap: CLI ignores the perk build field -- ' + (n - pending.length) + ' perk groups deferred until the CLI is refreshed');
   }
+  if (pending.some(x => x.p && x.p.classic) && !cliSupportsClassic(runPrimary)) {
+    const n = pending.length;
+    pending = pending.filter(x => !(x.p && x.p.classic));
+    console.log('seedcap: CLI ignores the classic flag -- ' + (n - pending.length) + ' classic groups deferred until the CLI is refreshed');
+  }
   if (pending.length) {
     const res = runPrimary(pending.map((x, i) => cliLineOf('m' + i, x.p, x.runSeed)));
     if (res.fail) { console.log('::error::seedcap: CLI run failed ' + res.fail); process.exit(1); }
@@ -493,11 +544,12 @@ async function main() {
     //   costs nothing but the extra headroom (the primary verdicts stand)
     for (const c of cores.slice(1)) {
       const run = runOf(c.exe);
-      const okRr = cliSupportsRerolls(run), okBuild = cliSupportsBuild(run);
+      const okRr = cliSupportsRerolls(run), okBuild = cliSupportsBuild(run), okCl = cliSupportsClassic(run);
       const lines = [];
       pending.forEach((x, i) => {
         if (!okRr && x.p && (x.p.rerollLo || x.p.rerollHi)) return;
         if (!okBuild && x.p && x.p.build) return;
+        if (!okCl && x.p && x.p.classic) return;
         lines.push(cliLineOf('m' + i, x.p, x.runSeed));
       });
       if (!lines.length) continue;
@@ -522,7 +574,7 @@ async function main() {
     ' suspects=' + Object.keys(st.suspects).length + ' corrections=' + st.corrections.length);
 }
 
-module.exports = { selectCores, resolveCores, mergeCaps, corePathOf, OVERLAP_GRACE_MS, OVERLAP_MAX_MS, cliSupportsRerolls, capParamsOf, cliLineOf, cliSupportsBuild, PROBE_BUILD, chainStartBank, pickAuditable, applyAudit, pruneState, runCli, loadState, saveState, SC_STATE_FILE, AUDITED_KEEP, VETO_KEEP_MIN, offensePlanOf, writeOffense, mailDecision, sendAlertMail, alertMailText, rejectWindowsOf, OFFENSE_LB, OFFENSE_MAGIC, SC_MAIL_MIN_OVER, SC_MAIL_SUS_MIN };
+module.exports = { selectCores, resolveCores, mergeCaps, corePathOf, OVERLAP_GRACE_MS, OVERLAP_MAX_MS, cliSupportsRerolls, cliSupportsClassic, capParamsOf, cliLineOf, cliSupportsBuild, PROBE_BUILD, chainStartBank, selfSeatsOf, pickAuditable, applyAudit, pruneState, runCli, loadState, saveState, SC_STATE_FILE, AUDITED_KEEP, VETO_KEEP_MIN, offensePlanOf, writeOffense, mailDecision, sendAlertMail, alertMailText, rejectWindowsOf, OFFENSE_LB, OFFENSE_MAGIC, SC_MAIL_MIN_OVER, SC_MAIL_SUS_MIN };
 if (require.main === module) {
   main().catch(e => { console.log('::error::seedcap run failed: ' + (e && e.stack || e)); process.exit(1); });
 }

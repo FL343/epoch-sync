@@ -101,8 +101,8 @@ const live = { v: 1, channels: {
   ok('seedcap.yml: every job hands the artifact directory over', clis === 3 && dists === 3, clis + '/' + dists);
   const src = fs.readFileSync(path.join(__dirname, '..', 'seedcap.js'), 'utf8');
   ok('main(): root CLI existence stays the hard precondition (fallback for every selection miss)', /if \(!fs\.existsSync\(SEEDCAP_CLI\)\)/.test(src));
-  ok('main(): capability probes run against the primary core', /cliSupportsRerolls\(runPrimary\)/.test(src) && /cliSupportsBuild\(runPrimary\)/.test(src));
-  ok('main(): overlap cores probe their own capabilities before being asked', /const okRr = cliSupportsRerolls\(run\), okBuild = cliSupportsBuild\(run\);/.test(src));
+  ok('main(): capability probes run against the primary core', /cliSupportsRerolls\(runPrimary\)/.test(src) && /cliSupportsBuild\(runPrimary\)/.test(src) && /cliSupportsClassic\(runPrimary\)/.test(src));
+  ok('main(): overlap cores probe their own capabilities before being asked', /const okRr = cliSupportsRerolls\(run\), okBuild = cliSupportsBuild\(run\), okCl = cliSupportsClassic\(run\);/.test(src));
 }
 
 console.log('seedcap-cores: ' + pass + ' ok' + (fail ? ', ' + fail + ' FAIL' : ''));
