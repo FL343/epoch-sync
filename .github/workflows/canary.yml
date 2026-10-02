@@ -28,11 +28,20 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           MAX_AGE: ${{ inputs.max_age || '10800' }}
         run: |
-          last=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow reconcile --status success --limit 1 --json updatedAt --jq '.[0].updatedAt // empty')
-          if [ -z "$last" ]; then echo "::error::no successful reconcile run found at all"; exit 1; fi
-          age=$(( $(date -u +%s) - $(date -u -d "$last" +%s) ))
-          echo "last successful reconcile: $last (${age}s ago, threshold ${MAX_AGE}s)"
-          if [ "$age" -gt "$MAX_AGE" ]; then
-            echo "::error::reconcile silent for ${age}s -- external dispatch timer, its token, or the workflow itself is dead"
-            exit 1
-          fi
+          # The status-filtered run listing (--status success) is served from a lagging index: it
+          # intermittently returned a success from days earlier while reconcile was green every five
+          # minutes (9 false alarms 2026-09-18..10-01). List recent runs unfiltered and pick the newest
+          # success client-side, and only alarm when three reads a minute apart all agree it is stale.
+          for attempt in 1 2 3; do
+            last=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow reconcile --limit 40 --json conclusion,updatedAt --jq '[.[] | select(.conclusion == "success")][0].updatedAt // empty')
+            if [ -n "$last" ]; then
+              age=$(( $(date -u +%s) - $(date -u -d "$last" +%s) ))
+              echo "read $attempt: last successful reconcile $last (${age}s ago, threshold ${MAX_AGE}s)"
+              if [ "$age" -le "$MAX_AGE" ]; then exit 0; fi
+            else
+              echo "read $attempt: no success among the 40 most recent reconcile runs"
+            fi
+            if [ "$attempt" -lt 3 ]; then sleep 60; fi
+          done
+          echo "::error::reconcile has no success within ${MAX_AGE}s on three reads -- external dispatch timer, its token, or the workflow itself is dead"
+          exit 1
