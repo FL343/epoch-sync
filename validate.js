@@ -693,8 +693,46 @@ async function getJson(url) {
       await new Promise(res => setTimeout(res, 8000 * (attempt + 1))); continue;
     }
     let j = null; try { j = JSON.parse(t); } catch (e) {}
+    if (j && String(url).includes('GetLeaderboardsForGame')) noteBoardListing(j);
     return { status: r.status, ok: r.ok, json: j, text: t };
   }
+}
+// Sandbox write fence. A local end-to-end run reads TEST shards (LB_PREFIX contains "test"), but
+// roughly thirty board names default to the live names, so a recipe that forgets one *_LB env var
+// used to settle test matches straight onto that live board: on 2026-08-22 a test-machine round
+// credited the live wallet board, and the nightly audit stayed red for six weeks because those
+// accounts never appear in the committed state. In sandbox mode every leaderboard write
+// (set / delete / find-or-create) must target a board whose NAME contains "test"; anything else
+// (including a board id this run never saw a name for) is refused and counted, never sent. The
+// live channels use a non-test prefix, so the fence is inert there.
+const isTestBoardName = n => /test/i.test(String(n || ''));
+const sandboxOn = () => isTestBoardName(process.env.LB_PREFIX);
+const BOARD_NAME_BY_ID = new Map();
+const SANDBOX_REFUSED = new Map();
+function noteBoardListing(j) {
+  const list = (j && j.response && j.response.leaderboards) || [];
+  for (const b of list) { const id = b.id || b.ID, name = b.name || b.Name; if (id != null && name) BOARD_NAME_BY_ID.set(String(id), String(name)); }
+}
+function sandboxRefusal(path, params) {
+  if (!sandboxOn() || !/SetLeaderboardScore|DeleteLeaderboardScore|FindOrCreateLeaderboard/.test(path)) return null;
+  const name = /FindOrCreateLeaderboard/.test(path) ? String(params.name || '') : BOARD_NAME_BY_ID.get(String(params.leaderboardid));
+  if (isTestBoardName(name)) return null;
+  const label = name || ('unnamed board id ' + params.leaderboardid);
+  const n = (SANDBOX_REFUSED.get(label) || 0) + 1;
+  SANDBOX_REFUSED.set(label, n);
+  if (n === 1) console.log('::warning::sandbox (test shard prefix): refused write to non-test board ' + label + ' -- point its *_LB env var at a *_test board');
+  return { status: 0, ok: false, json: null, text: 'sandbox: refused write to non-test board ' + label };
+}
+function sandboxSummary() {
+  if (!SANDBOX_REFUSED.size) return;
+  console.log('::warning::sandbox: refused ' + [...SANDBOX_REFUSED.values()].reduce((a, b) => a + b, 0) + ' write(s) to non-test boards: ' + [...SANDBOX_REFUSED].map(([k, v]) => k + ' x' + v).join(', '));
+}
+process.on('exit', sandboxSummary);
+function noteCreatedBoard(path, params, j) {
+  if (!/FindOrCreateLeaderboard/.test(path) || !j) return;
+  const lb = (j.result && j.result.leaderboard) || j.leaderboard || null;
+  const id = lb && (lb.leaderBoardID || lb.leaderboardID || lb.id || lb.ID);
+  if (id != null && params.name) BOARD_NAME_BY_ID.set(String(id), String(params.name));
 }
 const ghWarn = m => console.log('::warning::' + m);
 const ghErr = m => console.log('::error::' + m);
@@ -739,16 +777,21 @@ function writeRunSummary() {
   } catch (e) {}
 }
 async function postForm(path, params) {
+  const refused = sandboxRefusal(path, params);
+  if (refused) return refused;
   const body = Object.keys(params).map(k => k + '=' + encodeURIComponent(params[k])).join('&');
   const r = await fetch(BASE + path, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body });
   const t = await r.text(); let j = null; try { j = JSON.parse(t); } catch (e) {}
+  if (r.ok) noteCreatedBoard(path, params, j);
   return { status: r.status, ok: r.ok, json: j, text: t };
 }
 // detail data is stored as RAW bytes by the API -- a hex string or encodeURIComponent would mangle bytes > 127 (UTF-8),
 //   so the int32-LE detail array is appended pre-percent-encoded one byte at a time.
 function pctBytes(arr) { const b = Buffer.alloc(arr.length * 4); arr.forEach((n, i) => b.writeInt32LE(n | 0, i * 4)); return Array.from(b).map(x => '%' + x.toString(16).padStart(2, '0')).join(''); }
 async function postFormDetails(path, params, detailsArr) {
-  let body = Object.keys(params).map(k => k + '=' + encodeURIComponent(params[k])).join('&');
+  const refused = sandboxRefusal(path, params);
+  if (refused) return refused;
+  let body =Object.keys(params).map(k => k + '=' + encodeURIComponent(params[k])).join('&');
   if (detailsArr && detailsArr.length) body += '&details=' + pctBytes(detailsArr);
   const r = await fetch(BASE + path, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body });
   const t = await r.text(); let j = null; try { j = JSON.parse(t); } catch (e) {}
@@ -2344,6 +2387,7 @@ async function main() {
   if (missing.length) { ghErr('missing env: ' + missing.join(', ')); process.exit(1); }
   RUN.t0 = Date.now();
   console.log('reconcile: start (concurrency ' + CONCURRENCY + ')');
+  if (sandboxOn()) console.log('sandbox: test shard prefix -> leaderboard writes limited to boards named *test*');
 
   const lr = await getJson(BASE + '/ISteamLeaderboards/GetLeaderboardsForGame/v2/?key=' + KEY + '&appid=' + APPID + '&format=json');
   if (lr.status === 403) { ghErr('403 (key has no access)'); process.exit(1); }
@@ -4366,7 +4410,7 @@ async function main() {
 if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
-module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CHAT_MUTE: chatMute.CHAT_MUTE, CHAT_MUTE_FILE, CHAT_MUTE_LB, CHAT_REPORT_LB, isVoidDisp, voidByConsensus, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, RS_SOLO_VS_TRIO, RS_TRIO_WIN, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, CONFESS_MAGIC, reconcileConfessions, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan, postForm, postFormDetails, findOrCreateBoard, ghWarn, ghErr, PT_MODE, PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, ACTIVE_MATCH_LB, ptSeedCp, ptBoardPlan, PRIVATE_XP, isPrivateMt, privateProgressOf, creditXpPrivate, BOT_XP, isBotMt, botTierOf, botTierMult, botSeatSplit, botRanksOf, botRankEffOf, botXpGain, botProgressOf, creditXpBot, DEMO_APPID, ENDLESS_XP, computeXpEndless, creditXpEndless, CAMPAIGN_LB, SEEDCAP_REJECT_LADDER_MIN, seedcapRejectWindowMin, seedcapRejectUntilMin, seedcapRejectActive,
+module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CHAT_MUTE: chatMute.CHAT_MUTE, CHAT_MUTE_FILE, CHAT_MUTE_LB, CHAT_REPORT_LB, isVoidDisp, voidByConsensus, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, RS_SOLO_VS_TRIO, RS_TRIO_WIN, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, CONFESS_MAGIC, reconcileConfessions, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan, postForm, postFormDetails, findOrCreateBoard, isTestBoardName, sandboxOn, ghWarn, ghErr, PT_MODE, PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, ACTIVE_MATCH_LB, ptSeedCp, ptBoardPlan, PRIVATE_XP, isPrivateMt, privateProgressOf, creditXpPrivate, BOT_XP, isBotMt, botTierOf, botTierMult, botSeatSplit, botRanksOf, botRankEffOf, botXpGain, botProgressOf, creditXpBot, DEMO_APPID, ENDLESS_XP, computeXpEndless, creditXpEndless, CAMPAIGN_LB, SEEDCAP_REJECT_LADDER_MIN, seedcapRejectWindowMin, seedcapRejectUntilMin, seedcapRejectActive,
   ENDLESS_COMP_LB, SAVE_BOX_LB, SOLO_FILE, COMP, soloSanity, soloChainPlan, rerollChain, soloMilestones, soloAdvance, soloRunKey, soloStartAttested, loadSolo, saveSolo, segOrderOf, segStartOf, freshOrder,
   ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, SAVE_BOX_LB_DUO, SAVE_BOX_LB_TRIO, teamRunKey, soloMsSlot, groupRecords,
   ENDLESS_COMP_LB_QUAD, SAVE_BOX_LB_QUAD, ENDLESS_LB_QUAD, ENDLESS_MAX_PC, compFamKeyOf,   // client knife 3.7a (O178 four seats)
