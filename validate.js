@@ -344,6 +344,67 @@ function botXpGain(lv, n, rankEff, tierMult, loneMult, bm, cls) {
 }
 // demo channel identity (both playtest/demo twins export DEMO_APPID; kept for channel telemetry)
 const DEMO_APPID = Number(process.env.DEMO_APPID || 0);
+// ===== one-shot pool recovery (client knife 5.0i, 2026-10-06) =====
+// Sealed demo packages 2026093001..2026100601 started their guard through the client's auto-spawn path in the dev
+//   "test form", so every solo endless segment and its start attestation went to the client's three test pools instead
+//   of the ledger shards and never settled. RECOVER_FILE names those pools for ONE channel until a date; that channel's
+//   reconcile (APPID == DEMO_APPID) and seedcap twin (SEEDCAP_CHANNEL) read them IN ADDITION to the shards, through a
+//   strict filter (recoverPick):
+//     - settle record: solo endless (type 7, one seat), the signature verifies with a key listed in cfg.keys (sealed
+//       packages only) and the pool row owner is the run's seat 0 (the soloSettleGate owner binding)
+//     - start attestation: only for a match that has a kept settle record, written by that run's seat 0
+//   Everything else on the pools (dev-key test rows, multi-seat rows, unlisted keys) is ignored. Read-only (nothing is
+//   written to or deleted from a pool); past `until` the file is inert; only boards whose name marks them as test boards
+//   are honoured, so the file can never point the reader at a live board.
+const RECOVER_FILE = process.env.RECOVER_FILE || require('path').join(__dirname, 'recover-shards.json');
+function loadRecover(file, channel, nowMs) {
+  if (!channel) return null;
+  let j = null;
+  try { j = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { return null; }
+  if (!j || String(j.channel || '') !== String(channel)) return null;
+  const until = Date.parse(String(j.until || ''));
+  if (!(until > nowMs)) return null;
+  const boards = (Array.isArray(j.boards) ? j.boards : []).map(String).filter(n => n && isTestBoardName(n));
+  const keys = new Set((Array.isArray(j.keys) ? j.keys : []).map(String).filter(k => /^\d{10}$/.test(k)));
+  if (!boards.length || !keys.size) return null;
+  return { channel: String(j.channel), until, boards, keys };
+}
+// pure: decoded pool rows [{ steamID, board, d }] -> { recs, starts } shaped like the shard reader's output (+ recovered: true)
+function recoverPick(rows, cfg, pubTable) {
+  const kept = [], startsByM = {};
+  for (const e of rows || []) {
+    const d = e && e.d;
+    if (!Array.isArray(d) || d.length < 10 || !isEndlessMt(d[2] | 0) || (d[8] | 0) !== 1) continue;
+    const m = d[3] + '_' + d[4] + '_' + d[2];
+    if (d[0] === 0xB1) {
+      const cv = attest.verifySoloRecord(d, pubTable);
+      const gate = attest.soloSettleGate(cv, { owner: String(e.steamID), allowDevKey: false });
+      if (gate.settle && cfg.keys.has(String(cv.fields.keyName))) kept.push({ m, e });
+    } else if (d[0] === START_MAGIC) {
+      const roster = decodeRoster(d);
+      if (roster && String(roster[0]) === String(e.steamID)) (startsByM[m] = startsByM[m] || []).push(e);
+    }
+  }
+  const recs = [], starts = [], ms = new Set();
+  for (const k of kept) {
+    const d = k.e.d, dispCode = d.length > 11 ? (d[11] | 0) : 0;
+    recs.push({ steamID: k.e.steamID, shard: 'r:' + String(k.e.board || '?'), d, dispCode, disp: dispName(dispCode), roster: decodeRoster(d), recovered: true });
+    ms.add(k.m);
+  }
+  for (const m of ms) for (const e of (startsByM[m] || [])) starts.push({ start: true, steamID: e.steamID, shard: 'r:' + String(e.board || '?'), d: e.d, roster: decodeRoster(e.d), recovered: true });
+  return { recs, starts };
+}
+// read the cfg's pools (board list from an already-fetched GetLeaderboardsForGame listing) -> decoded rows for recoverPick
+async function readRecoverRows(cfg, listing) {
+  const rows = [];
+  for (const name of cfg.boards) {
+    const b = (listing || []).find(x => String(x.name || x.Name) === name);
+    if (!b) continue;
+    const { ents } = await readBoardAll(b.id || b.ID, 'recover ' + name);
+    for (const e of ents) rows.push({ steamID: e.steamID, board: name, d: decodeDetails(e.detailData) });
+  }
+  return rows;
+}
 // NOTE (extensibility): SCORE_CAP/DUR_CAP/MIN_START_AGE_MS were derived from the MATCHMADE game
 // -- originally 5 levels per matchmade run, 2-4 players, current item-value scale. A level-count
 // change or economy rework must re-derive them. Re-derived 2026-08-26 (O117, 5 -> 6 levels):
@@ -1691,7 +1752,7 @@ function soloSanity(f) {
 // chain verdict for one segment. Mutates only st.wait (first-sighting clock of an unchained claim).
 //   { ok: true, proven, consume? }  settle (proven = depth credited to the pacing gate; consume = save point used)
 //   { ok: false, reason }           reject (processed, no credit)      { ok: null, reason }  wait
-function soloChainPlan(st, key, f, m, nowMs) {
+function soloChainPlan(st, key, f, m, nowMs, opts) {
   const run = st.runs[key];
   const waitOr = (reason) => {
     const w = st.wait[m] || (st.wait[m] = { t0: nowMs });
@@ -1726,7 +1787,12 @@ function soloChainPlan(st, key, f, m, nowMs) {
     if (sv.by) return sv.by === m ? { ok: true, proven: sd } : { ok: false, reason: 'save-reused' };
     return { ok: true, proven: sd, consume: String(sd) };
   }
-  if (!run) return waitOr('chain-gap');
+  // one-shot pool recovery (client knife 5.0i): the client's three-pool rotation overwrote the early segments of every run longer
+  //   than two segments, so a recovered continuing segment (guard-signed, listed sealed key, owner-bound -- recoverPick) whose
+  //   predecessors are gone is credited from its own start: ladder = its end depth, XP from its start depth, pacing from the chain
+  //   head (0 when there is none). A RESUMED segment still needs its save / checkpoint proof (branch above). Live shards: unchanged.
+  const truncated = () => ({ ok: true, proven: run ? (run.max | 0) : 0, truncated: true });
+  if (!run) return (opts && opts.recovered) ? truncated() : waitOr('chain-gap');
   if ((run.max | 0) === sd) return { ok: true, proven: sd };
   if ((run.max | 0) > sd) {
     // audit 2026-09-06 B-F2: the chain head is a FLOOR, not an equality. An overlapping segment that still reaches past the head
@@ -1737,7 +1803,7 @@ function soloChainPlan(st, key, f, m, nowMs) {
     if ((f.endDepth | 0) > (run.max | 0)) return { ok: true, proven: run.max | 0, overlap: sd };
     return { ok: false, reason: 'chain-back' };
   }
-  return waitOr('chain-gap');
+  return (opts && opts.recovered) ? truncated() : waitOr('chain-gap');
 }
 // milestones newly crossed by this segment (bitmap on the holder: a soloMsSlot = once per player x season x ladder family). Mutates holder.ms only.
 function soloMilestones(run, endDepth) {
@@ -2483,6 +2549,19 @@ async function main() {
   for (const r of shardOut) {
     if (r.status === 'fulfilled') for (const rec of r.value) (rec.start ? starts : (rec.confess ? confessions : recs)).push(rec);
     else ghWarn('read shard failed: ' + (r.reason && r.reason.message || r.reason));
+  }
+  // one-shot pool recovery (recoverPick above): demo channel only, read-only, inert past the file's date
+  const recCfg = (DEMO_APPID > 0 && APPID === DEMO_APPID) ? loadRecover(RECOVER_FILE, 'demo', Date.now()) : null;
+  if (recCfg) {
+    try {
+      const rows = await readRecoverRows(recCfg, (lr.json && lr.json.response && lr.json.response.leaderboards) || []);
+      const got = recoverPick(rows, recCfg, attest.loadPubTable(require('path').join(__dirname, 'attest-keys.json')) || {});
+      const seen = new Set(recs.map(r => r.d[3] + '_' + r.d[4] + '_' + r.d[2] + '|' + r.steamID));
+      const fresh = got.recs.filter(r => !seen.has(r.d[3] + '_' + r.d[4] + '_' + r.d[2] + '|' + r.steamID));
+      for (const r of fresh) recs.push(r);
+      for (const s of got.starts) starts.push(s);
+      console.log('recover: ' + fresh.length + ' solo segment(s) + ' + got.starts.length + ' start attestation(s) kept of ' + rows.length + ' pool rows (until ' + new Date(recCfg.until).toISOString() + ')');
+    } catch (e) { ghWarn('recover pools read failed: ' + (e && e.message)); }
   }
   console.log('records: ' + recs.length + (starts.length ? ' (+' + starts.length + ' start attestations)' : '') + (confessions.length ? ' (+' + confessions.length + ' abandon confessions)' : ''));
   RUN.rec = recs.length; RUN.starts = starts.length;
@@ -3455,7 +3534,7 @@ async function main() {
       return false;
     }
     const key = soloRunKey(p, f.seasonId, f.runSeed);
-    const plan = soloChainPlan(soloState, key, f, m, nowMs);
+    const plan = soloChainPlan(soloState, key, f, m, nowMs, { recovered: !!r.recovered });
     if (plan.ok === null) { console.log('  solo ' + m + ': ' + plog(sid) + ' depth ' + f.startDepth + '->' + f.endDepth + ' waiting for its chain (' + plan.reason + ')'); return false; }
     if (plan.ok === false) {
       RUN.soloRej = (RUN.soloRej | 0) + 1;
@@ -3496,7 +3575,8 @@ async function main() {
     if (!cpId || (classic ? !enClassicSoloId : casual ? (!cas.id || (seasonId >= 1 && !cas.seasonId)) : (!compId || (seasonId >= 1 && !compSeasonId)))) { console.log('  solo ' + m + ': cp/' + (classic ? 'classic-solo' : casual ? 'casual-solo' : 'comp') + '/seasonal board unresolved -- left pending'); return false; }
     // pacing: the segment's own start attestation (single guard attester) or its first sighting
     let pend = startsPending[m];
-    if (!pend) { pend = startsPending[m] = { t0: nowMs, mt: r.d[2] | 0, roster: {}, settled: [], synth: true }; sigPlayer(signals, p, nowMs).ns += 1; sigDirty = true; }
+    // (a recovered pool segment whose start row was overwritten by the pool rotation is not a missing-start signal)
+    if (!pend) { pend = startsPending[m] = { t0: nowMs, mt: r.d[2] | 0, roster: {}, settled: [], synth: true }; if (!r.recovered) sigPlayer(signals, p, nowMs).ns += 1; sigDirty = true; }
     const reqMs = endlessRequiredMs({ startDepth: f.startDepth, endDepth: f.endDepth }, plan.proven, classic ? CLASSIC.LEVEL_S_SOLO : 0);   // O216: classic 60s levels
     if (nowMs - (pend.t0 || 0) < reqMs) {
       console.log('  solo-pacing ' + m + ': depth ' + f.startDepth + '->' + f.endDepth + ' (proven ' + plan.proven + ') needs ' + Math.round(reqMs / 1000) + 's real time, seen ' + Math.round((nowMs - (pend.t0 || 0)) / 1000) + 's -- deferred');
@@ -3544,7 +3624,7 @@ async function main() {
     }
     }
     if (xpId) creditXpEndless(c.g, { startDepth: Math.max(f.startDepth | 0, plan.proven | 0), endDepth: f.endDepth }, xp, changedXp, spSet, classic ? CLASSIC.XP_MUL : 1);   // audit B-F2: overlap credits new depth only; O216 classic x0.5
-    console.log('  solo settle ' + m + ': ' + plog(sid) + (classic ? ' classic' : (casual ? ' casual' : '')) + ' depth ' + f.startDepth + '->' + f.endDepth + ' bank ' + f.score + ' flags ' + f.flags + ((f.dispCode | 0) === attest.DISP_USER_QUIT ? ' (quit)' : '') + ' key=' + f.keyName + (v.sealed ? '' : ' [dev]') + (plan.overlap != null ? ' (overlap from ' + plan.overlap + ', proven ' + plan.proven + ')' : '') + (plan.revive ? (classic ? ' (revived by a classic token resume)' : ' (revived by a casual token resume)') : ''));
+    console.log('  solo settle ' + m + ': ' + plog(sid) + (classic ? ' classic' : (casual ? ' casual' : '')) + ' depth ' + f.startDepth + '->' + f.endDepth + ' bank ' + f.score + ' flags ' + f.flags + ((f.dispCode | 0) === attest.DISP_USER_QUIT ? ' (quit)' : '') + ' key=' + f.keyName + (v.sealed ? '' : ' [dev]') + (plan.overlap != null ? ' (overlap from ' + plan.overlap + ', proven ' + plan.proven + ')' : '') + (plan.truncated ? ' (recovered pool segment: truncated chain, head ' + plan.proven + ')' : '') + (plan.revive ? (classic ? ' (revived by a classic token resume)' : ' (revived by a casual token resume)') : ''));
     processed.add(m);
     return true;
   };
@@ -4419,4 +4499,5 @@ module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CHAT_MUTE: 
   ENDLESS_LB_CLASSIC_DUO, ENDLESS_LB_CLASSIC_TRIO, ENDLESS_LB_CLASSIC_QUAD, SAVE_BOX_LB_CLASSIC_DUO, SAVE_BOX_LB_CLASSIC_TRIO, SAVE_BOX_LB_CLASSIC_QUAD,   // client knife 3.9b N3 (team classic lane)
   ENDLESS_COMP_LB_OVERALL, overallScore, overallDominant,   // knife 3.5d composite ladder
   CAMPAIGN_ENDLESS_BOX_PREFIX, CAMPAIGN_ENDLESS_LB_PREFIX, CAMPAIGN_ENDLESS_SUFFIX, CAMPAIGN_ENDLESS_OFFENSE_LB, CAMPAIGN_ENDLESS_FILE, CE_MAIL_MIN, CE_SETTLED_TTL_MS, loadCe, saveCe,   // client knife 3.9b N4 (Gold Rush lane)
-  PERKS_CFG: perks.PERKS_CFG, verifyPerkPicks: perks.verifyPerkPicks };
+  PERKS_CFG: perks.PERKS_CFG, verifyPerkPicks: perks.verifyPerkPicks,
+  RECOVER_FILE, loadRecover, recoverPick, readRecoverRows };   // client knife 5.0i one-shot pool recovery

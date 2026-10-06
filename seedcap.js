@@ -594,6 +594,21 @@ async function readGroups() {
       (groups[m] = groups[m] || []).push({ d, roster: v.decodeRoster(d), w: String(e.steamID || '') });
     }
   }
+  // one-shot pool recovery (validate.recoverPick, client knife 5.0i): the channel's reconcile settles the recovered solo
+  //   segments, so its seedcap twin audits exactly the same filtered set (settle records only; read-only; inert past the date)
+  const rc = v.loadRecover(v.RECOVER_FILE, SEEDCAP_CHANNEL, Date.now());
+  if (rc) {
+    const rows = await v.readRecoverRows(rc, boards);
+    const got = v.recoverPick(rows, rc, attest.loadPubTable(path.join(__dirname, 'attest-keys.json')) || {});
+    let kept = 0;
+    for (const r of got.recs) {
+      const m = r.d[3] + '_' + r.d[4] + '_' + r.d[2];
+      if ((groups[m] || []).some(x => x.w === String(r.steamID))) continue;
+      records++; kept++;
+      (groups[m] = groups[m] || []).push({ d: r.d, roster: r.roster, w: String(r.steamID || '') });
+    }
+    console.log('seedcap: recover ' + kept + ' solo segment(s) from ' + rows.length + ' pool rows');
+  }
   return { groups, shards: shardIds.length, records };
 }
 // which compiled world(s) answer this run: live.json channel window -> primary + overlap cores (root CLI when unregistered)
