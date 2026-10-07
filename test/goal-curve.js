@@ -80,6 +80,15 @@ if (!LOOPY) {
   T('[2] both curves at depth 2^31-1 within the budget', ms < BUDGET, ms.toFixed(2) + ' ms');
   T('[2] past the domain clamps to the cap value', r1 === v.endlessGoalBase(CAP) && r2 === v.classicGoalAt(CAP) && v.endlessGoalBase(CAP + 1) === v.endlessGoalBase(CAP));
   T('[2] goalFor scales the clamped base', v.endlessGoalFor(HUGE, 3) === v.endlessGoalBase(CAP) * 3);
+  // a non-numeric depth-cap override must not turn the curves (and with them the depth-scaled score cap) into NaN
+  const probe = (val) => {
+    const r = require('child_process').spawnSync(process.execPath, ['-e', "const v = require(process.argv[1]); console.log(JSON.stringify([v.ENDLESS.DEPTH_CAP, v.endlessGoalBase(12)]))", path.join(__dirname, '..', 'validate.js')],
+      { env: Object.assign({}, process.env, { ENDLESS_DEPTH_CAP: val }), encoding: 'utf8' });
+    try { return JSON.parse(String(r.stdout).trim().split('\n').pop()); } catch (e) { return null; }
+  };
+  const bad = probe('abc'), neg = probe('-5'), big = probe('300000');
+  T('[2] ENDLESS_DEPTH_CAP non-numeric / below 1 falls back to 200000 (curves stay finite)', bad && bad[0] === 200000 && Number.isFinite(bad[1]) && neg && neg[0] === 200000, JSON.stringify([bad, neg]));
+  T('[2] a valid override is kept', big && big[0] === 300000, JSON.stringify(big));
 }
 
 // ---- record builders (client wire form; team tail = startDepth, endDepth, cont, tokens, seasonId, flags) ----

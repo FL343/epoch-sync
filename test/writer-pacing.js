@@ -11,6 +11,9 @@
 //   [7] after an outage several of one pair's starts are first sighted together: they drain one floor apart
 //   [8] the older start wins the slot even when its key sorts later (oldest-first order)
 //   [9] wiring pins (gate order, every lane, export, no bypass)
+//   [10] outage drain + shard rotation: a finisher whose record rotates away while his 3P ranked group waits is not
+//        convicted as a leaver once the rest of the group settles (he was seen agreeing earlier)
+//   [11] the per-day settle signal counts a drained bot match once, not on every run it waited
 // State isolation is structural (every *_FILE var scanned and redirected, cwd = temp dir), like test/strict-gate.js.
 const { spawnSync } = require('child_process');
 const fs = require('fs'), path = require('path'), os = require('os');
@@ -133,6 +136,8 @@ const FLOOR = v.SANITY.MIN_START_AGE_MS;
   T('[1] a mark earlier than t0 does not', v.writerReadyAt(sg, [A], 2000, 300) === 2300);
   v.writerClaim(sg, [A], 1200, 5000);
   T('[1] a claim never moves a mark backwards', sg.players[v.pid(A)].bz === 1300);
+  sg.players[v.pid(C)] = { bz: 1e15 };   // a mark far in the future (clock skew / foreign state file)
+  T('[1] a stored mark past now is read as now', v.writerReadyAt(sg, [C], 1000, 300, 5000) === 5300);
 }
 
 // ---- [2] fabricated quick batch (no start attestation): first sight defers, then one group per floor ----
@@ -235,6 +240,50 @@ const FLOOR = v.SANITY.MIN_START_AGE_MS;
   T('[8] the older start settled, the newer one waits', p.size === 1 && p.has(keyOf(older)), [...p].join(','));
 }
 
+// ---- [10] outage drain + shard rotation: no false leaver conviction ----
+{
+  const ros = [A, B, C], sc3 = [9000, 6000, 3000];
+  const mm3 = (h, seat) => {   // 3P ranked record
+    const d = [0xB1, 3, 2, h | 0, 1234, seat, 1 + seat, (6 << 1) | (seat === 0 ? 1 : 0), 3, 720, sc3[0], sc3[1], sc3[2], 0];
+    for (const s of ros) { const p = sidPair(s); d.push(p[0], p[1]); }
+    return d;
+  };
+  const hashes = [0x8001, 0x8002, 0x8003];
+  const recsFor = (without) => [].concat(...hashes.map(h => ros.filter((s, i) => !(without && without.has(h) && s === without.get(h))).map((s) => ({ sid: s, d: mm3(h, ros.indexOf(s)) }))));
+  const withPts = (recs) => { const b = boardsWith(recs); b.find(x => x.name === 'points').entries.push({ steamID: C, score: 2000 }); return b; };
+  const now = Date.now(), starts = {};
+  for (const h of hashes) starts[keyOf(mm3(h, 0))] = { t0: now - FLOOR - 30000, mt: 2, roster: {}, settled: [] };   // all first sighted together (outage)
+  const r1 = runCron(withPts(recsFor(null)), { STARTS_FILE: starts });
+  const done1 = processedOf(r1);
+  T('[10] run 1 after the outage: one group settles, the rest wait', r1.code === 0 && done1.size === 1, 'settled=' + done1.size);
+  // C keeps playing: his records of the still-waiting matches rotate off his shards
+  const gone = new Map(hashes.filter(h => !done1.has(keyOf(mm3(h, 0)))).map(h => [h, C]));
+  let r = r1, convicted = 0, exempt = 0;
+  for (let k = 2; k <= 3; k++) {
+    r = runCron(withPts(recsFor(gone)), advance(r.state, FLOOR + 1000));
+    convicted += (r.out.match(/ {2}leaver [^\n]*\(in roster, no record/g) || []).length;
+    exempt += (r.out.match(/seen agreeing earlier -- finished, not a leaver/g) || []).length;
+  }
+  const lvC = ((r.state.LEAVERS_FILE || {})[v.pid(C)] || { leaves: 0 }).leaves;
+  T('[10] the rest settle without C (2 more groups)', processedOf(r).size === 3, 'settled=' + processedOf(r).size);
+  T('[10] C is never convicted as a leaver (exempt twice, exit-rate untouched)', convicted === 0 && exempt === 2 && lvC === 0, 'convicted=' + convicted + ' exempt=' + exempt + ' leaves=' + lvC);
+  const lpC = posts(r, 7).filter(p => /steamid=76561198000000003(&|$)/.test(p.body));
+  T('[10] no points write for C (no leaver penalty)', lpC.length === 0, 'writes=' + lpC.length);
+}
+
+// ---- [11] per-day settle signal: a drained bot match counts once ----
+{
+  const N = 4, recs = [];
+  for (let i = 0; i < N; i++) recs.push({ sid: A, d: botRec(0x9100 + i) });
+  const boards = boardsWith(recs);
+  const reqB = Math.max(FLOOR, 6 * v.BOT_XP.LEVEL_SECONDS * 1000 * v.BOT_XP.PACE_FRAC);
+  let r = runCron(boards);
+  for (let k = 0; k < N && processedOf(r).size < N; k++) r = runCron(boards, advance(r.state, reqB + 1000));
+  const days = (r.state.SIGNALS_FILE || {}).day || {};
+  const n = (days.n || {})[v.pid(A)] || 0;
+  T('[11] ' + N + ' drained bot matches -> per-day count ' + N + ' (once per settle)', processedOf(r).size === N && n === N, 'settled=' + processedOf(r).size + ' day.n=' + n);
+}
+
 // ---- [9] wiring pins ----
 {
   const gate = SRC.indexOf('let pend = startsPending[c.m];');
@@ -246,6 +295,12 @@ const FLOOR = v.SANITY.MIN_START_AGE_MS;
   T('[9] the old unconstrained "no attestation" pass is gone', !/if \(!pend\) for \(const sid of writerSids\)/.test(SRC));
   T('[9] exports', typeof v.writerReadyAt === 'function' && typeof v.writerClaim === 'function' && typeof v.freshOrderPaced === 'function');
   T('[9] run summary reports the deferrals', /one-match-at-a-time deferrals/.test(SRC));
+  T('[9] the gate remembers agreeing writers; the leaver filter consults them', /const agreed = pend\.agreed \|\| \(pend\.agreed = \[\]\);/.test(SRC) && /detectLeavers\(g\)\.filter\(/.test(SRC) && /pend\.agreed\.indexOf\(pid\(String\(x\.steamID\)\)\)/.test(SRC));
+  T('[9] per-day count once per settle: matchmade at the gate, private / bot only after their floor and the one-match rule',
+    /if \(!isPrivateMt\(matchType\) && !isBotMt\(matchType\)\) countDay\(\);/.test(SRC) &&
+    /writerPaced\(c\.m, writerSids, pendP\.t0, reqMsP\)\) continue;[^\n]*\n\s*countDay\(\);/.test(SRC) &&
+    /writerPaced\(c\.m, writerSids, pendB\.t0, reqMsB\)\) continue;[^\n]*\n\s*countDay\(\);/.test(SRC));
+  T('[9] the closure clamps stored marks to this run', /writerReadyAt\(signals, wSids, t0, reqMs, nowMs\)/.test(SRC));
 }
 
 console.log(failN ? ('FAIL x' + failN) : 'ALL OK (writer-pacing)');

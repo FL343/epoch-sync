@@ -566,9 +566,16 @@ function pacingDefer(pendingEntry, now, minMs) { return !!(pendingEntry && (now 
 // when the job first sees several of one player's starts at once (an outage): they drain one floor apart. A
 // fabricated batch settles at most one group per writer per floor -- no faster than really playing it. Deferral
 // only, never a flag. Lanes: matchmade, private, bot (endless lanes keep their depth-scaled per-run gate for now).
-function writerReadyAt(signals, writerSids, t0, reqMs) {
+// now (optional): a legitimate mark is never later than the run that claimed it, so a stored mark past `now` (clock
+//   skew, a foreign or hand-edited state file) is read as `now` instead of blocking that writer until it passes.
+function writerReadyAt(signals, writerSids, t0, reqMs, now) {
   let start = Number(t0) || 0;
-  for (const sid of writerSids) { const p = signals.players[pid(sid)]; if (p && Number(p.bz) > start) start = Number(p.bz); }
+  for (const sid of writerSids) {
+    const p = signals.players[pid(sid)];
+    let mark = p ? Number(p.bz) : 0;
+    if (now != null && mark > now) mark = Number(now);
+    if (mark > start) start = mark;
+  }
   return start + Math.max(0, Number(reqMs) || 0);
 }
 function writerClaim(signals, writerSids, readyAt, now) {
@@ -2095,7 +2102,9 @@ const ENDLESS = {
   // 60s-era clients still accrue real wall time well above 75*0.5 per depth.
   LEVEL_SECONDS: 75,
   PACE_FRAC: Number(process.env.ENDLESS_PACE_FRAC || 0.5),
-  DEPTH_CAP: Number(process.env.ENDLESS_DEPTH_CAP || 200000),   // structural domain; keeps packed board keys far inside int32
+  // structural domain; keeps packed board keys far inside int32. A non-numeric override falls back to the default (the
+  //   goal curves clamp to it, so NaN here would silently turn the depth-scaled score cap off).
+  DEPTH_CAP: ((n) => (Number.isFinite(n) && n >= 1 ? n : 200000))(Number(process.env.ENDLESS_DEPTH_CAP || 200000)),
   SCORE_MULT: Number(process.env.ENDLESS_SCORE_MULT || 10),     // per-seat score cap = team goal at endDepth x this
   BOARD_SCALE: 10000, TIEBREAK_DIV: 1000,                       // packed board key: depth major, team score minor
   PENDING_TTL_MS: Number(process.env.ENDLESS_PENDING_TTL_MS || 30 * 86400000),
@@ -3577,7 +3586,7 @@ async function main() {
   // one match at a time per account (writerReadyAt): true = defer this group; false = the writers' slot is claimed
   //   (call it only where the group settles on this run -- every path after it ends in processed.add)
   const writerPaced = (m, wSids, t0, reqMs) => {
-    const readyAt = writerReadyAt(signals, wSids, t0, reqMs);
+    const readyAt = writerReadyAt(signals, wSids, t0, reqMs, nowMs);
     if (readyAt > nowMs) {
       RUN.writerPaced = (RUN.writerPaced | 0) + 1;
       console.log('  writer-pacing ' + m + ': a writer is still inside an earlier match -- eligible in ' + Math.round((readyAt - nowMs) / 1000) + 's, deferred');
@@ -4015,6 +4024,11 @@ async function main() {
       for (const sid of writerSids) sigPlayer(signals, pid(sid), nowMs).ns += 1;
       sigDirty = true;
     }
+    // writers already seen agreeing on this match (pids): a finisher whose record later rotates off its shard while
+    //   the group waits (e.g. the one-match-at-a-time drain after an outage) is not convicted as absent when the
+    //   rest of the group settles -- see the leaver filter below
+    const agreed = pend.agreed || (pend.agreed = []);
+    for (const sid of writerSids) { const h = pid(sid); if (agreed.indexOf(h) < 0) agreed.push(h); }
     if (pacingDefer(pend, nowMs, SANITY.MIN_START_AGE_MS)) {
       console.log('  pacing ' + c.m + ': start ' + (pend.synth ? 'first sighted' : 'attested') + ' ' + Math.round((nowMs - (pend.t0 || 0)) / 1000) + 's ago < ' + Math.round(SANITY.MIN_START_AGE_MS / 1000) + 's -- deferred');
       continue;
@@ -4023,10 +4037,15 @@ async function main() {
     if (!isPrivateMt(matchType) && !isBotMt(matchType) && writerPaced(c.m, writerSids, pend.t0, SANITY.MIN_START_AGE_MS)) continue;
     // per-UTC-day settle counts are recorded as a pure SIGNAL (no gate): the future judgment
     // layer marks "suspiciously many matches per day" against real-traffic baselines. VOID
-    // matches count too -- they still credit innocent-participation XP.
-    const day = sigDay(signals, nowMs);
-    for (const sid of writerSids) day.n[pid(sid)] = (day.n[pid(sid)] || 0) + 1;
-    sigDirty = true;
+    // matches count too -- they still credit innocent-participation XP. Counted where a group
+    // really settles: here for the matchmade lanes, inside the private / bot branches after their
+    // own floor (a deferred group used to be counted again on every run it waited).
+    const countDay = () => {
+      const day = sigDay(signals, nowMs);
+      for (const sid of writerSids) day.n[pid(sid)] = (day.n[pid(sid)] || 0) + 1;
+      sigDirty = true;
+    };
+    if (!isPrivateMt(matchType) && !isBotMt(matchType)) countDay();
     const seatToId = {};
     for (const r of g) seatToId[r.d[5] | 0] = r.steamID;
     const pc = g[0].d[8] | 0, scores = g[0].d.slice(10, 10 + pc);
@@ -4051,11 +4070,11 @@ async function main() {
     // are all skipped by construction (the endless-branch pattern, narrower still).
     // Time-as-work: private DOES write start attestations (reconcileStarts exempts type 10
     // from conviction, keeps t0); a missing/failed attestation falls back to the settle's own
-    // first sighting (synth pend -- identical wall-time cost for a fabricator, endless family).
+    // first sighting (synth pend -- identical wall-time cost for a fabricator, endless family;
+    // since 2026-10-07 the generic gate above creates it, the branch below is only a guard).
     // The generic MIN_START_AGE pacing gate above already deferred us past the 5-min floor;
     // here the requirement scales with the claimed level count (a 9-level room waits longer).
-    // Known benign skew: a private group deferred HERE (not by the generic gate) recounts the
-    // day.n signal next run -- advisory signal only, at most one extra tick for lv>8 rooms.
+    // The day.n signal is counted only once the room settles (countDay below).
     if (isPrivateMt(matchType)) {
       let pendP = startsPending[c.m];
       if (!pendP) {
@@ -4070,6 +4089,7 @@ async function main() {
         continue;
       }
       if (writerPaced(c.m, writerSids, pendP.t0, reqMsP)) continue;   // one match at a time per account
+      countDay();
       if (xpId) creditXpPrivate(g, rankOf, lvP, xp, changedXp, xpState, today, spSet);
       console.log('  private settle ' + c.m + ': ' + g.length + ' writers, lv ' + lvP + (c.void ? ' (void majority -- XP by class only, nothing else to void)' : ''));
       processed.add(c.m); settledPrivate++;
@@ -4093,6 +4113,7 @@ async function main() {
         continue;
       }
       if (writerPaced(c.m, writerSids, pendB.t0, reqMsB)) continue;   // one match at a time per account (a lone writer cannot run parallel bot matches, R1-A2-01)
+      countDay();
       if (xpId) creditXpBot(g, lvB, xp, changedXp, xpState, today, spSet, !!c.botLone);
       console.log('  bots settle ' + c.m + ': ' + g.length + ' writer' + (g.length > 1 ? 's' : '') + ', lv ' + lvB + ' tier ' + botTierOf(matchType) + (c.botLone ? ' (lone lane x' + BOT_XP.loneMult + ')' : '') + (c.void ? ' (void majority -- XP by class only, nothing else to void)' : ''));
       processed.add(c.m); settledBots++;
@@ -4120,7 +4141,13 @@ async function main() {
     // (no start attestation ever sighted = the per-writer ns signal, counted once when the synthetic
     //  first-sighting entry was created at the pacing gate above -- a cheap fabrication tell for the
     //  judgment layer now that every live build attests)
-    const leavers0 = detectLeavers(g);   // consensus-absent seats: LP penalty below + §7 teammate shield input
+    // consensus-absent seats: LP penalty below + §7 teammate shield input -- minus anyone this job already saw agreeing
+    //   on this match (pend.agreed): that record was lost to shard rotation while the group waited, the player finished
+    const leavers0 = detectLeavers(g).filter((x) => {
+      if (!(pend.agreed && pend.agreed.indexOf(pid(String(x.steamID))) >= 0)) return true;
+      console.log('  leaver ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' record gone but seen agreeing earlier -- finished, not a leaver');
+      return false;
+    });
     // ===== playtest channel: no rating/points surface (lock layer 3) -- the TrueSkill update,
     // placement seeding, group-decay memory and every points write are skipped wholesale, so
     // skill.json/groups.json stay untouched and the changed/changedLp pools stay empty. The
