@@ -82,11 +82,18 @@ jobs:
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add -- $state_files
             git commit -m "state: update reconciliation state"
-            # a code push landing mid-run would reject this push; losing the state commit means the
-            # next run re-settles the same matches = double-applied LP/XP. Rebase (state files are
-            # bot-only, trivially clean) and fail LOUDLY if it still cannot land.
-            git pull --rebase origin "${GITHUB_REF_NAME}" || { echo "::error::state rebase failed -- resolve manually before next run"; exit 1; }
-            git push
+            # Any other push landing between the rebase and the push (a code push, or a sibling
+            # channel's state commit: the dispatcher fires every workflow in the same second) rejects
+            # this push; losing the state commit means the next run re-settles the same matches =
+            # double-applied LP/XP/CP (the boards are already written). Rebase (state files are
+            # bot-only, trivially clean) and retry like every sibling persist step; fail LOUDLY if it
+            # still cannot land. test/workflow-push-retry.js pins this shape for every workflow.
+            n=0
+            until git pull --rebase origin "${GITHUB_REF_NAME}" && git push; do
+              n=$((n+1))
+              if [ "$n" -ge 3 ]; then echo "::error::state push failed after $n tries -- the next run would re-settle this batch; resolve manually"; exit 1; fi
+              sleep $((5 * n))
+            done
           else
             echo "no state change"
           fi
@@ -102,8 +109,12 @@ jobs:
             date -u +%FT%TZ > .heartbeat
             git add .heartbeat
             git commit -m "chore: heartbeat"
-            git pull --rebase origin "${GITHUB_REF_NAME}" || { echo "::error::heartbeat rebase failed"; exit 1; }
-            git push
+            n=0
+            until git pull --rebase origin "${GITHUB_REF_NAME}" && git push; do
+              n=$((n+1))
+              if [ "$n" -ge 3 ]; then echo "::error::heartbeat push failed after $n tries"; exit 1; fi
+              sleep $((5 * n))
+            done
           else
             echo "heartbeat not due (age ${age}d)"
           fi
