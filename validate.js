@@ -966,12 +966,33 @@ function seedcapRejectActive(su, nowMin) {
   return u != null && (nowMin | 0) < u;
 }
 function loadSeedcap() { try { return JSON.parse(fs.readFileSync(SC_STATE_FILE, 'utf8')) || null; } catch (e) { return null; } }
-// pending abandon confessions (see reconcileConfessions): "pid|matchKey" -> {t0, mt, ded, ex, refunded, done}
+// abandon confessions (see reconcileConfessions): "pid|matchKey" -> {t0, mt, ded, ex, refunded, done}
+// An entry is also the ONLY memory that its 0xB5 record was already applied, and that record stays
+// readable until the writer's own shard rotation overwrites it -- for a player who stops playing,
+// indefinitely. Age alone therefore never retires an entry: past CONFESS_PRUNE_MS it is dropped
+// only once a COMPLETE shard read no longer shows its record (pruneConfessions). Dropping it while
+// the record is still up made the next run apply the same record again (-LP + another exit-rate
+// hit every window) whenever the match never reached processed (fewer than two start attesters
+// visible and no consistent settlement).
 const CONFESSIONS_FILE = process.env.CONFESSIONS_FILE || 'confessions.json';
 const CONFESS_PRUNE_MS = Number(process.env.CONFESS_PRUNE_MS || 48 * 3600 * 1000);
 function loadConfessions() { try { return JSON.parse(fs.readFileSync(CONFESSIONS_FILE, 'utf8')) || {}; } catch (e) { return {}; } }
-function saveConfessions(s, now) {
-  for (const k of Object.keys(s)) if (now - (s[k].t0 || 0) > CONFESS_PRUNE_MS) delete s[k];
+// live: Set of "pid|matchKey" keys whose 0xB5 record this run's shard read showed, built only when
+//   every shard was read completely (all fulfilled, none cut by PAGE_CAP); anything else (null) =
+//   "cannot prove a record is gone" -> every entry past the window is kept for this run.
+// Bound: entries past the window <= confession records still on the shards (the data every run
+//   reads anyway); they leave as their writers' later records overwrite those shard entries.
+function pruneConfessions(s, now, live) {
+  let dropped = 0;
+  for (const k of Object.keys(s)) {
+    if (now - (s[k].t0 || 0) <= CONFESS_PRUNE_MS) continue;
+    if (!(live instanceof Set) || live.has(k)) continue;
+    delete s[k]; dropped++;
+  }
+  return dropped;
+}
+function saveConfessions(s, now, live) {
+  pruneConfessions(s, now, live);
   try { fs.writeFileSync(CONFESSIONS_FILE, JSON.stringify(s, null, 0)); } catch (e) { ghWarn('write ' + CONFESSIONS_FILE + ' failed: ' + (e && e.message)); }
 }
 // knife-7 unmatched-confession sticky state (dedupe across runs; the box is a rolling ring so
@@ -2565,10 +2586,14 @@ async function main() {
   // 0 while direct entry reads returned the records, so back-to-back runs logged
   // "records: 0" against live data. 50 paged reads cost single-digit seconds under the
   // worker pool; the count is not worth trusting for anything.
+  // shardsComplete: every listed shard read in full this run (no failure, no PAGE_CAP cut) -- only
+  // then may an absent record count as gone (confession retention, see pruneConfessions).
+  let shardsComplete = shards.length > 0;
   const shardOut = await mapPool(shards, CONCURRENCY, async (s) => {
     const id = s.id || s.ID;
     const label = 's' + String(s.name || s.Name).replace(PREFIX, '');
-    const { ents } = await readBoardAll(id, 'shard ' + label);   // paged; cap-hit is warned inside
+    const { ents, complete } = await readBoardAll(id, 'shard ' + label);   // paged; cap-hit is warned inside
+    if (!complete) shardsComplete = false;
     const out = [];
     for (const e of ents) {
       const d = decodeDetails(e.detailData);
@@ -2592,8 +2617,10 @@ async function main() {
   const starts = [], confessions = [];
   for (const r of shardOut) {
     if (r.status === 'fulfilled') for (const rec of r.value) (rec.start ? starts : (rec.confess ? confessions : recs)).push(rec);
-    else ghWarn('read shard failed: ' + (r.reason && r.reason.message || r.reason));
+    else { shardsComplete = false; ghWarn('read shard failed: ' + (r.reason && r.reason.message || r.reason)); }
   }
+  // confession keys still on the shards (retention input of saveConfessions); null = partial read
+  const confLive = shardsComplete ? new Set(confessions.map(c => pid(String(c.steamID)) + '|' + c.m)) : null;
   // one-shot pool recovery (recoverPick above): demo channel only, read-only, inert past the file's date
   const recCfg = (DEMO_APPID > 0 && APPID === DEMO_APPID) ? loadRecover(RECOVER_FILE, 'demo', Date.now()) : null;
   if (recCfg) {
@@ -2634,6 +2661,7 @@ async function main() {
   // (a match that started and was never settled by anyone) produces no consistent matches at all,
   // so it must still be tracked, judged and persisted on those paths.
   const processed = loadProcessed();
+  const processedN0 = processed.size;   // grow-only set: a size change = keys added on this run (persistStartsSide)
   const leavers = loadLeavers(); let leaverHits = 0;
   const startsPending = loadStarts();
   const confState = loadConfessions();   // loaded before starts so the orphan verdict can skip confessed keys
@@ -2801,10 +2829,15 @@ async function main() {
   const persistStartsSide = () => {
     if (!APPLY_MMR) { console.log('APPLY_MMR=0 dry-run, nothing written'); return; }
     saveStarts(startsPending);
-    saveConfessions(confState, nowMs);
+    saveConfessions(confState, nowMs, confLive);
     if (sigDirty) saveSignals(signals, nowMs);
     if (startsRes.convicted || confRes.exitHits || confRes.refunded) { saveLeavers(leavers); }
-    if (startsRes.convicted) { saveProcessed(processed); }
+    // persist on growth, not on conviction count: an orphan verdict marks its key processed even
+    // when it convicts nobody (every roster member confessed or wrote a settle record). Its
+    // pending entry is already gone from starts.json, so leaving the key unsaved made the next run
+    // re-register it from the still-visible 0xB2 records and judge it again -- the consolation XP
+    // repeated every maturity window.
+    if (processed.size !== processedN0) saveProcessed(processed);
   };
   // ladder-floor gate for gated catalog items: met on THIS season's ladder, else on any
   // archived season ladder (found-only -- never creates archives; a soft-reset can park a
@@ -4542,7 +4575,7 @@ async function main() {
   saveLeavers(leavers);
   saveStarts(startsPending);
   saveSolo(soloState, nowMs);
-  saveConfessions(confState, nowMs);
+  saveConfessions(confState, nowMs, confLive);
   if (sigDirty) saveSignals(signals, nowMs);
   if (xpId) saveXp(xpState);
   await maintainTrust();
@@ -4569,4 +4602,5 @@ module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CHAT_MUTE: 
   ENDLESS_COMP_LB_OVERALL, overallScore, overallDominant,   // knife 3.5d composite ladder
   CAMPAIGN_ENDLESS_BOX_PREFIX, CAMPAIGN_ENDLESS_LB_PREFIX, CAMPAIGN_ENDLESS_SUFFIX, CAMPAIGN_ENDLESS_OFFENSE_LB, CAMPAIGN_ENDLESS_FILE, CE_MAIL_MIN, CE_SETTLED_TTL_MS, loadCe, saveCe,   // client knife 3.9b N4 (Gold Rush lane)
   PERKS_CFG: perks.PERKS_CFG, verifyPerkPicks: perks.verifyPerkPicks,
+  pruneConfessions, CONFESS_PRUNE_MS,   // confession entries outlive the window while their record is still on a shard
   RECOVER_FILE, loadRecover, recoverPick, readRecoverRows };   // client knife 5.0i one-shot pool recovery
