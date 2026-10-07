@@ -97,7 +97,16 @@ console.log('-- [3] chain replay: predecessor + resumed in one tick --');
 console.log('-- [4] wiring --');
 {
   const src = fs.readFileSync(path.join(__dirname, '..', 'validate.js'), 'utf8');
-  assert('fresh.sort(freshOrder) is the one sort of the fresh list', /\n  fresh\.sort\(freshOrder\);/.test(src) && !/fresh\.sort\(\(a, b\) =>/.test(src));
+  // 2026-10-07 (one match at a time per account): the one sort is freshOrderPaced = freshOrder with the non-endless
+  //   groups taken oldest start first; endless pairs still compare by freshOrder exactly
+  assert('fresh.sort(freshOrderPaced(...)) is the one sort of the fresh list', (src.match(/\n\s*fresh\.sort\(/g) || []).length === 1 && /\n  fresh\.sort\(freshOrderPaced\(/.test(src) && !/fresh\.sort\(\(a, b\) =>/.test(src));
+  const t0 = { old: 100, 'a-mid': 200, mid: 200, new: 300 };
+  const paced = v.freshOrderPaced((m) => t0[m] || 0);
+  const e = (m, sd, ed) => grp(m, mk7(SA, 0, { startDepth: sd, endDepth: ed }), mk7(SB, 1, { startDepth: sd, endDepth: ed }));
+  const ends = [e('z-e1', 5, 7), e('a-e2', 0, 5), e('m-e3', 5, 5)];
+  eq('freshOrderPaced: endless segments keep freshOrder exactly', ends.slice().sort(paced).map(x => x.m), ends.slice().sort(freshOrder).map(x => x.m));
+  const q = (m) => grp(m, mk1(SA, 0), mk1(SB, 1));
+  eq('freshOrderPaced: non-endless oldest start first, key breaks ties, endless after', [q('new'), ends[0], q('mid'), q('old'), q('a-mid')].sort(paced).map(x => x.m), ['old', 'a-mid', 'mid', 'new', 'z-e1']);
   assert('freshOrder / segStartOf / segOrderOf exported', typeof v.freshOrder === 'function' && typeof v.segStartOf === 'function' && typeof v.segOrderOf === 'function');
   assert('COMP.CHAIN_WAIT_MS is what a mis-ordered tick used to burn', (COMP.CHAIN_WAIT_MS | 0) > 0);
 }

@@ -551,9 +551,29 @@ function sanityFlags(g) {
   return out;
 }
 // pacing gate: true = this settle group must wait (its start attestation is younger than the
-// physical minimum). No pending entry (pre-attestation build, or start overwritten before ever
-// sighted) -> no constraint; that case is recorded as an `ns` signal instead.
+// physical minimum). No pending entry -> no constraint here; the settle loop never passes one any
+// more (since 2026-10-07 a group with no attestation ever sighted gets a synthetic entry stamped
+// at its own first sighting, counted once as an `ns` signal -- see the matchmade gate).
 function pacingDefer(pendingEntry, now, minMs) { return !!(pendingEntry && (now - (pendingEntry.t0 || 0)) < minMs); }
+// ---- one match at a time per account (R1-A2-07 / R1-A2-01, cloud audit 2026-10-07) ----
+// The pacing floors above are per MATCH: a group may settle once its own start is old enough. Shard rows are
+// writable by any owner of the game, so two colluding accounts (or ONE account on the single-writer bot lane) could
+// write N consistent fabricated groups at once and have all N clear the floor together -- settlement throughput had
+// no per-account bound. A player can only be inside one match at a time, so every writer carries a "busy until"
+// mark (signals.players[pid].bz, ms). A group becomes eligible at
+//   readyAt = max(t0, every writer's mark) + reqMs          (reqMs = the lane's own floor)
+// and settling it moves every writer's mark to readyAt. Honest matches never overlap, so an honest group waits only
+// when the job first sees several of one player's starts at once (an outage): they drain one floor apart. A
+// fabricated batch settles at most one group per writer per floor -- no faster than really playing it. Deferral
+// only, never a flag. Lanes: matchmade, private, bot (endless lanes keep their depth-scaled per-run gate for now).
+function writerReadyAt(signals, writerSids, t0, reqMs) {
+  let start = Number(t0) || 0;
+  for (const sid of writerSids) { const p = signals.players[pid(sid)]; if (p && Number(p.bz) > start) start = Number(p.bz); }
+  return start + Math.max(0, Number(reqMs) || 0);
+}
+function writerClaim(signals, writerSids, readyAt, now) {
+  for (const sid of writerSids) { const p = sigPlayer(signals, pid(sid), now); if (!(Number(p.bz) >= readyAt)) p.bz = readyAt; }
+}
 // ---- B6 signal collection (record now, judge after real-traffic calibration) ----
 // Rolling aggregates the future trust layer needs as history from day one: per-player
 // settle/win/void/flag/disp counts + score moments, pairwise co-occurrence (who plays with
@@ -832,6 +852,7 @@ function writeRunSummary() {
       '| endless settles / cp+board writes | ' + s('endless', 0) + ' (+' + s('endlessComp', 0) + ' team comp, +' + s('solo', 0) + ' solo) / ' + s('writesEndless', '0/0 0/0') + ' |',
       '| seedcap veto / reject-window discards | ' + s('seedcapVeto', 0) + ' / ' + s('seedcapReject', 0) + ' |',
       '| perk replay rejects | ' + s('perkRej', 0) + ' |',
+      '| one-match-at-a-time deferrals | ' + s('writerPaced', 0) + ' |',
       '| campaign grants / campaign endless | ' + s('campaign', '-') + ' / ' + s('campaignEndless', '-') + ' |',
       '| page-cap hits | ' + RUN.cap + ' |',
       '| duration | ' + ((Date.now() - (RUN.t0 || Date.now())) / 1000).toFixed(1) + 's |',
@@ -1859,6 +1880,15 @@ function freshOrder(a, b) {
     if (oa.rs !== ob.rs) return oa.rs - ob.rs;
   }
   return a.m < b.m ? -1 : a.m > b.m ? 1 : 0;
+}
+// freshOrder with the non-endless groups taken oldest start first (t0Of(m) = the group's start sighting, ms):
+//   the one-match-at-a-time rule (writerReadyAt) hands each writer's next slot to whichever group comes first, so an
+//   older honest match must not queue behind a writer's newer groups. Endless order is untouched.
+function freshOrderPaced(t0Of) {
+  return (a, b) => {
+    if (!segOrderOf(a) && !segOrderOf(b)) { const ta = Number(t0Of(a.m)) || 0, tb = Number(t0Of(b.m)) || 0; if (ta !== tb) return ta - tb; }
+    return freshOrder(a, b);
+  };
 }
 // ===== O140 private friend-room XP credit (match type 10) =====
 // Levels-played reader for private groups (domain 1..15 -- rooms run 3/6/9 levels, wider than
@@ -3355,7 +3385,8 @@ async function main() {
   const overallSeasonId = overallSeason.id;
   if (seasonId >= 1 && overallId && !overallSeasonId) ghWarn('seasonal overall comp board unresolved -> seasonal composite rows skipped this tick');
 
-  fresh.sort(freshOrder);   // non-endless by key; endless segments predecessor-first (startDepth, then key) -- see freshOrder
+  // non-endless oldest start first, then by key; endless segments predecessor-first (startDepth, then key) -- see freshOrder
+  fresh.sort(freshOrderPaced((m) => (startsPending[m] && startsPending[m].t0) || nowMs));
   // On-demand base values: when a bulk read hit PAGE_CAP the maps are incomplete -- a settling
   // player missing from them may still hold an entry beyond the window, and settling from base 0
   // would silently reset his LP/XP. Fetch exactly the players this run settles (record holders +
@@ -3510,6 +3541,18 @@ async function main() {
     }
   };
   let scPendingRestore = null;
+  // one match at a time per account (writerReadyAt): true = defer this group; false = the writers' slot is claimed
+  //   (call it only where the group settles on this run -- every path after it ends in processed.add)
+  const writerPaced = (m, wSids, t0, reqMs) => {
+    const readyAt = writerReadyAt(signals, wSids, t0, reqMs);
+    if (readyAt > nowMs) {
+      RUN.writerPaced = (RUN.writerPaced | 0) + 1;
+      console.log('  writer-pacing ' + m + ': a writer is still inside an earlier match -- eligible in ' + Math.round((readyAt - nowMs) / 1000) + 's, deferred');
+      return true;
+    }
+    writerClaim(signals, wSids, readyAt, nowMs); sigDirty = true;
+    return false;
+  };
   // ===== O93 solo competitive segment settle (COMP block above) =====
   const soloState = loadSolo();
   const soloPub = attest.loadPubTable(require('path').join(__dirname, 'attest-keys.json')) || {};
@@ -3929,11 +3972,22 @@ async function main() {
     // number guessable-wrong): a match cannot settle before it could physically have been
     // PLAYED. Not a flag, not suspicion -- just "come back when the time has actually passed";
     // legit matches arrive already-aged, so this defers at most one run in edge timing.
-    const pend = startsPending[c.m];
+    // No start attestation ever sighted (job outage / failed client write): the settle group's own first
+    //   sighting starts the clock, counted once as an `ns` signal -- the endless / private / bot lanes always
+    //   did this. Matchmade groups used to pass unconstrained (kept for pre-attestation builds); every live
+    //   build attests since B7 (2026-07-12), so that exemption only served fabricated batches (R1-A2-07).
+    let pend = startsPending[c.m];
+    if (!pend) {
+      pend = startsPending[c.m] = { t0: nowMs, mt: matchType, roster: {}, settled: [], synth: true };
+      for (const sid of writerSids) sigPlayer(signals, pid(sid), nowMs).ns += 1;
+      sigDirty = true;
+    }
     if (pacingDefer(pend, nowMs, SANITY.MIN_START_AGE_MS)) {
-      console.log('  pacing ' + c.m + ': start attested ' + Math.round((nowMs - (pend.t0 || 0)) / 1000) + 's ago < ' + Math.round(SANITY.MIN_START_AGE_MS / 1000) + 's -- deferred');
+      console.log('  pacing ' + c.m + ': start ' + (pend.synth ? 'first sighted' : 'attested') + ' ' + Math.round((nowMs - (pend.t0 || 0)) / 1000) + 's ago < ' + Math.round(SANITY.MIN_START_AGE_MS / 1000) + 's -- deferred');
       continue;
     }
+    // one match at a time per account; the private and bot lanes apply it after their own level-scaled floor below
+    if (!isPrivateMt(matchType) && !isBotMt(matchType) && writerPaced(c.m, writerSids, pend.t0, SANITY.MIN_START_AGE_MS)) continue;
     // per-UTC-day settle counts are recorded as a pure SIGNAL (no gate): the future judgment
     // layer marks "suspiciously many matches per day" against real-traffic baselines. VOID
     // matches count too -- they still credit innocent-participation XP.
@@ -3982,6 +4036,7 @@ async function main() {
         console.log('  private-pacing ' + c.m + ': lv ' + lvP + ' needs ' + Math.round(reqMsP / 1000) + 's real time, seen ' + Math.round((nowMs - (pendP.t0 || 0)) / 1000) + 's -- deferred');
         continue;
       }
+      if (writerPaced(c.m, writerSids, pendP.t0, reqMsP)) continue;   // one match at a time per account
       if (xpId) creditXpPrivate(g, rankOf, lvP, xp, changedXp, xpState, today, spSet);
       console.log('  private settle ' + c.m + ': ' + g.length + ' writers, lv ' + lvP + (c.void ? ' (void majority -- XP by class only, nothing else to void)' : ''));
       processed.add(c.m); settledPrivate++;
@@ -4004,6 +4059,7 @@ async function main() {
         console.log('  bots-pacing ' + c.m + ': lv ' + lvB + ' needs ' + Math.round(reqMsB / 1000) + 's real time, seen ' + Math.round((nowMs - (pendB.t0 || 0)) / 1000) + 's -- deferred');
         continue;
       }
+      if (writerPaced(c.m, writerSids, pendB.t0, reqMsB)) continue;   // one match at a time per account (a lone writer cannot run parallel bot matches, R1-A2-01)
       if (xpId) creditXpBot(g, lvB, xp, changedXp, xpState, today, spSet, !!c.botLone);
       console.log('  bots settle ' + c.m + ': ' + g.length + ' writer' + (g.length > 1 ? 's' : '') + ', lv ' + lvB + ' tier ' + botTierOf(matchType) + (c.botLone ? ' (lone lane x' + BOT_XP.loneMult + ')' : '') + (c.void ? ' (void majority -- XP by class only, nothing else to void)' : ''));
       processed.add(c.m); settledBots++;
@@ -4028,10 +4084,9 @@ async function main() {
     if (parts.length < 2) { processed.add(c.m); continue; }
     // B6 collection for a real settle: per-player counters + pairwise co-occurrence.
     recordMatchSignals(signals, g, parts, rankOf, matchType, false, nowMs);
-    // settled with no start attestation ever sighted: legit for pre-attestation builds, so it is
-    // a recorded signal (per-writer ns counter), not a flag -- once every live build attests,
-    // a high ns rate becomes a cheap fabrication tell for the judgment layer.
-    if (!pend) for (const sid of writerSids) sigPlayer(signals, pid(sid), nowMs).ns += 1;
+    // (no start attestation ever sighted = the per-writer ns signal, counted once when the synthetic
+    //  first-sighting entry was created at the pacing gate above -- a cheap fabrication tell for the
+    //  judgment layer now that every live build attests)
     const leavers0 = detectLeavers(g);   // consensus-absent seats: LP penalty below + §7 teammate shield input
     // ===== playtest channel: no rating/points surface (lock layer 3) -- the TrueSkill update,
     // placement seeding, group-decay memory and every points write are skipped wholesale, so
@@ -4505,7 +4560,7 @@ if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
 module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CHAT_MUTE: chatMute.CHAT_MUTE, CHAT_MUTE_FILE, CHAT_MUTE_LB, CHAT_REPORT_LB, isVoidDisp, voidByConsensus, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, RS_SOLO_VS_TRIO, RS_TRIO_WIN, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, CONFESS_MAGIC, reconcileConfessions, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan, postForm, postFormDetails, findOrCreateBoard, isTestBoardName, sandboxOn, ghWarn, ghErr, PT_MODE, PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, ACTIVE_MATCH_LB, ptSeedCp, ptBoardPlan, PRIVATE_XP, isPrivateMt, privateProgressOf, creditXpPrivate, BOT_XP, isBotMt, botTierOf, botTierMult, botSeatSplit, botRanksOf, botRankEffOf, botXpGain, botProgressOf, creditXpBot, DEMO_APPID, ENDLESS_XP, computeXpEndless, creditXpEndless, CAMPAIGN_LB, SEEDCAP_REJECT_LADDER_MIN, seedcapRejectWindowMin, seedcapRejectUntilMin, seedcapRejectActive,
-  ENDLESS_COMP_LB, SAVE_BOX_LB, SOLO_FILE, COMP, soloSanity, soloChainPlan, rerollChain, soloMilestones, soloAdvance, soloRunKey, soloStartAttested, loadSolo, saveSolo, segOrderOf, segStartOf, freshOrder,
+  ENDLESS_COMP_LB, SAVE_BOX_LB, SOLO_FILE, COMP, soloSanity, soloChainPlan, rerollChain, soloMilestones, soloAdvance, soloRunKey, soloStartAttested, loadSolo, saveSolo, segOrderOf, segStartOf, freshOrder, freshOrderPaced, writerReadyAt, writerClaim,
   ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, SAVE_BOX_LB_DUO, SAVE_BOX_LB_TRIO, teamRunKey, soloMsSlot, groupRecords,
   ENDLESS_COMP_LB_QUAD, SAVE_BOX_LB_QUAD, ENDLESS_LB_QUAD, ENDLESS_MAX_PC, compFamKeyOf,   // client knife 3.7a (O178 four seats)
   ENDLESS_LB_SOLO, SAVE_BOX_LB_CASUAL, CASUAL_LIVES,   // client knife 3.7a (O218 casual solo lane)

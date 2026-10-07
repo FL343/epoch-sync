@@ -39,8 +39,12 @@ A flagged match is not settled and not marked processed, so a loosened bound sel
 still-visible records. A **pacing gate** enforces minimum real match time without
 trusting any client-reported duration (speed hacks can't move it): a settle group is
 only eligible once its start attestation was first *sighted* a configurable minimum ago
-— the clock is this job's own observation time. Settles with no attestation ever
-sighted pass unconstrained (pre-attestation builds) but are recorded as an `ns` signal.
+— the clock is this job's own observation time. A group with no attestation ever sighted
+starts the clock at its own first sighting and is recorded once as an `ns` signal. On top
+of that, **one match at a time per account**: each writer carries a "busy until" mark, a
+group becomes eligible only once every writer's previous match had its own minimum time,
+and settling it moves the marks. Honest play never overlaps, so it never waits on this;
+a batch of fabricated groups written at once settles no faster than really playing them.
 Per-day settle counts are recorded as pure signals — thresholds for "suspiciously many
 matches per day", like all statistical bounds (win rates, distribution tightening),
 wait for real-traffic calibration.
