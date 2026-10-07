@@ -484,7 +484,9 @@ function sanityFlags(g) {
       if (t.seasonId < -1 || t.seasonId > 4095) out.push('season');   // season snapshot domain (absent = -1 legacy; ids are small)
       // score cap scales with the claimed depth (the global matchmade cap has no meaning on an
       // unbounded track); the floor stays shared -- shop overdraft is equally legal here.
-      scoreCap = ((fl & attest.SEG_CLASSIC) ? classicGoalFor(t.endDepth, pc) : endlessGoalFor(t.endDepth, pc)) * ENDLESS.SCORE_MULT;   // N3: classic line x k (k = pc/2)
+      // An out-of-domain depth is already flagged above: never derive a cap from it (R1-B2-02 -- a
+      // forged 2^31 depth used to drive the goal curve into a multi-second loop on every run).
+      if (out.indexOf('depth') < 0) scoreCap = ((fl & attest.SEG_CLASSIC) ? classicGoalFor(t.endDepth, pc) : endlessGoalFor(t.endDepth, pc)) * ENDLESS.SCORE_MULT;   // N3: classic line x k (k = pc/2)
     }
   } else if (base === PRIVATE_XP.MT) {
     // O140 friend rooms: 2..6 seats, never premade fields (the client's mtCodeOf returns the
@@ -1744,8 +1746,10 @@ function soloSanity(f) {
   if ((casual || classic) && (fl & attest.SEG_SUSPENDED)) out.push('flags');   // a casual / classic save is a checkpoint ROW (the run continues), never a suspended segment
   if ((f.dispCode | 0) !== attest.DISP_FINISHED && (f.dispCode | 0) !== attest.DISP_USER_QUIT) out.push('disp');
   if ((fl & attest.SEG_SUSPENDED) && (f.dispCode | 0) !== attest.DISP_FINISHED) out.push('disp');
-  const cap = (classic ? classicGoalFor(Math.max(1, f.endDepth | 0), 1) : endlessGoalFor(Math.max(1, f.endDepth | 0), 1)) * ENDLESS.SCORE_MULT;   // O216: classic line (650/1195/… linear +2705)
-  if ((f.score | 0) > cap || (f.score | 0) < SANITY.SCORE_FLOOR) out.push('score');
+  if (out.indexOf('depth') < 0) {   // never derive a cap from an out-of-domain depth (already flagged; R1-B2-02)
+    const cap = (classic ? classicGoalFor(Math.max(1, f.endDepth | 0), 1) : endlessGoalFor(Math.max(1, f.endDepth | 0), 1)) * ENDLESS.SCORE_MULT;   // O216: classic line (650/1195/… linear +2705)
+    if ((f.score | 0) > cap || (f.score | 0) < SANITY.SCORE_FLOOR) out.push('score');
+  }
   if ((f.durationSec | 0) < 0) out.push('duration');
   return out;
 }
@@ -2007,10 +2011,16 @@ const CLASSIC = {
   GOAL: { start: 375, addonStart: 275, grow: 270, earlyLevels: 9 },                                     // lockstep: src/data/classic-rules.js GOAL (goalAt)
   SCALE_BASE_PC: 2,
 };
+// Closed form of the client's per-level loop (goal += addon, addon grows by `grow` for the first earlyLevels steps). The
+//   cron used to run that loop here, i.e. `level` iterations per call: a record claiming a depth near 2^31 cost ~10 s of
+//   CPU per evaluation, and a few dozen such records timed the reconcile / seedcap jobs out on every run. Value-identical
+//   to the loop on the whole depth domain (test/goal-curve.js: every level to 20000 + samples to the cap); levels past
+//   ENDLESS.DEPTH_CAP are clamped to it (every caller flags such a record 'depth' and never settles it anyway).
 function classicGoalAt(level) {
-  let goal = CLASSIC.GOAL.start + CLASSIC.GOAL.addonStart, addon = CLASSIC.GOAL.addonStart;
-  for (let d = 1; d < (level | 0); d++) { if (d <= CLASSIC.GOAL.earlyLevels) addon += CLASSIC.GOAL.grow; goal += addon; }
-  return goal;
+  const G = CLASSIC.GOAL, E = G.earlyLevels;
+  const n = Math.max(0, Math.min(level | 0, ENDLESS.DEPTH_CAP) - 1);       // loop steps d = 1..n
+  const ramp = n <= E ? n * (n + 1) / 2 : E * (E + 1) / 2 + E * (n - E);   // sum over the steps of min(d, E)
+  return G.start + G.addonStart + n * G.addonStart + G.grow * ramp;
 }
 function classicGoalFor(depth, pc) {
   const g = classicGoalAt(Math.max(1, depth | 0)), n = Math.max(1, pc | 0);
@@ -2202,11 +2212,15 @@ function endlessAbstention(g, maxSeats) {
 }
 // cumulative team goal line (client curve mirror): quadratic ramp for the early levels, then
 // near-linear. Used as the depth-scaled score cap -- the global matchmade cap has no meaning here.
+// Closed form of the client's per-level loop (addon grows by growEarly for the first earlyLevels steps, then by
+//   growLate; goal += addon each step) -- O(1) for the same reason as classicGoalAt above (the loop made a forged
+//   depth near 2^31 cost ~16 s per call). Value-identical on [1, DEPTH_CAP]; deeper inputs clamp to the cap.
 function endlessGoalBase(depth) {
-  const G = ENDLESS.GOAL, dd = Math.max(1, depth | 0);
-  let goal = G.start, addon = G.addonStart;
-  for (let n = 2; n <= dd; n++) { addon += ((n - 1) <= G.earlyLevels) ? G.growEarly : G.growLate; goal += addon; }
-  return goal;
+  const G = ENDLESS.GOAL, E = G.earlyLevels;
+  const k = Math.min(Math.max(1, depth | 0), ENDLESS.DEPTH_CAP) - 1;           // loop steps n = 2..depth  <=>  k = 1..depth-1
+  const early = k <= E ? k * (k + 1) / 2 : E * (E + 1) / 2 + E * (k - E);     // sum over the steps of min(k, E)
+  const late = k <= E ? 0 : (k - E) * (k - E + 1) / 2;                        // sum over the steps of max(0, k - E)
+  return G.start + k * G.addonStart + G.growEarly * early + G.growLate * late;
 }
 function endlessGoalFor(depth, pcnt) { return endlessGoalBase(depth) * Math.max(1, pcnt | 0); }
 // per-game CP gain (client formula mirror): flat base + rank bonus (full-credit records only),

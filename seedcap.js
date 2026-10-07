@@ -310,6 +310,7 @@ const CHAIN_LEGACY_KEEP_MIN = 7 * 1440;    // legacy pid:pc entries: read-only f
 const CHAIN_KEEP_MIN = 90 * 1440;          // per-run entries expire after 90 days (a run cannot be resumed past its save row's season anyway)
 function chainStartBank(st, rosterPids, pc, startDepth, runSeed) {
   if ((startDepth | 0) <= 0) return 0;
+  // (the static bound below is O(1) -- endlessGoalFor is a closed form clamped to the depth domain, R1-B2-02)
   let best = 0;
   for (const p of rosterPids) {
     const c = st.chain[chainKey(p, pc, runSeed)] || st.chain[p + ':' + pc];   // this run's audited chain; legacy account-wide key as a transitional fallback
@@ -365,6 +366,10 @@ function pickAuditable(st, groups) {
         if (t && (!tail || (t.endDepth | 0) > (tail.endDepth | 0))) tail = t;
       }
       if (!tail || (tail.endDepth | 0) < (tail.startDepth | 0)) continue;
+      // out-of-domain depth (structural forgery: the reconcile flags it 'depth' and never settles it) is never replayed
+      //   or capped here -- one unsigned record claiming a depth near 2^31 used to run the goal curve for ~15 s per run
+      //   (R1-B2-02). Remembered once as audited-with-error like a forged pick log (takeSkips).
+      if ((tail.startDepth | 0) < 0 || (tail.endDepth | 0) > v.ENDLESS.DEPTH_CAP) { pending.push({ m, mt, pc, scores, p: null, tail, roster: {}, self: [], runSeed: d0[4] | 0, skip: 'depth' }); continue; }
     }
     const p = capParamsOf(mt, pc, tail);
     const roster = v.rosterConsensus(g);
