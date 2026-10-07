@@ -35,6 +35,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: steps.gate.outputs.yield != 'true'
         with:
+          # the branch tip when the job starts, not the commit the event fired on: a run that waited in the
+          # concurrency queue (a native schedule landing next to the dispatcher's run) would otherwise work on the
+          # state from before the previous run's push -- re-settling what that run just settled
+          ref: ${{ github.ref_name }}
           # full history: the replica push rejects shallow updates
           fetch-depth: 0
       - name: test

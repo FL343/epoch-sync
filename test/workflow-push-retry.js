@@ -7,6 +7,11 @@
 // the boards were already written ("current value + delta"), so the next run re-settles the same
 // matches and every LP / XP / CP delta lands twice. The only push allowed outside the loop is the
 // best-effort replica push (it targets $MIRROR_URL and must never fail a production run).
+// [3] Every checkout of this repository in a workflow that pushes state must take the branch tip
+// (ref: ${{ github.ref_name }}): by default a job checks out the commit its event fired on, so a run
+// that waited in the concurrency queue (the native schedule landing next to the dispatcher's run --
+// seen 2026-10-07) works on the state from before the previous run's push and re-settles what that
+// run just settled, before its own push conflicts.
 const fs = require('fs');
 const path = require('path');
 
@@ -79,6 +84,40 @@ function scanPushes(src) {
   const vy = fs.readFileSync(path.join(WF, 'validate.yml'), 'utf8');
   T('[2] validate.yml: persist + heartbeat both retry', vy.split('\n').filter(L => LOOP_HEAD.test(L)).length === 2);
   T('[2] retry loops in total >= 13 (no persist step silently dropped)', loops >= 13, 'loops=' + loops);
+}
+
+// ---- [3] state workflows check this repository out at the branch tip ----
+// Pure: workflow source -> self checkouts (no `repository:`) without `ref: ${{ github.ref_name }}` ({ line }).
+function staleCheckouts(src) {
+  const lines = String(src).split('\n');
+  const out = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (!/^\s*- uses: actions\/checkout@/.test(lines[i])) continue;
+    let self = true, tip = false;
+    for (let j = i + 1; j < lines.length && !/^\s*- /.test(lines[j]) && !/^ {0,2}\S/.test(lines[j]); j++) {
+      if (/^\s+repository:/.test(lines[j])) self = false;
+      if (/^\s+ref: \$\{\{ github\.ref_name \}\}\s*$/.test(lines[j])) tip = true;
+    }
+    if (self && !tip) out.push({ line: i + 1 });
+  }
+  return out;
+}
+{
+  const step = (extra) => ['    steps:', '      - uses: actions/checkout@abc # v7', '        with:'].concat(extra, ['      - name: run', '        run: node x.js']).join('\n');
+  T('[3] a self checkout without ref is caught', staleCheckouts(step(['          fetch-depth: 0'])).length === 1);
+  T('[3] a self checkout at the branch tip passes', staleCheckouts(step(['          ref: ${{ github.ref_name }}', '          fetch-depth: 0'])).length === 0);
+  T('[3] a checkout of another repository is exempt', staleCheckouts(step(['          repository: someone/else', '          path: other'])).length === 0);
+  T('[3] a different ref (event sha) is still caught', staleCheckouts(step(['          ref: ${{ github.sha }}'])).length === 1);
+  const WF = path.join(__dirname, '..', '.github', 'workflows');
+  let pinned = 0;
+  for (const f of fs.readdirSync(WF).filter(x => /\.ya?ml$/.test(x)).sort()) {
+    const src = fs.readFileSync(path.join(WF, f), 'utf8');
+    if (!src.split('\n').some(L => LOOP_HEAD.test(L))) continue;   // read-only workflows (audit / canary) push nothing
+    const st = staleCheckouts(src);
+    pinned += (src.match(/ref: \$\{\{ github\.ref_name \}\}/g) || []).length;
+    T('[3] ' + f + ': every self checkout takes the branch tip', st.length === 0, st.map(x => 'L' + x.line).join(', '));
+  }
+  T('[3] pinned self checkouts >= 12 (none silently dropped)', pinned >= 12, 'pinned=' + pinned);
 }
 
 console.log(failN ? ('FAIL x' + failN) : 'ALL OK (workflow-push-retry)');
