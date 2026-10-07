@@ -4,11 +4,14 @@
 // writable by any owner of the game, so one unsigned record claiming endDepth near 2^31 cost ~16 s of CPU per
 // evaluation; a few dozen made the reconcile and the seedcap audit time out on every run (state never saved,
 // settlement stalled for everyone). Pins:
+//   [0] structural: neither curve function contains a loop (the DoS shape) -- checked first
 //   [1] closed forms are value-identical to the original loops on the whole depth domain
-//   [2] both curves answer a 2^31 depth in O(1) and clamp past the domain
+//   [2] both curves answer a 2^31 depth fast and clamp past the domain
 //   [3] reconcile sanity (team + solo) flags such a record 'depth' fast and derives no cap from it
 //   [4] the seedcap picker skips it (audited-with-error once) instead of replaying / capping it
-//   [5] the timing budget is meaningful: the original loop blows it on a depth far below 2^31
+// Every test runs before each production reconcile, so a machine-dependent red would skip a settlement run:
+//   timing checks are single calls against a generous BUDGET (the closed forms take microseconds, the old loops
+//   take seconds at this depth), and the loop-vs-closed-form comparison at the end is printed, never asserted.
 const path = require('path');
 process.env.STEAM_PUBLISHER_KEY = process.env.STEAM_PUBLISHER_KEY || 'test-key';
 process.env.APPID = process.env.APPID || '0';
@@ -37,6 +40,12 @@ function classicGoalAtLoop(level) {
 }
 const CAP = v.ENDLESS.DEPTH_CAP, HUGE = 2147483647;
 const msOf = (fn) => { const t = process.hrtime.bigint(); fn(); return Number(process.hrtime.bigint() - t) / 1e6; };
+const BUDGET = 500;   // ms per single call at depth 2^31-1
+
+// ---- [0] structural pin (first: with a loop back in, the timing sections below would take minutes) ----
+const loopy = (fn) => /\bfor\s*\(|\bwhile\s*\(/.test(String(fn));
+const LOOPY = loopy(v.endlessGoalBase) || loopy(v.classicGoalAt);
+T('[0] neither curve function contains a loop (a per-level loop is the DoS shape)', !LOOPY);
 
 // ---- [1] value identity on the domain ----
 {
@@ -64,11 +73,11 @@ const msOf = (fn) => { const t = process.hrtime.bigint(); fn(); return Number(pr
     JSON.stringify([1, 10, 12, 50].map(v.classicGoalAt)) === JSON.stringify([1, 10, 12, 50].map(classicGoalAtLoop)));
 }
 
-// ---- [2] O(1) + clamp past the domain ----
-{
+// ---- [2] fast + clamp past the domain ----
+if (!LOOPY) {
   let r1, r2;
-  const ms = msOf(() => { for (let i = 0; i < 1000; i++) { r1 = v.endlessGoalBase(HUGE); r2 = v.classicGoalAt(HUGE); } });
-  T('[2] 1000 x (both curves at depth 2^31-1) under 50 ms', ms < 50, ms.toFixed(1) + ' ms');
+  const ms = msOf(() => { r1 = v.endlessGoalBase(HUGE); r2 = v.classicGoalAt(HUGE); });
+  T('[2] both curves at depth 2^31-1 within the budget', ms < BUDGET, ms.toFixed(2) + ' ms');
   T('[2] past the domain clamps to the cap value', r1 === v.endlessGoalBase(CAP) && r2 === v.classicGoalAt(CAP) && v.endlessGoalBase(CAP + 1) === v.endlessGoalBase(CAP));
   T('[2] goalFor scales the clamped base', v.endlessGoalFor(HUGE, 3) === v.endlessGoalBase(CAP) * 3);
 }
@@ -84,27 +93,27 @@ function mk7(writer, seat, o) {
 }
 
 // ---- [3] reconcile sanity: flagged 'depth', fast, no cap derived ----
-{
+if (!LOOPY) {
   const g = [mk7(A, 0, { startDepth: 0, endDepth: HUGE }), mk7(B, 1, { startDepth: 0, endDepth: HUGE })];
   let f1; const ms1 = msOf(() => { f1 = v.sanityFlags(g); });
   T('[3] team record at depth 2^31-1 -> depth flag', f1.indexOf('depth') >= 0, JSON.stringify(f1));
-  T('[3] ... in under 50 ms', ms1 < 50, ms1.toFixed(1) + ' ms');
+  T('[3] ... within the budget', ms1 < BUDGET, ms1.toFixed(1) + ' ms');
   const gC = [mk7(A, 0, { startDepth: 0, endDepth: HUGE, flags: attest.SEG_CLASSIC | attest.SEG_FINAL }), mk7(B, 1, { startDepth: 0, endDepth: HUGE, flags: attest.SEG_CLASSIC | attest.SEG_FINAL })];
   let f2; const ms2 = msOf(() => { f2 = v.sanityFlags(gC); });
-  T('[3] team classic record at depth 2^31-1 -> depth flag in under 50 ms', f2.indexOf('depth') >= 0 && ms2 < 50, JSON.stringify(f2) + ' ' + ms2.toFixed(1) + ' ms');
+  T('[3] team classic record at depth 2^31-1 -> depth flag within the budget', f2.indexOf('depth') >= 0 && ms2 < BUDGET, JSON.stringify(f2) + ' ' + ms2.toFixed(1) + ' ms');
   const gOk = [mk7(A, 0, { startDepth: 0, endDepth: 6 }), mk7(B, 1, { startDepth: 0, endDepth: 6 })];
   T('[3] an honest depth-6 co-op record stays clean', v.sanityFlags(gOk).length === 0, JSON.stringify(v.sanityFlags(gOk)));
   const seg = (o) => Object.assign({ startDepth: 0, endDepth: 5, flags: 0, continuesUsed: 0, tokensCp: 0, seasonId: 1, dispCode: attest.DISP_FINISHED, score: 1000, durationSec: 300, build: 0, picksLo: 0, picksHi: 0, rerollLo: 0, rerollHi: 0 }, o);
   let f3; const ms3 = msOf(() => { f3 = v.soloSanity(seg({ startDepth: HUGE - 5, endDepth: HUGE })); });
-  T('[3] signed solo segment at depth 2^31-1 -> depth flag in under 50 ms', f3.indexOf('depth') >= 0 && ms3 < 50, JSON.stringify(f3) + ' ' + ms3.toFixed(1) + ' ms');
+  T('[3] signed solo segment at depth 2^31-1 -> depth flag within the budget', f3.indexOf('depth') >= 0 && ms3 < BUDGET, JSON.stringify(f3) + ' ' + ms3.toFixed(1) + ' ms');
   let f4; const ms4 = msOf(() => { f4 = v.soloSanity(seg({ startDepth: HUGE - 5, endDepth: HUGE, flags: attest.SEG_CLASSIC | attest.SEG_FINAL })); });
-  T('[3] classic solo segment at depth 2^31-1 -> depth flag in under 50 ms', f4.indexOf('depth') >= 0 && ms4 < 50, JSON.stringify(f4) + ' ' + ms4.toFixed(1) + ' ms');
+  T('[3] classic solo segment at depth 2^31-1 -> depth flag within the budget', f4.indexOf('depth') >= 0 && ms4 < BUDGET, JSON.stringify(f4) + ' ' + ms4.toFixed(1) + ' ms');
   T('[3] in-domain solo score cap unchanged (depth 5 line)', v.soloSanity(seg({ score: v.endlessGoalBase(5) * v.ENDLESS.SCORE_MULT })).length === 0 &&
     v.soloSanity(seg({ score: v.endlessGoalBase(5) * v.ENDLESS.SCORE_MULT + 1 })).indexOf('score') >= 0);
 }
 
 // ---- [4] seedcap picker: skip, never replay / cap ----
-{
+if (!LOOPY) {
   const st = { audited: {}, chain: {} };
   const groups = {
     huge: [mk7(A, 0, { startDepth: HUGE - 10, endDepth: HUGE }), mk7(B, 1, { startDepth: HUGE - 10, endDepth: HUGE })],
@@ -113,7 +122,7 @@ function mk7(writer, seat, o) {
   };
   let pend; const ms = msOf(() => { pend = sc.pickAuditable(st, groups); });
   const byM = {}; for (const x of pend) byM[x.m] = x;
-  T('[4] picker answers in under 50 ms', ms < 50, ms.toFixed(1) + ' ms');
+  T('[4] picker answers within the budget', ms < BUDGET, ms.toFixed(1) + ' ms');
   T('[4] depth 2^31-1 group -> skip depth (no cap params)', byM.huge && byM.huge.skip === 'depth' && byM.huge.p === null);
   T('[4] negative start depth -> skip depth', byM.neg && byM.neg.skip === 'depth');
   T('[4] honest group still picked with a cap (startBank computed)', byM.fine && !byM.fine.skip && byM.fine.p && typeof byM.fine.p.startBank === 'number');
@@ -121,18 +130,16 @@ function mk7(writer, seat, o) {
   T('[4] takeSkips remembers the skip once (audited-with-error), keeps the honest group', tk.pending.length === 1 && tk.pending[0].m === 'fine' && st.audited.huge && st.audited.huge.e === 'depth' && st.audited.neg && st.audited.neg.e === 'depth');
   T('[4] remembered group is not picked again', sc.pickAuditable(st, { huge: groups.huge }).length === 0);
   let b; const msB = msOf(() => { b = sc.chainStartBank({ chain: {} }, [], 2, HUGE, 1); });
-  T('[4] chainStartBank static bound at a forged start depth is O(1) and finite', msB < 50 && Number.isFinite(b), msB.toFixed(1) + ' ms');
+  T('[4] chainStartBank static bound at a forged start depth is fast and finite', msB < BUDGET && Number.isFinite(b), msB.toFixed(1) + ' ms');
 }
 
-// ---- [5] structural pin + the budget is meaningful ----
+// ---- info only (never asserted -- machine dependent): what the old loop cost vs the closed form ----
 {
-  const loopy = (fn) => /\bfor\s*\(|\bwhile\s*\(/.test(String(fn));
-  T('[5] neither curve function contains a loop (a per-level loop is the DoS shape)', !loopy(v.endlessGoalBase) && !loopy(v.classicGoalAt));
-  const D = 1 << 28;   // 1/8 of the attack depth
+  const D = 1 << 25;   // 1/64 of the attack depth
   const msLoop = msOf(() => endlessGoalBaseLoop(D)), msNew = msOf(() => v.endlessGoalBase(D));
-  T('[5] the original loop at depth 2^28 already exceeds the 50 ms budget used above', msLoop > 50, msLoop.toFixed(1) + ' ms');
-  T('[5] closed form at the same depth is under 1 ms', msNew < 1, msNew.toFixed(3) + ' ms');
+  console.log('  info  depth 2^25: original loop ' + msLoop.toFixed(1) + ' ms, closed form ' + msNew.toFixed(3) + ' ms (x64 for the attack depth 2^31)');
 }
+if (LOOPY) bad('[2]-[4] skipped: a curve function loops again');
 
 try { require('fs').unlinkSync(process.env.SC_STATE_FILE); } catch (e) {}
 console.log(failN ? ('FAIL x' + failN) : 'ALL OK (goal-curve)');

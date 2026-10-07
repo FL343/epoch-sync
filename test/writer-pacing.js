@@ -68,6 +68,10 @@ function runCron(boards, files, env) {
     const e = Object.assign({}, process.env, {
       STEAM_PUBLISHER_KEY: 'k', APPID: '1', LB_PREFIX: 'shard_', RANKED_LB: 'rating', LP_LB: 'points', XP_LB: 'progress', STATE_SALT: 's',
       STUB_FIXTURE: fxPath, STUB_LOG: logPath, GITHUB_STEP_SUMMARY: '', CONCURRENCY: '1', STRICT_BOARDS: '0',
+      // pin the season clock: from a season start on, ranked points go to that season's board (points_s<N>) and the
+      //   [3] write count below would read 0 -- every test runs before each production reconcile, so a date-dependent
+      //   red here would stop settlement on that day
+      SEASON_NOW: '2026-10-01T00:00:00Z',
     }, stateEnv, env || {});
     const r = spawnSync(process.execPath, ['-r', stub, VALIDATE], { env: e, encoding: 'utf8', cwd: dir, timeout: 120000 });
     const posts = fs.readFileSync(logPath, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l));
@@ -211,7 +215,7 @@ const FLOOR = v.SANITY.MIN_START_AGE_MS;
   const ms = [0x6001, 0x6002, 0x6003].map(h => [mm(1, h, 0), mm(1, h, 1)]);
   const boards = boardsWith([].concat(...ms.map(([a, b]) => [{ sid: A, d: a }, { sid: B, d: b }])));
   const now = Date.now(), starts = {};
-  for (const [a] of ms) starts[keyOf(a)] = { t0: now - FLOOR - 1000, mt: 1, roster: {}, settled: [] };
+  for (const [a] of ms) starts[keyOf(a)] = { t0: now - FLOOR - 30000, mt: 1, roster: {}, settled: [] };   // 30 s margin: robust to clock skew between this process and the child runs
   const r1 = runCron(boards, { STARTS_FILE: starts });
   const r2 = runCron(boards, advance(r1.state, FLOOR + 1000));
   const r3 = runCron(boards, advance(r2.state, FLOOR + 1000));
