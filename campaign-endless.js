@@ -69,13 +69,18 @@ function verifyGrRecord(d, pubTable) {
   if (f.ver !== GR_VER) return { ok: false, reason: 'ver', pending: true, fields: f };
   for (let i = BASE_LEN + SIG_INTS; i < d.length; i++) if ((d[i] | 0) !== 0) return { ok: false, reason: 'trailing', fields: f };
   const ent = pubTable && pubTable[f.keyName];
-  if (!ent || !Array.isArray(ent.pubs) || !ent.pubs.length) return { ok: false, reason: 'unknown-key', pending: true, fields: f };
+  const held = (ent && Array.isArray(ent.held)) ? ent.held : [];   // R1-A5-07: keys the job's key policy holds (attest.applyKeyPolicy)
+  if (!ent || !Array.isArray(ent.pubs) || !(ent.pubs.length || held.length)) return { ok: false, reason: 'unknown-key', pending: true, fields: f };
   const bytes = toBytes(d.slice(0, BASE_LEN));
   const sig = Buffer.alloc(64);
   for (let i = 0; i < SIG_INTS; i++) sig.writeInt32LE(d[BASE_LEN + i] | 0, i * 4);
   let sigOk = false;
   for (const pub of ent.pubs) { try { if (crypto.verify(null, bytes, pubKeyObj(pub), sig)) { sigOk = true; break; } } catch (e) { /* malformed pub: next */ } }
-  if (!sigOk) return { ok: false, reason: 'bad-sig', fields: f };
+  if (!sigOk) {
+    // a held key's signature: pending (soft), never bad-sig -- never an offense (attest.applyKeyPolicy)
+    for (const h of held) { try { if (crypto.verify(null, bytes, pubKeyObj(h.pub), sig)) return { ok: false, reason: 'key-' + h.reason, pending: true, fields: f }; } catch (e) { /* malformed pub: next */ } }
+    return { ok: false, reason: 'bad-sig', fields: f };
+  }
   return { ok: true, fields: f, sealed: !!ent.sealed };
 }
 

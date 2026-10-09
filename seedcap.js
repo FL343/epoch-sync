@@ -604,7 +604,8 @@ async function readGroups() {
   const rc = v.loadRecover(v.RECOVER_FILE, SEEDCAP_CHANNEL, Date.now());
   if (rc) {
     const rows = await v.readRecoverRows(rc, boards);
-    const got = v.recoverPick(rows, rc, attest.loadPubTable(path.join(__dirname, 'attest-keys.json')) || {});
+    // R1-A5-07: the same per-channel key policy as the reconcile (recovery keys stay readable until the file's date)
+    const got = v.recoverPick(rows, rc, attest.loadPubTable(path.join(__dirname, 'attest-keys.json'), { channel: SEEDCAP_CHANNEL || null, nowMs: Date.now(), exempt: rc.keys }) || {});
     let kept = 0;
     for (const r of got.recs) {
       const m = r.d[3] + '_' + r.d[4] + '_' + r.d[2];

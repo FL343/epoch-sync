@@ -404,6 +404,22 @@ function botXpGain(lv, n, rankEff, tierMult, loneMult, bm, cls) {
 }
 // demo channel identity (both playtest/demo twins export DEMO_APPID; kept for channel telemetry)
 const DEMO_APPID = Number(process.env.DEMO_APPID || 0);
+// R1-A5-07 (cloud audit, 2026-10-08): the attest key table serves all three jobs, so each job loads it through its own key policy
+//   (attest.applyKeyPolicy): only keys labeled with this job's channel and not retired for more than the grace window verify; a
+//   record signed by any other registered key waits as pending (reason 'key-...'), never rejected. The main job is ea; the two
+//   PT_MODE twins tell themselves apart by APPID == DEMO_APPID (both export DEMO_APPID). null = cannot tell -> channel binding
+//   off (warned every run), retirement still applies. EVERY production read of attest-keys.json goes through loadJobPubTable
+//   (test/playtest-key-policy.js pins it).
+const KEY_CHANNEL = !PT_MODE ? 'ea' : (DEMO_APPID > 0 ? (APPID === DEMO_APPID ? 'demo' : 'playtest') : null);
+const keyPolicyWarned = new Set();
+const keyPolicyWarn = (msg) => { if (!keyPolicyWarned.has(msg)) { keyPolicyWarned.add(msg); ghWarn(msg); } };   // once per message per run
+function loadJobPubTable(nowMs, exempt) {
+  if (KEY_CHANNEL === null) keyPolicyWarn('attest key policy: this job cannot tell its channel (PT_MODE without DEMO_APPID) -- channel binding off');
+  return attest.loadPubTable(require('path').join(__dirname, 'attest-keys.json'), {
+    channel: KEY_CHANNEL, nowMs, exempt: exempt || null, onWarn: keyPolicyWarn,
+  });
+}
+const keyHeld = (reason) => /^key-/.test(String(reason || ''));
 // ===== one-shot pool recovery (client knife 5.0i, 2026-10-06) =====
 // Sealed demo packages 2026093001..2026100601 started their guard through the client's auto-spawn path in the dev
 //   "test form", so every solo endless segment and its start attestation went to the client's three test pools instead
@@ -927,6 +943,7 @@ function writeRunSummary() {
       '| one-match-at-a-time deferrals | ' + s('writerPaced', 0) + ' |',
       '| campaign grants / campaign endless | ' + s('campaign', '-') + ' / ' + s('campaignEndless', '-') + ' |',
       '| page-cap hits | ' + RUN.cap + ' |',
+      '| solo segments held by the key policy (other channel / retired key; new this run) | ' + s('keyHeld', 0) + ' (' + s('keyHeldNew', 0) + ') |',
       '| duration | ' + ((Date.now() - (RUN.t0 || Date.now())) / 1000).toFixed(1) + 's |',
       '',
     ].join('\n'));
@@ -1842,11 +1859,28 @@ function overallDominant(bests) {
   }
   return at;
 }
-function loadSolo() { try { const st = JSON.parse(fs.readFileSync(SOLO_FILE, 'utf8')) || {}; st.runs = st.runs || {}; st.wait = st.wait || {}; st.ms = st.ms || {}; return st; } catch (e) { return { runs: {}, wait: {}, ms: {} }; } }
+function loadSolo() { try { const st = JSON.parse(fs.readFileSync(SOLO_FILE, 'utf8')) || {}; st.runs = st.runs || {}; st.wait = st.wait || {}; st.ms = st.ms || {}; st.held = st.held || {}; return st; } catch (e) { return { runs: {}, wait: {}, ms: {}, held: {} }; } }
 function pruneSolo(st, nowMs) {
   for (const k of Object.keys(st.runs)) if (nowMs - (st.runs[k].t || 0) > COMP.RUN_TTL_MS) delete st.runs[k];
   for (const m of Object.keys(st.wait)) if (nowMs - (st.wait[m].t0 || 0) > COMP.CHAIN_WAIT_MS + 86400000) delete st.wait[m];
   for (const k of Object.keys(st.ms || {})) if (nowMs - (st.ms[k].t || 0) > COMP.MS_TTL_MS) delete st.ms[k];
+  for (const m of Object.keys(st.held || {})) if (nowMs - (st.held[m].t || 0) > COMP.CHAIN_WAIT_MS + 86400000) delete st.held[m];   // gone from the board
+}
+// R1-A5-07: a solo segment the key policy holds (soft pending) never advances its run's chain, so the run's later segments --
+//   signed by the live build's key, honest -- would wait out CHAIN_WAIT_MS and reject as chain-gap / save-orphan (processed: lost
+//   for good). st.held remembers held segments per run (refreshed every run they are still on the board); while one is recent,
+//   the run's unchained segments keep waiting with their own clock restarted. Fixing the table (keepUntil / channel-live
+//   --rollback / a re-registration) releases the held segment, the chain advances and the successors settle.
+function soloKeyHeld(st, key, m, keyName, reason, nowMs) {
+  st.held = st.held || {};
+  const h = st.held[m], first = !h;
+  st.held[m] = { k: key, t0: h ? h.t0 : nowMs, t: nowMs, key: String(keyName || ''), r: String(reason || '') };
+  return first;
+}
+function soloRunHasHeld(st, key, m, nowMs) {
+  const h = st.held || {};
+  for (const x of Object.keys(h)) if (x !== m && h[x].k === key && nowMs - (h[x].t || 0) <= COMP.CHAIN_WAIT_MS) return true;
+  return false;
 }
 function saveSolo(st, nowMs) { pruneSolo(st, nowMs); try { writeStateFile(SOLO_FILE, JSON.stringify(st, null, 0)); } catch (e) { ghWarn('write ' + SOLO_FILE + ' failed: ' + (e && e.message)); } }
 function soloRunKey(p, seasonId, runSeed) { return p + '|' + (seasonId | 0) + '|' + (runSeed | 0); }
@@ -1893,6 +1927,7 @@ function soloSanity(f) {
 function soloChainPlan(st, key, f, m, nowMs, opts) {
   const run = st.runs[key];
   const waitOr = (reason) => {
+    if (soloRunHasHeld(st, key, m, nowMs)) { st.wait[m] = { t0: nowMs }; return { ok: null, reason: reason + ' (a segment of this run is held by the key policy)' }; }   // R1-A5-07: a held segment of this run restarts the wait clock (soloKeyHeld)
     const w = st.wait[m] || (st.wait[m] = { t0: nowMs });
     return (nowMs - (w.t0 || 0) > COMP.CHAIN_WAIT_MS) ? { ok: false, reason } : { ok: null, reason };
   };
@@ -1966,6 +2001,7 @@ function soloAdvance(st, key, f, m, plan, nowMs) {
   if ((f.flags | 0) & attest.SEG_RESUMED) run.contN = 0;       // O218: the continue ladder restarts with the guard session (renderer / guard / cron alike)
   if ((f.flags | 0) & attest.SEG_FINAL) run.final = 1;
   delete st.wait[m];
+  if (st.held) delete st.held[m];
   return run;
 }
 // Same-tick segment ordering (2026-09-09): the settle loop walks `fresh` in order and the chain memory
@@ -2728,7 +2764,7 @@ async function main() {
   if (recCfg) {
     try {
       const rows = await readRecoverRows(recCfg, (lr.json && lr.json.response && lr.json.response.leaderboards) || []);
-      const got = recoverPick(rows, recCfg, attest.loadPubTable(require('path').join(__dirname, 'attest-keys.json')) || {});
+      const got = recoverPick(rows, recCfg, loadJobPubTable(Date.now(), recCfg.keys) || {});   // R1-A5-07: the recovery keys stay readable until the file's date
       const seen = new Set(recs.map(r => r.d[3] + '_' + r.d[4] + '_' + r.d[2] + '|' + r.steamID));
       const fresh = got.recs.filter(r => !seen.has(r.d[3] + '_' + r.d[4] + '_' + r.d[2] + '|' + r.steamID));
       for (const r of fresh) recs.push(r);
@@ -3080,17 +3116,17 @@ async function main() {
       if (!cbId || !gtId) { console.log('campaign/grant board absent -- skip'); return; }
       const cb = await readBoardAll(cbId, 'campaign box');
       if (!cb.ents.length) return;
-      const pubTable = attest.loadPubTable(require('path').join(__dirname, 'attest-keys.json')) || {};
+      const pubTable = loadJobPubTable(nowMs) || {};
       const allowDevKey = /_test$/.test(CAMPAIGN_LB);
       const gb = await readBoardAll(gtId, 'grant box');
       const grantedBy = {};
       for (const e of gb.ents) { const m = decodeGrantMask(decodeDetails(e.detailData)); if (m) grantedBy[String(e.steamID)] = m; }
-      let nBits = 0, nPlayers = 0, nPend = 0, nRej = 0;
+      let nBits = 0, nPlayers = 0, nPend = 0, nRej = 0, nHeld = 0;
       for (const e of cb.ents) {
         const sid = String(e.steamID);
         const v = campaign.verifyCampaignRecord(decodeDetails(e.detailData), pubTable);
         const plan = campaign.campaignGrantPlan(v, { owner: sid, allowDevKey });
-        if (!plan.bits.length) { if (plan.pending) nPend++; else { nRej++; console.log('  campaign ' + plog(sid) + ': rejected (' + plan.reason + ')'); } continue; }
+        if (!plan.bits.length) { if (plan.pending) { if (keyHeld(plan.reason)) nHeld++; else nPend++; } else { nRej++; console.log('  campaign ' + plog(sid) + ': rejected (' + plan.reason + ')'); } continue; }
         const granted = grantedBy[sid] || [0, 0];
         const newBits = plan.bits.filter(b => !grantBit(granted, b));
         if (!newBits.length) continue;
@@ -3106,7 +3142,9 @@ async function main() {
         nBits += newBits.length; nPlayers++;
         console.log('  campaign ' + plog(sid) + ': granted bits [' + newBits.join(' ') + '] tier=' + v.fields.tierBits + ' lastU=' + v.fields.lastU + ' credited=' + v.fields.credited + ' key=' + v.fields.keyName);
       }
-      if (nPlayers || nPend || nRej) { RUN.campaign = nPlayers + 'p/' + nBits + 'b' + (nPend ? '/' + nPend + 'pend' : '') + (nRej ? '/' + nRej + 'rej' : ''); console.log('campaign grants: ' + nBits + ' bits across ' + nPlayers + ' players (pending ' + nPend + ', rejected ' + nRej + ')'); }
+      // (key-held campaign records stay in this lane's own count: a granted player's record signed by a since-retired build key
+      //   shows up here every run, so it would drown the solo lane's summary row)
+      if (nPlayers || nPend || nRej || nHeld) { RUN.campaign = nPlayers + 'p/' + nBits + 'b' + (nPend ? '/' + nPend + 'pend' : '') + (nHeld ? '/' + nHeld + 'held' : '') + (nRej ? '/' + nRej + 'rej' : ''); console.log('campaign grants: ' + nBits + ' bits across ' + nPlayers + ' players (pending ' + nPend + ', key-held ' + nHeld + ', rejected ' + nRej + ')'); }
     } catch (e) { ghWarn('campaign channel failed: ' + (e && e.message)); }
   };
   // Campaign endless (Gold Rush) lane: per-difficulty box -> verify + boundary plan (campaign-endless.js) -> best-only ladder;
@@ -3119,11 +3157,11 @@ async function main() {
     const ce = campaignEndless;
     let caps = null;
     try { caps = JSON.parse(fs.readFileSync(require('path').join(__dirname, 'gr-caps.json'), 'utf8')); } catch (e) { ghWarn('campaign endless: gr-caps.json unreadable -- lane skipped'); return; }
-    const pubTable = attest.loadPubTable(require('path').join(__dirname, 'attest-keys.json')) || {};
+    const pubTable = loadJobPubTable(nowMs) || {};
     const allowDevKey = CAMPAIGN_ENDLESS_SUFFIX === '_test';
     const st = loadCe();
     const nowSec = Math.floor(nowMs / 1000), nowMin = Math.floor(nowMs / 60000), nowHour = Math.floor(nowMs / 3600000);
-    let nUp = 0, nSame = 0, nPend = 0, nRej = 0, nDup = 0;
+    let nUp = 0, nSame = 0, nPend = 0, nRej = 0, nDup = 0, nHeld = 0;
     const offenseRows = {};   // sid -> details (latest offense this run; score = cumulative count)
     try {
       let offId = null;
@@ -3146,7 +3184,7 @@ async function main() {
           const v = ce.verifyGrRecord(d, pubTable);
           const plan = ce.settlePlan(v, { owner: sid, allowDevKey, boxDif: dif, caps, nowSec });
           if (!plan.ok) {
-            if (plan.pending) { nPend++; continue; }
+            if (plan.pending) { if (keyHeld(plan.reason)) nHeld++; else nPend++; continue; }
             nRej++;
             const p2 = pid(sid);
             const of = st.offenses[p2] = st.offenses[p2] || { n: 0, t0: nowMin, rs: [] };
@@ -3186,7 +3224,7 @@ async function main() {
       }
     } catch (e) { ghWarn('campaign endless channel failed: ' + (e && e.message)); }
     saveCe(st, nowMs);
-    if (nUp || nSame || nPend || nRej || nDup) { RUN.campaignEndless = nUp + 'up/' + nSame + 'same' + (nPend ? '/' + nPend + 'pend' : '') + (nRej ? '/' + nRej + 'rej' : '') + (nDup ? '/' + nDup + 'dup' : ''); console.log('campaign endless: ' + nUp + ' ladder writes, ' + nSame + ' not better, ' + nPend + ' pending, ' + nRej + ' rejected, ' + nDup + ' already settled'); }
+    if (nUp || nSame || nPend || nRej || nDup || nHeld) { RUN.campaignEndless = nUp + 'up/' + nSame + 'same' + (nPend ? '/' + nPend + 'pend' : '') + (nHeld ? '/' + nHeld + 'held' : '') + (nRej ? '/' + nRej + 'rej' : '') + (nDup ? '/' + nDup + 'dup' : ''); console.log('campaign endless: ' + nUp + ' ladder writes, ' + nSame + ' not better, ' + nPend + ' pending, ' + nHeld + ' key-held, ' + nRej + ' rejected, ' + nDup + ' already settled'); }
   };
   // Supporter pack (supporters.js header): probe DLC ownership for known players (capped per run, cached in
   //   state), then reconcile the wall board (respecting the client-writable opt-out board), OR the grant bit
@@ -3708,7 +3746,8 @@ async function main() {
   };
   // ===== O93 solo competitive segment settle (COMP block above) =====
   const soloState = loadSolo();
-  const soloPub = attest.loadPubTable(require('path').join(__dirname, 'attest-keys.json')) || {};
+  const soloPub = loadJobPubTable(nowMs) || {};
+  const soloPubRec = recCfg ? (loadJobPubTable(nowMs, recCfg.keys) || {}) : soloPub;   // R1-A5-07: only RECOVERED segments (demo, until the file's date) keep the recovery keys
   const soloAllowDev = /_test$/.test(ENDLESS_COMP_LB);   // dev-key records only ever land on a *_test ladder
   const soloSettle = async (c) => {
     const m = c.m;
@@ -3716,12 +3755,22 @@ async function main() {
     //   guard-signed segment) -- settle the first candidate whose signature + owner binding verifies; judge the rest as before
     let r = c.g[0], sid = String(r.steamID), p = pid(sid), v = null, gate = null;
     for (const cand of c.g) {
-      const cv = attest.verifySoloRecord(cand.d, soloPub);
+      const cv = attest.verifySoloRecord(cand.d, cand.recovered ? soloPubRec : soloPub);
       const cg = attest.soloSettleGate(cv, { owner: String(cand.steamID), allowDevKey: soloAllowDev });
       if (!v || cg.settle || cg.pending) { r = cand; sid = String(cand.steamID); p = pid(sid); v = cv; gate = cg; }
       if (cg.settle) break;
     }
     if (!gate.settle) {
+      if (gate.pending && keyHeld(gate.reason) && v && v.fields) {
+        // R1-A5-07: soft hold (never flagged / processed) + one warning per new held segment: either a forgery with another channel's
+        //   or a retired key, or a build of that key is still live (Steam rollback, a second branch, a missed channel-live registration)
+        RUN.keyHeld = (RUN.keyHeld | 0) + 1;
+        if (soloKeyHeld(soloState, soloRunKey(p, v.fields.seasonId, v.fields.runSeed), m, v.fields.keyName, gate.reason, nowMs)) {
+          RUN.keyHeldNew = (RUN.keyHeldNew | 0) + 1;
+          ghWarn('match=' + m + ': solo segment ' + plog(sid) + ' signed by key ' + v.fields.keyName + ' is held (' + gate.reason + ') -- a forgery, or that build is still ' +
+            'live (Steam rollback / second branch / missed channel-live registration: fix the key table, e.g. keepUntil). It waits; the run\'s later segments wait with it.');
+        }
+      }
       if (gate.pending) { console.log('  solo ' + m + ': ' + plog(sid) + ' pending (' + gate.reason + ')'); return false; }
       recordFlag(signals, c.g, m, nowMs); sigDirty = true; trustTouched.add(sid);
       RUN.soloRej = (RUN.soloRej | 0) + 1;
@@ -3786,7 +3835,11 @@ async function main() {
     // pacing: the segment's own start attestation (single guard attester) or its first sighting
     let pend = startsPending[m];
     // (a recovered pool segment whose start row was overwritten by the pool rotation is not a missing-start signal)
-    if (!pend) { pend = startsPending[m] = { t0: nowMs, mt: r.d[2] | 0, roster: {}, settled: [], synth: true }; if (!r.recovered) sigPlayer(signals, p, nowMs).ns += 1; sigDirty = true; }
+    if (!pend) {
+      pend = startsPending[m] = { t0: nowMs, mt: r.d[2] | 0, roster: {}, settled: [], synth: true };
+      if (!(soloState.held && soloState.held[m])) { if (!r.recovered) sigPlayer(signals, p, nowMs).ns += 1; }   // R1-A5-07: a segment released from a key hold may have outlived its start row
+      sigDirty = true;
+    }
     const reqMs = endlessRequiredMs({ startDepth: f.startDepth, endDepth: f.endDepth }, plan.proven, classic ? CLASSIC.LEVEL_S_SOLO : 0);   // O216: classic 60s levels
     if (nowMs - (pend.t0 || 0) < reqMs) {
       console.log('  solo-pacing ' + m + ': depth ' + f.startDepth + '->' + f.endDepth + ' (proven ' + plan.proven + ') needs ' + Math.round(reqMs / 1000) + 's real time, seen ' + Math.round((nowMs - (pend.t0 || 0)) / 1000) + 's -- deferred');
@@ -4755,3 +4808,4 @@ module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CHAT_MUTE: 
   PERKS_CFG: perks.PERKS_CFG, verifyPerkPicks: perks.verifyPerkPicks,
   pruneConfessions, CONFESS_PRUNE_MS,   // confession entries outlive the window while their record is still on a shard
   RECOVER_FILE, loadRecover, recoverPick, readRecoverRows };   // client knife 5.0i one-shot pool recovery
+Object.assign(module.exports, { KEY_CHANNEL, loadJobPubTable, soloKeyHeld, soloRunHasHeld });   // cloud audit R1-A5-07 per-channel key policy (test/playtest-key-policy.js)

@@ -66,6 +66,69 @@ function pubKeyObj(pubHex) {
   return crypto.createPublicKey({ key: Buffer.concat([SPKI_PREFIX, Buffer.from(pubHex, 'hex')]), format: 'der', type: 'spki' });
 }
 
+// ---- per-channel key policy (cloud audit R1-A5-07, 2026-10-08) ----
+// One key table serves the three reconcile jobs (main = ea, playtest, demo). Before this fix any sealed key verified on any job
+//   for ever: a demo package's key -- or the demo 2026100101 seed that every later sealed guard carries as a read-only persist
+//   key -- signed records the main (ea) job would have settled. The table now labels each public key with the channel whose
+//   package carries it and, once a newer package of that channel went live, the time this one stopped being live:
+//   keys[id].pubInfo[pubHex] = { ch, retiredAt?, keepUntil?, revokedAt? } (written by the client repo's build / set-live tools,
+//   mirrored here by the upload runbook). A job loads the table through loadPubTable(file, policy) and applyKeyPolicy moves to `held`:
+//     - a key labeled with another channel ('channel');
+//     - a key retired more than KEY_RETIRE_GRACE_MS ago ('retired'); keepUntil (a manual lever: a rollback, a second branch still
+//       serving that build, a cron stall across a package switch) keeps it usable until then; policy.exempt names keys a one-shot
+//       recovery still reads;
+//     - a key past revokedAt ('revoked'; a manual lever for a leaked key, no grace, never set by the tools).
+//   A record signed by a held key verifies as PENDING with reason 'key-<why>' -- soft: never flagged, never marked processed,
+//   never an offense, so a table mistake is fixed by pushing a corrected table and the records settle on the next run.
+//   - grace = 7 days (architecture decision 9's N-1 window): a run cut on the old build, a chain still waiting, a cron stall.
+//   - a sealed key WITHOUT a valid channel label (a table edited by the tools before this fix, a hand merge that lost a block)
+//     is accepted on every job exactly as before the fix and named in one warning per load (onWarn): a labeling slip must never
+//     hold a live build's records. Only revokedAt applies to it.
+//   - the dev key is out of scope (sealed:false; the allowDevKey gates handle it).
+//   - no policy (tests, the client repo's parity test) = the plain table: every verdict exactly as before.
+const KEY_CHANNELS = ['ea', 'playtest', 'demo'];
+const KEY_RETIRE_GRACE_MS = 7 * 86400000;
+const isoMs = (v) => { const t = Date.parse(String(v || '')); return Number.isFinite(t) ? t : null; };
+function keyHoldReason(keyName, ent, pub, policy) {
+  if (!ent || !ent.sealed) return null;
+  const info = (ent.pubInfo && typeof ent.pubInfo === 'object' && ent.pubInfo[pub]) || null;
+  const rv = isoMs(info && info.revokedAt);
+  if (rv !== null && policy.nowMs >= rv) return 'revoked';
+  if (!info || KEY_CHANNELS.indexOf(info.ch) < 0) return null;   // unlabeled: fail-open (applyKeyPolicy names it in a warning)
+  if (policy.channel && info.ch !== policy.channel) return 'channel';
+  const rt = isoMs(info.retiredAt);
+  if (rt === null || (policy.exempt && policy.exempt.has(String(keyName)))) return null;
+  const grace = Number.isFinite(policy.graceMs) ? policy.graceMs : KEY_RETIRE_GRACE_MS;
+  const keep = isoMs(info.keepUntil);
+  return (policy.nowMs > Math.max(rt + grace, keep === null ? -Infinity : keep)) ? 'retired' : null;
+}
+// keys ({keyName: {pubs, sealed, pubInfo?}}) + policy { channel: 'ea'|'playtest'|'demo'|null, nowMs, graceMs?, exempt?: Set|Array,
+//   onWarn?(msg) } -> a copy whose entries keep the usable pubs in `pubs` and the rest in `held: [{pub, reason}]`
+function applyKeyPolicy(keys, policy) {
+  if (!keys || typeof keys !== 'object' || !policy) return keys;
+  const p = { channel: KEY_CHANNELS.indexOf(policy.channel) >= 0 ? policy.channel : null,
+    nowMs: Number.isFinite(policy.nowMs) ? policy.nowMs : Date.now(), graceMs: policy.graceMs,
+    exempt: policy.exempt ? new Set(Array.from(policy.exempt, String)) : null };
+  const out = {}, unlabeled = [];
+  for (const k of Object.keys(keys)) {
+    const ent = keys[k];
+    if (!ent || !Array.isArray(ent.pubs)) { out[k] = ent; continue; }
+    const pubs = [], held = [];
+    for (const pub of ent.pubs) {
+      const r = keyHoldReason(k, ent, pub, p);
+      if (r) held.push({ pub, reason: r }); else pubs.push(pub);
+      const info = ent.sealed && ent.pubInfo && typeof ent.pubInfo === 'object' ? ent.pubInfo[pub] : null;
+      if (ent.sealed && (!info || KEY_CHANNELS.indexOf(info.ch) < 0) && unlabeled.indexOf(k) < 0) unlabeled.push(k);
+    }
+    out[k] = Object.assign({}, ent, { pubs, held });
+  }
+  if (unlabeled.length && typeof policy.onWarn === 'function') {
+    policy.onWarn('attest key table: ' + unlabeled.length + ' sealed key(s) without a channel label (' + unlabeled.slice(0, 8).join(', ') +
+      (unlabeled.length > 8 ? ', ...' : '') + ') are accepted on every channel -- copy the client repo\'s labeled table here (R1-A5-07)');
+  }
+  return out;
+}
+
 // details int32[] + pubTable ({keyName: {pubs:[hex], sealed}}) -> verdict
 //   { ok, reason, pending, fields }  (ok=true only when a registered key verifies the signature)
 function verifySoloRecord(d, pubTable) {
@@ -114,15 +177,20 @@ function verifySoloRecord(d, pubTable) {
     if ((d[i] | 0) !== 0) return { ok: false, reason: 'trailing', fields };
   }
   const ent = pubTable && pubTable[keyName];
+  const held = (ent && Array.isArray(ent.held)) ? ent.held : [];   // R1-A5-07: keys the job's key policy holds (applyKeyPolicy)
   // unknown key = a soft state: a freshly shipped build whose key table push lagged.
   //   The record waits (pending) instead of being rejected; a later run settles it.
-  if (!ent || !Array.isArray(ent.pubs) || !ent.pubs.length) return { ok: false, reason: 'unknown-key', pending: true, fields };
+  if (!ent || !Array.isArray(ent.pubs) || !(ent.pubs.length || held.length)) return { ok: false, reason: 'unknown-key', pending: true, fields };
   const base = d.slice(0, baseLen);
   const sig = Buffer.alloc(64);
   for (let i = 0; i < SIG_INTS; i++) sig.writeInt32LE(d[baseLen + i] | 0, i * 4);
   const bytes = toBytes(base);
   for (const pub of ent.pubs) {
     try { if (crypto.verify(null, bytes, pubKeyObj(pub), sig)) return { ok: true, fields, sealed: !!ent.sealed }; }
+    catch (e) { /* malformed pub entry: try the next */ }
+  }
+  for (const h of held) {   // a held key's signature: pending (soft), never bad-sig -- see applyKeyPolicy
+    try { if (crypto.verify(null, bytes, pubKeyObj(h.pub), sig)) return { ok: false, reason: 'key-' + h.reason, pending: true, fields }; }
     catch (e) { /* malformed pub entry: try the next */ }
   }
   return { ok: false, reason: 'bad-sig', fields };
@@ -262,11 +330,13 @@ function reconcileUnmatched(rows, opts) {
 //   truth for the build->pubkey table; a mirror lives in THIS repo (committed by the upload
 //   runbook) so verifySoloRecord has a loadable table when O93 wires solo settlement. Returns
 //   the {keyName: {pubs, sealed}} map or null (absent/corrupt mirror -> caller treats every
-//   keyId as unknown -> pending, never a crash).
-function loadPubTable(file) {
+//   keyId as unknown -> pending, never a crash). R1-A5-07: production callers pass the job's key
+//   policy (applyKeyPolicy above); without one the table is returned as stored.
+function loadPubTable(file, policy) {
   try {
     const j = JSON.parse(require('fs').readFileSync(file || 'attest-keys.json', 'utf8'));
-    return (j && j.keys && typeof j.keys === 'object') ? j.keys : null;
+    const keys = (j && j.keys && typeof j.keys === 'object') ? j.keys : null;
+    return (keys && policy) ? applyKeyPolicy(keys, policy) : keys;
   } catch (e) { return null; }
 }
 
@@ -300,6 +370,7 @@ module.exports = {
   SB_MAGIC, SB_VER, SB_CONSUMED, saveBoxHead,
   SEG_SUSPENDED, SEG_FINAL, SEG_RESUMED, SEG_COMP, SEG_CASUAL, SEG_CLASSIC, DISP_FINISHED, DISP_USER_QUIT,
   verifySoloRecord, soloSettleGate, soloTail, toBytes, loadPubTable,
+  KEY_CHANNELS, KEY_RETIRE_GRACE_MS, keyHoldReason, applyKeyPolicy,
   // B
   CONFESS_MAGIC, CONFESS_VER, CONFESS_MAX_SEATS,
   decodeUnmatched, reconcileUnmatched, pruneUnmatchedState,

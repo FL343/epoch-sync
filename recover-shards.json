@@ -1,6 +1,6 @@
 {
   "channel": "demo",
-  "until": "2026-10-14T00:00:00Z",
+  "until": "2026-10-09T06:19:00Z",
   "boards": ["lbtest_pool", "lbtest_pool_b", "lbtest_pool_c"],
   "keys": ["2026100101", "2026100401", "2026100501", "2026100601"]
 }
