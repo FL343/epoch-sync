@@ -43,6 +43,10 @@ jobs:
           for f in test/playtest-*.js; do echo "== $f =="; node "$f" || exit 1; done
           echo "::$t::"
       - name: run
+        id: run
+        # R1-B2-03: the step times out before the job does (job: 10 min), so a wedged run still leaves the persist
+        # step time to commit the one-shot marks validate.js already saved next to its board writes
+        timeout-minutes: 8
         env:
           STEAM_PUBLISHER_KEY: ${{ secrets.STEAM_PUBLISHER_KEY }}
           APPID: ${{ secrets.PLAYTEST_APPID }}
@@ -84,6 +88,15 @@ jobs:
           STRICT_BOARDS: '1'
         run: node validate.js
       - name: persist
+        id: persist
+        # R1-B2-03: also after a FAILED run. validate.js writes some boards long before its normal state save
+        # (consolation XP, confession points) and the whole main path before the trust / redeem upkeep that can
+        # still exit 1; the markers that make those writes one-shot are already on disk (written atomically) --
+        # dropping them made the next run pay / fine / settle the same matches again. Not after a skipped run
+        # (yield gate, red tests): nothing ran, nothing to save.
+        if: always() && steps.run.outcome != 'skipped'
+        env:
+          RUN_OUTCOME: ${{ steps.run.outcome }}
         run: |
           state_files=""
           for f in pt-processed.json pt-leavers.json pt-xp.json pt-starts.json pt-signals.json pt-confessions.json pt-unmatched.json pt-supporters.json pt-endless-solo.json pt-chat-mute.json; do
@@ -93,7 +106,7 @@ jobs:
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add -- $state_files
-            git commit -m "state: update playtest reconciliation state"
+            git commit -m "state: update playtest reconciliation state$([ "$RUN_OUTCOME" = success ] || echo " (run $RUN_OUTCOME: marks saved before the exit)")"
             n=0
             until git pull --rebase origin "${GITHUB_REF_NAME}" && git push; do
               n=$((n+1))

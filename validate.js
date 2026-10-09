@@ -673,7 +673,7 @@ function pruneSignals(s, now) {
     for (let i = 0; i < rk.length - SIG_PAIRS_CAP; i++) delete s.rseen[rk[i]];
   }
 }
-function saveSignals(s, now) { try { pruneSignals(s, now); fs.writeFileSync(SIGNALS_FILE, JSON.stringify(s, null, 0)); } catch (e) { ghWarn('write ' + SIGNALS_FILE + ' failed: ' + (e && e.message)); } }
+function saveSignals(s, now) { try { pruneSignals(s, now); writeStateFile(SIGNALS_FILE, JSON.stringify(s, null, 0)); } catch (e) { ghWarn('write ' + SIGNALS_FILE + ' failed: ' + (e && e.message)); } }
 function sigPlayer(s, h, now) { const p = s.players[h] || (s.players[h] = { g: 0, w: 0, v: 0, f: 0, ns: 0, disp: [0, 0, 0, 0, 0, 0, 0], s1: 0, s2: 0, smax: 0, at: 0 }); p.at = now; return p; }
 // flag once per match key (flagged groups are not processed, so they re-surface every run
 // until their shard entries are overwritten -- the dedup map keeps counters honest).
@@ -1006,14 +1006,19 @@ async function readUserEntry(id, sid, label) {
   for (const e of ents) if (String(e.steamID) === String(sid)) return e;
   return null;
 }
+// State files are committed by the persist step even after a failed run (R1-B2-03: a run that exits after a board
+//   write must still hand its one-shot markers to the next run), and a step timeout can kill the process at any
+//   instant -- so a file is never left half-written: write a sibling temp file, then rename over (atomic on one
+//   filesystem; the persist step only adds the named state files, never the .tmp).
+function writeStateFile(file, text) { const tmp = file + '.tmp'; fs.writeFileSync(tmp, text); fs.renameSync(tmp, file); }
 function loadProcessed() { try { return new Set(JSON.parse(fs.readFileSync(PROCESSED_FILE, 'utf8'))); } catch (e) { return new Set(); } }
-function saveProcessed(set) { try { fs.writeFileSync(PROCESSED_FILE, JSON.stringify([...set], null, 0)); } catch (e) { ghWarn('write ' + PROCESSED_FILE + ' failed: ' + (e && e.message)); } }
+function saveProcessed(set) { try { writeStateFile(PROCESSED_FILE, JSON.stringify([...set], null, 0)); } catch (e) { ghWarn('write ' + PROCESSED_FILE + ' failed: ' + (e && e.message)); } }
 const SKILL_FILE = process.env.SKILL_FILE || 'skill.json';
 function loadSkill() { try { return JSON.parse(fs.readFileSync(SKILL_FILE, 'utf8')) || {}; } catch (e) { return {}; } }
-function saveSkill(s) { try { fs.writeFileSync(SKILL_FILE, JSON.stringify(s, null, 0)); } catch (e) { ghWarn('write ' + SKILL_FILE + ' failed: ' + (e && e.message)); } }
+function saveSkill(s) { try { writeStateFile(SKILL_FILE, JSON.stringify(s, null, 0)); } catch (e) { ghWarn('write ' + SKILL_FILE + ' failed: ' + (e && e.message)); } }
 const LEAVERS_FILE = process.env.LEAVERS_FILE || 'leavers.json';
 function loadLeavers() { try { return JSON.parse(fs.readFileSync(LEAVERS_FILE, 'utf8')) || {}; } catch (e) { return {}; } }
-function saveLeavers(s) { try { fs.writeFileSync(LEAVERS_FILE, JSON.stringify(s, null, 0)); } catch (e) { ghWarn('write ' + LEAVERS_FILE + ' failed: ' + (e && e.message)); } }
+function saveLeavers(s) { try { writeStateFile(LEAVERS_FILE, JSON.stringify(s, null, 0)); } catch (e) { ghWarn('write ' + LEAVERS_FILE + ' failed: ' + (e && e.message)); } }
 // ---- O124 seedcap consult (knife-9) -- seedcap.js OWNS its state file; the reconcile only
 // READS it (cross-workflow ownership stays clean: each side writes its own file, the applied-
 // correction handshake goes through signals.json which the reconcile owns). Enforcement is
@@ -1075,20 +1080,21 @@ function pruneConfessions(s, now, live) {
 }
 function saveConfessions(s, now, live) {
   pruneConfessions(s, now, live);
-  try { fs.writeFileSync(CONFESSIONS_FILE, JSON.stringify(s, null, 0)); } catch (e) { ghWarn('write ' + CONFESSIONS_FILE + ' failed: ' + (e && e.message)); }
+  try { writeStateFile(CONFESSIONS_FILE, JSON.stringify(s, null, 0)); } catch (e) { ghWarn('write ' + CONFESSIONS_FILE + ' failed: ' + (e && e.message)); }
 }
 // knife-7 unmatched-confession sticky state (dedupe across runs; the box is a rolling ring so
 //   the same event reappears until it ages out -- only a GROWN total is new information).
 const UNMATCHED_FILE = process.env.UNMATCHED_FILE || 'unmatched.json';
 function loadUnmatched() { try { return JSON.parse(fs.readFileSync(UNMATCHED_FILE, 'utf8')) || {}; } catch (e) { return {}; } }
-function saveUnmatched(s) { try { fs.writeFileSync(UNMATCHED_FILE, JSON.stringify(s, null, 0)); } catch (e) { ghWarn('write ' + UNMATCHED_FILE + ' failed: ' + (e && e.message)); } }
+function saveUnmatched(s) { try { writeStateFile(UNMATCHED_FILE, JSON.stringify(s, null, 0)); } catch (e) { ghWarn('write ' + UNMATCHED_FILE + ' failed: ' + (e && e.message)); } }
 // Process abandon confessions (record-writer identity = penalty target; nothing here can touch a
 // third party). Runs BEFORE the no-consistent-matches early returns -- the everyone-left scenario
 // this exists for produces no settle groups at all. Dependencies are injected so tests need no fetch.
 //   confs: [{steamID, m, mt, dispCode}] from this run's shard read (deduped by state key).
 //   groups: this run's settle-record groups (forgiveness probe: confessor wrote a settle record).
 //   opts: { penalty, lpMax, maturityMs, appliesLpFn, seedFor(sid) -> base LP for a first-ranked leaver,
-//           readLp: async(sid) -> {score, details}|null, writeLp: async(sid, score, details) -> ok }
+//           readLp: async(sid) -> {score, details}|null, writeLp: async(sid, score, details) -> ok,
+//           checkpoint: () -> void (optional; saves confState + leavers to disk after every points write) }
 // Effects per NEW confession on an unprocessed match: exit-rate leaves++ (all matchmade types) and,
 // for ranked, an immediate clamp-aware LP deduction (amount recorded for the refund). A later run
 // that sees the confessor's own settle record for the same match refunds the deduction and retracts
@@ -1132,6 +1138,7 @@ async function reconcileConfessions(confs, groups, processed, confState, leavers
       st.ded = base - nv;
       const okW = await opts.writeLp(String(c.steamID), nv, e && e.details);
       if (okW) res.penalized++; else { st.ded = 0; ghWarn('confession LP write failed ' + plog(String(c.steamID))); }
+      if (opts.checkpoint) opts.checkpoint();   // R1-B2-03: the fine's marker (+ exit-rate hit) on disk before anything else can exit
       console.log('  confess ' + c.m + ': ' + plog(String(c.steamID)) + ' ' + dispName(c.dispCode) + ' pts ' + base + '-' + opts.penalty + '->' + nv + (e ? '' : ' (seeded base)'));
     } else {
       console.log('  confess ' + c.m + ': ' + plog(String(c.steamID)) + ' ' + dispName(c.dispCode) + ' exit-rate only (non-ranked)');
@@ -1148,11 +1155,13 @@ async function reconcileConfessions(confs, groups, processed, confState, leavers
     const rec = settleRec(m, p);   // hardened probe (consistent group + non-abandoner disp); lone/divergent records refund nothing
     if (rec) {
       // came back and finished: refund the exact deducted amount + retract the exit signal
+      let wrote = false;
       if (st.ded > 0 && opts.readLp) {
         const sid = String(rec.steamID);
         const e = await opts.readLp(sid);
         const nv = Math.min(opts.lpMax, ((e ? e.score : 0) | 0) + (st.ded | 0));
         const okW = await opts.writeLp(sid, nv, e && e.details);
+        wrote = true;
         if (okW) res.refunded++;
         console.log('  confess-forgive ' + m + ': ' + plog(sid) + ' settled after all, refund +' + st.ded + ' -> ' + nv);
       } else {
@@ -1160,6 +1169,7 @@ async function reconcileConfessions(confs, groups, processed, confState, leavers
       }
       if (st.ex && leavers[p]) { leavers[p].leaves = Math.max(0, (leavers[p].leaves | 0) - 1); st.ex = 0; }
       st.refunded = 1;
+      if (wrote && opts.checkpoint) opts.checkpoint();   // R1-B2-03: the refund is relative too -- its marker on disk before the next exit
       continue;
     }
     if (now - (st.t0 || 0) > opts.maturityMs) { st.done = 1; res.finalized++; }   // forgiveness window closed; penalty stands
@@ -1178,7 +1188,7 @@ const STARTS_MATURITY_MS = Number(process.env.STARTS_MATURITY_MS || 2 * 3600 * 1
 // Competitive values (LP/MMR) never move here. Client mirrors the same constant (lockstep-pinned).
 const CONSOLATION_XP = Number(process.env.CONSOLATION_XP || 50);
 function loadStarts() { try { return JSON.parse(fs.readFileSync(STARTS_FILE, 'utf8')) || {}; } catch (e) { return {}; } }
-function saveStarts(s) { try { fs.writeFileSync(STARTS_FILE, JSON.stringify(s, null, 0)); } catch (e) { ghWarn('write ' + STARTS_FILE + ' failed: ' + (e && e.message)); } }
+function saveStarts(s) { try { writeStateFile(STARTS_FILE, JSON.stringify(s, null, 0)); } catch (e) { ghWarn('write ' + STARTS_FILE + ' failed: ' + (e && e.message)); } }
 // ============================================================
 // repeat-group rating decay (retention R1): consecutive matches against MOSTLY THE SAME people
 // update TrueSkill with a decaying weight x1 / x0.5 / x0.25 / x0 (1st/2nd/3rd/4th+ in a row).
@@ -1196,7 +1206,7 @@ const GROUPS_FILE = process.env.GROUPS_FILE || 'groups.json';
 function loadGroups() { try { return JSON.parse(fs.readFileSync(GROUPS_FILE, 'utf8')) || {}; } catch (e) { return {}; } }
 function saveGroups(g, nowMs) {
   for (const p of Object.keys(g)) if (nowMs - (g[p].at || 0) > GROUP_DECAY.PRUNE_MS) delete g[p];
-  try { fs.writeFileSync(GROUPS_FILE, JSON.stringify(g, null, 0)); } catch (e) { ghWarn('write ' + GROUPS_FILE + ' failed: ' + (e && e.message)); }
+  try { writeStateFile(GROUPS_FILE, JSON.stringify(g, null, 0)); } catch (e) { ghWarn('write ' + GROUPS_FILE + ' failed: ' + (e && e.message)); }
 }
 // Pure: advance every roster member's streak memory and return their update weight.
 // rosterPids = de-identified pids of everyone seated in the match (writers + consensus leavers --
@@ -1582,7 +1592,7 @@ const XP_FILE = process.env.XP_FILE || 'xp.json';
 // supporter pack state (HMAC pid keyed): ownership probe cache + wall/opt-out bookkeeping (supporters.js header).
 const SUPPORTERS_FILE = process.env.SUPPORTERS_FILE || 'supporters.json';
 function loadSupporters() { try { return JSON.parse(fs.readFileSync(SUPPORTERS_FILE, 'utf8')) || {}; } catch (e) { return {}; } }
-function saveSupporters(s) { try { fs.writeFileSync(SUPPORTERS_FILE, JSON.stringify(s, null, 0)); } catch (e) { ghWarn('write ' + SUPPORTERS_FILE + ' failed: ' + (e && e.message)); } }
+function saveSupporters(s) { try { writeStateFile(SUPPORTERS_FILE, JSON.stringify(s, null, 0)); } catch (e) { ghWarn('write ' + SUPPORTERS_FILE + ' failed: ' + (e && e.message)); } }
 const SUPPORTER_WALL_LB = process.env.SUPPORTER_WALL_LB || supporters.SUPPORTER.WALL_LB;
 const SUPPORTER_OPTOUT_LB = process.env.SUPPORTER_OPTOUT_LB || supporters.SUPPORTER.OPTOUT_LB;
 // chat moderation lane state (HMAC pid keyed: reporter watermarks + per-target reporter sets + automatic mute expiries; never text or raw ids)
@@ -1590,9 +1600,9 @@ const CHAT_MUTE_FILE = process.env.CHAT_MUTE_FILE || 'chat-mute.json';
 const CHAT_MUTE_LB = process.env.CHAT_MUTE_LB || chatMute.CHAT_MUTE.MUTE_LB;
 const CHAT_REPORT_LB = process.env.CHAT_REPORT_LB || chatMute.CHAT_MUTE.REPORT_LB;
 function loadChatMute() { try { const o = JSON.parse(fs.readFileSync(CHAT_MUTE_FILE, 'utf8')); return (o && typeof o === 'object') ? o : {}; } catch (e) { return {}; } }
-function saveChatMute(st) { try { fs.writeFileSync(CHAT_MUTE_FILE, JSON.stringify(st)); } catch (e) { ghWarn('write ' + CHAT_MUTE_FILE + ' failed: ' + (e && e.message)); } }
+function saveChatMute(st) { try { writeStateFile(CHAT_MUTE_FILE, JSON.stringify(st)); } catch (e) { ghWarn('write ' + CHAT_MUTE_FILE + ' failed: ' + (e && e.message)); } }
 function loadXp() { try { return JSON.parse(fs.readFileSync(XP_FILE, 'utf8')) || {}; } catch (e) { return {}; } }
-function saveXp(s) { try { fs.writeFileSync(XP_FILE, JSON.stringify(s, null, 0)); } catch (e) { ghWarn('write ' + XP_FILE + ' failed: ' + (e && e.message)); } }
+function saveXp(s) { try { writeStateFile(XP_FILE, JSON.stringify(s, null, 0)); } catch (e) { ghWarn('write ' + XP_FILE + ' failed: ' + (e && e.message)); } }
 // per-game point formula -- lockstep mirror of the client config (asserted by the schema-lockstep test).
 // boosts = permanent account-level point multiplier milestones ([level, +pct], ascending; the
 // highest tier at-or-below the player's level applies -- tiers are absolute, not additive).
@@ -1838,7 +1848,7 @@ function pruneSolo(st, nowMs) {
   for (const m of Object.keys(st.wait)) if (nowMs - (st.wait[m].t0 || 0) > COMP.CHAIN_WAIT_MS + 86400000) delete st.wait[m];
   for (const k of Object.keys(st.ms || {})) if (nowMs - (st.ms[k].t || 0) > COMP.MS_TTL_MS) delete st.ms[k];
 }
-function saveSolo(st, nowMs) { pruneSolo(st, nowMs); try { fs.writeFileSync(SOLO_FILE, JSON.stringify(st, null, 0)); } catch (e) { ghWarn('write ' + SOLO_FILE + ' failed: ' + (e && e.message)); } }
+function saveSolo(st, nowMs) { pruneSolo(st, nowMs); try { writeStateFile(SOLO_FILE, JSON.stringify(st, null, 0)); } catch (e) { ghWarn('write ' + SOLO_FILE + ' failed: ' + (e && e.message)); } }
 function soloRunKey(p, seasonId, runSeed) { return p + '|' + (seasonId | 0) + '|' + (runSeed | 0); }
 // team run chain key: the roster SET (order-free, de-identified) + season + runSeed. A resume must bring the same people --
 //   the save row belongs to the host's guard and the lobby refuses another roster; the cron mirrors that by never finding
@@ -2223,7 +2233,7 @@ function loadCe() { try { const st = JSON.parse(fs.readFileSync(CAMPAIGN_ENDLESS
 function saveCe(st, nowMs) {
   for (const k of Object.keys(st.settled)) if (nowMs - (st.settled[k] | 0) * 60000 > CE_SETTLED_TTL_MS) delete st.settled[k];
   st.rejects = campaignEndless.pruneRejects(st.rejects, Math.floor(nowMs / 3600000));
-  try { fs.writeFileSync(CAMPAIGN_ENDLESS_FILE, JSON.stringify(st, null, 0)); } catch (e) { ghWarn('write ' + CAMPAIGN_ENDLESS_FILE + ' failed: ' + (e && e.message)); }
+  try { writeStateFile(CAMPAIGN_ENDLESS_FILE, JSON.stringify(st, null, 0)); } catch (e) { ghWarn('write ' + CAMPAIGN_ENDLESS_FILE + ' failed: ' + (e && e.message)); }
 }
 // Ops mail (Resend; same env as the seedcap alert). Not shared with seedcap.js: that module requires this one, so a top-level
 //   import here would be circular. Unconfigured -> false (decision stays pending, retried next run).
@@ -2763,6 +2773,23 @@ async function main() {
   if (startsRes.registered || startsRes.convicted || startsRes.cleaned || Object.keys(startsPending).length)
     console.log('starts: ' + Object.keys(startsPending).length + ' pending (+' + startsRes.registered + ' new), ' + startsRes.convicted + ' exit-rate hits, ' + startsRes.cleaned + ' cleaned' + (startsRes.held ? ', ' + startsRes.held + ' matured verdict(s) held (incomplete shard read)' : ''));
   RUN.pending = Object.keys(startsPending).length; RUN.convicted = startsRes.convicted;
+  // R1-B2-03: the consolation XP and confession points writes below are relative ("board value now + delta") and
+  // land long before this run's normal state save (early-return persistStartsSide / the main-path tail). Any exit
+  // in between (a STRICT_BOARDS listing wobble, an aborted base read, a crash, the step timeout) used to drop the
+  // markers that make them one-shot, so the next run paid / fined the same match again -- every run, for as long
+  // as the failure lasted. The markers are now on disk right next to the writes, and the persist step commits the
+  // state files even when this run fails afterwards (validate.yml / playtest.yml / demo.yml persist: always()).
+  // Consolation is written ahead (at most once: a run killed mid-loop forfeits the unpaid credits, which is the
+  // documented failed-write behavior); each confession write is followed by its marker (reconcileConfessions).
+  // Writes a pruned COPY of confState: pruning the live object would delete entries the upkeep loop still visits.
+  const saveEarlyMarks = (leaversDirty) => {
+    if (!APPLY_MMR) return;
+    saveStarts(startsPending);
+    saveConfessions(Object.assign({}, confState), nowMs, confLive);
+    if (leaversDirty) saveLeavers(leavers);
+    if (processed.size !== processedN0) saveProcessed(processed);
+  };
+  saveEarlyMarks(startsRes.convicted > 0);
   // interrupted-match consolation: the matured-orphan verdict just identified survivors who stayed
   // to the forced settle of a match nobody could ever settle (lone records). Pay the flat credit
   // inline (same pre-early-return pattern as the confession LP writes -- the everyone-left scenario
@@ -2802,6 +2829,7 @@ async function main() {
       penalty: LEAVER_LP_PENALTY, lpMax: LP_MAX, maturityMs: STARTS_MATURITY_MS,
       appliesLpFn: appliesLp,
       consistentKeys,   // absolution probe only trusts consistent settle groups (a lone/divergent 0xB1 cancels nothing)
+      checkpoint: () => saveEarlyMarks(true),   // R1-B2-03: after every points write (fine or refund), before the next exit can happen
       seedFor: (sid) => { const sk = skill0[pid(sid)] || ts.DEFAULTS; return seedLp(ts.displayRating(sk.mu, sk.sigma)); },
       readLp: lpId0 ? (async (sid) => {
         const e = await readUserEntry(lpId0, sid, 'points');
