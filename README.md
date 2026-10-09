@@ -18,6 +18,18 @@ settle record) loses a fixed points penalty in the ranked ladder — this is the
 authoritative half of the client's optimistic deduction, so it survives read-back
 rather than being reverted. Single-side records can't frame a leaver (majority roster
 vote), and each match is penalized at most once (idempotent via `processed.json`).
+A missing record only counts as leaving once it is really gone: a consistent group that
+lacks a roster seat's record (any lane — the private and bot lanes convict nobody, but
+settling early would cost the late finisher their XP) waits until (a) a run has read every
+record shard in full — the listing must hold exactly `LB_PREFIX`+0..N-1 (N = the client's
+shard count, `LEDGER_SHARDS`), and no shard read may fail (408 / 429 / 5xx retry first),
+hit the page cap or answer a 200 without its entries block — and (b) the gap has stood for
+`ABSENT_GRACE_MS` on this job's own clock (default 5 min, floor 3 min: a finisher's record
+can land up to ~2 min after the others' while the client retries a failed upload). The
+record landing in the meantime settles the group in full. Start-attestation verdicts
+likewise wait for a complete read. The grace stays short on purpose: a group only settles
+while its records are still on their shards, and a finisher's next match overwrites
+their row.
 
 **Team match types** (base 3/4 = quick/ranked team-brawl): placement follows the fixed
 seat convention — seats (0,1) vs (2,3), winning pair takes ranks {1,2} — instead of raw
@@ -84,7 +96,8 @@ absent, so a run is unaffected before it is provisioned.
 - `trueskill.js` — TrueSkill (mu/sigma) update + display rating.
 - `test/void-consensus.js`, `test/leaver-absence.js`, `test/lp-penalty.js`,
   `test/xp-ladder.js`, `test/reduced-stakes.js`, `test/team-rank.js`, `test/team-lp.js`,
-  `test/start-orphan.js`, `test/sanity-bounds.js`, `test/signals-collect.js` — unit tests
+  `test/start-orphan.js`, `test/sanity-bounds.js`, `test/signals-collect.js`,
+  `test/absence-grace.js` — unit tests
   for the pure helpers (run one with
   `node test/<name>.js`; CI runs all of `test/*.js` before each reconcile).
 - `.github/workflows/validate.yml` — scheduled run + state persistence.
@@ -141,6 +154,13 @@ Optional: `XP_LB` (progression ladder board name — XP is skipped if unset),
 `APPLY_MMR=0` (dry-run, no writes), `ALLOW_TEST=1`, `K_FACTOR`,
 `LEAVER_LP_PENALTY` (ranked leaver points deduction, default 100),
 `STARTS_MATURITY_MS` (start-attestation verdict window, default 2 h),
+`ABSENT_GRACE_MS` (how long a group missing a roster seat's record waits before settling
+without it, default 5 min, never below 3 min), `LEDGER_SHARDS` (record shard count on the
+main / demo channel, default 50; the playtest channel uses `PT_SHARD_COUNT`),
+`SHARD_STRICT_BODY=0` (escape hatch: read a shard's 200 without an entries block as an
+empty board again instead of an incomplete read — only if Steam turns out to answer that
+way for a board the listing still counts as non-empty), `READ_RETRY_MS` (base backoff
+between board read retries, default 8 s; tests set 0),
 `STARTS_FILE` (pending-starts state path, default `starts.json`),
 `SANITY_SCORE_CAP` / `SANITY_SCORE_FLOOR` / `SANITY_DUR_CAP` / `SANITY_MIN_START_AGE_MS`
 (sanity bounds + pacing gate; generous defaults, tighten only with real-traffic data),

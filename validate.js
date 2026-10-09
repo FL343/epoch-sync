@@ -43,6 +43,17 @@ const PT_MT_ALLOWED = [1, 3, 5, 7, 8, 10, 11];   // lockstep: client MATCHTYPE_C
 const PT_SEED_CP = Math.max(0, Number(process.env.PT_SEED_CP || 60));
 const PT_SHARD_COUNT = Math.max(1, Number(process.env.PT_SHARD_COUNT || 50));   // lockstep: client LEDGER_SHARDS
 const PT_MIRROR_LB = 'mirror_box';   // never provisioned on the playtest app (progress does not migrate)
+// record shards on a live channel (R1-B2-04 / O348-3): exactly PREFIX+0 .. PREFIX+(N-1), N = the client's LEDGER_SHARDS
+//   (lockstep; the playtest bootstrap provisions the same names from PT_SHARD_COUNT). See shardPlan.
+const LEDGER_SHARDS = Math.max(1, Number(process.env.LEDGER_SHARDS || (PT_MODE ? PT_SHARD_COUNT : 50)));
+// absent-seat grace (R1-B2-04 / R1-X14, cloud audit 2026-10): a consistent group that is missing a roster seat's record
+//   waits this long on the job's own clock (first sighting of the gap) before it settles without that seat. Floor 3 min:
+//   a finisher's settle record can land up to ~2 min after the others (the client re-writes a failed upload to the same
+//   shard with backoff, each retry re-resolving the board) -- see absenceHold. Default 5 min: kept short because the group
+//   only settles while its records are still on their shards (a finisher's NEXT match overwrites their entry; pend.agreed
+//   keeps them from being convicted, but once every finisher has rotated off, the group can no longer settle at all).
+const ABSENT_GRACE_MIN_MS = 180000;
+const ABSENT_GRACE_MS = Math.max(ABSENT_GRACE_MIN_MS, Number(process.env.ABSENT_GRACE_MS || 300000));
 
 const pid = (s) => crypto.createHmac('sha256', String(SALT || '')).update(String(s)).digest('hex').slice(0, 16);
 const plog = (s) => pid(s).slice(0, 8);
@@ -114,6 +125,51 @@ function detectLeavers(g) {
   }
   return leavers;
 }
+// Roster seats with no record in the group: detectLeavers' per-seat strict-majority vote, but a lone record counts too (it
+//   is its own majority) -- the single-writer bot lane needs it: 2 humans + bots, one human's record missing.
+function absentRosterSeats(g) {
+  if (!g || !g.length) return [];
+  if (g.length >= 2) return detectLeavers(g);
+  const present = (g[0].d[5] | 0), out = [];
+  for (const seatKey of Object.keys(g[0].roster || {})) if ((seatKey | 0) !== present) out.push({ seat: seatKey | 0, steamID: g[0].roster[seatKey] });
+  return out;
+}
+// ---- absent-seat hold (R1-B2-04 / R1-X14, cloud audit 2026-10) ----
+// A missing record is only evidence that its player left once (a) this run read EVERY record shard and (b) the gap has
+// been visible for the grace period on this job's own clock. Before this, a consistent group missing one seat settled on
+// the spot: a shard read that failed (5xx / 429 / a malformed 200 / a shard missing from the listing) or a finisher whose
+// record landed seconds after the others' (slow results screen, upload retry) convicted an honest finisher as a leaver
+// (ranked: -100 points + exit rate + no points / XP for the match) and marked the match processed, so their record, once
+// readable, was never looked at again. Now such a group just waits (never a flag): settled in full as soon as the late
+// record arrives, or without the seat once a complete read still lacks it after the grace.
+//   absent : absentRosterSeats(g) minus writers already seen agreeing (pend.agreed -- shard rotation, not leaving)
+//   pend   : the group's starts entry; absentAt = first sighting of a gap (stamped here, persisted with starts.json)
+// An abandon confession does not shorten the wait: a confessor who came back (rejoin) and finished may be the late record.
+// Returns { hold: 'read' | 'grace' | null, waitMs }.
+function absenceHold(absent, pend, now, complete, graceMs) {
+  if (!absent || !absent.length) return { hold: null, waitMs: 0 };
+  if (pend && !(Number(pend.absentAt) > 0)) pend.absentAt = now;
+  if (!complete) return { hold: 'read', waitMs: 0 };
+  let at = pend ? Number(pend.absentAt) : now;
+  if (!(at > 0) || at > now) at = now;   // a stamp from the future (clock skew / foreign state) restarts the wait, never skips it
+  const wait = Math.max(ABSENT_GRACE_MIN_MS, Number(graceMs) || 0) - (now - at);
+  return wait > 0 ? { hold: 'grace', waitMs: wait } : { hold: null, waitMs: 0 };
+}
+// Which listed boards are the record shards (R1-B2-04 / O348-3). Live channels: exactly PREFIX+0 .. PREFIX+(n-1). A name
+// missing from the listing makes the run's view incomplete (the listing can drop a board for a while); any other board
+// that only starts with the prefix is not read (each run reads every shard, so an extra board is pure cost). A listing
+// that holds prefix boards but none of the expected names means the prefix and the naming disagree (deployment error):
+// read what is listed, loudly, and treat the view as incomplete so no absence is convicted on it.
+// Sandbox runs (test prefix, local e2e: three lbtest_pool boards) read every listed prefix board, as before.
+function shardPlan(listedNames, prefix, n, sandbox) {
+  const names = listedNames.map(String);
+  if (sandbox) return { read: names.slice(), missing: [], extra: [], mismatch: false };
+  const want = []; for (let i = 0; i < n; i++) want.push(String(prefix) + i);
+  const have = new Set(names), wantSet = new Set(want);
+  const read = want.filter((x) => have.has(x));
+  if (!read.length && names.length) return { read: names.slice(), missing: want, extra: [], mismatch: true };
+  return { read, missing: want.filter((x) => !have.has(x)), extra: names.filter((x) => !wantSet.has(x)), mismatch: false };
+}
 // ---- start-attestation records (magic 0xB2) ----
 // Every client writes a start-type record when level 1 actually begins (same field layout as a
 // settle record with all result fields zeroed, so decodeRoster and the composite group key are
@@ -137,11 +193,14 @@ function soloStartAttested(att) {
   const r = att[0];
   return isEndlessMt(r.d[2] | 0) && (r.d[8] | 0) === 1 && !!r.roster && String(r.roster[0]) === String(r.steamID);
 }
-function reconcileStarts(starts, groups, consistentKeys, processed, pending, leavers, now, maturityMs, confState) {
+// readComplete === false (some record shard unread this run, R1-B2-04 / O348-7): registration and the cumulative settled
+//   exemptions still run, but no matured entry is judged -- a finisher whose only settle record sits on the unread shard
+//   would read as never-settled. The verdict waits for the next complete read (counted in `held`).
+function reconcileStarts(starts, groups, consistentKeys, processed, pending, leavers, now, maturityMs, confState, readComplete) {
   confState = confState || {};
   const sg = {};
   for (const r of starts) { const m = r.d[3] + '_' + r.d[4] + '_' + r.d[2]; (sg[m] = sg[m] || []).push(r); }
-  let registered = 0, convicted = 0, cleaned = 0;
+  let registered = 0, convicted = 0, cleaned = 0, held = 0;
   const consoledSids = [];   // interrupted-match consolation: real sids of still-visible settle writers at verdict time (in-memory only, never persisted -- state stays HMAC-keyed)
   // 1) register new pending entries (sticky first-seen: shard entries may be overwritten later)
   for (const m of Object.keys(sg)) {
@@ -190,6 +249,7 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
       continue;
     }
     if (now - (p.t0 || 0) < maturityMs) continue;
+    if (readComplete === false) { held++; continue; }
     const hit = [];
     for (const seat of Object.keys(p.roster)) {
       const h = p.roster[seat];
@@ -218,7 +278,7 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
     delete pending[m];
     console.log('  start-orphan ' + m + ': started, never settled -> ' + hit.length + ' exit-rate hits (' + hit.join(',') + ')' + (p.settled.length ? ', ' + p.settled.length + ' exempt (wrote a settle record)' : ''));
   }
-  return { registered, convicted, cleaned, consoledSids };
+  return { registered, convicted, cleaned, held, consoledSids };
 }
 // ---- deterministic sanity bounds (B5 tier A: flag-don't-settle) ----
 // Catches the case consensus can't: colluding clients writing IDENTICAL impossible records.
@@ -767,9 +827,13 @@ function recordMatchSignals(s, g, parts, rankOf, matchType, isVoid, now) {
 // Reads retry transient faults (network errors / 5xx) twice with backoff before giving
 // up: the storefront occasionally throws a one-off 5xx (observed 2026-07-28: a single
 // GetLeaderboardsForGame HTTP 502 failed the whole run) and reads are idempotent, so a
-// blip should cost seconds, not a full cycle plus a failure e-mail. 4xx are semantic
-// (bad key / missing board) and still surface immediately. Writes (postForm*) keep
-// single-shot behavior — a mid-write failure self-heals next run via unprocessed state.
+// blip should cost seconds, not a full cycle plus a failure e-mail. 408 (timeout) and 429
+// (rate limit) are transient too and retry the same way (R1-B2-04, cloud audit 2026-10: a
+// single 429 on one shard used to fail that shard read with zero retries). The other 4xx
+// are semantic (bad key / missing board) and still surface immediately. Writes (postForm*)
+// keep single-shot behavior — a mid-write failure self-heals next run via unprocessed state.
+const transientStatus = (st) => st >= 500 || st === 408 || st === 429;
+const READ_RETRY_MS = Math.max(0, Number(process.env.READ_RETRY_MS || 8000));   // backoff step (env: offline tests only)
 async function getJson(url) {
   for (let attempt = 0; ; attempt++) {
     let r, t;
@@ -777,10 +841,10 @@ async function getJson(url) {
       r = await fetch(url); t = await r.text();
     } catch (e) {
       if (attempt >= 2) throw e;
-      await new Promise(res => setTimeout(res, 8000 * (attempt + 1))); continue;
+      await new Promise(res => setTimeout(res, READ_RETRY_MS * (attempt + 1))); continue;
     }
-    if (r.status >= 500 && attempt < 2) {
-      await new Promise(res => setTimeout(res, 8000 * (attempt + 1))); continue;
+    if (transientStatus(r.status) && attempt < 2) {
+      await new Promise(res => setTimeout(res, READ_RETRY_MS * (attempt + 1))); continue;
     }
     let j = null; try { j = JSON.parse(t); } catch (e) {}
     if (j && String(url).includes('GetLeaderboardsForGame')) noteBoardListing(j);
@@ -852,6 +916,7 @@ function writeRunSummary() {
       '| consistent / fresh | ' + s('consistent', 0) + ' / ' + s('fresh', 0) + ' |',
       '| flagged inconsistent / sanity | ' + s('flagged', 0) + ' / ' + s('sanity', 0) + ' |',
       '| starts pending / exit-rate hits | ' + s('pending', 0) + ' / ' + s('convicted', 0) + ' |',
+      '| absent-seat holds (incomplete read / grace) | ' + s('absentHeld', 0) + ' |',
       '| confessions seen/penalized/refunded | ' + s('confess', '0/0/0') + ' |',
       '| reports seen / counted | ' + s('repSeen', 0) + ' / ' + s('repCounted', 0) + ' |',
       '| trust writes / deletes | ' + s('trustW', 0) + ' / ' + s('trustD', 0) + ' |',
@@ -907,12 +972,22 @@ async function mapPool(items, limit, fn) {
 // pagination below; PAGE_CAP bounds a pathological board (raise via env before raising shards).
 const PAGE_SIZE = 5000;
 const PAGE_CAP = Math.max(1, Number(process.env.PAGE_CAP || 10));   // 10 pages = 50k entries per board
-async function readBoardAll(id, label) {
+// opts.strictBody (record shards only, R1-B2-04): an HTTP 200 whose body is not JSON, or (when the listing says the
+//   board holds entries -- opts.expectEntries) JSON without leaderboardEntryInformation, is a failed read, not an
+//   empty board: it throws like any other read failure, so the caller marks the run's shard view incomplete instead of
+//   settling on it. A body that parses and carries the info object with no entries array is a genuinely empty board.
+//   Off for every other board (their absent-entry handling is unchanged). SHARD_STRICT_BODY=0 turns it off for the shards
+//   too -- the escape hatch in case Steam answers a really empty board (listing count still stale after deletes, e.g. the
+//   pre-launch wipe) without the info object: every run would then read as incomplete and hold every absent seat.
+const SHARD_STRICT_BODY = process.env.SHARD_STRICT_BODY !== '0';
+async function readBoardAll(id, label, opts) {
   const ents = [];
+  const strict = !!(opts && opts.strictBody), expectEntries = !!(opts && opts.expectEntries);
   for (let page = 0; page < PAGE_CAP; page++) {
     const start = page * PAGE_SIZE + 1, end = (page + 1) * PAGE_SIZE;
     const er = await getJson(BASE + '/ISteamLeaderboards/GetLeaderboardEntries/v1/?key=' + KEY + '&appid=' + APPID + '&rangestart=' + start + '&rangeend=' + end + '&datarequest=RequestGlobal&leaderboardid=' + id + '&format=json');
     if (!er.ok) throw new Error(label + ' HTTP ' + er.status);
+    if (strict && (er.json == null || (!er.json.leaderboardEntryInformation && (expectEntries || page > 0)))) throw new Error(label + ' HTTP ' + er.status + ' without entry information (malformed body)');
     const page0 = (er.json && er.json.leaderboardEntryInformation && er.json.leaderboardEntryInformation.leaderboardEntries) || [];
     for (const e of page0) ents.push(e);
     if (page0.length < PAGE_SIZE) return { ents, complete: true };   // short page = board exhausted
@@ -2584,8 +2659,15 @@ async function main() {
   const prevLpId = prevLpLb ? (prevLpLb.id || prevLpLb.ID) : null;
   if (seasonId > 0 && !PT_MODE) console.log('season ' + seasonId + ': points -> ' + lpCur.name + (prevLpId ? (' (soft-reset source ' + seasonBoardName(LP_LB, seasonId - 1) + ')') : ' (no previous-season board)'));
   const ALLOW_TEST = process.env.ALLOW_TEST === '1';
-  const shards = ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).filter(x => { const n = String(x.name || x.Name); return n.indexOf(PREFIX) === 0 && (ALLOW_TEST || n.indexOf('test') < 0); });
-  console.log('shards: ' + shards.length);
+  const listedShards = ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).filter(x => { const n = String(x.name || x.Name); return n.indexOf(PREFIX) === 0 && (ALLOW_TEST || n.indexOf('test') < 0); });
+  // R1-B2-04 / O348-3: the shard set is PREFIX+0..N-1, checked against the listing (shardPlan)
+  const shardSel = shardPlan(listedShards.map(x => String(x.name || x.Name)), PREFIX, LEDGER_SHARDS, sandboxOn());
+  const shardReadSet = new Set(shardSel.read);
+  const shards = listedShards.filter(x => shardReadSet.has(String(x.name || x.Name)));
+  console.log('shards: ' + shards.length + (shardSel.missing.length && !shardSel.mismatch ? ' (' + shardSel.missing.length + ' of ' + LEDGER_SHARDS + ' missing from the listing)' : '') + (shardSel.extra.length ? ' (+' + shardSel.extra.length + ' extra ignored)' : ''));
+  if (shardSel.mismatch) ghErr('shard listing: ' + listedShards.length + ' board(s) carry the shard prefix but none is named prefix+0..' + (LEDGER_SHARDS - 1) + ' -- reading them all; absent seats are not convicted until the naming matches');
+  else if (shardSel.missing.length) ghWarn('shard listing: ' + shardSel.missing.length + ' of ' + LEDGER_SHARDS + ' shard(s) missing (' + shardSel.missing.slice(0, 5).join(', ') + (shardSel.missing.length > 5 ? ', ...' : '') + ') -- incomplete view: absent seats are held, no start verdicts this run');
+  if (shardSel.extra.length) ghWarn('shard listing: ' + shardSel.extra.length + ' extra board(s) with the shard prefix not read (' + shardSel.extra.slice(0, 5).join(', ') + (shardSel.extra.length > 5 ? ', ...' : '') + ')');
 
   const recs = [];
   // Read EVERY shard every run. The listing's per-board `entries` count is eventually
@@ -2595,13 +2677,14 @@ async function main() {
   // 0 while direct entry reads returned the records, so back-to-back runs logged
   // "records: 0" against live data. 50 paged reads cost single-digit seconds under the
   // worker pool; the count is not worth trusting for anything.
-  // shardsComplete: every listed shard read in full this run (no failure, no PAGE_CAP cut) -- only
-  // then may an absent record count as gone (confession retention, see pruneConfessions).
-  let shardsComplete = shards.length > 0;
+  // shardsComplete: every shard of the set listed AND read in full this run (no failure, no PAGE_CAP cut, no malformed
+  // body) -- only then may an absent record count as gone (confession retention, see pruneConfessions; absent-seat
+  // conviction, see absenceHold; start-orphan verdicts, see reconcileStarts).
+  let shardsComplete = shards.length > 0 && !shardSel.missing.length && !shardSel.mismatch;
   const shardOut = await mapPool(shards, CONCURRENCY, async (s) => {
     const id = s.id || s.ID;
     const label = 's' + String(s.name || s.Name).replace(PREFIX, '');
-    const { ents, complete } = await readBoardAll(id, 'shard ' + label);   // paged; cap-hit is warned inside
+    const { ents, complete } = await readBoardAll(id, 'shard ' + label, { strictBody: SHARD_STRICT_BODY, expectEntries: ((s.entries || s.Entries) | 0) > 0 });   // paged; cap-hit is warned inside
     if (!complete) shardsComplete = false;
     const out = [];
     for (const e of ents) {
@@ -2676,9 +2759,9 @@ async function main() {
   const confState = loadConfessions();   // loaded before starts so the orphan verdict can skip confessed keys
   const consistentKeys = new Set(consistentMatches.map(c => c.m));
   const nowMs = Date.now();
-  const startsRes = reconcileStarts(starts, groups, consistentKeys, processed, startsPending, leavers, nowMs, STARTS_MATURITY_MS, confState);
+  const startsRes = reconcileStarts(starts, groups, consistentKeys, processed, startsPending, leavers, nowMs, STARTS_MATURITY_MS, confState, shardsComplete);
   if (startsRes.registered || startsRes.convicted || startsRes.cleaned || Object.keys(startsPending).length)
-    console.log('starts: ' + Object.keys(startsPending).length + ' pending (+' + startsRes.registered + ' new), ' + startsRes.convicted + ' exit-rate hits, ' + startsRes.cleaned + ' cleaned');
+    console.log('starts: ' + Object.keys(startsPending).length + ' pending (+' + startsRes.registered + ' new), ' + startsRes.convicted + ' exit-rate hits, ' + startsRes.cleaned + ' cleaned' + (startsRes.held ? ', ' + startsRes.held + ' matured verdict(s) held (incomplete shard read)' : ''));
   RUN.pending = Object.keys(startsPending).length; RUN.convicted = startsRes.convicted;
   // interrupted-match consolation: the matured-orphan verdict just identified survivors who stayed
   // to the forced settle of a match nobody could ever settle (lone records). Pay the flat credit
@@ -4029,8 +4112,20 @@ async function main() {
     //   rest of the group settles -- see the leaver filter below
     const agreed = pend.agreed || (pend.agreed = []);
     for (const sid of writerSids) { const h = pid(sid); if (agreed.indexOf(h) < 0) agreed.push(h); }
+    // absent-seat hold (R1-B2-04 / R1-X14, see absenceHold): a roster seat with no record is not settled around until this
+    //   run read every record shard and the gap has stood for the grace. Stamped before the pacing gate (the grace runs
+    //   alongside the start floor), judged after it; ahead of the one-match-at-a-time claim (a held group claims no slot)
+    //   and of every lane: matchmade (leaver conviction), private and bot (a late finisher's XP).
+    const absentNow = absentRosterSeats(g).filter((x) => agreed.indexOf(pid(String(x.steamID))) < 0);
+    const absHold = absenceHold(absentNow, pend, nowMs, shardsComplete, ABSENT_GRACE_MS);
     if (pacingDefer(pend, nowMs, SANITY.MIN_START_AGE_MS)) {
       console.log('  pacing ' + c.m + ': start ' + (pend.synth ? 'first sighted' : 'attested') + ' ' + Math.round((nowMs - (pend.t0 || 0)) / 1000) + 's ago < ' + Math.round(SANITY.MIN_START_AGE_MS / 1000) + 's -- deferred');
+      continue;
+    }
+    if (absHold.hold) {
+      RUN.absentHeld = (RUN.absentHeld | 0) + 1;
+      console.log('  absent-hold ' + c.m + ': seat' + (absentNow.length > 1 ? 's ' : ' ') + absentNow.map((x) => x.seat).join(',') + ' wrote no record -- '
+        + (absHold.hold === 'read' ? 'not every record shard was read this run' : 'grace ' + Math.round(absHold.waitMs / 1000) + 's left') + ', deferred (settles in full if the record lands)');
       continue;
     }
     // one match at a time per account; the private and bot lanes apply it after their own level-scaled floor below
@@ -4628,6 +4723,7 @@ module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CHAT_MUTE: 
   ENDLESS_LB_CLASSIC_DUO, ENDLESS_LB_CLASSIC_TRIO, ENDLESS_LB_CLASSIC_QUAD, SAVE_BOX_LB_CLASSIC_DUO, SAVE_BOX_LB_CLASSIC_TRIO, SAVE_BOX_LB_CLASSIC_QUAD,   // client knife 3.9b N3 (team classic lane)
   ENDLESS_COMP_LB_OVERALL, overallScore, overallDominant,   // knife 3.5d composite ladder
   CAMPAIGN_ENDLESS_BOX_PREFIX, CAMPAIGN_ENDLESS_LB_PREFIX, CAMPAIGN_ENDLESS_SUFFIX, CAMPAIGN_ENDLESS_OFFENSE_LB, CAMPAIGN_ENDLESS_FILE, CE_MAIL_MIN, CE_SETTLED_TTL_MS, loadCe, saveCe,   // client knife 3.9b N4 (Gold Rush lane)
+  absentRosterSeats, absenceHold, shardPlan, transientStatus, ABSENT_GRACE_MS, ABSENT_GRACE_MIN_MS, LEDGER_SHARDS,   // R1-B2-04 / R1-X14 absent-seat hold
   PERKS_CFG: perks.PERKS_CFG, verifyPerkPicks: perks.verifyPerkPicks,
   pruneConfessions, CONFESS_PRUNE_MS,   // confession entries outlive the window while their record is still on a shard
   RECOVER_FILE, loadRecover, recoverPick, readRecoverRows };   // client knife 5.0i one-shot pool recovery

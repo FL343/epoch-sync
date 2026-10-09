@@ -19,7 +19,7 @@ const { spawnSync } = require('child_process');
 const fs = require('fs'), path = require('path'), os = require('os');
 // knobs a CI/developer shell could carry that change behavior: scrubbed here (the module reads them at load) and
 //   from every child env -- each run sets exactly what it needs
-const SCRUB = ['PT_MODE', 'STRICT_BOARDS', 'APPLY_MMR', 'ALLOW_TEST', 'DEMO_APPID', 'RANKED_LB', 'LP_LB', 'XP_LB', 'STARTS_MATURITY_MS', 'CONFESS_PRUNE_MS', 'SEEDCAP_ENFORCE', 'SEEDCAP_REJECT', 'GITHUB_STEP_SUMMARY'];
+const SCRUB = ['PT_MODE', 'STRICT_BOARDS', 'APPLY_MMR', 'ALLOW_TEST', 'DEMO_APPID', 'RANKED_LB', 'LP_LB', 'XP_LB', 'STARTS_MATURITY_MS', 'CONFESS_PRUNE_MS', 'SEEDCAP_ENFORCE', 'SEEDCAP_REJECT', 'GITHUB_STEP_SUMMARY', 'LEDGER_SHARDS', 'PT_SHARD_COUNT', 'ABSENT_GRACE_MS', 'READ_RETRY_MS', 'SHARD_STRICT_BODY'];
 for (const k of SCRUB) delete process.env[k];
 process.env.STATE_SALT = 's';   // same salt as the child runs below, so v.pid() addresses their state rows
 const v = require(path.join(__dirname, '..', 'validate.js'));
@@ -33,7 +33,7 @@ const VALIDATE = path.join(__dirname, '..', 'validate.js');
 const SRC = fs.readFileSync(VALIDATE, 'utf8');
 const FILE_VARS = Array.from(new Set(Array.from(SRC.matchAll(/process\.env\.([A-Z0-9_]+_FILE)\b/g), m => m[1])));
 // stateless board stub (writes are logged, not applied: every assertion below counts writes per run);
-//   STUB_FAIL = { boardName: httpStatus } makes that board's entry reads fail (4xx: no retry back-off)
+//   STUB_FAIL = { boardName: httpStatus } makes that board's entry reads fail (408 / 429 / 5xx retry; READ_RETRY_MS 0 below)
 const STUB = [
   "const fs = require('fs');",
   "const FX = JSON.parse(fs.readFileSync(process.env.STUB_FIXTURE, 'utf8'));",
@@ -81,6 +81,7 @@ function runCron(boards, files, env) {
       STEAM_PUBLISHER_KEY: 'k', APPID: '1', LB_PREFIX: 'shard_', XP_LB: 'progress', STATE_SALT: 's',
       SEASON_NOW: '2026-10-01T00:00:00Z',   // pin the season clock: the points board name is season-derived
       STUB_FIXTURE: fxPath, STUB_LOG: logPath, CONCURRENCY: '1', STRICT_BOARDS: '0',
+      LEDGER_SHARDS: '8', READ_RETRY_MS: '0',   // world() lists shard_0..shard_7 = the full record shard set of these runs
     }, stateEnv, env || {});
     const r = spawnSync(process.execPath, ['-r', stub, VALIDATE], { env: e, encoding: 'utf8', cwd: dir, timeout: 120000 });
     const posts = fs.readFileSync(logPath, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l));
@@ -93,7 +94,7 @@ function runCron(boards, files, env) {
 //   stored instant moves back instead: start sightings, confession sightings and the writers' busy marks)
 function advance(state, ms) {
   const files = JSON.parse(JSON.stringify(state));
-  for (const f of ['STARTS_FILE', 'CONFESSIONS_FILE']) { const st = files[f] || {}; for (const k of Object.keys(st)) if (st[k] && st[k].t0) st[k].t0 -= ms; }
+  for (const f of ['STARTS_FILE', 'CONFESSIONS_FILE']) { const st = files[f] || {}; for (const k of Object.keys(st)) { if (st[k] && st[k].t0) st[k].t0 -= ms; if (st[k] && st[k].absentAt) st[k].absentAt -= ms; } }
   const sg = files.SIGNALS_FILE;
   if (sg && sg.players) for (const k of Object.keys(sg.players)) if (sg.players[k].bz) sg.players[k].bz -= ms;
   return files;
@@ -265,7 +266,7 @@ console.log('-- [5] honest reconnect-and-finish --');
   pin('processed size captured right after load', /const processed = loadProcessed\(\);\s*\n\s*const processedN0 = processed\.size;/);
   T('[6] pin: both confession saves pass the visibility set (none left without it)', (SRC.match(/saveConfessions\(confState, nowMs, confLive\)/g) || []).length === 2 && !/saveConfessions\(confState, nowMs\)/.test(SRC));
   pin('a failed shard read marks the run partial', /else \{ shardsComplete = false; ghWarn\('read shard failed: '/);
-  pin('a PAGE_CAP-cut shard read marks the run partial', /const \{ ents, complete \} = await readBoardAll\(id, 'shard ' \+ label\);[\s\S]{0,80}?if \(!complete\) shardsComplete = false;/);
+  pin('a PAGE_CAP-cut shard read marks the run partial', /const \{ ents, complete \} = await readBoardAll\(id, 'shard ' \+ label, \{ strictBody: SHARD_STRICT_BODY[^\n]*\n\s*if \(!complete\) shardsComplete = false;/);
   pin('visibility set only from a complete read', /const confLive = shardsComplete \? new Set\(/);
 
   console.log(failN ? ('FAIL x' + failN + ' (once-only-effects)') : 'ALL OK (once-only-effects)');
