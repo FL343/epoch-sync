@@ -943,7 +943,7 @@ function writeRunSummary() {
       '| confessions seen/penalized/refunded | ' + s('confess', '0/0/0') + ' |',
       '| reports seen / counted | ' + s('repSeen', 0) + ' / ' + s('repCounted', 0) + ' |',
       '| trust writes / deletes | ' + s('trustW', 0) + ' / ' + s('trustD', 0) + ' |',
-      '| team-gamble lone dissent unsettled / settled as leaver | ' + s('t2ld', '0/0') + ' |',
+      '| team-gamble lone / team dissent unsettled / settled | ' + s('t2ld', '0/0') + ' |',
       '| board writes rating/points/xp | ' + s('writes', '0/0 0/0 0/0') + ' |',
       '| endless settles / cp+board writes | ' + s('endless', 0) + ' (+' + s('endlessComp', 0) + ' team comp, +' + s('solo', 0) + ' solo) / ' + s('writesEndless', '0/0 0/0') + ' |',
       '| seedcap veto / reject-window discards | ' + s('seedcapVeto', 0) + ' / ' + s('seedcapReject', 0) + ' |',
@@ -1493,6 +1493,11 @@ function team2RankOf(parts, winTeam, ts) {
 // link died through the gamble window (or who was cut by a modded host) is struck the same way;
 // his first strike in a window is always free. Record-only signals beside it: players[p].ld (lone
 // dissents written) and players[host].lh (lone dissents by opponents in matches he hosted).
+// Q56 (follow-up): two or three TEAMMATES refusing together -- a premade blocking the game connection as
+// one -- are struck the same way, one strike per account (team2TeamDissent / team2Dissent below); the
+// match settles as soon as ANY of them is due, and the ones not yet due are excused for this match
+// (flagged, never a leaver -- the free-strike treatment). Opposing hosts LINKED by having sat on each
+// other's team count once (t2ldVerdict), so a modded pair taking turns hosting frames a victim once.
 const T2LD = {
   K: Math.max(1, Number(process.env.T2LD_K || 2)),
   K_HARD: Math.max(1, Number(process.env.T2LD_K_HARD || 4)),
@@ -1532,51 +1537,224 @@ function team2LoneDissent(g, vecOf) {
   const opp = (host && host !== hit.sid && teamOfSeat(seat, ts) !== teamOfSeat(0, ts)) ? 1 : 0;
   return { sid: hit.sid, seat, recs: hit.recs, rest: hit.rest, win: hit.win, host, opp };
 }
-// prior = the dissenter's stored strikes ({ m, t, h, o }); cur = this match's strike. -> 'free' | 'settle'
+// real ids of the host's team (roster seat 0's team) -- the strike's x (linked hosts, t2ldVerdict). The agreeing
+//   WRITERS seated on the host's team come first (who wrote a leaderboard entry cannot be forged); the roster
+//   consensus only adds to them. That roster is written by those same accounts, so a modded host team leaving its
+//   own seats blank must not drop out of x (two modded accounts taking turns hosting would no longer link).
+function team2HostTeam(roster, ts, rest) {
+  const out = [];
+  for (const r of (rest || [])) { const s = String(r.steamID); if (teamOfSeat(r.d[5] | 0, ts) === teamOfSeat(0, ts) && out.indexOf(s) < 0) out.push(s); }
+  for (const k of Object.keys(roster || {})) if (roster[k] != null && teamOfSeat(k | 0, ts) === teamOfSeat(0, ts) && out.indexOf(String(roster[k])) < 0) out.push(String(roster[k]));
+  return out;
+}
+// ---- team-gamble team dissent (Q56) ----
+// Q51 sees exactly ONE dissenting account. Two or three teammates who block the game connection together
+// through the gamble window (Steam online) all write the client's rank-0 refusal, so no single account is
+// "the" dissenter and the group fell back to 'rank-conflict': unsettled for everybody, every writer flagged,
+// nobody struck -- Q51's "lose -> void" done as a premade, any number of times, unmodded.
+// Accepted shape (narrower than Q51 on purpose: only the client's refusal, never two competing sane claims):
+//   - 2+ dissenting accounts, every one of their records ranked outside the domain (the rank-0 refusal);
+//   - all on ONE team, at most teamSize of them and at most as many as the agreeing accounts;
+//   - the agreeing accounts (2+) write one vector, one winner, pass sanity, are not void by consensus, and
+//     include the host (roster seat 0 -- an unmodded blocker is a joiner; the host blocking kills the match);
+//   - the agreeing writers' roster names each dissenter at his own seat (distinct, not an agreeing seat, in range);
+//   - no dissenter's refusal NAMES an agreeing seat (client Q43: one int after the roster, T2BY_TAG | seat mask,
+//     written only on evidence a blocker of his own link cannot produce). Such a group is a host refusing to settle,
+//     not a team refusing the result: it belongs to the Q43 accusation pass (which skips any key decided here), and
+//     striking the people who named him would charge the victims. A tag on a record out of bounds testifies to
+//     nothing (same rule as Q43) and does not move the group.
+// Returns null or { ds: [{ sid, seat, recs, opp }] (seat order), rest, win, host, hostTeam } (real ids).
+const T2_NAME_TAG = 0x74320000;   // client Q43 result-reporter.js T2BY_TAG (same value as the Q43 cron pass)
+function team2NamesSeat(r, seats) {
+  const d = r.d, pc = d[8] | 0, at = 11 + 3 * pc, seat = d[5] | 0;
+  if (pc < 2 || pc > 6 || d.length <= at || (d[6] | 0) !== 0) return false;
+  const tag = d[at] | 0;
+  if ((tag & ~0x3F) !== T2_NAME_TAG) return false;
+  if (sanityFlags([r]).some(f => f !== 'rank-conflict')) return false;
+  const bits = tag & 0x3F & ~(1 << seat);
+  return seats.some(s => (bits & (1 << s)) !== 0);
+}
+function team2TeamDissent(g, vecOf) {
+  if (!g || g.length < 4 || !isSubScoreMt(g[0].d[2] | 0)) return null;
+  const ts = teamSizeOfMt(g[0].d[2] | 0);
+  const refuses = r => { const k = r.d[6] | 0; return k < 1 || k > 2 * ts; };
+  const by = new Map();
+  for (const r of g) { const s = String(r.steamID); if (!by.has(s)) by.set(s, []); by.get(s).push(r); }
+  const dis = [], agree = [];
+  for (const [s, rs] of by) (rs.every(refuses) ? dis : agree).push(s);
+  if (dis.length < 2 || agree.length < 2 || dis.length > ts || dis.length > agree.length) return null;
+  const rest = g.filter(r => agree.indexOf(String(r.steamID)) >= 0);
+  const v0 = vecOf(rest[0]);
+  if (String(v0).indexOf('BAD') === 0 || !rest.every(r => vecOf(r) === v0)) return null;
+  const win = team2WinTeamOf(rest);
+  if (win == null) return null;
+  if (sanityFlags(rest).length) return null;   // settleable on its own (also rejects 'dup-writer')
+  const taken = rest.map(r => r.d[5] | 0);
+  if (new Set(taken).size !== taken.length) return null;
+  if (voidByConsensus(rest.map(r => r.dispCode | 0)).isVoid) return null;
+  const pc = rest[0].d[8] | 0, roster = rosterConsensus(rest);
+  const host = roster[0] != null ? String(roster[0]) : null;
+  if (!host || agree.indexOf(host) < 0) return null;
+  const ds = [], seats = new Set();
+  for (const s of dis) {
+    const recs = by.get(s), seat = recs[0].d[5] | 0;
+    if (recs.some(r => (r.d[5] | 0) !== seat) || seat < 0 || seat >= pc || taken.indexOf(seat) >= 0 || seats.has(seat)) return null;
+    if (String(roster[seat]) !== s) return null;
+    seats.add(seat);
+    ds.push({ sid: s, seat, recs, opp: teamOfSeat(seat, ts) !== teamOfSeat(0, ts) ? 1 : 0 });
+  }
+  if (ds.some(d => teamOfSeat(d.seat, ts) !== teamOfSeat(ds[0].seat, ts))) return null;   // one team's refusal, never a cross-team set
+  if (ds.some(d => d.recs.some(r => team2NamesSeat(r, taken)))) return null;   // they name the other side: Q43's
+  ds.sort((a, b) => a.seat - b.seat);
+  return { ds, rest, win, host, hostTeam: team2HostTeam(roster, ts, rest) };
+}
+// Q51 lone dissent first, else the Q56 team dissent, in one shape: { ds, rest, win, host, hostTeam, lone }.
+function team2Dissent(g, vecOf) {
+  const ld = team2LoneDissent(g, vecOf);
+  if (ld) {
+    return { ds: [{ sid: ld.sid, seat: ld.seat, recs: ld.recs, opp: ld.opp }], rest: ld.rest, win: ld.win, host: ld.host,
+      hostTeam: team2HostTeam(rosterConsensus(ld.rest), teamSizeOfMt(g[0].d[2] | 0), ld.rest), lone: true };
+  }
+  const td = team2TeamDissent(g, vecOf);
+  return td ? Object.assign(td, { lone: false }) : null;
+}
+// prior = the dissenter's stored strikes ({ m, t, h, o, x? }); cur = this match's strike. -> 'free' | 'settle'
+// Opposing-host strikes count once per group of LINKED hosts: the same host, or a host who sat on the other
+// strike's host team (x, Q56) -- a modded pair taking turns hosting frames the same victim once. A strike
+// without x (written before Q56) links by its host alone, exactly as Q51 counted. Own-side strikes count each.
 function t2ldVerdict(prior, cur, now) {
   const live = (prior || []).filter(e => e && e.m !== cur.m && now - (Number(e.t) || 0) <= T2LD.WINDOW_MS).concat([cur]);
-  let own = 0; const hosts = new Set();
-  for (const e of live) { if (e.o && e.h) hosts.add(String(e.h)); else own++; }
-  return (own + hosts.size >= T2LD.K || live.length >= T2LD.K_HARD) ? 'settle' : 'free';
+  let own = 0; const opp = [];
+  for (const e of live) { if (e.o && e.h) opp.push(e); else own++; }
+  const team = e => (Array.isArray(e.x) && e.x.length) ? e.x.map(String) : [String(e.h)];
+  const par = opp.map((_, i) => i);
+  const root = i => { while (par[i] !== i) { par[i] = par[par[i]]; i = par[i]; } return i; };
+  for (let i = 0; i < opp.length; i++) for (let j = i + 1; j < opp.length; j++) {
+    const a = opp[i], b = opp[j], ha = String(a.h), hb = String(b.h);
+    if (ha === hb || team(b).indexOf(ha) >= 0 || team(a).indexOf(hb) >= 0) par[root(i)] = root(j);
+  }
+  let hosts = 0;
+  for (let i = 0; i < opp.length; i++) if (root(i) === i) hosts++;
+  return (own + hosts >= T2LD.K || live.length >= T2LD.K_HARD) ? 'settle' : 'free';
 }
 // One run's classification pass, BEFORE the start/settle cross-check (a settle verdict's key is then
 // owned by the normal pipeline; a free verdict's key matures through the orphan verdict like any
 // other never-settled match). Mutates gr.consistentMatches / gr.inconsistentGroups in place.
 // Returns { dirty, free, settle, touched: [real ids] }.
+// Q56: one strike per dissenting account (a team dissent strikes each), each judged by t2ldVerdict on his own
+// strikes; the match settles if ANY dissenter is due -- every one still free is EXCUSED for this match (t2ex:
+// flagged, absent from the settle like a leaver for the teammate shield, but never convicted). Settling only
+// when ALL are due would let one account void forever behind a fresh partner each time. The stored verdict
+// (t2lv[m]: { p, t, v } for one dissenter as in Q51, { p: [pids], t, v, ex: [pids] } for several) is reused
+// while the dissenters seen are among the stored ones (a record rotated off); dissenters seen later beside
+// stored ones are struck then and can only turn a free verdict into a settle; a wholly different set never
+// convicts (Q51). A settled match carries t2ex (array, maybe empty) -- the settle loop's dissent marker.
+// A verdict is not overturned by refusals from accounts first seen after it (team2LateRefusers): when they alone
+// break the shape -- a third teammate's refusal naming the agreeing side, one more refuser than agreeing writers,
+// or a new refuser left alone once the known ones' records rotated off -- they are set aside: excused for the
+// match (flagged once, kept in t2lv[m].lt, never struck, never a leaver) and the verdict stands. Without this the
+// group fell back to 'rank-conflict' for good (or a settle turned free), and the dissenters already due walked free.
+function team2LateRefusers(g, known) {   // pids of accounts outside `known` whose every record refuses (rank out of domain)
+  if (!g || !g.length || !isSubScoreMt(g[0].d[2] | 0)) return [];
+  const ts = teamSizeOfMt(g[0].d[2] | 0), by = new Map();
+  for (const r of g) { const h = pid(String(r.steamID)); if (!by.has(h)) by.set(h, []); by.get(h).push(r); }
+  const out = [];
+  for (const [h, rs] of by) if (known.indexOf(h) < 0 && rs.every(r => { const k = r.d[6] | 0; return k < 1 || k > 2 * ts; })) out.push(h);
+  return out;
+}
 function applyTeam2LoneDissent(gr, signals, processed, now, vecOf) {
   const res = { dirty: false, free: 0, settle: 0, touched: [] };
   signals.t2ld = signals.t2ld || {}; signals.t2lv = signals.t2lv || {};
-  const judge = (m, g) => {   // -> null (leave as is) | 'drop' | replacement consistent entry
-    const prev = signals.t2lv[m];
-    const ld = team2LoneDissent(g, vecOf);
-    if (!ld) {
-      // a free match whose dissenting record has since gone stays unsettled (sticky verdict)
-      if (prev && prev.v === 'free' && !g.some(r => pid(String(r.steamID)) === prev.p)) return 'drop';
+  const judge = (c) => {   // -> null (leave as is) | 'drop' | replacement consistent entry
+    const m = c.m, prev = signals.t2lv[m];
+    let g = c.g, late = null;
+    const prevP = prev ? (Array.isArray(prev.p) ? prev.p.map(String) : [String(prev.p)]) : [];
+    const prevEx = (prev && Array.isArray(prev.ex)) ? prev.ex.map(String) : [];
+    const prevLt = (prev && Array.isArray(prev.lt)) ? prev.lt.map(String) : [];
+    const stillHere = () => g.some(r => prevP.indexOf(pid(String(r.steamID))) >= 0);
+    let td = team2Dissent(g, vecOf);
+    if (prev && !(td && td.ds.some(d => prevP.indexOf(pid(d.sid)) >= 0))) {   // refusals first seen after the verdict do not overturn it
+      const lt = team2LateRefusers(g, prevP);
+      if (lt.length) {
+        const g2 = g.filter(r => lt.indexOf(pid(String(r.steamID))) < 0);
+        const td2 = team2Dissent(g2, vecOf);
+        if (td2 ? td2.ds.every(d => prevP.indexOf(pid(d.sid)) >= 0) : !g2.some(r => prevP.indexOf(pid(String(r.steamID))) >= 0)) {
+          late = { ids: lt, recs: g.filter(r => lt.indexOf(pid(String(r.steamID))) >= 0) };
+          g = g2; td = td2;
+        }
+      }
+    }
+    const setAside = () => {   // the late refusers: flagged once per match, remembered in t2lv[m].lt
+      if (!late) return;
+      const nw = late.ids.filter(h => prevLt.indexOf(h) < 0);
+      if (!nw.length) return;
+      if (!signals.flagged[m]) { if (recordFlag(signals, late.recs.filter(r => nw.indexOf(pid(String(r.steamID))) >= 0), m, now)) res.dirty = true; }
+      else for (const h of nw) sigPlayer(signals, h, now).f += 1;
+      prev.lt = prevLt.concat(nw); res.dirty = true;
+      console.log('  team2 dissent ' + m + ': ' + nw.length + ' refusal(s) first seen after the verdict (' + prev.v + ') -> set aside, excused');
+    };
+    if (!td) {
+      // a free match whose dissenting records have since gone stays unsettled (sticky verdict)
+      if (prev && prev.v === 'free' && !stillHere()) { setAside(); return 'drop'; }
+      // a settled-verdict match whose dissenting records have all gone: the excused stay excused (Q56)
+      if (prev && prev.v === 'settle' && !stillHere() && c.t2ex == null && (late || gr.consistentMatches.indexOf(c) >= 0)) {
+        setAside();
+        if (!late) return Object.assign({}, c, { t2ex: prevEx });
+        if (gr.groups) gr.groups[m] = g;
+        return { m, g, void: false, t2ex: prevEx.concat(late.ids) };
+      }
       return null;
     }
-    const h = pid(ld.sid);
-    let v;
-    if (prev) v = (prev.p === h) ? prev.v : 'free';   // a different dissenter later: no new strike, never convict
+    const hs = td.ds.map(d => pid(d.sid));
+    const known = hs.filter(h => prevP.indexOf(h) >= 0), fresh = td.ds.filter(d => prevP.indexOf(pid(d.sid)) < 0);
+    let v, ex = [];
+    const flagNow = [];   // dissenters to flag this pass (records)
+    if (prev && !known.length) v = 'free';   // a different dissenter later: no new strike, never convict (Q51)
     else {
-      const list = signals.t2ld[h] || (signals.t2ld[h] = []);
-      const cur = { m, t: now, h: ld.host ? pid(ld.host) : '', o: ld.opp };
-      v = t2ldVerdict(list, cur, now);
-      list.push(cur);
-      signals.t2lv[m] = { p: h, t: now, v };
-      const sp = sigPlayer(signals, h, now); sp.ld = (sp.ld | 0) + 1;
-      if (ld.opp) { const hp = sigPlayer(signals, pid(ld.host), now); hp.lh = (hp.lh | 0) + 1; }
-      res.dirty = true;
-      console.log('  team2 lone dissent ' + m + ': seat ' + ld.seat + ' = ' + plog(ld.sid) + ' (' + g.length + ' records, ' + (ld.opp ? 'opposing host' : 'own-side host') + ') -> strike, verdict ' + v);
+      v = prev ? prev.v : 'free';
+      ex = prev ? (prev.v === 'settle' ? prevEx.slice() : prevP.slice()) : [];
+      const xs = td.hostTeam.map(pid);
+      for (const d of fresh) {   // first sight of this account in this match: one strike
+        const h = pid(d.sid);
+        const list = signals.t2ld[h] || (signals.t2ld[h] = []);
+        const cur = { m, t: now, h: td.host ? pid(td.host) : '', o: d.opp };
+        if (d.opp) cur.x = xs;
+        const vd = t2ldVerdict(list, cur, now);
+        if (!list.some(e => e && e.m === m)) list.push(cur);
+        if (vd === 'settle') v = 'settle'; else ex.push(h);
+        const sp = sigPlayer(signals, h, now); sp.ld = (sp.ld | 0) + 1;
+        if (d.opp && td.host) { const hp = sigPlayer(signals, pid(td.host), now); hp.lh = (hp.lh | 0) + 1; }
+        res.dirty = true;
+        if (vd !== 'settle') flagNow.push(d);
+        if (td.lone && !prev) console.log('  team2 lone dissent ' + m + ': seat ' + d.seat + ' = ' + plog(d.sid) + ' (' + g.length + ' records, ' + (d.opp ? 'opposing host' : 'own-side host') + ') -> strike, verdict ' + vd);
+        else console.log('  team2 team dissent ' + m + ': seat ' + d.seat + ' = ' + plog(d.sid) + ' (' + td.ds.length + ' dissenters, ' + g.length + ' records, ' + (d.opp ? 'opposing host' : 'own-side host') + ') -> strike, own verdict ' + vd);
+      }
+      if (fresh.length) {
+        const all = prevP.concat(fresh.map(d => pid(d.sid)));
+        if (v !== 'settle') ex = [];
+        signals.t2lv[m] = Object.assign((all.length === 1) ? { p: all[0], t: prev ? prev.t : now, v } : { p: all, t: prev ? prev.t : now, v, ex }, prevLt.length ? { lt: prevLt } : {});
+        if (!td.lone || prev) console.log('  team2 team dissent ' + m + ': ' + all.length + ' dissenters -> match verdict ' + v + (v === 'settle' && ex.length ? ' (excused ' + ex.length + ')' : ''));
+      }
     }
-    res.touched.push(ld.sid);
+    for (const d of td.ds) res.touched.push(d.sid);
     if (v === 'settle') {
       // the key's record set IS the agreeing side from here on: the confession absolution probe and the
-      // start cross-check read gr.groups, and the dissenting record must not count as "came back and finished"
-      if (gr.groups) gr.groups[m] = ld.rest;
+      // start cross-check read gr.groups, and the dissenting records must not count as "came back and finished"
+      if (gr.groups) gr.groups[m] = td.rest;
+      // the excused dissenters present now are flagged (once per match; a later arrival directly)
+      const exRecs = td.ds.filter(d => ex.indexOf(pid(d.sid)) >= 0);
+      if (exRecs.length) {
+        if (!signals.flagged[m]) { if (recordFlag(signals, [].concat(...exRecs.map(d => d.recs)), m, now)) res.dirty = true; }
+        else for (const d of flagNow) { sigPlayer(signals, pid(d.sid), now).f += 1; res.dirty = true; }
+      }
+      setAside();
       res.settle++;
-      return { m, g: ld.rest, void: false, t2ld: ld.sid };
+      return { m, g: td.rest, void: false, t2ld: td.ds[0].sid, t2ex: late ? ex.concat(late.ids) : ex };
     }
-    if (recordFlag(signals, ld.recs, m, now)) res.dirty = true;   // the dissenter alone, once per match
+    // free: the dissenters alone, once per match (a dissenter first seen after the flag was set: directly)
+    if (!signals.flagged[m]) { if (recordFlag(signals, [].concat(...td.ds.map(d => d.recs)), m, now)) res.dirty = true; }
+    else for (const d of flagNow) { sigPlayer(signals, pid(d.sid), now).f += 1; res.dirty = true; }
+    setAside();
     res.free++;
     return 'drop';
   };
@@ -1584,7 +1762,7 @@ function applyTeam2LoneDissent(gr, signals, processed, now, vecOf) {
   for (let i = cm.length - 1; i >= 0; i--) {
     const c = cm[i];
     if (c.solo || c.botLone || processed.has(c.m)) continue;
-    const j = judge(c.m, c.g);
+    const j = judge(c);
     if (j === 'drop') cm.splice(i, 1);
     else if (j) cm[i] = j;
   }
@@ -1592,7 +1770,7 @@ function applyTeam2LoneDissent(gr, signals, processed, now, vecOf) {
   for (let i = ig.length - 1; i >= 0; i--) {
     const c = ig[i];
     if (processed.has(c.m)) continue;
-    const j = judge(c.m, c.g);
+    const j = judge(c);
     if (j === 'drop') ig.splice(i, 1);
     else if (j) { ig.splice(i, 1); cm.push(j); }
   }
@@ -2946,7 +3124,8 @@ async function main() {
   // place real ids persist is the trust board itself, which is the public artifact anyway)
   const trustTouched = new Set();
   // Q51: a mode-2 group with exactly one dissenting writer strikes him; at the K-th strike it settles from
-  //   the agreeing records (he is a consensus leaver), otherwise it stays unsettled with only him flagged
+  //   the agreeing records (he is a consensus leaver), otherwise it stays unsettled with only him flagged.
+  //   Q56: two or three teammates refusing together are struck one by one the same way (any one due settles it)
   const t2ldRes = applyTeam2LoneDissent(gr, signals, processed, Date.now(), vecOf);
   if (t2ldRes.dirty) sigDirty = true;
   for (const sid of t2ldRes.touched) trustTouched.add(String(sid));
@@ -4469,6 +4648,9 @@ async function main() {
       console.log('  leaver ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' record gone but seen agreeing earlier -- finished, not a leaver');
       return false;
     });
+    // Q56 team-gamble dissent settle: dissenters not yet due are EXCUSED (pids) -- they stay in leavers0 (absent seats:
+    //   teammate shield, repeat-group memory) but get no conviction and no placement seed, like a confessed leave
+    const t2ex = new Set(Array.isArray(c.t2ex) ? c.t2ex.map(String) : []);
     // ===== playtest channel: no rating/points surface (lock layer 3) -- the TrueSkill update,
     // placement seeding, group-decay memory and every points write are skipped wholesale, so
     // skill.json/groups.json stay untouched and the changed/changedLp pools stay empty. The
@@ -4507,6 +4689,7 @@ async function main() {
         };
         for (const t of tsIn) if (lp[t.id] == null) await seedOne(t.id, t.mu, t.sigma, 'first settle this season');
         for (const x of leavers0) {
+          if (t2ex.has(pid(String(x.steamID)))) continue;   // Q56 excused: this match does not count for him
           if (lp[x.steamID] == null) {
             const sk = skill[pid(x.steamID)] || ts.DEFAULTS;
             await seedOne(x.steamID, sk.mu, sk.sigma, 'leaver, first settle this season');
@@ -4531,7 +4714,19 @@ async function main() {
         const sides = [[], []];
         const _mts = teamSizeOfMt(matchType);
         for (let i = 0; i < parts.length; i++) sides[teamOfSeat(parts[i].seat, _mts)].push(tsIn[i]);
-        tsOut = (sides[0].length && sides[1].length)
+        // Q56: a team-gamble dissent settle can leave a whole team absent (both 2v2 dissenters) -- rate the present
+        //   team against the absent team's PRE-match ratings (outputs kept for the present only; absent ratings never
+        //   move), instead of the degenerate ordinal fallback that moves rating between the winning teammates
+        const empty = !sides[0].length ? 0 : (!sides[1].length ? 1 : -1);
+        const ghost = (empty >= 0 && Array.isArray(c.t2ex))
+          ? leavers0.filter(x => teamOfSeat(x.seat, _mts) === empty).map(x => { const sk = skill[pid(x.steamID)] || ts.DEFAULTS; return { id: x.steamID, mu: sk.mu, sigma: sk.sigma }; })
+          : [];
+        if (ghost.length) {
+          sides[empty] = ghost;
+          const here = new Set(parts.map(p => p.steamID));
+          tsOut = ts.updateTeamMatch([{ players: sides[winTeam], rank: 1 }, { players: sides[1 - winTeam], rank: 2 }]).filter(r => here.has(r.id));
+          console.log('  team2 dissent ' + c.m + ': whole team ' + empty + ' absent -> rated against its ' + ghost.length + ' pre-match rating(s)');
+        } else tsOut = (sides[0].length && sides[1].length)
           ? ts.updateTeamMatch([{ players: sides[winTeam], rank: 1 }, { players: sides[1 - winTeam], rank: 2 }])
           : ts.updateMatch(tsIn);   // one side fully absent -> degenerate: ordinal fallback among the present
       } else {
@@ -4585,6 +4780,10 @@ async function main() {
       // (leaverSeats for teamLpPlan) is unaffected: leavers0 itself still lists the seat.
       if (confState[pid(x.steamID) + '|' + c.m]) {
         console.log('  leaver ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' already confessed -- consensus conviction skipped');
+        continue;
+      }
+      if (t2ex.has(pid(String(x.steamID)))) {
+        console.log('  leaver ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' team-gamble dissent not yet due -- excused, no conviction');
         continue;
       }
       leavers[pid(x.steamID)] = leavers[pid(x.steamID)] || { leaves: 0, lastMatch: '' };
@@ -4946,6 +5145,7 @@ module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CHAT_MUTE: 
   ENDLESS_COMP_LB_QUAD, SAVE_BOX_LB_QUAD, ENDLESS_LB_QUAD, ENDLESS_MAX_PC, compFamKeyOf,   // client knife 3.7a (O178 four seats)
   ENDLESS_LB_SOLO, SAVE_BOX_LB_CASUAL, CASUAL_LIVES,   // client knife 3.7a (O218 casual solo lane)
   T2LD, team2LoneDissent, t2ldVerdict, applyTeam2LoneDissent,   // cloud audit Q51 team-gamble lone dissent
+  team2TeamDissent, team2Dissent, team2HostTeam, team2NamesSeat, T2_NAME_TAG, team2LateRefusers,   // cloud audit Q56 team-gamble team dissent
   ENDLESS_LB_CLASSIC_SOLO, SAVE_BOX_LB_CLASSIC, CLASSIC, classicGoalAt, classicGoalFor, packClassicScore,   // client knife 3.9b N2 (O216 classic lane)
   ENDLESS_LB_CLASSIC_DUO, ENDLESS_LB_CLASSIC_TRIO, ENDLESS_LB_CLASSIC_QUAD, SAVE_BOX_LB_CLASSIC_DUO, SAVE_BOX_LB_CLASSIC_TRIO, SAVE_BOX_LB_CLASSIC_QUAD,   // client knife 3.9b N3 (team classic lane)
   ENDLESS_COMP_LB_OVERALL, overallScore, overallDominant,   // knife 3.5d composite ladder

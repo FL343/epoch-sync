@@ -51,6 +51,18 @@ settles from the agreeing records and his seat is a consensus leaver. Strikes in
 hosted by the same opposing player count once (a modded host cannot convict a victim alone)
 until `T2LD_K_HARD` (4) strikes in total convict whatever the host. The verdict of a match
 is decided at first sight and kept in `signals.json` (`t2ld` / `t2lv`).
+Two or three TEAMMATES writing the rank-0 refusal together (a premade blocking the game
+connection as one) against an agreeing side that includes the host are a team dissent: each
+of them is struck the same way, and the match settles as soon as ANY of them is due; the ones
+not yet due are excused for that match (flagged, never a leaver, no rating or points change).
+Opposing hosts that sat on each other's team (each strike keeps its host team: the agreeing
+writers seated there first, then the roster) count as one host, so a modded pair taking turns
+hosting cannot convict a victim either. A refusal first seen after a match's verdict that no
+longer fits the shape does not overturn it: that account is excused (flagged once, never struck). When a whole team
+is absent from such a settle, the present team is rated against the absent team's pre-match
+ratings. A refusal that names a seat on the agreeing side (the client's accusation tag after
+the roster) is not a team dissent: it is the victims of a host who never settled, and the
+group is left for the accusation pass.
 
 **Sanity bounds** catch what consensus can't: colluding clients writing *identical*
 impossible records. Only calibration-free structural/physical bounds are enforced —

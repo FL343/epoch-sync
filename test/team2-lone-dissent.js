@@ -11,7 +11,8 @@
 //   [4] the same player's second lone dissent (differing vector, his team losing) inside the window: settles from
 //       the rest, he is a consensus leaver (-100 points, exit rate), the others are rated
 //   [5] honest occasional disconnect: one strike, the next one 31 days later is free again
-//   [6] two dissenters: unchanged (nobody settles, every writer flagged, no strike)
+//   [6] two dissenters (teammates, rank-0 refusals): since Q56 each is struck once like a lone dissenter -- first
+//       strikes are free, only the two of them are flagged (test/team2-team-dissent.js covers the rest)
 //   [7] framed twice by the same opposing host: still free; a different opposing host's match then settles
 //   [8] honest agreeing match: unaffected
 //   [9] quick 3v3: second strike settles, exit rate only (no points surface)
@@ -277,12 +278,12 @@ let r3;
   T('[5] the expired strike is pruned', strikesOf(r2, D) === 1);
 }
 
-// ---- [6] two dissenters: unchanged ----
+// ---- [6] two dissenters (Q56: struck one by one; first strikes free) ----
 {
   const recs = match(6, 0x600, R4, { 2: { rank: 0 }, 3: { rank: 0 } });
   const m = keyOf(recs[0].d);
   const r = runCron(boardsWith(recs), { STARTS_FILE: { [m]: startOf(6, 0x600, R4, FLOOR + 5 * 60000) } });
-  T('[6] not settled, every writer flagged, no strike', !processedOf(r).has(m) && [A, B, C, D].every(s => fOf(r, s) === 1) && strikesOf(r, C) === 0 && strikesOf(r, D) === 0, 'f=' + [A, B, C, D].map(s => fOf(r, s)).join(','));
+  T('[6] not settled, only the two dissenters flagged, one strike each', !processedOf(r).has(m) && [C, D].every(s => fOf(r, s) === 1) && [A, B].every(s => fOf(r, s) === 0) && strikesOf(r, C) === 1 && strikesOf(r, D) === 1, 'f=' + [A, B, C, D].map(s => fOf(r, s)).join(','));
 }
 
 // ---- [7] framed twice by the same opposing host; a different opposing host then settles ----
