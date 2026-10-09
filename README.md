@@ -42,6 +42,16 @@ matchType's high bits (the match group key contains the full code, so a lone for
 mask only orphans that record): the pair settles at its average placement and average
 tier with one shared delta, and mismatch compensation treats the pair as a single unit.
 
+**Team-gamble lone dissent**: a team-gamble match (base 5/6/8/9) in which exactly one writer
+disagrees with an otherwise consistent, sane, non-void outcome (the client's rank-0 refusal
+of a seat that judged itself cut from the gamble, or a differing score vector) is a lone
+dissent: only the dissenter is struck and flagged. His first strike inside `T2LD_WINDOW_MS`
+(30 days) leaves the match unsettled as before; from the `T2LD_K`-th (2) on, the match
+settles from the agreeing records and his seat is a consensus leaver. Strikes in matches
+hosted by the same opposing player count once (a modded host cannot convict a victim alone)
+until `T2LD_K_HARD` (4) strikes in total convict whatever the host. The verdict of a match
+is decided at first sight and kept in `signals.json` (`t2ld` / `t2lv`).
+
 **Sanity bounds** catch what consensus can't: colluding clients writing *identical*
 impossible records. Only calibration-free structural/physical bounds are enforced —
 score caps far above anything the game can produce, duration bounds, seat/player-count
@@ -167,4 +177,6 @@ between board read retries, default 8 s; tests set 0),
 `SIGNALS_FILE` / `SIG_PAIR_WINDOW_MS` / `SIG_PLAYER_WINDOW_MS` / `SIG_PAIRS_CAP`
 (signal-collection state path, rolling windows, size fuse),
 `GROUPS_FILE` (repeat-group decay state path, default `groups.json`),
-`CONFESSIONS_FILE` (pending abandon-confession state path, default `confessions.json`).
+`CONFESSIONS_FILE` (pending abandon-confession state path, default `confessions.json`),
+`T2LD_K` / `T2LD_K_HARD` / `T2LD_WINDOW_MS` (team-gamble lone dissent: strikes that convict, total
+strike cap whatever the host, rolling window; defaults 2 / 4 / 30 days).

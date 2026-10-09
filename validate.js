@@ -674,6 +674,13 @@ function pruneSignals(s, now) {
   for (const k of Object.keys(s.flagged)) if (now - (s.flagged[k] || 0) > SIG_PAIR_WINDOW_MS) delete s.flagged[k];
   for (const k of Object.keys(s.rep || {})) if (now - (s.rep[k].at || 0) > SIG_PAIR_WINDOW_MS) delete s.rep[k];
   for (const k of Object.keys(s.rseen || {})) if (now - (s.rseen[k] || 0) > SIG_PAIR_WINDOW_MS) delete s.rseen[k];
+  // Q51 lone-dissent strikes age out of their own window; the per-match verdicts live as long as a flag does
+  //   (a verdict is only consulted while its key is unprocessed -- at most the start maturity window)
+  for (const k of Object.keys(s.t2ld || {})) {
+    const live = (s.t2ld[k] || []).filter(e => e && now - (Number(e.t) || 0) <= T2LD.WINDOW_MS);
+    if (live.length) s.t2ld[k] = live; else delete s.t2ld[k];
+  }
+  for (const k of Object.keys(s.t2lv || {})) if (now - ((s.t2lv[k] && s.t2lv[k].t) || 0) > SIG_PAIR_WINDOW_MS) delete s.t2lv[k];
   const pk = Object.keys(s.pairs);
   if (pk.length > SIG_PAIRS_CAP) {   // size fuse: same escalation path as skill.json growth -> external storage
     ghWarn('signals pairs ' + pk.length + ' > cap ' + SIG_PAIRS_CAP + ' -- oldest evicted; plan the move to external state storage');
@@ -936,6 +943,7 @@ function writeRunSummary() {
       '| confessions seen/penalized/refunded | ' + s('confess', '0/0/0') + ' |',
       '| reports seen / counted | ' + s('repSeen', 0) + ' / ' + s('repCounted', 0) + ' |',
       '| trust writes / deletes | ' + s('trustW', 0) + ' / ' + s('trustD', 0) + ' |',
+      '| team-gamble lone dissent unsettled / settled as leaver | ' + s('t2ld', '0/0') + ' |',
       '| board writes rating/points/xp | ' + s('writes', '0/0 0/0 0/0') + ' |',
       '| endless settles / cp+board writes | ' + s('endless', 0) + ' (+' + s('endlessComp', 0) + ' team comp, +' + s('solo', 0) + ' solo) / ' + s('writesEndless', '0/0 0/0') + ' |',
       '| seedcap veto / reject-window discards | ' + s('seedcapVeto', 0) + ' / ' + s('seedcapReject', 0) + ' |',
@@ -1461,6 +1469,134 @@ function team2RankOf(parts, winTeam, ts) {
     for (let i = 0; i < members.length; i++) rankOf[members[i].steamID] = b * ts + i + 1;
   }
   return rankOf;
+}
+// ---- team-gamble lone dissent (Q51, audit follow-up to the gamble commit-reveal fix) ----
+// A mode-2 group (base 5/6/8/9) where exactly ONE writer disagrees -- a rank claim outside the
+// domain (the client's rank-0 refusal, also written by a seat that judged itself wrongly cut from
+// the gamble), a conflicting winner claim, or a differing score vector -- while every other writer
+// (at least two) agrees on one sane, non-void outcome. Before this such a group never settled for
+// anybody and EVERY writer's forgery flag (f) moved, so a player who blocked only the game
+// connection through the gamble window (Steam still online) voided the match at will, at no cost;
+// with a teammate on voice: "lose -> void, win -> come back and keep it".
+// Now only the dissenter is struck (signals.t2ld, per account, once per match) and only he is
+// flagged. The verdict of a match is decided once, at first sight, and is sticky (signals.t2lv):
+//   free   -- the match stays unsettled exactly as before (the start orphan verdict processes it at
+//             maturity); only the dissenter's f moves.
+//   settle -- the group settles from the agreeing records alone and the dissenter's seat is judged
+//             a consensus leaver (exit rate, ranked LEAVER_LP_PENALTY, teammate shield) -- the
+//             treatment a disconnect got before the gamble fix.
+// Verdict = settle when, inside WINDOW_MS, the dissenter's strikes (this one included) reach K --
+// counting strikes in matches hosted (roster seat 0) by the same OPPOSING player once, so a single
+// modded host cutting the same opponent again cannot convict him; self-hosted / own-side strikes
+// count each, so a colluding premade cannot hide behind its own host -- or reach K_HARD in total
+// whatever the host. The record carries no reason for the dissent, so an honest player whose game
+// link died through the gamble window (or who was cut by a modded host) is struck the same way;
+// his first strike in a window is always free. Record-only signals beside it: players[p].ld (lone
+// dissents written) and players[host].lh (lone dissents by opponents in matches he hosted).
+const T2LD = {
+  K: Math.max(1, Number(process.env.T2LD_K || 2)),
+  K_HARD: Math.max(1, Number(process.env.T2LD_K_HARD || 4)),
+  WINDOW_MS: Number(process.env.T2LD_WINDOW_MS || 30 * 86400000),
+};
+// g = one key's records (any shape); vecOf = the run's consistency vector. Returns null or
+// { sid, seat, recs, rest, win, host, opp } (sid / host = real ids; opp = 1 when the host plays on
+// the other team).
+function team2LoneDissent(g, vecOf) {
+  if (!g || g.length < 3 || !isSubScoreMt(g[0].d[2] | 0)) return null;
+  const by = new Map();
+  for (const r of g) { const s = String(r.steamID); if (!by.has(s)) by.set(s, []); by.get(s).push(r); }
+  if (by.size < 3) return null;
+  let hit = null;
+  for (const [x, xr] of by) {
+    const rest = g.filter(r => String(r.steamID) !== x);
+    const v0 = vecOf(rest[0]);
+    if (String(v0).indexOf('BAD') === 0 || !rest.every(r => vecOf(r) === v0)) continue;
+    const win = team2WinTeamOf(rest);
+    if (win == null) continue;
+    if (xr.every(r => vecOf(r) === v0) && team2WinTeamOf(rest.concat(xr)) === win) return null;   // everyone agrees
+    if (hit) return null;   // a second candidate implies full agreement (>= 3 writers); guard only
+    hit = { sid: x, recs: xr, rest, win };
+  }
+  if (!hit) return null;
+  // the agreeing side must be settleable on its own (this also rejects one account writing twice: 'dup-writer')
+  if (sanityFlags(hit.rest).length) return null;
+  const taken = hit.rest.map(r => r.d[5] | 0);
+  if (new Set(taken).size !== taken.length) return null;   // two writers on one seat
+  const seat = hit.recs[0].d[5] | 0, pc = hit.rest[0].d[8] | 0;
+  if (hit.recs.some(r => (r.d[5] | 0) !== seat) || taken.indexOf(seat) >= 0 || seat < 0 || seat >= pc) return null;
+  if (voidByConsensus(hit.rest.map(r => r.dispCode | 0)).isVoid) return null;   // a void outcome was not the dissenter's doing
+  const roster = rosterConsensus(hit.rest);
+  if (String(roster[seat]) !== hit.sid) return null;   // the agreeing writers must name him at that seat
+  const ts = teamSizeOfMt(g[0].d[2] | 0);
+  const host = roster[0] != null ? String(roster[0]) : null;
+  const opp = (host && host !== hit.sid && teamOfSeat(seat, ts) !== teamOfSeat(0, ts)) ? 1 : 0;
+  return { sid: hit.sid, seat, recs: hit.recs, rest: hit.rest, win: hit.win, host, opp };
+}
+// prior = the dissenter's stored strikes ({ m, t, h, o }); cur = this match's strike. -> 'free' | 'settle'
+function t2ldVerdict(prior, cur, now) {
+  const live = (prior || []).filter(e => e && e.m !== cur.m && now - (Number(e.t) || 0) <= T2LD.WINDOW_MS).concat([cur]);
+  let own = 0; const hosts = new Set();
+  for (const e of live) { if (e.o && e.h) hosts.add(String(e.h)); else own++; }
+  return (own + hosts.size >= T2LD.K || live.length >= T2LD.K_HARD) ? 'settle' : 'free';
+}
+// One run's classification pass, BEFORE the start/settle cross-check (a settle verdict's key is then
+// owned by the normal pipeline; a free verdict's key matures through the orphan verdict like any
+// other never-settled match). Mutates gr.consistentMatches / gr.inconsistentGroups in place.
+// Returns { dirty, free, settle, touched: [real ids] }.
+function applyTeam2LoneDissent(gr, signals, processed, now, vecOf) {
+  const res = { dirty: false, free: 0, settle: 0, touched: [] };
+  signals.t2ld = signals.t2ld || {}; signals.t2lv = signals.t2lv || {};
+  const judge = (m, g) => {   // -> null (leave as is) | 'drop' | replacement consistent entry
+    const prev = signals.t2lv[m];
+    const ld = team2LoneDissent(g, vecOf);
+    if (!ld) {
+      // a free match whose dissenting record has since gone stays unsettled (sticky verdict)
+      if (prev && prev.v === 'free' && !g.some(r => pid(String(r.steamID)) === prev.p)) return 'drop';
+      return null;
+    }
+    const h = pid(ld.sid);
+    let v;
+    if (prev) v = (prev.p === h) ? prev.v : 'free';   // a different dissenter later: no new strike, never convict
+    else {
+      const list = signals.t2ld[h] || (signals.t2ld[h] = []);
+      const cur = { m, t: now, h: ld.host ? pid(ld.host) : '', o: ld.opp };
+      v = t2ldVerdict(list, cur, now);
+      list.push(cur);
+      signals.t2lv[m] = { p: h, t: now, v };
+      const sp = sigPlayer(signals, h, now); sp.ld = (sp.ld | 0) + 1;
+      if (ld.opp) { const hp = sigPlayer(signals, pid(ld.host), now); hp.lh = (hp.lh | 0) + 1; }
+      res.dirty = true;
+      console.log('  team2 lone dissent ' + m + ': seat ' + ld.seat + ' = ' + plog(ld.sid) + ' (' + g.length + ' records, ' + (ld.opp ? 'opposing host' : 'own-side host') + ') -> strike, verdict ' + v);
+    }
+    res.touched.push(ld.sid);
+    if (v === 'settle') {
+      // the key's record set IS the agreeing side from here on: the confession absolution probe and the
+      // start cross-check read gr.groups, and the dissenting record must not count as "came back and finished"
+      if (gr.groups) gr.groups[m] = ld.rest;
+      res.settle++;
+      return { m, g: ld.rest, void: false, t2ld: ld.sid };
+    }
+    if (recordFlag(signals, ld.recs, m, now)) res.dirty = true;   // the dissenter alone, once per match
+    res.free++;
+    return 'drop';
+  };
+  const cm = gr.consistentMatches;
+  for (let i = cm.length - 1; i >= 0; i--) {
+    const c = cm[i];
+    if (c.solo || c.botLone || processed.has(c.m)) continue;
+    const j = judge(c.m, c.g);
+    if (j === 'drop') cm.splice(i, 1);
+    else if (j) cm[i] = j;
+  }
+  const ig = gr.inconsistentGroups;
+  for (let i = ig.length - 1; i >= 0; i--) {
+    const c = ig[i];
+    if (processed.has(c.m)) continue;
+    const j = judge(c.m, c.g);
+    if (j === 'drop') ig.splice(i, 1);
+    else if (j) { ig.splice(i, 1); cm.push(j); }
+  }
+  return res;
 }
 // clamp-aware authoritative leaver deduction (never below 0)
 function leaverLpPenalty(cur, pen) { return Math.max(0, (cur | 0) - (pen | 0)); }
@@ -2802,6 +2938,20 @@ async function main() {
   const processedN0 = processed.size;   // grow-only set: a size change = keys added on this run (persistStartsSide)
   const leavers = loadLeavers(); let leaverHits = 0;
   const startsPending = loadStarts();
+  // B6 signal collection state (loaded here, ahead of the start cross-check, because the team-gamble
+  // lone-dissent pass below writes its strikes into it and decides which keys are consistent)
+  const signals = loadSignals();
+  let sigDirty = false;
+  // trust-tier candidates seen this run (real sids; signals stay HMAC-keyed -- the only
+  // place real ids persist is the trust board itself, which is the public artifact anyway)
+  const trustTouched = new Set();
+  // Q51: a mode-2 group with exactly one dissenting writer strikes him; at the K-th strike it settles from
+  //   the agreeing records (he is a consensus leaver), otherwise it stays unsettled with only him flagged
+  const t2ldRes = applyTeam2LoneDissent(gr, signals, processed, Date.now(), vecOf);
+  if (t2ldRes.dirty) sigDirty = true;
+  for (const sid of t2ldRes.touched) trustTouched.add(String(sid));
+  if (t2ldRes.free || t2ldRes.settle) console.log('team2 lone dissent: ' + t2ldRes.free + ' left unsettled (dissenter flagged), ' + t2ldRes.settle + ' settling from the agreeing records');
+  RUN.t2ld = t2ldRes.free + '/' + t2ldRes.settle;
   const confState = loadConfessions();   // loaded before starts so the orphan verdict can skip confessed keys
   const consistentKeys = new Set(consistentMatches.map(c => c.m));
   const nowMs = Date.now();
@@ -2890,13 +3040,8 @@ async function main() {
       console.log('confessions: ' + confRes.seen + ' seen, ' + confRes.penalized + ' penalized, ' + confRes.exitHits + ' exit-rate hits, ' + confRes.refunded + ' refunded, ' + confRes.finalized + ' finalized');
   }
   RUN.confess = confRes.seen + '/' + confRes.penalized + '/' + confRes.refunded;
-  // B6 signal collection state + forgery-flag counters for the inconsistent groups seen this run
+  // forgery-flag counters for the inconsistent groups seen this run
   // (they are never processed, so they re-surface every run -- recordFlag dedups by match key).
-  const signals = loadSignals();
-  let sigDirty = false;
-  // trust-tier candidates seen this run (real sids; signals stay HMAC-keyed -- the only
-  // place real ids persist is the trust board itself, which is the public artifact anyway)
-  const trustTouched = new Set();
   for (const { m, g } of inconsistentGroups) {
     if (recordFlag(signals, g, m, nowMs)) sigDirty = true;
     for (const r of g) trustTouched.add(String(r.steamID));
@@ -4800,6 +4945,7 @@ module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CHAT_MUTE: 
   ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, SAVE_BOX_LB_DUO, SAVE_BOX_LB_TRIO, teamRunKey, soloMsSlot, groupRecords,
   ENDLESS_COMP_LB_QUAD, SAVE_BOX_LB_QUAD, ENDLESS_LB_QUAD, ENDLESS_MAX_PC, compFamKeyOf,   // client knife 3.7a (O178 four seats)
   ENDLESS_LB_SOLO, SAVE_BOX_LB_CASUAL, CASUAL_LIVES,   // client knife 3.7a (O218 casual solo lane)
+  T2LD, team2LoneDissent, t2ldVerdict, applyTeam2LoneDissent,   // cloud audit Q51 team-gamble lone dissent
   ENDLESS_LB_CLASSIC_SOLO, SAVE_BOX_LB_CLASSIC, CLASSIC, classicGoalAt, classicGoalFor, packClassicScore,   // client knife 3.9b N2 (O216 classic lane)
   ENDLESS_LB_CLASSIC_DUO, ENDLESS_LB_CLASSIC_TRIO, ENDLESS_LB_CLASSIC_QUAD, SAVE_BOX_LB_CLASSIC_DUO, SAVE_BOX_LB_CLASSIC_TRIO, SAVE_BOX_LB_CLASSIC_QUAD,   // client knife 3.9b N3 (team classic lane)
   ENDLESS_COMP_LB_OVERALL, overallScore, overallDominant,   // knife 3.5d composite ladder
