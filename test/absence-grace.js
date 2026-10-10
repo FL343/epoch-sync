@@ -14,6 +14,7 @@
 //   [3] late record (complete reads): held, still held two minutes later, settled in full when it lands
 //   [4] a genuine leaver: held for the grace, then convicted exactly once (an empty shard answering an odd 200 does not
 //       make the read incomplete)
+//   [4b] Q69: the same absence, but the absent seat never wrote his own start record (only the others name him): held, then not convicted
 //   [5] grace already over but this run's read is incomplete: still held; convicted on the next complete read
 //   [6] private room (3 seats): the late finisher gets their XP (the group used to settle without them)
 //   [7] bot match with two humans: the second human's late record joins the settle; when it never lands, the lone
@@ -148,8 +149,11 @@ function world(rows) {
 // A on shard 0, B on shard 1, C on shard 2 (C's row only when withC)
 const rows3 = (mk, h, withC) => [{ shard: 0, sid: A, d: mk(h, 0) }, { shard: 1, sid: B, d: mk(h, 1) }].concat(withC ? [{ shard: 2, sid: C, d: mk(h, 2) }] : []);
 const FLOOR = v.SANITY.MIN_START_AGE_MS, GRACE = v.ABSENT_GRACE_MS, MIN = 60000;
-// the match's start attestation was sighted by an earlier run, past the start floor (30 s margin: clock skew between this process and the child runs)
-const attested = (d, ageMs) => { const s = {}; s[keyOf(d)] = { t0: Date.now() - (ageMs || FLOOR + 30000), mt: d[2], roster: {}, settled: [] }; return { STARTS_FILE: s }; };
+// the human sids of a settle record's roster (a bot seat = sid 0 is skipped)
+const rosterSids = (d) => { const pc = d[8], out = []; for (let i = 0; i < pc; i++) { const s = (BigInt(d[12 + pc + 2 * i] >>> 0) << 32n) | BigInt(d[11 + pc + 2 * i] >>> 0); if (s) out.push(s.toString()); } return out; };
+// the match's start attestation was sighted by an earlier run, past the start floor (30 s margin: clock skew between this process and the child runs);
+// every seated human wrote his own start record at level 1 unless `noStart` lists him (Q69: a leave is convicted only on the player's own record)
+const attested = (d, ageMs, noStart) => { const s = {}; s[keyOf(d)] = { t0: Date.now() - (ageMs || FLOOR + 30000), mt: d[2], roster: {}, settled: [], started: rosterSids(d).filter((x) => (noStart || []).indexOf(x) < 0).map(v.pid) }; return { STARTS_FILE: s }; };
 
 // ---- [1] helpers ----
 console.log('-- [1] helpers --');
@@ -232,6 +236,16 @@ console.log('-- [4] genuine leaver --');
   T('[4] run 2: the leaver points penalty is written for C', writes(r2, 7, C).length === 1 && /leaver LP [^\n]*pts 2000-100->1900/.test(r2.out));
   const r3 = runCron(boards, advance(r2.state, MIN));
   T('[4] run 3: nothing more (processed)', convictLines(r3) === 0 && leavesOf(r3, C) === 1 && writes(r3, 7).length === 0);
+  // Q69: the same absence, but C never wrote his own start record (only A's and B's rosters name him): held for the grace
+  // like any absent seat, then the others settle and C is not convicted
+  const h2 = 0x4200, m2 = keyOf(ranked(h2, 0));
+  const boards2 = world(rows3(ranked, h2, false));
+  const q1 = runCron(boards2, attested(ranked(h2, 0), 0, [C]));
+  T('[4b] Q69 run 1 (C named only): held like any absent seat', !processedOf(q1).has(m2) && convictLines(q1) === 0);
+  const q2 = runCron(boards2, advance(q1.state, GRACE + 1000));
+  T('[4b] Q69 run 2 (grace over): A and B settle, C not convicted, no points penalty, logged', processedOf(q2).has(m2) && settleLines(q2, m2) === 2 && convictLines(q2) === 0 && leavesOf(q2, C) === 0
+    && writes(q2, 7, C).length === 0 && /never wrote his own record for this match/.test(q2.out),
+    'processed=' + processedOf(q2).has(m2) + ' settleLines=' + settleLines(q2, m2) + ' convict=' + convictLines(q2) + ' leaves=' + leavesOf(q2, C));
 }
 
 // ---- [5] grace over but the read is incomplete ----
@@ -281,7 +295,7 @@ console.log('-- [7] bot match --');
 console.log('-- [8] start verdicts --');
 {
   const MAT = v.STARTS_MATURITY_MS, now = 100 * 3600000, m = '77_88_2';
-  const mkPend = () => { const p = {}; p[m] = { t0: now - MAT - MIN, mt: 2, roster: { 0: v.pid(A), 1: v.pid(B) }, settled: [v.pid(A)] }; return p; };
+  const mkPend = () => { const p = {}; p[m] = { t0: now - MAT - MIN, mt: 2, roster: { 0: v.pid(A), 1: v.pid(B) }, settled: [v.pid(A)], started: [v.pid(A), v.pid(B)] }; return p; };
   let pend = mkPend(), lv = {};
   let res = v.reconcileStarts([], {}, new Set(), new Set(), pend, lv, now, MAT, {}, false);
   T('[8] readComplete=false: matured entry held, nobody convicted, entry kept', res.held === 1 && res.convicted === 0 && !lv[v.pid(B)] && !!pend[m], JSON.stringify(res));
@@ -291,7 +305,7 @@ console.log('-- [8] start verdicts --');
   res = v.reconcileStarts([], {}, new Set(), new Set(), pend, lv, now, MAT, {});
   T('[8] readComplete omitted (older callers): verdict as before', (lv[v.pid(B)] || {}).leaves === 1);
   // end to end: the main path passes the run's shard completeness
-  const st = {}; st[m] = { t0: Date.now() - MAT - MIN, mt: 2, roster: { 0: v.pid(A), 1: v.pid(B) }, settled: [] };
+  const st = {}; st[m] = { t0: Date.now() - MAT - MIN, mt: 2, roster: { 0: v.pid(A), 1: v.pid(B) }, settled: [], started: [v.pid(A), v.pid(B)] };
   const e1 = runCron(world([]), { STARTS_FILE: st }, { STUB_FAIL: JSON.stringify({ shard_4: 503 }) });
   T('[8] e2e run with a failed shard: no exit-rate verdict, entry kept', leavesOf(e1, A) === 0 && leavesOf(e1, B) === 0 && !!(e1.state.STARTS_FILE || {})[m], e1.out.slice(-400));
   const e2 = runCron(world([]), advance(e1.state, MIN));
@@ -342,7 +356,7 @@ console.log('-- [11] mutation self-checks --');
       return convictLines(r) === 1;   // [3] run 1 convicts the late finisher again
     }],
     ['verdict hold removed', "if (readComplete === false) { held++; continue; }", "if (false) { held++; continue; }", (script) => {
-      const m = '77_88_2', st = {}; st[m] = { t0: Date.now() - v.STARTS_MATURITY_MS - MIN, mt: 2, roster: { 0: v.pid(A), 1: v.pid(B) }, settled: [] };
+      const m = '77_88_2', st = {}; st[m] = { t0: Date.now() - v.STARTS_MATURITY_MS - MIN, mt: 2, roster: { 0: v.pid(A), 1: v.pid(B) }, settled: [], started: [v.pid(A), v.pid(B)] };
       const r = runCron(world([]), { STARTS_FILE: st }, { STUB_FAIL: JSON.stringify({ shard_4: 503 }) }, script);
       return leavesOf(r, B) === 1;   // [8] verdict lands on an incomplete read again
     }],
