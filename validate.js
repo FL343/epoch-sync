@@ -182,11 +182,35 @@ function shardPlan(listedNames, prefix, n, sandbox) {
 // only, matching the rest of the state) the first time a start group is seen, and judged once the
 // entry is older than STARTS_MATURITY_MS.
 //
-// Verdict at maturity with no consistent settlement: every consensus-roster member who wrote no
-// settle record gets an exit-rate hit (leavers.json -> effectiveLeaverFactor). Deliberately NO LP
-// deduction: with zero finisher testimony an all-absent match cannot be told apart from a
-// migration-failure / crash cascade, so the harsh ranked penalty stays on the finisher-consensus
-// path (detectLeavers). Escalation on top of this signal is trust-graph territory.
+// Verdict at maturity with no consistent settlement: every consensus-roster member who wrote his
+// own start record but no settle record gets an exit-rate hit (leavers.json -> effectiveLeaverFactor).
+// Deliberately NO LP deduction: with zero finisher testimony an all-absent match cannot be told
+// apart from a migration-failure / crash cascade, so the harsh ranked penalty stays on the
+// finisher-consensus path (detectLeavers). Escalation on top of this signal is trust-graph territory.
+//
+// Q69 (cloud audit 2026-10): a roster is what OTHER accounts wrote. Any two accounts that own the
+// game can write a consistent pair of records (start or settle) for a match that never happened,
+// naming anyone at the other seats, so a leave is only convicted on the named player's OWN record
+// for the key: his start attestation (written when level 1 begins), tracked cumulatively in the
+// pending entry because a later record of his can rotate it off its shard. A roster seat that never
+// wrote one is not convicted on either path (no exit rate, no points); the settle path also accepts
+// his own settle record or abandon confession for the key (a team-gamble dissenter wrote the one; the
+// other is counted on its own path), see the leaver filter in main(). An abandon confession is its
+// own conviction (reconcileConfessions), so a quitter who confessed is counted whether he started or
+// not -- except when his confession is first read in the run his start entry matures with no start of
+// his: the verdict below processes the key and the confession path then only marks it done (one
+// exit-rate hit lost; needs a quit before level 1 plus the cron or his shard unread for most of the
+// two-hour window).
+// Cost: a real leaver whose start upload failed, who quit before level 1, or whose client suppresses
+// the write goes unpunished -- an honest quitter still confesses (0xB5), a loading-screen drop was
+// never meant to be a leave (B7), and a suppressed write is a modified client.
+const OWN_START_CAP = 16;   // a roster has at most 8 seats: the cap only bounds what extra writers can grow
+function noteOwnStarts(p, recs) {
+  if (!p || !recs || !recs.length) return;
+  const st = Array.isArray(p.started) ? p.started : (p.started = []);
+  for (const r of recs) { const h = pid(String(r.steamID)); if (st.indexOf(h) < 0 && st.length < OWN_START_CAP) st.push(h); }
+}
+function hasOwnStart(p, h) { return !!(p && Array.isArray(p.started) && p.started.indexOf(h) >= 0); }
 // O93: the one-attester exception of reconcileStarts (solo competitive segment start)
 function soloStartAttested(att) {
   if (!att || att.length !== 1) return false;
@@ -235,6 +259,7 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
     // anyone who wrote ANY settle record was present at the end -> exempt. Tracked cumulatively:
     // a lone settle (e.g. the finishing side of a 2P match) can be overwritten before maturity.
     if (groups[m]) for (const r of groups[m]) { const h = pid(r.steamID); if (p.settled.indexOf(h) < 0) p.settled.push(h); }
+    noteOwnStarts(p, sg[m]);   // Q69: who wrote his OWN start for this key, cumulative (entries from older builds start empty)
     if (consistentKeys.has(m)) continue;   // consistent settle group -> the normal pipeline owns this key
     // endless (type 7): never convicted from an orphaned start. Co-op runs are excluded from the
     // exit-rate economy by design (client parity), and a legit endless run outlives the matchmade
@@ -254,6 +279,7 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
     for (const seat of Object.keys(p.roster)) {
       const h = p.roster[seat];
       if (p.settled.indexOf(h) >= 0) continue;
+      if (!hasOwnStart(p, h)) continue;   // Q69: named by others only -- logged below, not convicted
       if (confState[h + '|' + m]) continue;   // confession already counted this leave (no double exit-rate)
       leavers[h] = leavers[h] || { leaves: 0, lastMatch: '' };
       leavers[h].leaves += 1; leavers[h].lastMatch = m;
@@ -272,6 +298,11 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
       if (!Object.keys(p.roster).some((seat) => p.roster[seat] === h)) continue;   // not on the attested roster
       if (sanityFlags([r]).length) continue;
       consoledSids.push(s);
+    }
+    const unatt = Object.keys(p.roster).map((seat) => p.roster[seat]).filter((h) => p.settled.indexOf(h) < 0 && !hasOwnStart(p, h) && !confState[h + '|' + m]);
+    if (unatt.length) {
+      RUN.unattested = (RUN.unattested | 0) + unatt.length;
+      console.log('  start-orphan ' + m + ': ' + unatt.length + ' roster seat(s) never wrote their own start record -- not convicted (' + unatt.map((h) => h.slice(0, 8)).join(',') + ')');
     }
     convicted += hit.length;
     processed.add(m);   // idempotent: a super-late settlement of a convicted key is skipped as stale
@@ -949,6 +980,7 @@ function writeRunSummary() {
       '| seedcap veto / reject-window discards | ' + s('seedcapVeto', 0) + ' / ' + s('seedcapReject', 0) + ' |',
       '| perk replay rejects | ' + s('perkRej', 0) + ' |',
       '| one-match-at-a-time deferrals | ' + s('writerPaced', 0) + ' |',
+      '| absent seats named by others only, not convicted (Q69) | ' + s('unattested', 0) + ' |',
       '| campaign grants / campaign endless | ' + s('campaign', '-') + ' / ' + s('campaignEndless', '-') + ' |',
       '| page-cap hits | ' + RUN.cap + ' |',
       '| solo segments held by the key policy (other channel / retired key; new this run) | ' + s('keyHeld', 0) + ' (' + s('keyHeldNew', 0) + ') |',
@@ -3073,6 +3105,8 @@ async function main() {
   }
   // confession keys still on the shards (retention input of saveConfessions); null = partial read
   const confLive = shardsComplete ? new Set(confessions.map(c => pid(String(c.steamID)) + '|' + c.m)) : null;
+  // Q69: confession keys read this run, partial read or not -- a confession is its writer's own record for the match
+  const confSeen = new Set(confessions.map(c => pid(String(c.steamID)) + '|' + c.m));
   // one-shot pool recovery (recoverPick above): demo channel only, read-only, inert past the file's date
   const recCfg = (DEMO_APPID > 0 && APPID === DEMO_APPID) ? loadRecover(RECOVER_FILE, 'demo', Date.now()) : null;
   if (recCfg) {
@@ -4641,10 +4675,28 @@ async function main() {
     // (no start attestation ever sighted = the per-writer ns signal, counted once when the synthetic
     //  first-sighting entry was created at the pacing gate above -- a cheap fabrication tell for the
     //  judgment layer now that every live build attests)
+    // Q69: an absent seat is only a leaver on his OWN record for this key -- his start attestation (pend.started,
+    //   cumulative, plus the starts visible this run) or any settle record of his (pend.settled / every record read this
+    //   run for the key, consistent or not: a team-gamble dissenter wrote one) or his confession (counted on its own path). A seat that only the writers' rosters name (two accounts can write
+    //   a consistent pair of records for a match that never happened) is not convicted, seeded or group-decayed; it stays
+    //   a §7 shield seat for its teammates (namedOnly), like before. `un` = writer signal: named a seat that never wrote.
+    noteOwnStarts(pend, starts.filter((r) => (r.d[3] + '_' + r.d[4] + '_' + r.d[2]) === c.m));
+    const own = new Set((pend.started || []).concat(pend.settled || []));
+    for (const r of recs) if ((r.d[3] + '_' + r.d[4] + '_' + r.d[2]) === c.m) own.add(pid(String(r.steamID)));
+    const namedOnly = [];
+    const ownOrNamed = (x) => {
+      const hx = pid(String(x.steamID));
+      if (own.has(hx) || confSeen.has(hx + '|' + c.m) || confState[hx + '|' + c.m]) return true;   // his confession is his own record too (counted on its own path, skipped below)
+      namedOnly.push(x); RUN.unattested = (RUN.unattested | 0) + 1;
+      for (const sid of writerSids) { const h = sigPlayer(signals, pid(sid), nowMs); h.un = (h.un | 0) + 1; }
+      sigDirty = true;
+      console.log('  leaver ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' named by the others but never wrote his own record for this match -- not a leaver (Q69)');
+      return false;
+    };
     // consensus-absent seats: LP penalty below + §7 teammate shield input -- minus anyone this job already saw agreeing
     //   on this match (pend.agreed): that record was lost to shard rotation while the group waited, the player finished
     const leavers0 = detectLeavers(g).filter((x) => {
-      if (!(pend.agreed && pend.agreed.indexOf(pid(String(x.steamID))) >= 0)) return true;
+      if (!(pend.agreed && pend.agreed.indexOf(pid(String(x.steamID))) >= 0)) return ownOrNamed(x);
       console.log('  leaver ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' record gone but seen agreeing earlier -- finished, not a leaver');
       return false;
     });
@@ -4737,7 +4789,7 @@ async function main() {
       //   matchType mask settle at their average rank -- design line 66; solos = original formula).
       const planIn = tsIn.map((t, i) => ({ steamID: t.id, seat: parts[i].seat | 0, mmr: ts.displayRating(t.mu, t.sigma), rank: t.rank, lp: (lp[t.id] == null ? 0 : lp[t.id]) }));
       const rsPlan = isTeamMt(matchType)
-        ? teamLpPlan(planIn, matchType, scores, leavers0.map(x => x.seat), t2Win)
+        ? teamLpPlan(planIn, matchType, scores, leavers0.concat(namedOnly).map(x => x.seat), t2Win)   // Q69: named-only seats still shield their teammates
         : reducedStakesPlan(planIn, matchType, premadeMaskOf(matchType), premadeTrioAtOf(matchType));
       for (const r of tsOut) {
         // repeat-group decay: blend the update toward the pre-match rating by the streak weight
@@ -5155,3 +5207,4 @@ module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CHAT_MUTE: 
   pruneConfessions, CONFESS_PRUNE_MS,   // confession entries outlive the window while their record is still on a shard
   RECOVER_FILE, loadRecover, recoverPick, readRecoverRows };   // client knife 5.0i one-shot pool recovery
 Object.assign(module.exports, { KEY_CHANNEL, loadJobPubTable, soloKeyHeld, soloRunHasHeld });   // cloud audit R1-A5-07 per-channel key policy (test/playtest-key-policy.js)
+Object.assign(module.exports, { noteOwnStarts, hasOwnStart, OWN_START_CAP });   // cloud audit Q69 own-record evidence for leaver verdicts

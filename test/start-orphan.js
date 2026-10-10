@@ -42,8 +42,8 @@ console.log('=== reconcileStarts (B7 start/settle cross-check) ===');
   reconcileStarts([mkStart(A, { 0: A, 1: B }), mkStart(B, { 0: A, 1: X })], {}, new Set(), new Set(), pending, {}, 0, MAT);
   eq('split seat dropped, agreed seat kept', pending[KEY].roster, { 0: pid(A) });
 }
-{ // maturity verdict: exit-rate hit for every roster member without a settle record; idempotent via processed
-  const pending = { [KEY]: { t0: 0, mt: 2, roster: { 0: pid(A), 1: pid(B), 2: pid(C) }, settled: [] } };
+{ // maturity verdict: exit-rate hit for every roster member without a settle record (each wrote his own start); idempotent via processed
+  const pending = { [KEY]: { t0: 0, mt: 2, roster: { 0: pid(A), 1: pid(B), 2: pid(C) }, settled: [], started: [pid(A), pid(B), pid(C)] } };
   const leavers = {}, processed = new Set();
   const r = reconcileStarts([], {}, new Set(), processed, pending, leavers, MAT + 1, MAT);
   eq('3 exit-rate hits', r.convicted, 3);
@@ -56,7 +56,7 @@ console.log('=== reconcileStarts (B7 start/settle cross-check) ===');
   eq('no double leaves', leavers[pid(A)].leaves, 1);
 }
 { // settle-writer exemption (the 2P blind-spot case): lone finisher exempt, quitter convicted
-  const pending = { [KEY]: { t0: 0, mt: 2, roster: { 0: pid(A), 1: pid(B) }, settled: [] } };
+  const pending = { [KEY]: { t0: 0, mt: 2, roster: { 0: pid(A), 1: pid(B) }, settled: [], started: [pid(A), pid(B)] } };
   const leavers = {}, processed = new Set();
   const groups = { [KEY]: [mkSettle(A)] };   // A finished (lone settle = never settles the match)
   const r = reconcileStarts([], groups, new Set(), processed, pending, leavers, MAT + 1, MAT);
@@ -65,7 +65,7 @@ console.log('=== reconcileStarts (B7 start/settle cross-check) ===');
   eq('quitter B hit', leavers[pid(B)].leaves, 1);
 }
 { // settle writers are remembered across runs (shard entry may be overwritten before maturity)
-  const pending = { [KEY]: { t0: 0, mt: 2, roster: { 0: pid(A), 1: pid(B) }, settled: [] } };
+  const pending = { [KEY]: { t0: 0, mt: 2, roster: { 0: pid(A), 1: pid(B) }, settled: [], started: [pid(A), pid(B)] } };
   const leavers = {}, processed = new Set();
   reconcileStarts([], { [KEY]: [mkSettle(A)] }, new Set(), processed, pending, leavers, HOUR, MAT);   // run 1: A's settle visible, immature
   eq('settled[] captured while visible', pending[KEY].settled, [pid(A)]);
@@ -91,12 +91,58 @@ console.log('=== reconcileStarts (B7 start/settle cross-check) ===');
   reconcileStarts([mkStart(A, { 0: A, 1: B }), mkStart(B, { 0: A, 1: B })], {}, new Set(), new Set(), pending, {}, 9999, MAT);
   eq('t0 unchanged on re-sight', pending[KEY].t0, 500);
 }
-{ // roster consensus can convict a non-attester (the anchor value: honest starters testify for the whole lobby)
+{ // Q69 (cloud audit 2026-10): roster consensus alone convicts NOBODY -- two accounts can write a consistent start pair naming
+  //   anyone. Before: the starters "testified for the whole lobby" and C (never wrote anything) was hit too.
   const pending = {}, leavers = {}, processed = new Set();
   reconcileStarts([mkStart(A, { 0: A, 1: B, 2: C }), mkStart(B, { 0: A, 1: B, 2: C })], {}, new Set(), processed, pending, leavers, 0, MAT);
+  eq('registration records the two own starts', pending[KEY].started, [pid(A), pid(B)]);
   const r = reconcileStarts([], {}, new Set(), processed, pending, leavers, MAT + 1, MAT);
-  eq('C (never wrote anything) also hit', leavers[pid(C)].leaves, 1);
-  eq('all 3 hit', r.convicted, 3);
+  eq('C (never wrote anything) NOT hit', leavers[pid(C)], undefined);
+  eq('the two starters (no settle) hit', [r.convicted, leavers[pid(A)].leaves, leavers[pid(B)].leaves], [2, 1, 1]);
+  eq('key still processed (no re-judging)', processed.has(KEY), true);
+}
+// ---- Q69: own start record = the only evidence for an orphan verdict ----
+const { noteOwnStarts, hasOwnStart, OWN_START_CAP } = require(path.join(__dirname, '..', 'validate.js'));
+{ // the frame: X and Y (two owned accounts) write a consistent start pair naming V; nobody ever settles
+  const V = '76561198000000077', Y = '76561198000000078';
+  const pending = {}, leavers = {}, processed = new Set();
+  reconcileStarts([mkStart(X, { 0: X, 1: Y, 2: V }), mkStart(Y, { 0: X, 1: Y, 2: V })], {}, new Set(), processed, pending, leavers, 0, MAT);
+  const r = reconcileStarts([], {}, new Set(), processed, pending, leavers, MAT + 1, MAT);
+  eq('framed V: no exit-rate hit', leavers[pid(V)], undefined);
+  eq('the framers only hurt themselves', [r.convicted, leavers[pid(X)].leaves, leavers[pid(Y)].leaves], [2, 1, 1]);
+}
+{ // own starts are cumulative: C's start seen in an early run, gone (rotated off its shard) at maturity -> still convicted
+  const pending = {}, leavers = {}, processed = new Set();
+  reconcileStarts([mkStart(A, { 0: A, 1: B, 2: C }), mkStart(B, { 0: A, 1: B, 2: C })], {}, new Set(), processed, pending, leavers, 0, MAT);
+  reconcileStarts([mkStart(C, { 0: A, 1: B, 2: C })], {}, new Set(), processed, pending, leavers, HOUR, MAT);   // C's start lands later
+  eq('late own start merged into the entry', pending[KEY].started, [pid(A), pid(B), pid(C)]);
+  const r = reconcileStarts([], {}, new Set(), processed, pending, leavers, MAT + 1, MAT);                   // nothing visible any more
+  eq('C convicted on his remembered own start', [r.convicted, leavers[pid(C)] && leavers[pid(C)].leaves], [3, 1]);
+}
+{ // an entry from an older build (no started[]): starts still visible are merged before the verdict; none visible -> nobody hit
+  const pending = { [KEY]: { t0: 0, mt: 2, roster: { 0: pid(A), 1: pid(B) }, settled: [] } };
+  const leavers = {};
+  const r = reconcileStarts([mkStart(B, { 0: A, 1: B })], {}, new Set(), new Set(), pending, leavers, MAT + 1, MAT);
+  eq('legacy entry: B (start visible) hit, A (none visible) not', [r.convicted, leavers[pid(A)], leavers[pid(B)] && leavers[pid(B)].leaves], [1, undefined, 1]);
+  const K3 = '333_7_2', pending2 = { [K3]: { t0: 0, mt: 2, roster: { 0: pid(A), 1: pid(B) }, settled: [] } }, lv2 = {};
+  const r2 = reconcileStarts([], {}, new Set(), new Set(), pending2, lv2, MAT + 1, MAT);
+  eq('legacy entry, no start visible: nobody hit, key still closed', [r2.convicted, lv2, !!pending2[K3]], [0, {}, false]);
+}
+{ // a confessed seat is neither convicted nor reported as named-only
+  const pending = { [KEY]: { t0: 0, mt: 2, roster: { 0: pid(A), 1: pid(B) }, settled: [], started: [pid(A)] } };
+  const conf = { [pid(B) + '|' + KEY]: { t0: 0, mt: 2, ded: 0, ex: 1 } };
+  const leavers = {};
+  const r = reconcileStarts([], {}, new Set(), new Set(), pending, leavers, MAT + 1, MAT, conf);
+  eq('confessed B skipped, A hit', [r.convicted, leavers[pid(B)]], [1, undefined]);
+}
+{ // helpers: dedup, cap, missing field
+  const p = {};
+  noteOwnStarts(p, [mkStart(A, {}), mkStart(A, {}), mkStart(B, {})]);
+  eq('dedup per account', p.started, [pid(A), pid(B)]);
+  const many = []; for (let i = 0; i < 40; i++) many.push(mkStart('7656119800000' + String(1000 + i), {}));
+  noteOwnStarts(p, many);
+  eq('capped at OWN_START_CAP', p.started.length, OWN_START_CAP);
+  eq('hasOwnStart', [hasOwnStart(p, pid(A)), hasOwnStart({}, pid(A)), hasOwnStart(null, pid(A))], [true, false, false]);
 }
 { // START_MAGIC pinned (client writer lockstep is asserted from the mvp side test)
   eq('START_MAGIC = 0xB2', START_MAGIC, 0xB2);
@@ -106,8 +152,8 @@ console.log('=== reconcileStarts (B7 start/settle cross-check) ===');
 // a sanity-clean settle record shape (mt=2 pc=2, in-cap scores, sane duration, self-seat honest)
 const mkRich = (writer, seat) => { const d = []; d[2] = 2; d[5] = seat | 0; d[8] = 2; d[9] = 300; d[10] = 1200; d[11] = 800; return { steamID: writer, d, roster: { 0: A, 1: B } }; };
 
-{ // live sanity-clean settle writer at verdict time -> consoled; the quitter is still convicted
-  const pending = { [KEY]: { t0: 0, mt: 2, roster: { 0: pid(A), 1: pid(B) }, settled: [] } };
+{ // live sanity-clean settle writer at verdict time -> consoled; the quitter (wrote his own start) is still convicted
+  const pending = { [KEY]: { t0: 0, mt: 2, roster: { 0: pid(A), 1: pid(B) }, settled: [], started: [pid(A), pid(B)] } };
   const leavers = {};
   const r = reconcileStarts([], { [KEY]: [mkRich(A, 0)] }, new Set(), new Set(), pending, leavers, MAT + 1, MAT);
   eq('consolation: live lone writer credited (real sid)', r.consoledSids, [A]);

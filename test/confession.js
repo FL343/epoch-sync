@@ -174,7 +174,7 @@ const conf = (sid, m, mt, dispCode) => ({ steamID: sid, m, mt, dispCode: dispCod
   {
     // start-orphan verdict skips a confessed key
     const st = { [pid(A) + '|o1_7_2']: { t0: 0, mt: 2, ded: 100, ex: 1 } };
-    const pending = { 'o1_7_2': { t0: 0, mt: 2, roster: { 0: pid(A), 1: pid(B) }, settled: [] } };
+    const pending = { 'o1_7_2': { t0: 0, mt: 2, roster: { 0: pid(A), 1: pid(B) }, settled: [], started: [pid(A), pid(B)] } };   // both wrote their own start (Q69)
     const leavers = {}, processedSet = new Set();
     reconcileStarts([], {}, new Set(), processedSet, pending, leavers, 3 * 3600 * 1000, 2 * 3600 * 1000, st);
     eq('orphan verdict: confessed player skipped, the other roster member still hit', [leavers[pid(A)], leavers[pid(B)].leaves], [undefined, 1]);

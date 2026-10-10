@@ -95,11 +95,25 @@ writes a start-type record (a second magic, zeroed result fields, same roster la
 when play actually begins. A start group with two-plus distinct writers and a
 per-seat majority roster is held as pending state; if no consistent settlement appears
 before a maturity window (default 2 h) elapses, every consensus-roster member who wrote
-no settle record takes an exit-rate hit. Deliberately **no points penalty** on this
+his own start record but no settle record takes an exit-rate hit. Deliberately **no points penalty** on this
 path — with zero finisher testimony, a coordinated dodge is indistinguishable from a
 crash/migration-failure cascade, so the harsh deduction stays on the finisher-consensus
 path above. Anyone who wrote any settle record is exempt (remembered across runs, since
 shard entries get overwritten), and lone attestations convict nobody.
+
+**A leave needs the player's own record** (cloud audit Q69, both paths above). A roster is
+what *other* accounts wrote: two accounts that own the game can write a consistent pair of
+records for a match that never happened and name anyone at the other seats. So an absent
+seat is convicted (exit rate; ranked: the points penalty) only when its player wrote his own
+record for that match key — his start attestation (written when level 1 begins; remembered
+in `starts.json` as `started`, since a later record can rotate it off its shard), his abandon
+confession for that key, or, on the settle path, any settle record of his. A seat that only the others' rosters name is logged
+(`never wrote his own record for this match -- not a leaver (Q69)`), counted in the run
+summary, and marked on the writers as the `un` signal; it still shields its teammates in
+team ladders like any absent seat. Cost: a real leaver whose start upload failed, who quit
+before level 1, or whose client suppresses the write goes unpunished (an honest quitter still
+confesses; a loading-screen drop was never meant to count; a suppressed write is a modified
+client).
 
 It also maintains a separate **cumulative progression ladder** (`XP_LB`, optional): a
 per-game points total that only accrues. Each present record earns points derived from

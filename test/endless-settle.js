@@ -160,7 +160,7 @@ eq('rosterConsensus split vote -> seat dropped', rosterConsensus(grp(mk7(A, 0, {
   const pending = {
     m7: { t0: 0, mt: 7, roster: { 0: pid(A), 1: pid(B) }, settled: [] },            // mature far past matchmade maturity
     m7old: { t0: -(31 * 86400000), mt: 7, roster: { 0: pid(A) }, settled: [] },     // past the endless TTL
-    mq: { t0: 0, mt: 1, roster: { 0: pid(C), 1: pid(D) }, settled: [] },            // matchmade control: convicts
+    mq: { t0: 0, mt: 1, roster: { 0: pid(C), 1: pid(D) }, settled: [], started: [pid(C), pid(D)] },   // matchmade control: convicts (both wrote their own start, Q69)
   };
   const res = reconcileStarts([], {}, new Set(), processed, pending, leavers, 8 * 3600 * 1000, 2 * 3600 * 1000);
   eq('type-7 orphan start: entry kept as pacing anchor', !!pending.m7, true);
