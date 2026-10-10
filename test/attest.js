@@ -111,6 +111,17 @@ console.log('== A0) layouts (attVer 3 and 4 accepted; attVer sits at [21] in bot
   eq('a v3 body claiming attVer 4 -> short (the v4 layout needs 44 ints; no sig relocation trick)', A.verifySoloRecord(v3as4, TABLE).reason, 'short');
   const v3as4pad = rec3.concat([0, 0, 0]); v3as4pad[21] = 4;
   eq('a v3 body claiming attVer 4 padded to 44 -> bad-sig (sig read from the wrong slot)', A.verifySoloRecord(v3as4pad, TABLE).reason, 'bad-sig');
+  // cloud audit R1-A3-02 (2026-10-08): the resume tag rides bits 9..31 of [21] (above attVer + jwtPresent) -- same layout / length / ATT_VER
+  eq('resume tag constants (23 bits at bit 9)', [A.RESUME_TAG_MASK, A.RESUME_TAG_SHIFT], [0x7FFFFF, 9]);
+  const bt = b5.slice(); bt[21] = (5 | (1 << 8) | (0x7ABCDE << 9)) | 0;   // a tag with bit 31 set: the int goes negative
+  const recT = sign(bt, kSealed.priv);
+  const vT = A.verifySoloRecord(recT, TABLE);
+  assert('a v5 record carrying a resume tag verifies (the tag is inside the signature domain)', vT.ok === true);
+  eq('decoded: attVer 5 / jwtPresent / resumeTag (bit 31 set) / the v5 tail intact', [vT.fields.attVer, vT.fields.jwtPresent, vT.fields.resumeTag, vT.fields.rerollLo, vT.fields.build], [5, true, 0x7ABCDE, 5, 41411]);
+  eq('soloTail (seedcap) surfaces the same tag', A.soloTail(recT).resumeTag, 0x7ABCDE);
+  const tt = recT.slice(); tt[21] = (5 | (1 << 8) | (0x7ABCDF << 9)) | 0;
+  eq('a tag edited after signing -> bad-sig', A.verifySoloRecord(tt, TABLE).reason, 'bad-sig');
+  eq('records without a tag decode as 0 (v3 / v4 / v5)', [v3.fields.resumeTag, v4.fields.resumeTag, v5.fields.resumeTag], [0, 0, 0]);
 }
 
 console.log('== A) verifySoloRecord ==');

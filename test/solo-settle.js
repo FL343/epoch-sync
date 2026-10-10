@@ -210,6 +210,90 @@ console.log('-- O218 casual solo chain (client knife 3.7a): token resume from a 
   eq('competitive segment after a FINAL run still rejects (after-final)', soloChainPlan({ runs: { k: { max: 7, final: 1, saves: {} } }, wait: {} }, 'k', seg({ startDepth: 7, endDepth: 8 }), 'c6', T0), { ok: false, reason: 'after-final' });
 }
 
+console.log('-- cloud audit R1-A3-02: one save row (resume tag) starts ONE resumed session per run (casual / classic; competitive keeps its save-point rule) --');
+{
+  // The save box is a client-writable board: the original (pre-tombstone) row bytes can be written back and the guard accepts the row
+  //   again. The resumed session's first segment carries the row's tag (attest [21] bits 9..31); a second session from the same tag is
+  //   rejected and the run settles nothing more (the replayed timeline could otherwise buy a fresh row and revive the run again).
+  const T0 = 3000000;
+  for (const [label, FL, sd] of [['classic', A.SEG_CLASSIC, 4], ['casual', A.SEG_CASUAL, 5]]) {
+    const st = { runs: {}, wait: {} };
+    const key = soloRunKey('p9', 1, 991);
+    const go = (f, m, t) => { const p = soloChainPlan(st, key, seg(f), m, t || T0); if (p.ok) soloAdvance(st, key, seg(f), m, p, t || T0); return p; };
+    go({ flags: FL, startDepth: 0, endDepth: sd }, label + '-s0');
+    go({ flags: FL | A.SEG_FINAL, startDepth: sd, endDepth: sd + 2 }, label + '-s1');   // run over at sd+2
+    const TAG = 0x2A5F1;
+    let p = go({ flags: FL | A.SEG_RESUMED | A.SEG_FINAL, startDepth: sd, endDepth: sd + 3, resumeTag: TAG }, label + '-r1');
+    eq(label + ': first resume from the row (tag) -> settles, revives, records the tag', [p.ok, p.revive, p.rtags, st.runs[key].revs], [true, true, [TAG], { [TAG]: label + '-r1' }]);
+    eq(label + ': the SAME segment again (guard retry / re-read shard) -> still ok (idempotent)', soloChainPlan(st, key, seg({ flags: FL | A.SEG_RESUMED | A.SEG_FINAL, startDepth: sd, endDepth: sd + 3, resumeTag: TAG }), label + '-r1', T0).ok, true);
+    eq(label + ': a SECOND session from the same row (written back after the tombstone) -> save-reused', soloChainPlan(st, key, seg({ flags: FL | A.SEG_RESUMED, startDepth: sd, endDepth: sd + 4, resumeTag: TAG }), label + '-r2', T0 + 1000), { ok: false, reason: 'save-reused' });
+    eq(label + ': the run is burnt -- a fresh row bought in the replayed timeline revives nothing', soloChainPlan(st, key, seg({ flags: FL | A.SEG_RESUMED, startDepth: sd, endDepth: sd + 5, resumeTag: 0x77 }), label + '-r3', T0 + 2000), { ok: false, reason: 'run-burnt' });
+    eq(label + ': ... nor any later segment of the run', soloChainPlan(st, key, seg({ flags: FL, startDepth: sd + 3, endDepth: sd + 5 }), label + '-c4', T0 + 2000).reason, 'run-burnt');
+  }
+  {
+    // a token bought AGAIN before the next checkpoint legitimately writes a second row at the same checkpoint (new nonce = new tag)
+    const st = { runs: {}, wait: {} }, key = soloRunKey('p9', 1, 992), C = A.SEG_CASUAL;
+    const go = (f, m) => { const p = soloChainPlan(st, key, seg(f), m, T0); if (p.ok) soloAdvance(st, key, seg(f), m, p, T0); return p; };
+    go({ flags: C, startDepth: 0, endDepth: 5 }, 'k0'); go({ flags: C | A.SEG_FINAL, startDepth: 5, endDepth: 7 }, 'k1');
+    go({ flags: C | A.SEG_RESUMED | A.SEG_FINAL, startDepth: 5, endDepth: 8, resumeTag: 0x111 }, 'k2');
+    eq('casual: a second row at the same checkpoint (its own tag) -> settles + revives', go({ flags: C | A.SEG_RESUMED, startDepth: 5, endDepth: 9, resumeTag: 0x222 }, 'k3'), { ok: true, proven: 5, revive: true, rtags: [0x222] });
+    eq('casual: both tags remembered, run not burnt', [Object.keys(st.runs[key].revs).length, !!st.runs[key].burnt], [2, false]);
+  }
+  {
+    // records from builds before the fix carry no tag (0): accepted exactly as before while the lever is off (the default; the cutover
+    //   is the version gate + RESUME_TAG_REQUIRED, see the README). requireTag pinned off here so a flipped job env cannot redden this.
+    const st = { runs: {}, wait: {} }, key = soloRunKey('p9', 1, 993), K = A.SEG_CLASSIC;
+    const go = (f, m) => { const p = soloChainPlan(st, key, seg(f), m, T0, { requireTag: false }); if (p.ok) soloAdvance(st, key, seg(f), m, p, T0); return p; };
+    go({ flags: K, startDepth: 0, endDepth: 4 }, 'o0'); go({ flags: K | A.SEG_FINAL, startDepth: 4, endDepth: 6 }, 'o1');
+    eq('untagged resume (older build) -> as before, no rtags', go({ flags: K | A.SEG_RESUMED | A.SEG_FINAL, startDepth: 4, endDepth: 7 }, 'o2'), { ok: true, proven: 4, revive: true });
+    eq('untagged second resume (older build) -> as before (not provable)', go({ flags: K | A.SEG_RESUMED, startDepth: 4, endDepth: 8 }, 'o3'), { ok: true, proven: 4, revive: true });
+  }
+  {
+    // RESUME_TAG_REQUIRED (the pre-fix window lever, default off): on = an untagged casual / classic resume is refused; nothing else moves
+    for (const [label, FL, sd] of [['classic', A.SEG_CLASSIC, 4], ['casual', A.SEG_CASUAL, 5]]) {
+      const st = { runs: {}, wait: {} }, key = soloRunKey('p9', 1, 994);
+      const go = (f, m, o) => { const p = soloChainPlan(st, key, seg(f), m, T0, o); if (p.ok) soloAdvance(st, key, seg(f), m, p, T0); return p; };
+      go({ flags: FL, startDepth: 0, endDepth: sd }, 'u0', { requireTag: true }); go({ flags: FL | A.SEG_FINAL, startDepth: sd, endDepth: sd + 2 }, 'u1', { requireTag: true });
+      eq(label + ' lever on: fresh segments unaffected (the chain above settled)', st.runs[key].max, sd + 2);
+      eq(label + ' lever on: untagged resume -> resume-untagged (run not burnt, no tag recorded)', [go({ flags: FL | A.SEG_RESUMED, startDepth: sd, endDepth: sd + 3 }, 'u2', { requireTag: true }), !!st.runs[key].burnt, st.runs[key].revs || null], [{ ok: false, reason: 'resume-untagged' }, false, null]);
+      eq(label + ' lever on: a tagged resume still settles', go({ flags: FL | A.SEG_RESUMED, startDepth: sd, endDepth: sd + 3, resumeTag: 0x31 }, 'u3', { requireTag: true }).rtags, [0x31]);
+    }
+    const stc = { runs: { kc: { max: 10, ms: 0, saves: { 10: { t: T0 } }, t: T0 } }, wait: {} };
+    eq('lever on: competitive untagged resume unaffected (its save-point rule)', soloChainPlan(stc, 'kc', seg({ flags: A.SEG_RESUMED, startDepth: 10, endDepth: 12 }), 'uq', T0, { requireTag: true }), { ok: true, proven: 10, consume: '10' });
+    const stt = { runs: { tk: { max: 5, ms: 0, saves: {}, t: T0, final: 1 } }, wait: {} };
+    eq('lever on: team classic with every writer\'s tag 0 -> resume-untagged', soloChainPlan(stt, 'tk', seg({ flags: A.SEG_CLASSIC | A.SEG_RESUMED, startDepth: 3, endDepth: 6, resumeTags: [0, 0] }), 'ut', T0, { requireTag: true }).reason, 'resume-untagged');
+    eq('lever on: team classic with one writer\'s tag -> settles', soloChainPlan(stt, 'tk', seg({ flags: A.SEG_CLASSIC | A.SEG_RESUMED, startDepth: 3, endDepth: 6, resumeTags: [0, 0x41] }), 'ut2', T0, { requireTag: true }).rtags, [0x41]);
+    eq('lever off (explicit): untagged resume as before', soloChainPlan(stt, 'tk', seg({ flags: A.SEG_CLASSIC | A.SEG_RESUMED, startDepth: 3, endDepth: 6 }), 'ut3', T0, { requireTag: false }), { ok: true, proven: 3, revive: true });
+  }
+  {
+    // competitive keeps its own rule (a save point resumes once, saves[sd].by) and is never burnt by the tag rule
+    const st = { runs: { kc: { max: 10, ms: 0, saves: { 10: { t: T0 } }, t: T0 } }, wait: {} };
+    const p1 = soloChainPlan(st, 'kc', seg({ flags: A.SEG_RESUMED, startDepth: 10, endDepth: 12, resumeTag: 0x5 }), 'q1', T0);
+    soloAdvance(st, 'kc', seg({ flags: A.SEG_RESUMED, startDepth: 10, endDepth: 12 }), 'q1', p1, T0);
+    eq('competitive: second resume of the save point -> save-reused (saves[].by), run not burnt', [soloChainPlan(st, 'kc', seg({ flags: A.SEG_RESUMED, startDepth: 10, endDepth: 13, resumeTag: 0x5 }), 'q2', T0), !!st.runs.kc.burnt], [{ ok: false, reason: 'save-reused' }, false]);
+  }
+  // team lane: every writer's tag counts (the tag is outside the consensus vector; a cold rejoiner writes 0)
+  {
+    const st = { runs: {}, wait: {} }, key = 'T|x+y|0|5', K = A.SEG_CLASSIC;
+    const go = (f, m) => { const p = soloChainPlan(st, key, seg(f), m, T0); if (p.ok) soloAdvance(st, key, seg(f), m, p, T0); return p; };
+    go({ flags: K, startDepth: 0, endDepth: 3 }, 't0'); go({ flags: K | A.SEG_FINAL, startDepth: 3, endDepth: 5 }, 't1');
+    eq('team classic: writers [0, tag] -> settles with the tag', go({ flags: K | A.SEG_RESUMED | A.SEG_FINAL, startDepth: 3, endDepth: 6, resumeTags: [0, 0x9] }, 't2').rtags, [0x9]);
+    eq('team classic: a replay where only ONE writer still reports the tag -> save-reused', soloChainPlan(st, key, seg({ flags: K | A.SEG_RESUMED, startDepth: 3, endDepth: 7, resumeTags: [0x9, 0] }), 't3', T0), { ok: false, reason: 'save-reused' });
+  }
+  // wiring: the solo lane hands the verified fields (fields.resumeTag) to the planner; the team classic lane passes every writer's tag
+  const src = require('fs').readFileSync(path.join(__dirname, '..', 'validate.js'), 'utf8');
+  assert('team classic settle passes every writer\'s resume tag to the planner', /resumeTags: g\.map\(r => \{ const tr = endlessTail\(r\.d\); return tr \? tr\.resumeTag : 0; \}\)/.test(src));
+  assert('the solo settle plans on the verified fields (resumeTag comes from attest.verifySoloRecord)', /const f = v\.fields;/.test(src) && /resumeTag: \(d\[21\] >>> RESUME_TAG_SHIFT\) & RESUME_TAG_MASK/.test(require('fs').readFileSync(path.join(__dirname, '..', 'attest.js'), 'utf8')));
+  assert('soloAdvance records the tags of a settled resume (run.revs)', /run\.revs\[t\] = m/.test(src));
+  assert('lever reads its own env, default off', /const RESUME_TAG_REQUIRED = process\.env\.RESUME_TAG_REQUIRED === '1';/.test(src) && /: RESUME_TAG_REQUIRED;/.test(src));
+  assert('both rejects feed the counter + row-owner signal (solo: the account; team classic: seat 0)', /noteResumeRule\(plan\.reason, casual \|\| classic, sid\);/.test(src) && /noteResumeRule\(plan\.reason, true, rosterSids\[0\]\);/.test(src));
+  const nrr = /const noteResumeRule = [\s\S]*?\n  \};/.exec(src);
+  assert('the signal is record-only (rv on the owner, never recordFlag / the trust flag counter)', !!nrr && /sp\.rv = \(sp\.rv \| 0\) \+ 1/.test(nrr[0]) && !/recordFlag|\.f \+=/.test(nrr[0]));
+  assert('settled untagged resumes counted on both lanes (the lever\'s flip signal)', (src.match(/if \(untaggedResume\(f\)\) RUN\.resumeUntagged = /g) || []).length === 2);
+  assert('step summary row carries the four counts', /token resumes: replays caught \/ burnt-run segments \/ untagged settled \/ untagged refused/.test(src) && /s\('resumeReplay', 0\)/.test(src) && /s\('resumeUntaggedRej', 0\)/.test(src));
+  eq('endlessTail reads the optional 12th int (absent = 0)', [v.endlessTail([0xB1, 3, 7, 1, 2, 0, 1, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 3, 6, 0, 0, 1, 32, 0, 0, 0, 0, 0]).resumeTag, v.endlessTail([0xB1, 3, 7, 1, 2, 0, 1, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 3, 6, 0, 0, 1, 32, 0, 0, 0, 0, 0, 0x9]).resumeTag], [0, 0x9]);
+}
+
 console.log('-- board surface --');
 {
   const plan = ptBoardPlan([], { prefix: 'rec_', shards: 1, xpLb: 'xpb', cpLb: 'cpb', endlessLb: 'enb', endlessTrioLb: 'entb', trustLb: 'trb', reportLb: 'rpb', compLb: 'cmp', saveBoxLb: 'sbx',

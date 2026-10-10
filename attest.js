@@ -55,6 +55,11 @@ const SEG_CASUAL = 16;     // casual-endless SOLO run (client knife 3.7a, O218):
 const SEG_CLASSIC = 32;    // classic (nostalgia) endless run (client knife 3.9b N2, O216): guard-written solo (N3: client team lane); classic lane -> endless_classic_* lifetime ladders, XP x0.5, no CP, 1 life, no perks / rerolls / continues
 // dispCode (client DISP_CODE lockstep): 0 finished / 5 user-quit (the guard writes the truth for solo runs)
 const DISP_FINISHED = 0, DISP_USER_QUIT = 5;
+// resume tag (cloud audit R1-A3-02, 2026-10-08): the FIRST segment of a session that resumed from a save row carries the row's nonce
+//   folded to 23 bits (never 0) in bits 9..31 of [21] -- the bits above attVer (low byte) and jwtPresent (bit 8), so the layout, the
+//   length and ATT_VER stay as they are and an older decoder ignores it. 0 = not a resumed first segment, or a build before the fix.
+//   validate.js soloChainPlan lets one tag start one resumed session per run (casual / classic: the replayed pre-tombstone row).
+const RESUME_TAG_MASK = 0x7FFFFF, RESUME_TAG_SHIFT = 9;
 const SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
 
 function toBytes(d) {
@@ -153,6 +158,7 @@ function verifySoloRecord(d, pubTable) {
     matchHash: d[3] >>> 0, runSeed: d[4] | 0, durationSec: d[9] | 0, score: d[10] | 0, dispCode: d[11] | 0,
     startDepth: d[14] | 0, endDepth: d[15] | 0, continuesUsed: d[16] | 0, tokensCp: d[17] | 0, seasonId: d[18] | 0, flags: d[19] | 0,
     keyId, keyName, attVer, jwtPresent: !!((d[21] >> 8) & 1), jwtHashLo: d[22] >>> 0,
+    resumeTag: (d[21] >>> RESUME_TAG_SHIFT) & RESUME_TAG_MASK,   // R1-A3-02 (0 = none)
     // O143-4 commitment: rolling FNV-1a 64 over the op stream the guard's authority core executed (hex, lo@23 hi@24)
     opHash: ((BigInt(d[24] >>> 0) << 32n) | BigInt(d[23] >>> 0)).toString(16),
     // attVer 4 (2026-09-07): perk build word @25 + pick log @26 (lo) / @27 (hi); an attVer 3 record carries no perks (0/0/0)
@@ -210,7 +216,7 @@ function soloTail(d) {
     startDepth: d[14] | 0, endDepth: d[15] | 0, continuesUsed: d[16] | 0, tokensCp: d[17] | 0, seasonId: d[18] | 0, flags: d[19] | 0,
     build: (v4 && d.length > 25) ? (d[25] >>> 0) : 0, picksLo: (v4 && d.length > 26) ? (d[26] | 0) : 0, picksHi: (v4 && d.length > 27) ? (d[27] | 0) : 0,
     rerollLo: (v5 && d.length > 28) ? (d[28] | 0) : 0, rerollHi: (v5 && d.length > 29) ? (d[29] | 0) : 0,
-    keyId: d[20] | 0, attVer,
+    keyId: d[20] | 0, attVer, resumeTag: (d[21] >>> RESUME_TAG_SHIFT) & RESUME_TAG_MASK,
   };
 }
 
@@ -365,7 +371,7 @@ function saveBoxHead(d) {
 module.exports = {
   hash32,
   // A
-  LEDGER_MAGIC, LEDGER_VER, MT_ENDLESS, ATT_VER, BASE_LEN, BASE_LEN_V3, LAYOUTS, SIG_INTS,
+  LEDGER_MAGIC, LEDGER_VER, MT_ENDLESS, ATT_VER, BASE_LEN, BASE_LEN_V3, LAYOUTS, SIG_INTS, RESUME_TAG_MASK, RESUME_TAG_SHIFT,
   // C
   SB_MAGIC, SB_VER, SB_CONSUMED, saveBoxHead,
   SEG_SUSPENDED, SEG_FINAL, SEG_RESUMED, SEG_COMP, SEG_CASUAL, SEG_CLASSIC, DISP_FINISHED, DISP_USER_QUIT,

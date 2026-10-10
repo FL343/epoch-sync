@@ -54,7 +54,7 @@ eq('goalBase clamps depth<1', endlessGoalBase(0), 650);
 
 // -- tail decode --
 const clean = mk7(A, 0, { startDepth: 0, endDepth: 6, cont: 0, tokens: 0 });
-eq('tail decode (4-int legacy tail -> seasonId -1, flags 0, no perks)', endlessTail(clean.d), { startDepth: 0, endDepth: 6, continuesUsed: 0, tokensCp: 0, seasonId: -1, flags: 0, build: 0, picksLo: 0, picksHi: 0, rerollLo: 0, rerollHi: 0 });
+eq('tail decode (4-int legacy tail -> seasonId -1, flags 0, no perks)', endlessTail(clean.d), { startDepth: 0, endDepth: 6, continuesUsed: 0, tokensCp: 0, seasonId: -1, flags: 0, build: 0, picksLo: 0, picksHi: 0, rerollLo: 0, rerollHi: 0, resumeTag: 0 });
 eq('missing tail -> null', endlessTail(mk7(A, 0, { noTail: true }).d), null);
 
 // -- CP gain mirror (client computeCpGain): base 10 + rank bonus (valid only), ranked x2 --
@@ -195,7 +195,7 @@ eq('rosterConsensus split vote -> seat dropped', rosterConsensus(grp(mk7(A, 0, {
 {
   const { endlessAbstention, computeXpEndless, creditXpEndless, ENDLESS_XP, PRIVATE_XP } = v;
   const s1 = mk7(A, 0, { startDepth: 0, endDepth: 6, seasonId: 1 });
-  eq('tail decode with seasonId', endlessTail(s1.d), { startDepth: 0, endDepth: 6, continuesUsed: 0, tokensCp: 0, seasonId: 1, flags: 0, build: 0, picksLo: 0, picksHi: 0, rerollLo: 0, rerollHi: 0 });
+  eq('tail decode with seasonId', endlessTail(s1.d), { startDepth: 0, endDepth: 6, continuesUsed: 0, tokensCp: 0, seasonId: 1, flags: 0, build: 0, picksLo: 0, picksHi: 0, rerollLo: 0, rerollHi: 0, resumeTag: 0 });
   eq('tail decode with the 6th int (segment flags)', endlessTail(mk7(A, 0, { startDepth: 5, endDepth: 10, seasonId: 1, flags: 9 }).d).flags, 9);
   // 2026-09-07: 7th..9th ints = perk build word + pick log (lo/hi); 9-int tails are consistency-compared in full (lockstep build)
   {

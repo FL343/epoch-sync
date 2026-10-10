@@ -979,6 +979,8 @@ function writeRunSummary() {
       '| endless settles / cp+board writes | ' + s('endless', 0) + ' (+' + s('endlessComp', 0) + ' team comp, +' + s('solo', 0) + ' solo) / ' + s('writesEndless', '0/0 0/0') + ' |',
       '| seedcap veto / reject-window discards | ' + s('seedcapVeto', 0) + ' / ' + s('seedcapReject', 0) + ' |',
       '| perk replay rejects | ' + s('perkRej', 0) + ' |',
+      '| token resumes: replays caught / burnt-run segments / untagged settled / untagged refused | ' + s('resumeReplay', 0) + ' / ' + s('runBurnt', 0) + ' / ' + s('resumeUntagged', 0) + ' / ' + s('resumeUntaggedRej', 0) + ' |',
+      '| solo same-key forks (another signed record under a settled segment key) | ' + s('soloKeyFork', 0) + ' |',
       '| one-match-at-a-time deferrals | ' + s('writerPaced', 0) + ' |',
       '| absent seats named by others only, not convicted (Q69) | ' + s('unattested', 0) + ' |',
       '| campaign grants / campaign endless | ' + s('campaign', '-') + ' / ' + s('campaignEndless', '-') + ' |',
@@ -2267,11 +2269,37 @@ function soloSanity(f) {
   if ((f.durationSec | 0) < 0) out.push('duration');
   return out;
 }
-// chain verdict for one segment. Mutates only st.wait (first-sighting clock of an unchained claim).
-//   { ok: true, proven, consume? }  settle (proven = depth credited to the pacing gate; consume = save point used)
+// resume tags a segment carries (cloud audit R1-A3-02, 2026-10-08): the consumed save row's nonce folded to 23 bits, on the FIRST
+//   segment of a resumed session only. Solo = the guard-signed attest field (attest.js fields.resumeTag); team = the clients' 12th tail
+//   int (endlessTail; not in the consensus vector, so the team settle passes every writer's non-zero tag: a cold rejoiner writes 0).
+//   0 / absent = no tag (a build before the fix): accepted as before, unless RESUME_TAG_REQUIRED.
+// RESUME_TAG_REQUIRED (lever, default off): '1' = a casual / classic resume with no tag is refused ('resume-untagged'). Flip it once the
+//   version gate's MIN_BUILD excludes every build before the fix (the step summary's "untagged settled" count = how many such resumes
+//   still arrive; 0 for a while = safe). Until then an untagged resume is the pre-fix window (architecture decision 9: N-1 accepted).
+const RESUME_TAG_REQUIRED = process.env.RESUME_TAG_REQUIRED === '1';
+function resumeTagsOf(f) {
+  const src = Array.isArray(f.resumeTags) ? f.resumeTags : [f.resumeTag];
+  const out = [];
+  for (const t of src) { const v = (t >>> 0) & attest.RESUME_TAG_MASK; if (v && out.indexOf(v) < 0) out.push(v); }
+  return out;
+}
+// true = one of the tags already started a resumed session of this run under a DIFFERENT segment key (the same key again = the guard's
+//   retry or a re-read shard of the same record: idempotent)
+function soloTagReused(run, tags, m) {
+  const revs = run && run.revs;
+  if (!revs) return false;
+  for (const t of tags) if (revs[t] && revs[t] !== m) return true;
+  return false;
+}
+// chain verdict for one segment. Mutates st.wait (first-sighting clock of an unchained claim) and, on save-reused for a casual / classic
+//   resume, run.burnt (R1-A3-02: the run is over -- the replayed session could otherwise buy a fresh row and revive the run again).
+//   { ok: true, proven, consume?, revive?, rtags? }  settle (proven = depth credited to the pacing gate; consume = save point used;
+//                                                    rtags = resume tags soloAdvance records as used by this segment)
 //   { ok: false, reason }           reject (processed, no credit)      { ok: null, reason }  wait
 function soloChainPlan(st, key, f, m, nowMs, opts) {
   const run = st.runs[key];
+  if (run && run.burnt) return { ok: false, reason: 'run-burnt' };   // R1-A3-02: a run caught resuming a used row settles nothing more
+  const needTag = (opts && opts.requireTag != null) ? !!opts.requireTag : RESUME_TAG_REQUIRED;   // R1-A3-02 pre-fix window lever (tests pass it)
   const waitOr = (reason) => {
     if (soloRunHasHeld(st, key, m, nowMs)) { st.wait[m] = { t0: nowMs }; return { ok: null, reason: reason + ' (a segment of this run is held by the key policy)' }; }   // R1-A5-07: a held segment of this run restarts the wait clock (soloKeyHeld)
     const w = st.wait[m] || (st.wait[m] = { t0: nowMs });
@@ -2288,18 +2316,28 @@ function soloChainPlan(st, key, f, m, nowMs, opts) {
   if (fl & attest.SEG_RESUMED) {
     if (classicResume) {
       // O216 classic: the guard cut a segment [segStart, purchaseDepth] at the shop-token purchase, so the resumed depth is any depth the run has
-      //   PROVEN (run.max >= sd) -- no checkpoint-multiple rule; replay defence = guard tombstone + processed segment keys; no resume debit.
+      //   PROVEN (run.max >= sd) -- no checkpoint-multiple rule; no resume debit. Replay defence: the guard tombstones the row on consume,
+      //   but the box is client-writable (the original row bytes can be written back and the guard accepts them again), so the cron
+      //   holds the line: one row (resume tag) starts one resumed session per run (R1-A3-02).
       if (!run || (run.max | 0) < sd) return waitOr('chain-gap');
-      return { ok: true, proven: sd, revive: !!run.final };
+      const rtags = resumeTagsOf(f);
+      if (!rtags.length && needTag) return { ok: false, reason: 'resume-untagged' };   // lever on: a build before the fix can no longer token-resume
+      if (soloTagReused(run, rtags, m)) { run.burnt = 1; return { ok: false, reason: 'save-reused' }; }
+      return rtags.length ? { ok: true, proven: sd, revive: !!run.final, rtags } : { ok: true, proven: sd, revive: !!run.final };   // no tag (a build before the fix) = as before
     }
     if (casualResume) {
       // O218 casual (client knife 3.7a): the save is a checkpoint-snapshot ROW the guard wrote on the shop token purchase and tombstoned
       //   on consume -- there is no suspended segment / save point to consume. Rule = the multiplayer casual one: the resumed depth must be
-      //   a checkpoint the run has PROVEN (chain memory); the run may already be FINAL (the token revives it: one revive per row, replay
-      //   defence = the guard tombstone + processed segment keys); no resume debit (the token was paid in gold inside the run).
+      //   a checkpoint the run has PROVEN (chain memory); the run may already be FINAL (the token revives it); no resume debit (the token
+      //   was paid in gold inside the run). One revive per ROW, not per depth (a token bought again before the next checkpoint legitimately
+      //   writes a second row at the same checkpoint): the row's resume tag may start one session per run (R1-A3-02 -- the guard
+      //   tombstone alone does not hold, the box is client-writable and the original row bytes can be written back).
       if (sd % COMP.CKPT_EVERY !== 0) return { ok: false, reason: 'resume-not-checkpoint' };
       if (!run || (run.max | 0) < sd) return waitOr('chain-gap');
-      return { ok: true, proven: sd, revive: !!run.final };
+      const rtags = resumeTagsOf(f);
+      if (!rtags.length && needTag) return { ok: false, reason: 'resume-untagged' };   // lever on: a build before the fix can no longer token-resume
+      if (soloTagReused(run, rtags, m)) { run.burnt = 1; return { ok: false, reason: 'save-reused' }; }
+      return rtags.length ? { ok: true, proven: sd, revive: !!run.final, rtags } : { ok: true, proven: sd, revive: !!run.final };   // no tag (a build before the fix) = as before
     }
     const sv = run && run.saves && run.saves[String(sd)];
     if (!sv) return waitOr('save-orphan');
@@ -2343,6 +2381,7 @@ function soloAdvance(st, key, f, m, plan, nowMs) {
   if (f.picksLo != null) run.pk = { lo: f.picksLo | 0, hi: f.picksHi | 0 };   // perk pick log at this segment's close (perk_chain: the next segment must extend it)
   if (f.rerollLo != null) run.rr = { lo: f.rerollLo >>> 0, hi: f.rerollHi >>> 0 };   // reroll bitmap at close (rerollChain: monotone across segments)
   if ((f.flags | 0) & attest.SEG_SUSPENDED) { const sk = String(f.endDepth | 0); run.saves[sk] = Object.assign(run.saves[sk] || {}, { t: nowMs }); }   // audit B-F6: merge -- never drop `by` (one save, one resume)
+  if (plan.rtags && plan.rtags.length) { run.revs = run.revs || {}; for (const t of plan.rtags) if (!run.revs[t]) run.revs[t] = m; }   // R1-A3-02: this row (tag) has started its one session
   if (plan.revive) run.final = 0;                              // O218 casual token resume brings a FINAL run back (its own FINAL below may close it again)
   if ((f.flags | 0) & attest.SEG_RESUMED) run.contN = 0;       // O218: the continue ladder restarts with the guard session (renderer / guard / cron alike)
   if ((f.flags | 0) & attest.SEG_FINAL) run.final = 1;
@@ -2681,7 +2720,10 @@ function endlessTail(d) {
     picksHi: d.length >= at + 9 ? (d[at + 8] | 0) : 0,
     // 10th..11th ints (2026-09-11): endless affix reroll bitmap lo/hi (bit k = depth 3+3k rerolled); absent = none
     rerollLo: d.length >= at + 10 ? (d[at + 9] | 0) : 0,
-    rerollHi: d.length >= at + 11 ? (d[at + 10] | 0) : 0 };
+    rerollHi: d.length >= at + 11 ? (d[at + 10] | 0) : 0,
+    // 12th int (cloud audit R1-A3-02, 2026-10-08): the resume tag of a resumed session's first segment (team classic / team competitive);
+    //   absent (older writers) / every other segment = 0. Outside the consensus vector (vecOf reads the first 9 tail ints).
+    resumeTag: d.length >= at + 12 ? ((d[at + 11] >>> 0) & attest.RESUME_TAG_MASK) : 0 };
 }
 // endless affix reroll bitmap sanity + chain (2026-09-11): a bit may only sit at a target depth the segment could have asked about
 //   (depth 3+3k <= endDepth+1: the question is asked at the level end BEFORE the target), and a resumed segment must keep every bit the
@@ -4107,6 +4149,20 @@ async function main() {
   const soloPub = loadJobPubTable(nowMs) || {};
   const soloPubRec = recCfg ? (loadJobPubTable(nowMs, recCfg.keys) || {}) : soloPub;   // R1-A5-07: only RECOVERED segments (demo, until the file's date) keep the recovery keys
   const soloAllowDev = /_test$/.test(ENDLESS_COMP_LB);   // dev-key records only ever land on a *_test ladder
+  // R1-A3-02 (2026-10-08): what the one-row-one-resume rule did, counted so its firing rate can be read after launch -- the step
+  //   summary row below + rv on the row owner's signals (solo: the account; team classic: seat 0 = the host whose box held the row).
+  //   Record-only: rv does NOT feed the trust tier (recordFlag / f). An honest client cannot start a second session from one row (the
+  //   guard refuses the resume until the tombstone write is confirmed and remembers the rows it consumed for the life of the game),
+  //   so promote rv to a flag only once the numbers show it never lands on an honest account.
+  const noteResumeRule = (reason, tagRule, ownerSid) => {
+    if (reason === 'save-reused' && tagRule) {
+      RUN.resumeReplay = (RUN.resumeReplay | 0) + 1;
+      if (ownerSid) { const sp = sigPlayer(signals, pid(ownerSid), nowMs); sp.rv = (sp.rv | 0) + 1; sigDirty = true; }
+    } else if (reason === 'run-burnt') RUN.runBurnt = (RUN.runBurnt | 0) + 1;
+    else if (reason === 'resume-untagged') RUN.resumeUntaggedRej = (RUN.resumeUntaggedRej | 0) + 1;
+  };
+  // a settled casual / classic token resume with no tag = a build before the fix still resuming (the lever's flip signal)
+  const untaggedResume = (f) => !!((f.flags | 0) & attest.SEG_RESUMED) && !!((f.flags | 0) & (attest.SEG_CASUAL | attest.SEG_CLASSIC)) && !resumeTagsOf(f).length;
   const soloSettle = async (c) => {
     const m = c.m;
     // audit 2026-09-06 B-F10: a group can hold several pc=1 records under one key (a foreign same-key record beside the real
@@ -4137,6 +4193,20 @@ async function main() {
       return false;
     }
     const f = v.fields;
+    // R1-A3-02 residual watch: another signed record under this segment key that verifies too but differs from the one settled here
+    //   (the guard re-signing a segment after an ambiguous write, or a modified client that reused the session id for a replay and got
+    //   both copies onto the board inside one tick -- the first verified copy settles, the other is never looked at again). Counted only.
+    if (c.g.length > 1) {
+      const rb = r.d.join(',');
+      for (const cand of c.g) {
+        if (cand === r || cand.d.join(',') === rb) continue;
+        if (attest.soloSettleGate(attest.verifySoloRecord(cand.d, soloPub), { owner: String(cand.steamID), allowDevKey: soloAllowDev }).settle) {
+          RUN.soloKeyFork = (RUN.soloKeyFork | 0) + 1;
+          console.log('  solo ' + m + ': ' + plog(sid) + ' another signed record under the same segment key differs (the first settles; counted)');
+          break;
+        }
+      }
+    }
     const casual = !!((f.flags | 0) & attest.SEG_CASUAL);   // O218: guard-written casual solo run -> own ladder pair, continue-ladder debits, no milestones, no resume debit
     const classic = !!((f.flags | 0) & attest.SEG_CLASSIC);   // O216: classic (nostalgia) run -> lifetime ladder, XP x0.5, no CP, 60s pacing
     const sane = soloSanity(f);
@@ -4155,6 +4225,7 @@ async function main() {
     if (plan.ok === null) { console.log('  solo ' + m + ': ' + plog(sid) + ' depth ' + f.startDepth + '->' + f.endDepth + ' waiting for its chain (' + plan.reason + ')'); return false; }
     if (plan.ok === false) {
       RUN.soloRej = (RUN.soloRej | 0) + 1;
+      noteResumeRule(plan.reason, casual || classic, sid);
       ghWarn('match=' + m + ': solo segment ' + plog(sid) + ' chain REJECT (' + plan.reason + ') depth ' + f.startDepth + '->' + f.endDepth);
       processed.add(m);
       return false;
@@ -4208,6 +4279,7 @@ async function main() {
     recordEndlessSignals(signals, [sid], nowMs); sigDirty = true;
     if (PT_MODE) ptSeedCp(cp, changedCp, [sid]);
     const run = soloAdvance(soloState, key, f, m, plan, nowMs);
+    if (untaggedResume(f)) RUN.resumeUntagged = (RUN.resumeUntagged | 0) + 1;
     if (plan.consume) {
       cp[sid] = (cp[sid] == null ? 0 : cp[sid]) - COMP.RESUME_CP; changedCp[sid] = cp[sid];
       console.log('  solo cp ' + m + ': ' + plog(sid) + ' -' + COMP.RESUME_CP + ' resume (save@' + plan.consume + ') -> ' + cp[sid]);
@@ -4335,11 +4407,13 @@ async function main() {
         }
         const key = teamRunKey(rosterSids, 0, g[0].d[4] | 0);   // lifetime: season 0 in the key (the row / segments carry the season snapshot but a classic run may span seasons)
         const f = { startDepth: t.startDepth | 0, endDepth: t.endDepth | 0, flags: t.flags | 0,
-          build: 0, picksLo: 0, picksHi: 0, seasonId: t.seasonId | 0, rerollLo: 0, rerollHi: 0 };   // sanity pinned the perk / reroll tail to 0 ('classic-perk')
+          build: 0, picksLo: 0, picksHi: 0, seasonId: t.seasonId | 0, rerollLo: 0, rerollHi: 0,   // sanity pinned the perk / reroll tail to 0 ('classic-perk')
+          resumeTags: g.map(r => { const tr = endlessTail(r.d); return tr ? tr.resumeTag : 0; }) };   // R1-A3-02: every writer's tag (outside the consensus vector; a cold rejoiner writes 0)
         const plan = soloChainPlan(soloState, key, f, c.m, nowMs);
         if (plan.ok === null) { console.log('  endless-classic ' + c.m + ': depth ' + f.startDepth + '->' + f.endDepth + ' waiting for its chain (' + plan.reason + ')'); continue; }
         if (plan.ok === false) {
           RUN.soloRej = (RUN.soloRej | 0) + 1;
+          noteResumeRule(plan.reason, true, rosterSids[0]);   // seat 0 = the host (resumed rosters are re-seated host-first) = the row's box
           ghWarn('match=' + c.m + ': team classic segment chain REJECT (' + plan.reason + ') depth ' + f.startDepth + '->' + f.endDepth + ' ' + rosterSids.map(plog).join('+'));
           processed.add(c.m);
           continue;
@@ -4355,6 +4429,7 @@ async function main() {
         for (const sid of writerSids) dayK.n[pid(sid)] = (dayK.n[pid(sid)] || 0) + 1;
         recordEndlessSignals(signals, rosterSids, nowMs); sigDirty = true;
         soloAdvance(soloState, key, f, c.m, plan, nowMs);
+        if (untaggedResume(f)) RUN.resumeUntagged = (RUN.resumeUntagged | 0) + 1;
         let teamK = 0;
         for (let i = 0; i < pc7; i++) teamK += g[0].d[10 + i] | 0;
         for (const sid of writerSids) {
