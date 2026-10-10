@@ -362,7 +362,7 @@ function pruneUnmatchedState(state, now, ttlMs) {
 //    (audit 2026-09-06 B-F11: v1 was int32[33] with a 12-int body; the plaintext head layout is unchanged and saveBoxHead reads
 //     only [0..4]. SB_VER mirrors save_box.h / mvp/test/lib/save-box.js and is pinned by mvp ledger-schema-lockstep §26.)
 // ============================================================
-const SB_MAGIC = 0xBA, SB_VER = 5, SB_CONSUMED = 1;   // v5 (2026-09-16, client knife 3.9b N2): four seat banks 32 bits + rules 2 bits (v4: fourth seat + casual bit; v3: reroll bitmap); the cron reads only the plaintext head [0..4] (any accepted version)
+const SB_MAGIC = 0xBA, SB_VER = 6, SB_CONSUMED = 1;   // v6 (cloud audit R1-A3-01): depth widened 8 -> 24 bits (16-bit depthHi at the body tail; body still 23 ints); v5 (2026-09-16, client knife 3.9b N2): four seat banks 32 bits + rules 2 bits (v4: fourth seat + casual bit; v3: reroll bitmap); the cron reads only the plaintext head [0..4] (any accepted version)
 function saveBoxHead(d) {
   if (!Array.isArray(d) || d.length < 5 || (d[0] & 0xff) !== SB_MAGIC) return null;
   return { ver: (d[0] >> 8) & 0xff, seasonId: d[1] | 0, flags: d[2] | 0, consumed: !!(d[2] & SB_CONSUMED), keyId: d[3] | 0, nonce: d[4] >>> 0 };
