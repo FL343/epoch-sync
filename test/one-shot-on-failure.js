@@ -169,8 +169,9 @@ const orphanWorld = (K, extra) => {
     { shard: 2, sid: B, d: rec(0xB1, 1, K, 1, sids) },
   ];
   const key = keyOf(rows[0].d);
-  // t0 3h back: maturity is 2h, so the verdict is due on the first run with an hour to spare
-  const starts = { [key]: { t0: Date.now() - 3 * HOUR, mt: 1, roster: { 0: v.pid(A), 1: v.pid(B) }, settled: [] } };
+  // t0 3h back: maturity is 2h, so the verdict is due on the first run with an hour to spare; both wrote their start
+  // records when the entry was registered (Q69: the verdict convicts only a seat whose own start is on file)
+  const starts = { [key]: { t0: Date.now() - 3 * HOUR, mt: 1, roster: { 0: v.pid(A), 1: v.pid(B) }, settled: [], started: [v.pid(A), v.pid(B)] } };
   return { boards: world(rows, extra), key, starts };
 };
 
