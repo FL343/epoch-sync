@@ -19,6 +19,14 @@
 //   PORT / FB_STATE_FILE / FB_MOD_FILE / APPID env overrides for e2e.
 // Terminal output stays text-free (counts only); player text renders in the
 // browser page only.
+//
+// Filtered / capped / blocked items keep only a keyed fingerprint in the public
+// state file (audit Q189); the console reads their text back from the authors'
+// live box rows (same fingerprint rule as the cron). That needs the publisher
+// key, app id and state salt -- env, else ~/gmt-secrets (steam_publisher_key.txt,
+// steam_appid.txt, epoch_state_salt.txt), read at call time, never stored. An
+// item whose author has replaced the row since (or a run without the secrets)
+// shows why its text is missing.
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -45,10 +53,42 @@ function loadModFile() {
 }
 function saveModFile(m) { fs.writeFileSync(MOD, JSON.stringify(m, null, 1) + '\n'); }
 
-function dataPayload() {
+// Box text per item id, read straight from the Steam Web API with the key passed at call time
+// (validate.js captures its key when first loaded, which here is before any secret is read).
+const BOX_LB = process.env.FB_LB || fb.FB_LB;
+const BOX_PAGE = 5000, BOX_PAGES = 10;
+async function boxTexts(st) {
+  const key = process.env.STEAM_PUBLISHER_KEY || readSecret('steam_publisher_key.txt');
+  const salt = process.env.STATE_SALT || readSecret('epoch_state_salt.txt');
+  const boxId = (st.boards || {})[BOX_LB];
+  if (!key || !APPID || !salt || !boxId) return { ok: false, why: 'nokey' };
+  const v = require('../validate.js');
+  const texts = {}, nowMin = fb.nowTsMin();
+  for (let page = 0; page < BOX_PAGES; page++) {
+    const r = await fetch('https://partner.steam-api.com/ISteamLeaderboards/GetLeaderboardEntries/v1/?key=' + key + '&appid=' + APPID +
+      '&rangestart=' + (page * BOX_PAGE + 1) + '&rangeend=' + ((page + 1) * BOX_PAGE) + '&datarequest=RequestGlobal&leaderboardid=' + boxId + '&format=json');
+    if (!r.ok) return { ok: false, why: 'err', msg: 'HTTP ' + r.status };
+    const j = await r.json();
+    const ents = (j && j.leaderboardEntryInformation && j.leaderboardEntryInformation.leaderboardEntries) || [];
+    for (const e of ents) {
+      const it = fb.decodeBoxEntry(String(e.steamID), v.decodeDetails(e.detailData), nowMin);
+      if (it) texts[String(it.itemId)] = it.text;
+    }
+    if (ents.length < BOX_PAGE) break;
+  }
+  return { ok: true, texts, salt };
+}
+
+async function dataPayload() {
   const st = loadJson(STATE, { items: {}, votes: {}, boards: {} });
   const mod = loadModFile();
   const nowMin = fb.nowTsMin();
+  st.items = st.items || {};
+  let fill = { ok: true };
+  if (Object.keys(st.items).some(id => st.items[id].text == null)) {
+    try { fill = await boxTexts(st); } catch (e) { fill = { ok: false, why: 'err', msg: String(e && e.message) }; }
+    if (fill.ok) fb.hydrateText(st.items, fill.texts, fill.salt);
+  }
   const items = Object.keys(st.items || {}).map(id => {
     const it = st.items[id];
     const t = fb.tallyVotes((st.votes || {})[id], it.ap);
@@ -57,7 +97,8 @@ function dataPayload() {
       id, cat: fb.FB_CATS[it.cat | 0] || String(it.cat), lang: it.lang, ts: it.ts | 0,
       ageMin: Math.max(0, nowMin - (it.ts | 0)), st: it.st, ha: it.ha | 0,
       up: t.up, down: t.down, rep: fb.reportsSince((st.votes || {})[id], it.ap, clearAt),
-      repAll: t.rep, text: it.text,
+      repAll: t.rep, text: it.text != null ? it.text : null,
+      gone: it.text != null ? '' : (fill.ok ? 'replaced' : fill.why), goneMsg: it.text != null || fill.ok ? '' : (fill.msg || ''),
     };
   }).sort((a, b) => b.ts - a.ts);
   return { nowMin, holdAt: fb.FB_REPORT_HOLD, items, mod };
@@ -111,6 +152,7 @@ h1{font-size:18px;color:#fbbf24}
 <div class="tabs" id="tabs"></div><div id="log"></div><div id="list"></div>
 <script>
 let DATA=null, VIEW='held';
+const GONE={replaced:'\uff08\u539f\u6587\u6ca1\u6709\u5b58\u8fdb\u516c\u5f00\u72b6\u6001\u6587\u4ef6\uff0c\u4f5c\u8005\u5df2\u7ecf\u5728\u5fc3\u58f0\u7bb1\u6362\u4e86\u65b0\u7684\u4e00\u6761\uff0c\u8bfb\u4e0d\u56de\u6765\uff09',nokey:'\uff08\u539f\u6587\u6ca1\u6709\u5b58\u8fdb\u516c\u5f00\u72b6\u6001\u6587\u4ef6\uff1b\u8bfb\u56de\u8981\u53d1\u5e03\u5bc6\u94a5\u3001\u5e94\u7528 ID \u548c\u76d0\uff1a\u653e\u8fdb ~/gmt-secrets \u6216\u73af\u5883\u53d8\u91cf\u540e\u5237\u65b0\uff09',err:'\uff08\u539f\u6587\u6ca1\u6709\u5b58\u8fdb\u516c\u5f00\u72b6\u6001\u6587\u4ef6\uff1b\u8bfb\u5fc3\u58f0\u7bb1\u5931\u8d25\uff1a'};
 const VIEWS={held:'\u5f85\u590d\u6838 (held)',fresh:'\u8fd1 48h',filtered:'\u5df2\u8fc7\u6ee4',blocked:'\u5df2\u4e0b\u67b6',all:'\u5168\u90e8'};
 async function load(){DATA=await (await fetch('/data')).json();render();}
 function rel(m){return m<60?m+'m':m<2880?Math.floor(m/60)+'h':Math.floor(m/1440)+'d';}
@@ -140,7 +182,7 @@ function card(x){
   return '<div class="card '+x.st+'"><div class="meta"><b>['+x.cat+'/'+x.lang+']</b> '+rel(x.ageMin)+' \u524d'+
     ' \u00b7 \u25b2'+x.up+' \u25bc'+x.down+' \u00b7 \u4e3e\u62a5 '+x.rep+'/'+DATA.holdAt+(x.repAll!==x.rep?' (\u7d2f\u8ba1 '+x.repAll+')':'')+
     ' \u00b7 id='+x.id+'<span class="st">'+x.st+'</span></div>'+
-    '<div class="txt">'+esc(x.text)+'</div><div class="act">'+acts.join('')+'</div></div>';
+    '<div class="txt">'+(x.text!=null?esc(x.text):'<i>'+(GONE[x.gone]||GONE.replaced)+(x.gone==='err'?esc(x.goneMsg)+'\uff09':'')+'</i>')+'</div><div class="act">'+acts.join('')+'</div></div>';
 }
 async function act(a,id){
   const r=await (await fetch('/act?a='+a+'&id='+id,{method:'POST'})).json();
@@ -160,7 +202,7 @@ const server = http.createServer(async (req, res) => {
   const send = (code, body, type) => { res.writeHead(code, { 'Content-Type': type || 'application/json; charset=utf-8' }); res.end(body); };
   try {
     if (u.pathname === '/') return send(200, PAGE, 'text/html; charset=utf-8');
-    if (u.pathname === '/data') return send(200, JSON.stringify(dataPayload()));
+    if (u.pathname === '/data') return send(200, JSON.stringify(await dataPayload()));
     if (u.pathname === '/act' && req.method === 'POST') {
       const a = u.searchParams.get('a'), id = u.searchParams.get('id') | 0;
       const mod = loadModFile();

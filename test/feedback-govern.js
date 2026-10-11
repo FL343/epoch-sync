@@ -188,8 +188,9 @@ function mkWl(subWords, wordWords) {
     ok('[9] asciiJson output is pure ASCII', !/[^\x00-\x7f]/.test(enc));
     ok('[9] asciiJson round-trips losslessly (surrogate pairs included)',
        JSON.stringify(JSON.parse(enc)) === JSON.stringify(sample));
+    // (the public copy since Q189: publicState drops filtered / capped / blocked text, test/feedback-text-privacy.js)
     ok('[9] saveState writes through asciiJson (single choke point)',
-       /function saveState\(st\) \{ fs\.writeFileSync\(FB_STATE_FILE, asciiJson\(st\)\); \}/.test(SRC));
+       /function saveState\(st\) \{ fs\.writeFileSync\(FB_STATE_FILE, asciiJson\(publicState\(st\)\)\); \}/.test(SRC));
   }
 
   console.log('feedback-govern: ' + pass + '/' + (pass + fail) + (fail ? ' FAIL' : ' ok'));

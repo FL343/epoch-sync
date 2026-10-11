@@ -36,7 +36,10 @@
 //
 // State (voice.json, public repo): sanitized text + HMAC pseudonyms only.
 // Author identity for feed writes is recovered from live board reads each run
-// and never persisted.
+// and never persisted. Text is persisted only for items that are or were shown
+// on the public feed boards (live / archived / held); items that never were or
+// never may be (filtered / capped / blocked) keep a keyed fingerprint and their
+// text is read back from the author's live box row when needed (publicState).
 const fs = require('fs');
 const crypto = require('crypto');
 const v = require('./validate.js');   // main() is require-guarded; safe to import helpers
@@ -433,8 +436,8 @@ function loadState() {
     return { boards: s.boards || {}, items: s.items || {}, votes: s.votes || {}, digest: s.digest || { day: '', at: 0 } };
   } catch (e) { return { boards: {}, items: {}, votes: {}, digest: { day: '', at: 0 } }; }
 }
-// State is the ONLY file in this repo that persists player-written text (held tombstones /
-// item bodies), and the CI bot commits it without local hooks -- so the writer itself must
+// State is the ONLY file in this repo that persists player-written text (item bodies of
+// live / archived / held items, see publicState), and the CI bot commits it without local hooks -- so the writer itself must
 // keep the file ASCII-only (\uXXXX escapes; JSON.parse round-trips them losslessly). Raw
 // non-ASCII here leaked real player feedback text into the public repo on the playtest
 // channel (2026-08-22) and then bricked every local push on the repo-wide Han scan.
@@ -442,7 +445,59 @@ function loadState() {
 function asciiJson(o) {
   return JSON.stringify(o).replace(/[\u0080-\uffff]/g, c => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0'));
 }
-function saveState(st) { fs.writeFileSync(FB_STATE_FILE, asciiJson(st)); }
+function saveState(st) { fs.writeFileSync(FB_STATE_FILE, asciiJson(publicState(st))); }
+
+// Which item text may sit in the committed state file (audit Q189, 2026-10-11). The state file
+// lives in a PUBLIC repo and git history keeps every version forever, so text goes there only
+// when it is public anyway: live / archived items were (or are) on the feed boards every
+// player reads, and a held item needs its text to come back after an admin clearance (its feed
+// slot is a zero-body tombstone). Text that never was and never may be shown stays out:
+// filtered (failed the content filter -- ads, contact numbers, wordlist hits, so the very text
+// most likely to carry a phone number or an insult), capped (over the daily cap, never shown)
+// and blocked (permanent removal by the admin). Those keep `th`, a keyed fingerprint of the
+// admitted text; whenever the text is needed again (an admin 'allow' / unblock, the daily
+// digest, the admin console) it is read back from the author's live box row and accepted only
+// when the fingerprint matches -- a box row rewritten under the same item id cannot slip
+// unreviewed text onto the feed. Display behavior is unchanged: such an item can reach the
+// feed only through its box row (it never had a feed slot, or lost it to a real delete), so
+// the stored text could never be shown once that row was gone. What is lost is only the
+// digest / console view of a row the author has already replaced.
+const FB_TEXT_PUBLIC = Object.freeze(['live', 'archived', 'held']);
+function textSig(key, text, salt) { return wlHash(salt == null ? process.env.STATE_SALT : salt, 'fb-text|' + key + '|' + text); }
+function mayKeepText(item) { return FB_TEXT_PUBLIC.indexOf(item && item.st) >= 0; }
+function publicState(st) {
+  const items = {};
+  for (const key of Object.keys(st.items || {})) {
+    const item = st.items[key];
+    if (mayKeepText(item) || item.text == null) { items[key] = item; continue; }
+    const o = {};
+    for (const f of Object.keys(item)) if (f !== 'text') o[f] = item[f];
+    o.th = textSig(key, item.text);
+    items[key] = o;
+  }
+  return Object.assign({}, st, { items });
+}
+// Legacy state (written before Q189) may still carry text a non-public item must not keep.
+function needsTextScrub(st) {
+  return Object.keys(st.items || {}).some(k => !mayKeepText(st.items[k]) && st.items[k].text != null);
+}
+// Runtime-only: put back the text of items whose state copy carries the fingerprint only,
+// from this run's box reads (textByItem: itemId -> sanitized text), fingerprint-checked.
+// Returns how many items still have no text afterwards. salt: the state salt (default env;
+// tools/feedback-admin.js passes its own).
+function hydrateText(items, textByItem, salt) {
+  let missing = 0;
+  for (const key of Object.keys(items)) {
+    const item = items[key];
+    if (item.text != null) continue;
+    const t = textByItem[key];
+    if (t != null && item.th != null && textSig(key, t, salt) === item.th) item.text = t;
+    else missing++;
+  }
+  return missing;
+}
+
+const FB_DIGEST_GONE = '(text not available: filtered / capped / blocked text is not kept in the public state, and the author has replaced this box row since)';
 
 // ---- daily digest (rides the O49 Resend channel) ----
 // First tick after a UTC day rollover mails every item admitted since the last
@@ -464,10 +519,14 @@ async function maybeSendDigest(st, nowMs) {
   let maxTs = since;
   for (const x of fresh) maxTs = Math.max(maxTs, x.it.ts | 0);
   if (fresh.length) {
+    // filtered / capped / blocked text is not in the state file (publicState); main() read it
+    // back from the box before this call -- an item whose author replaced the row since says so
+    let gone = 0;
     const lines = fresh.slice(0, 200).map(x => {
       const t = tallyVotes(st.votes[x.id], x.it.ap);
+      if (x.it.text == null) gone++;
       return '[' + FB_CATS[x.it.cat | 0] + '/' + x.it.lang + ' st=' + x.it.st + ' +' + t.up + '/-' + t.down +
-        ' rep' + t.rep + ' id=' + x.id + ']\n' + x.it.text;
+        ' rep' + t.rep + ' id=' + x.id + ']\n' + (x.it.text != null ? x.it.text : FB_DIGEST_GONE);
     });
     const res = await fetch('https://api.resend.com/emails', {
       method: 'POST',
@@ -477,6 +536,7 @@ async function maybeSendDigest(st, nowMs) {
         to: [to],
         subject: (process.env.FB_DIGEST_TAG || '') + 'feedback digest ' + day + ': ' + fresh.length + ' new',
         text: 'New player feedback since the last digest: ' + fresh.length + '\n' +
+          (gone ? 'Text no longer readable (author replaced the box row; not kept in the public state): ' + gone + '\n' : '') +
           'Unlist: run tools/feedback-admin.js (or add the id to feedback-mod.json "block").\n\n' +
           lines.join('\n\n'),
       }),
@@ -493,7 +553,7 @@ async function main() {
   if (missing.length) { console.error('missing env: ' + missing.join(', ')); process.exit(1); }
   const nowMs = Date.now(), nowMin = nowTsMin(nowMs);
   const st = loadState();
-  let dirty = false;
+  let dirty = needsTextScrub(st);              // legacy text a non-public item must not keep: rewrite this run
   const wl = loadWordlist();
   const mod = loadMod();
   if (!wl) v.ghWarn('feedback wordlist unavailable -- admitting no new items this tick (fail-closed)');
@@ -524,6 +584,7 @@ async function main() {
 
   // ---- harvest submissions (admission gate: filter + daily cap) ----
   const sidByItem = {};                        // runtime only, never persisted
+  const textByItem = {};                       // runtime only: box text per item id (hydrateText)
   const box = await v.readBoardAll(boxId, 'voice box');
   let newItems = 0, filteredN = 0, cappedN = 0;
   for (const e of box.ents) {
@@ -531,6 +592,7 @@ async function main() {
     const it = decodeBoxEntry(sid, v.decodeDetails(e.detailData), nowMin);
     if (!it) continue;
     sidByItem[String(it.itemId)] = sid;
+    textByItem[String(it.itemId)] = it.text;
     const key = String(it.itemId);
     if (!st.items[key]) {
       if (!wl) continue;                       // fail-closed: no filter, no admissions
@@ -558,6 +620,10 @@ async function main() {
 
   // ---- governance: moderation file (block/allow/clear) + report hold ----
   if (governItems(st.items, st.votes, mod, nowMin)) dirty = true;
+  // filtered / capped / blocked items carry a fingerprint only (publicState): read their text back
+  // from the box rows just harvested (an 'allow' / unblock above needs it for the feed, the digest
+  // below for the mail); never persisted for them -- saveState strips it again
+  hydrateText(st.items, textByItem);
 
   // ---- read current feed boards (recovers author sids for older items) ----
   const feeds = {};                            // name -> { id, entries: {sid: {itemId, score}} }
@@ -584,10 +650,13 @@ async function main() {
   }
 
   // ---- archive items that are no longer placeable anywhere ----
+  // placeable = author sid recoverable AND text present (an item released from filtered / blocked
+  // whose box row is gone has neither; archiving it on both keeps the flip stable)
   for (const key of Object.keys(st.items)) {
     const item = st.items[key];
-    if (item.st === 'live' && !sidByItem[key]) { item.st = 'archived'; dirty = true; }
-    else if (item.st === 'archived' && sidByItem[key]) { item.st = 'live'; dirty = true; }
+    const placeable = !!sidByItem[key] && item.text != null;
+    if (item.st === 'live' && !placeable) { item.st = 'archived'; dirty = true; }
+    else if (item.st === 'archived' && placeable) { item.st = 'live'; dirty = true; }
   }
 
   // ---- compute + write desired feed sets ----
@@ -678,4 +747,5 @@ module.exports = {
   loadMod, reportsSince, trustPenaltyOf, governItems, maybeSendDigest,
   wlHash, wlSubHit, wlWordHit, foldForWordlist, asciiJson,
   FB_TOMB_SCORE, tombstoneDetails,
+  FB_TEXT_PUBLIC, FB_DIGEST_GONE, textSig, mayKeepText, publicState, needsTextScrub, hydrateText,
 };
