@@ -115,4 +115,68 @@ function plan(st, boardRows, targets, pidOf, nowUnixMin) {
 function digestLines(fresh, plog) {
   return (fresh || []).slice(0, 200).map(f => '[' + (f.scope === 1 ? 'global' : f.scope === 2 ? 'party' : f.scope === 3 ? 'dm' : 'chat') + ' ts=' + f.tsMin + ' reporter=' + f.reporterSid + ' target=' + f.target + ']\n' + f.text);
 }
-module.exports = { CHAT_MUTE, decodeReport, tsMinToUnixMin, harvest, prune, reporterCount, plan, digestLines, sidPlausible };
+
+// ---- digest queue (the state file is committed to a PUBLIC repository every tick) ----
+// The queue of harvested rows still owed to the private digest holds keyed digests only -- never a raw id, never text:
+//   st.pend     = { reporterPid: mailSig }  one entry per reporter (the report box keeps one row per reporter; a newer
+//                                           report replaces the older row, so the newer entry replaces the older one)
+//   st.pendLost = number of queued rows that can no longer be shown (replaced by the same reporter's newer report,
+//                 or over PEND_MAX) -- a count for the mail body, nothing else
+// When the digest goes out the rows are read back from the report box (read every tick anyway) and matched by
+// mailSig, so report text and raw ids exist only on Steam and in the private inbox. A channel without a mail
+// channel queues nothing. mailSig goes through the keyed pseudonym (pidOf): the public file cannot confirm a guess.
+const PEND_MAX = 200;
+function mailSig(f, pidOf) { return pidOf('chat-mail|' + f.target + '|' + (f.scope | 0) + '|' + (f.tsMin | 0) + '|' + String(f.text == null ? '' : f.text)); }
+// Queue fresh rows ({ reporterSid, target, scope, tsMin, text }: harvest's fresh list, or a legacy pendingMail list).
+function queueMail(st, fresh, pidOf) {
+  let added = 0;
+  for (const f of fresh || []) {
+    if (!f || !sidPlausible(f.reporterSid)) continue;
+    const pend = st.pend || (st.pend = {});
+    const rp = pidOf(String(f.reporterSid)), sig = mailSig(f, pidOf);
+    if (pend[rp] === sig) continue;
+    if (pend[rp] !== undefined) { st.pendLost = (st.pendLost | 0) + 1; delete pend[rp]; }   // re-insert: newest last
+    pend[rp] = sig; added++;
+  }
+  if (st.pend) {
+    const keys = Object.keys(st.pend);
+    for (let i = 0; i < keys.length - PEND_MAX; i++) { delete st.pend[keys[i]]; st.pendLost = (st.pendLost | 0) + 1; }
+  }
+  return added;
+}
+// Read the queued rows back from this run's report box rows ([{ reporterSid, det }]).
+// Returns { found: [{ reporterSid, target, scope, tsMin, text }] (oldest first), missing }.
+function pendingRows(st, rows, pidOf) {
+  const pend = st.pend || {};
+  const found = [], hit = new Set();
+  for (const r of rows || []) {
+    if (!sidPlausible(r.reporterSid)) continue;
+    const rp = pidOf(String(r.reporterSid));
+    if (pend[rp] === undefined || hit.has(rp)) continue;
+    const rep = decodeReport(r.det);
+    if (!rep) continue;
+    const f = { reporterSid: String(r.reporterSid), target: rep.target, scope: rep.scope, tsMin: rep.tsMin, text: rep.text };
+    if (mailSig(f, pidOf) !== pend[rp]) continue;
+    hit.add(rp); found.push(f);
+  }
+  found.sort((a, b) => (a.tsMin | 0) - (b.tsMin | 0));
+  return { found, missing: Object.keys(pend).length - found.length };
+}
+// An earlier version queued the raw rows themselves (st.pendingMail = [{ reporterSid, target, scope, tsMin, text }]).
+// Never keep them: with a mail channel they move into the keyed queue, without one they are dropped. Returns how many.
+function scrubLegacy(st, pidOf, mailOn) {
+  const old = Array.isArray(st.pendingMail) ? st.pendingMail : [];
+  delete st.pendingMail;
+  if (mailOn && old.length) queueMail(st, old, pidOf);
+  return old.length;
+}
+// The only keys that reach the committed file. A new state field has to be added here on purpose -- and must hold
+// keyed pseudonyms, counts or times only. (sig: keyed digest of a reporter's last harvested row, where present.)
+const PUBLIC_KEYS = Object.freeze(['seen', 'sig', 'rep', 'auto', 'digest', 'pend', 'pendLost']);
+function publicState(st) {
+  const o = {};
+  for (const k of PUBLIC_KEYS) if (st && st[k] !== undefined) o[k] = st[k];
+  return o;
+}
+module.exports = { CHAT_MUTE, decodeReport, tsMinToUnixMin, harvest, prune, reporterCount, plan, digestLines, sidPlausible,
+  PEND_MAX, PUBLIC_KEYS, mailSig, queueMail, pendingRows, scrubLegacy, publicState };

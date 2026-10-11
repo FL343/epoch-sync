@@ -1965,7 +1965,8 @@ const CHAT_MUTE_FILE = process.env.CHAT_MUTE_FILE || 'chat-mute.json';
 const CHAT_MUTE_LB = process.env.CHAT_MUTE_LB || chatMute.CHAT_MUTE.MUTE_LB;
 const CHAT_REPORT_LB = process.env.CHAT_REPORT_LB || chatMute.CHAT_MUTE.REPORT_LB;
 function loadChatMute() { try { const o = JSON.parse(fs.readFileSync(CHAT_MUTE_FILE, 'utf8')); return (o && typeof o === 'object') ? o : {}; } catch (e) { return {}; } }
-function saveChatMute(st) { try { writeStateFile(CHAT_MUTE_FILE, JSON.stringify(st)); } catch (e) { ghWarn('write ' + CHAT_MUTE_FILE + ' failed: ' + (e && e.message)); } }
+// committed to the public repository: chatMute.publicState keeps keyed pseudonyms, counts and times only
+function saveChatMute(st) { try { writeStateFile(CHAT_MUTE_FILE, JSON.stringify(chatMute.publicState(st))); } catch (e) { ghWarn('write ' + CHAT_MUTE_FILE + ' failed: ' + (e && e.message)); } }
 function loadXp() { try { return JSON.parse(fs.readFileSync(XP_FILE, 'utf8')) || {}; } catch (e) { return {}; } }
 function saveXp(s) { try { writeStateFile(XP_FILE, JSON.stringify(s, null, 0)); } catch (e) { ghWarn('write ' + XP_FILE + ' failed: ' + (e && e.message)); } }
 // per-game point formula -- lockstep mirror of the client config (asserted by the schema-lockstep test).
@@ -3741,22 +3742,31 @@ async function main() {
           if (r.ok) nD++; else ghWarn('chat-mute: delete failed ' + plog(d.sid) + ' HTTP ' + r.status);
         }
       }
-      // private digest (same channel as the feedback digest; text only in the mail body, once per UTC day)
-      if (h.fresh.length && process.env.FB_DIGEST_TO && process.env.RESEND_API_KEY && !PT_MODE_MAIL_OFF) {
+      // private digest (same channel as the feedback digest; once per UTC day, a failed send is retried next tick).
+      // The state file is committed to the PUBLIC repository: it queues keyed row digests only (chatMute.queueMail);
+      // report text and raw ids are read back from the report box when the mail goes out, so they exist only on Steam
+      // and in the private inbox. Without a mail channel nothing is queued.
+      const mailOn = !!(process.env.FB_DIGEST_TO && process.env.RESEND_API_KEY) && !PT_MODE_MAIL_OFF;
+      chatMute.scrubLegacy(st, pid, mailOn);
+      if (!mailOn) { delete st.pend; delete st.pendLost; }
+      else {
+        if (h.fresh.length) chatMute.queueMail(st, h.fresh, pid);
         const day = new Date(nowMs).toISOString().slice(0, 10);
-        st.pendingMail = (st.pendingMail || []).concat(h.fresh).slice(-200);
-        const dg = st.digest || (st.digest = { day: '', at: 0 });
-        if (dg.day !== day || process.env.FB_DIGEST_FORCE) {
-          const lines = chatMute.digestLines(st.pendingMail, plog);
+        const dg = st.digest || { day: '', at: 0 };
+        if (st.pend && Object.keys(st.pend).length && rb.complete && (dg.day !== day || process.env.FB_DIGEST_FORCE)) {
+          const q = chatMute.pendingRows(st, rows, pid);
+          const lost = (st.pendLost | 0) + q.missing;
+          const lines = chatMute.digestLines(q.found, plog);
           const res = await fetch('https://api.resend.com/emails', {
             method: 'POST', headers: { Authorization: 'Bearer ' + process.env.RESEND_API_KEY, 'Content-Type': 'application/json' },
             body: JSON.stringify({ from: process.env.FB_DIGEST_FROM || 'onboarding@resend.dev', to: [process.env.FB_DIGEST_TO],
-              subject: (process.env.FB_DIGEST_TAG || '') + 'chat reports ' + day + ': ' + st.pendingMail.length + ' new',
-              text: 'Chat report snapshots since the last digest: ' + st.pendingMail.length + '\nManual mute: set-lb ' + CHAT_MUTE_LB + ' <sid> <untilUnixMin|0>; automatic rule = ' + chatMute.CHAT_MUTE.AUTO_REPORTERS + ' distinct reporters / ' + chatMute.CHAT_MUTE.WINDOW_MIN + ' min -> ' + chatMute.CHAT_MUTE.AUTO_MUTE_MIN + ' min.\n\n' + lines.join('\n\n') }),
+              subject: (process.env.FB_DIGEST_TAG || '') + 'chat reports ' + day + ': ' + q.found.length + ' new',
+              text: 'Chat report snapshots since the last digest: ' + q.found.length + (lost ? '\n(+' + lost + ' earlier snapshot(s) no longer on the report box: the same reporter sent a newer report before this digest)' : '') + '\nManual mute: set-lb ' + CHAT_MUTE_LB + ' <sid> <untilUnixMin|0>; automatic rule = ' + chatMute.CHAT_MUTE.AUTO_REPORTERS + ' distinct reporters / ' + chatMute.CHAT_MUTE.WINDOW_MIN + ' min -> ' + chatMute.CHAT_MUTE.AUTO_MUTE_MIN + ' min.\n\n' + lines.join('\n\n') }),
           });
-          if (res.ok) { st.digest = { day, at: nowUnixMin }; st.pendingMail = []; } else ghWarn('chat-mute digest send failed HTTP ' + res.status);
+          if (res.ok) { st.digest = { day, at: nowUnixMin }; delete st.pend; delete st.pendLost; console.log('chat-mute: digest sent ' + day + ' (' + q.found.length + ' rows' + (lost ? ', ' + lost + ' replaced' : '') + ')'); }
+          else ghWarn('chat-mute digest send failed HTTP ' + res.status);
         }
-      } else if (h.fresh.length) { st.pendingMail = (st.pendingMail || []).concat(h.fresh).slice(-200); }
+      }
       if (h.fresh.length || nW || nD || p.writes.length) {
         console.log('chat-mute: reports +' + h.fresh.length + ' (skipped ' + h.skipped + ') targets ' + targets.length + ' auto +' + nW + ' expired -' + nD + (APPLY_MMR ? '' : ' [dry-run]'));
         RUN.chatMute = '+' + h.fresh.length + 'r' + (nW ? '/+' + nW + 'm' : '') + (nD ? '/-' + nD + 'x' : '');
