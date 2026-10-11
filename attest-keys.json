@@ -240,7 +240,8 @@
       "at": "2026-10-08T18:28:41.267Z",
       "pubInfo": {
         "42960b482a1e3d7ba01e08c15dfa9fc05d3c4bff33ea7e75d80d28e4f3bf7667": {
-          "ch": "demo"
+          "ch": "demo",
+          "retiredAt": "2026-10-11T09:50:32.101Z"
         }
       }
     },
