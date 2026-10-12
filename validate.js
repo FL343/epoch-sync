@@ -288,6 +288,26 @@ function startRosterSplit(att, votes, roster) {
   }
   return att.some((r) => roster[r.d[5] | 0] !== pid(String(r.steamID)));
 }
+// A roster as the job compares it: seat:pid in seat order (a bot seat has no entry).
+function rosterCanon(ro) {
+  return Object.keys(ro || {}).map(Number).sort((a, b) => a - b).map((s) => s + ':' + pid(String(ro[s]))).join(',');
+}
+// Q80 review: every honest start record of a key carries the same roster (the host's START_GAME seat map, unchanged
+// within the match) and the same seat count; only the writer's own seat differs. So the roster gates only when every
+// start record of the key -- the disputed claimants included -- has the same seat count and names the same account at
+// every seat. Otherwise it is split (no seat gate, the Q75 roster contest decides). Without this, outside accounts voted
+// unopposed from seat numbers past the players' seat count (review-q80.js T1 / T2), and -- comparing the voters only --
+// two losers naming alts at the winners' seats, the alts starting there to take the winners' votes away, were the only
+// voters left: their roster registered unsplit, the gate dropped the winners' records and the losers took the win
+// (REVIEW-2 A1 / A2; the same for outside accounts covering every written seat while voting from seats nobody started
+// from, A4). A start that names other accounts is never the players' own: every honest start names the same table. The
+// cost: one start record with a roster of its own, before the job's first look, splits the key -- one outside account
+// can already pause a match that way (T6), and a player could void his own match, as he already can by changing his
+// own score (an inconsistent result is held).
+function startRosterDisagrees(all) {
+  const sig = (r) => (r.d[8] | 0) + '|' + rosterCanon(r.roster);
+  return all.some((r) => sig(r) !== sig(all[0]));
+}
 // ---- start roster registration (sticky first-seen: shard entries may be overwritten later) ----
 // Q80 (cloud audit): one claimant per seat. The registered roster is what the seat gate below trusts, and a majority of
 // attesters used to be enough to set it: the match key is read off any public start record, so a few outside accounts
@@ -295,12 +315,14 @@ function startRosterSplit(att, votes, roster) {
 // themselves. Every honest attester writes from his own seat (d[5]), one account per seat; an outside account has to
 // write from some seat too, and every seat a player started from is then claimed twice. A seat claimed by two or more
 // accounts gives none of them a vote (the honest claimant loses his too -- the other players' votes still name him), so
-// an outsider can take votes away but never add one where a player started: the majority below is the players'. Only
-// a seat nobody started from (a bot seat, a player who dropped before level 1) lets an outside account vote unopposed,
-// one vote per such seat. A key no roster registers for (fewer than two votes left) stays with the Q75 roster contest
+// an outsider can take votes away but never add one where a player started: the majority below is the players'. A seat
+// nobody started from (a seat past the players' seat count, a bot seat, a player who dropped before level 1) lets an
+// outside account vote unopposed, one vote per such seat -- and his start must then name the players' roster word for
+// word, with the players' seat count, or the roster is split (startRosterDisagrees, Q80 review). A key no roster
+// registers for (fewer than two votes left) stays with the Q75 roster contest
 // (applyRosterContest: held, nobody rated or convicted) until the extra start rows are gone; so does a roster its voters
-// split (startRosterSplit: registered as before, marked split, gates nothing). Endless keys keep the plain count (their
-// settle is a separate path, cloud audit Q78).
+// split (startRosterSplit, startRosterDisagrees: registered as before, marked split, gates nothing). Endless keys keep
+// the plain count (their settle is a separate path, cloud audit Q78).
 function registerStartRosters(starts, processed, pending, now) {
   const sg = {};
   for (const r of starts || []) { const m = r.d[3] + '_' + r.d[4] + '_' + r.d[2]; (sg[m] = sg[m] || []).push(r); }
@@ -310,6 +332,7 @@ function registerStartRosters(starts, processed, pending, now) {
     const bySid = {};   // one vote per distinct writer (a cold-reconnect duplicate collapses)
     for (const r of sg[m]) bySid[String(r.steamID)] = r;
     let att = Object.values(bySid);
+    const all = att;   // every distinct writer, the disputed claimants included (startRosterDisagrees)
     if (!isEndlessMt(sg[m][0].d[2] | 0)) {
       const claim = {};
       for (const r of att) { const s = r.d[5] | 0; claim[s] = (claim[s] | 0) + 1; }
@@ -337,7 +360,7 @@ function registerStartRosters(starts, processed, pending, now) {
     }
     if (!n) continue;
     pending[m] = { t0: now, mt: sg[m][0].d[2] | 0, roster, settled: [] };
-    if (!isEndlessMt(pending[m].mt) && startRosterSplit(att, votes, roster)) {
+    if (!isEndlessMt(pending[m].mt) && (startRosterSplit(att, votes, roster) || startRosterDisagrees(all))) {
       pending[m].split = 1;
       RUN.split = (RUN.split | 0) + 1;
       console.log('  start-split ' + m + ': the voters do not agree on the roster -- no seat gate, the roster contest decides (Q80)');
@@ -5460,4 +5483,4 @@ module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CHAT_MUTE: 
 Object.assign(module.exports, { KEY_CHANNEL, loadJobPubTable, soloKeyHeld, soloRunHasHeld });   // cloud audit R1-A5-07 per-channel key policy (test/playtest-key-policy.js)
 Object.assign(module.exports, { noteOwnStarts, hasOwnStart, OWN_START_CAP });   // cloud audit Q69 own-record evidence for leaver verdicts
 Object.assign(module.exports, { rosterContestSeats, applyRosterContest });   // cloud audit Q75 one account per seat per match key
-Object.assign(module.exports, { registerStartRosters, startRosterSplit, seatGateRoster, seatedOnRoster, applySeatGate });   // cloud audit Q80 seat gate
+Object.assign(module.exports, { registerStartRosters, startRosterSplit, rosterCanon, startRosterDisagrees, seatGateRoster, seatedOnRoster, applySeatGate });   // cloud audit Q80 seat gate
