@@ -45,6 +45,18 @@
 //        then copy the real result at the winners' seats: the roster is split (the start records disagree on the seat
 //        count and the voters left on the roster), the Q75 contest holds the key, the outside accounts gain nothing,
 //        nobody is convicted; mutant (the agreement check removed -> the outside pair takes the win)
+//   [17] REVIEW-3 B1 / B5 and two more ways in: a key without a seat gate settled records written only from seats nobody
+//        plays. B1: one outside start from a seat the match does not have splits the roster before the first look, a
+//        minute in two outside accounts write a matching result from two such seats (the seat count raised to make
+//        room), copying the players at theirs; B5: a modded player's own start names an alt there and the two write it;
+//        B7: a player and an alt write it before level 1, so the job's first sight of the key is the result (its
+//        synthetic entry keeps the start roster from ever registering); B8: a bot match, an outside start from a bot seat
+//        splits the roster, then two outside accounts write a result naming themselves at two of the three bot seats
+//        (the seat count unchanged); B9: the same with one outside account alone (the bot lane takes a single writer).
+//        No seat is named twice, so the contest did not hold them: it settled, every real player was convicted
+//        (B1 / B5 / B7) or lost his match XP (B8 / B9). Records that disagree on the seat layout now hold the key; units
+//        for seatLayout; mutants (the layout check removed / seat count only); the cost (one outside start alone pauses
+//        an honest match while it is there, nobody rated or convicted, then the key settles)
 // State isolation is structural (every *_FILE var scanned and redirected, cwd = temp dir), like test/strict-gate.js.
 const { spawnSync } = require('child_process');
 const fs = require('fs'), path = require('path'), os = require('os');
@@ -673,6 +685,131 @@ else {
       const m = timeline(steps, script);
       T('[16] mutant: comparing the voters only -> P3 / P4 take the win, P1 / P2 get nothing', up(m, P3) && up(m, P4) && none(m, P1) && none(m, P2),
         JSON.stringify(all6.map(s => ptsIn(m, s))));
+    } finally { try { fs.unlinkSync(script); } catch (e) {} }
+  }
+}
+
+// ---- [17] REVIEW-3: a key without a seat gate, records written only from seats nobody plays ----
+{
+  // units: every honest record of a key -- start and settle, bot seats empty in each -- has one layout
+  const lay = (d, sid) => v.seatLayout({ steamID: sid, d, roster: v.decodeRoster(d) });
+  const ros3 = [P1, P2, P3], RB = [P1, P2, '0', '0'];
+  const h0 = 0x8070;
+  T('[17] units: an honest start and settle of one key share the layout', lay(ffaStart(h0, 0, ros3), P1) === lay(ffaSettle(h0, 2, ros3), P3) && lay(ffaStart(h0, 0, ros3), P1) === '3|0,1,2',
+    lay(ffaStart(h0, 0, ros3), P1) + ' ' + lay(ffaSettle(h0, 2, ros3), P3));
+  T('[17] units: bot seats are empty in every copy (a bot-match layout)', lay(rec(0xB2, 11, h0, 1, 0, false, RB), P2) === '4|0,1' && lay(rec(0xB1, 11, h0, 0, 1, true, RB), P1) === '4|0,1',
+    lay(rec(0xB2, 11, h0, 1, 0, false, RB), P2));
+  T('[17] units: the writer\'s own seat is not part of it (a writer his roster leaves out is refused by the self-seat flag)',
+    lay(rec(0xB1, 11, h0, 3, 2, false, RB), Q[4]) === '4|0,1', lay(rec(0xB1, 11, h0, 3, 2, false, RB), Q[4]));
+  const asRec = (d, sid) => ({ steamID: sid, d, roster: v.decodeRoster(d) });
+  T('[17] units: seatLayoutsDisagree -- same layout no, seat count yes, seat map yes (a bot seat named), empty no',
+    !v.seatLayoutsDisagree([asRec(ffaStart(h0, 0, ros3), P1), asRec(ffaSettle(h0, 1, ros3), P2)])
+    && v.seatLayoutsDisagree([asRec(ffaStart(h0, 0, ros3), P1), asRec(rec(0xB1, 2, h0, 3, 1, true, ros3.concat([Q[0]])), Q[0])])
+    && v.seatLayoutsDisagree([asRec(rec(0xB2, 11, h0, 0, 0, false, RB), P1), asRec(rec(0xB2, 11, h0, 2, 0, false, [P1, P2, Q[0], '0']), Q[0])])
+    && !v.seatLayoutsDisagree([asRec(rec(0xB2, 11, h0, 0, 0, false, RB), P1), asRec(rec(0xB1, 11, h0, 1, 2, false, RB), P2)])
+    && !v.seatLayoutsDisagree([]) && !v.seatLayoutsDisagree(null));
+  // integration: B1 / B5 (REVIEW-3, 3-player FFA), B7 (synthetic entry), B8 (bot match)
+  SC[5] = [1000, 900, 800, 6100, 5200];
+  const sc4 = SC[4];
+  const withSC4 = (row, fn) => { SC[4] = row; try { return fn(); } finally { SC[4] = sc4; } };
+  const xpPosts = (rs, sid) => [].concat(...rs.map(r => posts(r, 5).filter(p => new RegExp('steamid=' + sid + '(&|$)').test(p.body))));
+  const cases = [
+    ['[17] B1 outside pair', () => {
+      const h = 0x8060, R4 = ros3.concat([Q[0]]), R5 = ros3.concat([Q[0], Q[1]]);
+      const S = [0, 1, 2].map(s => ({ sid: ros3[s], d: ffaStart(h, s, ros3) })).concat([{ sid: Q[0], d: ffaStart(h, 3, R4) }]);
+      const F = [{ sid: Q[0], d: rec(0xB1, 2, h, 3, 1, true, R5) }, { sid: Q[1], d: rec(0xB1, 2, h, 4, 2, false, R5) }];
+      const Rl = [0, 1, 2].map(s => ({ sid: ros3[s], d: ffaSettle(h, s, ros3) }));
+      return { split: true, steps: [[0, S], [1 * MIN, S.concat(F)], [5 * MIN, S.concat(F)], [5 * MIN, S.concat(F)], [1 * MIN, S.concat(F, Rl)], [3 * HOUR, S.concat(F, Rl)]],
+        honest: ros3, takers: [Q[0], Q[1]], lane: 'points' };
+    }],
+    ['[17] B5 player + alt', () => {
+      const h = 0x8061, R4 = ros3.concat([Q[2]]);
+      const S = [0, 1].map(s => ({ sid: ros3[s], d: ffaStart(h, s, ros3) })).concat([{ sid: P3, d: ffaStart(h, 2, R4) }]);
+      const F = withSC4([1000, 900, 6100, 5200], () => [{ sid: P3, d: rec(0xB1, 2, h, 2, 1, true, R4) }, { sid: Q[2], d: rec(0xB1, 2, h, 3, 2, false, R4) }]);
+      const Rl = [0, 1].map(s => ({ sid: ros3[s], d: ffaSettle(h, s, ros3) }));
+      return { split: true, steps: [[0, S], [1 * MIN, S.concat(F)], [5 * MIN, S.concat(F)], [5 * MIN, S.concat(F)], [1 * MIN, S.concat(F, Rl)], [3 * HOUR, S.concat(F, Rl)]],
+        honest: [P1, P2], takers: [P3, Q[2]], lane: 'points' };
+    }],
+    ['[17] B7 result first (synthetic entry)', () => {
+      const h = 0x8062, R4 = ros3.concat([Q[3]]);
+      const F = withSC4([1000, 900, 6100, 5200], () => [{ sid: P3, d: rec(0xB1, 2, h, 2, 1, true, R4) }, { sid: Q[3], d: rec(0xB1, 2, h, 3, 2, false, R4) }]);
+      const S = [0, 1].map(s => ({ sid: ros3[s], d: ffaStart(h, s, ros3) }));
+      const Rl = [0, 1].map(s => ({ sid: ros3[s], d: ffaSettle(h, s, ros3) }));
+      return { synth: true, steps: [[0, F], [3 * MIN, F.concat(S)], [5 * MIN, F.concat(S)], [5 * MIN, F.concat(S)], [1 * MIN, F.concat(S, Rl)], [3 * HOUR, F.concat(S, Rl)]],
+        honest: [P1, P2], takers: [P3, Q[3]], lane: 'points' };
+    }],
+    ['[17] B8 bot match, outside pair at two bot seats', () => {
+      const h = 0x8063, RB5 = [P1, P2, '0', '0', '0'], RF = [P1, P2, '0', Q[4], Q[5]];
+      const S = [0, 1].map(s => ({ sid: RB5[s], d: rec(0xB2, 11, h, s, 0, false, RB5) }));
+      const XS = [{ sid: Q[4], d: rec(0xB2, 11, h, 3, 0, false, RF) }];
+      const F = [{ sid: Q[4], d: rec(0xB1, 11, h, 3, 1, true, RF) }, { sid: Q[5], d: rec(0xB1, 11, h, 4, 2, false, RF) }];
+      const Rl = [0, 1].map(s => ({ sid: RB5[s], d: rec(0xB1, 11, h, s, 3 + s, false, RB5) }));
+      return { split: true, steps: [[0, S.concat(XS)], [1 * MIN, S.concat(XS, F)], [5 * MIN, S.concat(XS, F)], [5 * MIN, S.concat(XS, F)], [1 * MIN, S.concat(XS, F, Rl)], [3 * HOUR, S.concat(XS, F, Rl)]],
+        honest: [P1, P2], takers: [Q[4], Q[5]], lane: 'xp' };
+    }],
+    ['[17] B9 bot match, one outside account alone at a bot seat', () => {
+      const h = 0x8064, RF = [P1, P2, Q[6], '0'];
+      const S = [0, 1].map(s => ({ sid: RB[s], d: rec(0xB2, 11, h, s, 0, false, RB) }));
+      const XS = [{ sid: Q[6], d: rec(0xB2, 11, h, 2, 0, false, RF) }];
+      const F = withSC4([1000, 900, 6100, 5200], () => [{ sid: Q[6], d: rec(0xB1, 11, h, 2, 1, true, RF) }]);
+      const Rl = [0, 1].map(s => ({ sid: RB[s], d: rec(0xB1, 11, h, s, 1 + s, s === 0, RB) }));
+      return { split: true, steps: [[0, S.concat(XS)], [1 * MIN, S.concat(XS, F)], [5 * MIN, S.concat(XS, F)], [5 * MIN, S.concat(XS, F)], [1 * MIN, S.concat(XS, F, Rl)], [3 * HOUR, S.concat(XS, F, Rl)]],
+        honest: [P1, P2], takers: [Q[6]], lane: 'xp' };
+    }],
+  ];
+  const LFROM = '    if (seats.length || seatLayoutsDisagree(recsM)) res.contested.set(m, seats);';
+  const LTO = '    if (seats.length) res.contested.set(m, seats);';
+  const PFROM = "  return (r.d[8] | 0) + '|' + Object.keys(r.roster || {}).map(Number).sort((a, b) => a - b).join(',');";
+  const PTO = "  return String(r.d[8] | 0);";
+  const mut = (from, to, tag) => {
+    if (SRC.split(from).length !== 2) { bad(tag + ': anchor not found exactly once'); return null; }
+    const script = path.join(__dirname, '..', '.mutant-seat-gate-layout-' + process.pid + '.js');
+    fs.writeFileSync(script, SRC.replace(from, to));
+    return script;
+  };
+  const gained = (rs, c) => c.lane === 'points' ? c.takers.some(s => up(rs, s)) : c.takers.some(s => xpPosts(rs, s).length > 0);
+  const framed = (rs, c) => c.lane === 'points' ? c.honest.some(s => leavesOf(last(rs), s) > 0) : c.honest.every(s => xpPosts(rs, s).length === 0) && gained(rs, c);
+  for (const [tag, build] of cases) {
+    const c = build(), key = keyOf(c.steps[0][1][0].d), rs = timeline(c.steps), every = c.honest.concat(c.takers);
+    T(tag + ': six runs exit 0', allOk(rs, 6), last(rs).out.slice(-800));
+    if (c.split) T(tag + ': the roster registers split', (pendOf(rs[0], key) || {}).split === 1 && /start-split /.test(rs[0].out), JSON.stringify(pendOf(rs[0], key)));
+    if (c.synth) T(tag + ': the job sees the result first (synthetic entry, no start roster ever registers)', (pendOf(rs[0], key) || {}).synth === true && !/start-pending /.test(outOf(rs.filter(r => r.out.indexOf(key) >= 0))),
+      JSON.stringify(pendOf(rs[1], key)));
+    T(tag + ': two seat layouts -> held (Q75 contest) from the run the real records show up, nobody rated, no XP',
+      /records that disagree on the seat count or the seat map -- roster contest, not settled \(Q75\)/.test(rs[1].out)
+      && every.every(s => none(rs, s)) && every.every(s => xpPosts(rs.slice(0, 5), s).length === 0), JSON.stringify(every.map(s => [ptsIn(rs, s), xpPosts(rs, s).length])));
+    T(tag + ': no real player convicted while he plays nor at maturity', c.honest.every(s => rs.every(r => leavesOf(r, s) === 0)), JSON.stringify(c.honest.map(s => leavesOf(last(rs), s))));
+    let script = mut(LFROM, LTO, tag + ' mutant (layout check removed)');
+    if (script) try {
+      const m = timeline(c.steps, script);
+      T(tag + ' mutant: the layout check removed -> the real players are convicted / lose their XP, the cheaters gain', framed(m, c) && gained(m, c),
+        JSON.stringify(every.map(s => [ptsIn(m, s), leavesOf(last(m), s), xpPosts(m, s).length])));
+    } finally { try { fs.unlinkSync(script); } catch (e) {} }
+  }
+  // the cost (README: one outside start record alone): from a seat the match does not have, written before the first look,
+  //   it pauses the honest match while it is there -- nobody rated, nobody convicted; once it is gone the key settles
+  {
+    const h = 0x8065, R4 = ros3.concat([Q[7]]);
+    const S = [0, 1, 2].map(s => ({ sid: ros3[s], d: ffaStart(h, s, ros3) })), XS = [{ sid: Q[7], d: ffaStart(h, 3, R4) }];
+    const Rl = [0, 1, 2].map(s => ({ sid: ros3[s], d: ffaSettle(h, s, ros3) }));
+    const rs = timeline([[0, S.concat(XS)], [12 * MIN, S.concat(XS, Rl)], [5 * MIN, S.concat(XS, Rl)], [5 * MIN, S.concat(Rl)]]);
+    T('[17] cost: one outside start alone pauses an honest match while it is there, nobody rated or convicted',
+      allOk(rs, 4) && (pendOf(rs[0], keyOf(S[0].d)) || {}).split === 1
+      && /records that disagree on the seat count or the seat map -- roster contest, not settled \(Q75\)/.test(rs[1].out)
+      && ros3.every(sid => none(rs.slice(0, 3), sid)) && ros3.every(sid => rs.every(r => leavesOf(r, sid) === 0)), last(rs).out.slice(-600));
+    T('[17] cost: once that record is gone the key settles from the honest records', up(rs, P1) && ros3.every(sid => leavesOf(last(rs), sid) === 0),
+      JSON.stringify(ros3.map(sid => ptsIn(rs, sid))));
+  }
+  // the seat count alone (the REVIEW-3 sample) misses the bot matches: the outside accounts keep the count and only name
+  //   themselves at bot seats
+  for (const i of [3, 4]) {
+    const [tag, build] = cases[i], c = build();
+    const script = mut(PFROM, PTO, tag + ' mutant (seat count only)');
+    if (!script) continue;
+    try {
+      const m = timeline(c.steps, script);
+      T(tag + ' mutant: seat count only -> the outside account(s) take the match XP, the real players get none', framed(m, c) && gained(m, c),
+        JSON.stringify(c.honest.concat(c.takers).map(s => xpPosts(m, s).length)));
     } finally { try { fs.unlinkSync(script); } catch (e) {} }
   }
 }

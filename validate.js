@@ -233,6 +233,34 @@ function rosterContestSeats(recs) {
   }
   return Object.keys(at).filter(k => at[k].size > 1).map(Number).sort((a, b) => a - b);
 }
+// Q80 third review (REVIEW-3): the seat-by-seat contest above holds a key only while two accounts are named for one seat.
+// A key without a seat gate -- a roster its start records split, a synthetic first-sighting entry, no roster yet -- was
+// open to records written only from seats nobody plays: one outside start record from a seat the match does not have
+// split the roster before the job's first look, and a minute in two accounts wrote a matching result from two such seats
+// (the seat count raised to make room), copying the players at theirs. No seat was named twice, the job settled it and
+// convicted every real player as a leaver while the real result was still being played (review3-q80.js B1..B6: 1V1, 3-
+// and 4-player FFA, ranked and quick; one modded player with an alt did the same, B5). The same works with no split at
+// all when the fake result is the first thing the job sees of the key (written before level 1 by someone in the match:
+// the synthetic entry it makes blocks the start roster from ever registering), and from the empty seats of a bot match
+// (the seat count unchanged, the writers naming themselves at two bot seats). What a stranger cannot fake is the seat
+// layout: every honest record of a key, start and settle, carries the host's START_GAME seat count and seat map,
+// unchanged within the match (bot seats empty in every copy). So on a key the seat gate does not cover, records that
+// disagree on the seat count or on which seats are named hold the key like a seat named twice. (A settle record that
+// does not name its writer at his own seat is already refused by the self-seat sanity flag.) The cost: one outside
+// start record with another layout, written before the first look, pauses the match until it is gone (it already took
+// one more record to do that); nobody is rated or convicted from it.
+function seatLayout(r) {
+  return (r.d[8] | 0) + '|' + Object.keys(r.roster || {}).map(Number).sort((a, b) => a - b).join(',');
+}
+function seatLayoutsDisagree(recs) {
+  let first = null;
+  for (const r of recs || []) {
+    if (!r || !r.d) continue;
+    const l = seatLayout(r);
+    if (first === null) first = l; else if (l !== first) return true;
+  }
+  return false;
+}
 // A contested key is held like an inconsistent one: pulled out of both group lists before any pass reads them (the
 // team-gamble dissent pass, the start cross-check, the settle loop), every writer flagged once per key, nobody rated, nobody
 // convicted from it. Nothing sticky: when the contesting records are gone the key settles from what is left. Endless keys
@@ -249,8 +277,9 @@ function applyRosterContest(gr, starts, pending, signals, processed, now) {
     const g = gr.groups[m];
     if (!g || !g.length || processed.has(m) || isEndlessMt(g[0].d[2] | 0)) continue;
     if (seatGateRoster(pending && pending[m])) continue;   // Q80: a registered start roster already decides who counts (applySeatGate)
-    const seats = rosterContestSeats(g.concat(byKey[m] || []));
-    if (seats.length) res.contested.set(m, seats);
+    const recsM = g.concat(byKey[m] || []);
+    const seats = rosterContestSeats(recsM);
+    if (seats.length || seatLayoutsDisagree(recsM)) res.contested.set(m, seats);   // Q80 third review: or two seat layouts
   }
   if (!res.contested.size) return res;
   for (const list of [gr.consistentMatches, gr.inconsistentGroups]) {
@@ -261,7 +290,8 @@ function applyRosterContest(gr, starts, pending, signals, processed, now) {
     const g = gr.groups[m];
     if (recordFlag(signals, g, m, now)) res.dirty = true;
     for (const r of g) if (res.touched.indexOf(String(r.steamID)) < 0) res.touched.push(String(r.steamID));
-    ghWarn('match=' + m + ': two accounts named for seat(s) ' + seats.join(',') + ' -- roster contest, not settled (Q75): '
+    ghWarn('match=' + m + ': ' + (seats.length ? 'two accounts named for seat(s) ' + seats.join(',') : 'records that disagree on the seat count or the seat map')
+      + ' -- roster contest, not settled (Q75): '
       + g.map(r => plog(r.steamID) + '@' + r.shard + '=' + (r.d[5] | 0)).join(' '));
   }
   return res;
@@ -1157,7 +1187,7 @@ function writeRunSummary() {
       '| solo same-key forks (another signed record under a settled segment key) | ' + s('soloKeyFork', 0) + ' |',
       '| one-match-at-a-time deferrals | ' + s('writerPaced', 0) + ' |',
       '| absent seats named by others only, not convicted (Q69) | ' + s('unattested', 0) + ' |',
-      '| match keys with two accounts on one seat, not settled (Q75) | ' + s('contested', 0) + ' |',
+      '| match keys with two accounts on one seat or two seat layouts, not settled (Q75) | ' + s('contested', 0) + ' |',
       '| records off their start-roster seat, not counted / start keys with a seat claimed twice / start rosters the voters split, no seat gate (Q80) | ' + s('offSeat', 0) + ' / ' + s('disputed', 0) + ' / ' + s('split', 0) + ' |',
       '| campaign grants / campaign endless | ' + s('campaign', '-') + ' / ' + s('campaignEndless', '-') + ' |',
       '| page-cap hits | ' + RUN.cap + ' |',
@@ -5482,5 +5512,5 @@ module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CHAT_MUTE: 
   RECOVER_FILE, loadRecover, recoverPick, readRecoverRows };   // client knife 5.0i one-shot pool recovery
 Object.assign(module.exports, { KEY_CHANNEL, loadJobPubTable, soloKeyHeld, soloRunHasHeld });   // cloud audit R1-A5-07 per-channel key policy (test/playtest-key-policy.js)
 Object.assign(module.exports, { noteOwnStarts, hasOwnStart, OWN_START_CAP });   // cloud audit Q69 own-record evidence for leaver verdicts
-Object.assign(module.exports, { rosterContestSeats, applyRosterContest });   // cloud audit Q75 one account per seat per match key
+Object.assign(module.exports, { rosterContestSeats, applyRosterContest, seatLayout, seatLayoutsDisagree });   // cloud audit Q75 one account per seat per match key (+ Q80 third review seat layout)
 Object.assign(module.exports, { registerStartRosters, startRosterSplit, rosterCanon, startRosterDisagrees, seatGateRoster, seatedOnRoster, applySeatGate });   // cloud audit Q80 seat gate
