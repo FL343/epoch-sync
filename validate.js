@@ -4897,8 +4897,12 @@ async function main() {
       // never crosses seat counts, so the chain memory is per-board (knife-B's cross-ladder
       // max is retired with the mixed-resume semantics it served; legacy mixed resumes only
       // pace slower, never flag).
+      // Q111 (cloud audit 2026-10): only roster seats that wrote their own record for the run vouch for the chain (the Q78
+      //   own set). A deep player the writers merely NAME used to lend his best depth, so two accounts could claim a resume at
+      //   his depth and wait out one level instead of the whole span. A legit resume's deep player wrote his start
+      //   attestation when level 1 began; if even that is missing the run just waits the full span (deferred, never flagged).
       let chainMax = 0;
-      for (const sid of rosterSids) {
+      for (const sid of ownRosterSids) {
         if (bBest[sid] != null) chainMax = Math.max(chainMax, unpackEndlessScore(bBest[sid]).depth);
       }
       let pend7 = startsPending[c.m];
