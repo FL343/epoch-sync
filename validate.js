@@ -211,6 +211,58 @@ function noteOwnStarts(p, recs) {
   for (const r of recs) { const h = pid(String(r.steamID)); if (st.indexOf(h) < 0 && st.length < OWN_START_CAP) st.push(h); }
 }
 function hasOwnStart(p, h) { return !!(p && Array.isArray(p.started) && p.started.indexOf(h) >= 0); }
+// ---- roster contest (cloud audit Q75) ----
+// A match key is no secret among its players, and the shard rows are open to every account: anyone a player hands the key
+// to can write a record for the match. Every vote the settle takes (the seat -> account map, the team-gamble winner claims,
+// the absent-seat majority) used to count such a record like a player's, so two losers and one outside account turned a
+// 2V2 around (3 claims to 2) and five outside accounts took a match over outright. What a stranger cannot fake is the
+// roster agreeing with itself: it is the host's START_GAME seat map, written into every start and settle record by every
+// player of the match, unchanged until a rematch (a new key), and a player writes at his own seat. So every honest record
+// of a key names the same account at every seat. Returns the seats where the key's records (settle and start, every copy;
+// a writer's own seat counts as his name) or the registered start roster name two different accounts -- [] = the key
+// agrees with itself. A seat a record leaves empty ('0': a bot seat, a missing id) names nobody and contests nothing.
+// pend.roster holds pid hashes (starts.json); record rosters hold steam ids.
+function rosterContestSeats(recs, pend) {
+  const at = {};
+  const add = (seat, h) => { (at[seat] = at[seat] || new Set()).add(h); };
+  if (pend && pend.roster) for (const k of Object.keys(pend.roster)) if (pend.roster[k]) add(k | 0, String(pend.roster[k]));
+  for (const r of recs || []) {
+    if (!r || !r.d) continue;
+    add(r.d[5] | 0, pid(String(r.steamID)));
+    for (const k of Object.keys(r.roster || {})) add(k | 0, pid(String(r.roster[k])));
+  }
+  return Object.keys(at).filter(k => at[k].size > 1).map(Number).sort((a, b) => a - b);
+}
+// A contested key is held like an inconsistent one: pulled out of both group lists before any pass reads them (the
+// team-gamble dissent pass, the start cross-check, the settle loop), every writer flagged once per key, nobody rated, nobody
+// convicted from it. It does not count as consistent, so its start entry runs the orphan path at maturity: an honest
+// finisher wrote a settle record (exempt), a real quitter's own start still counts (Q69). Nothing sticky: when the
+// contesting records are gone the key settles from what is left. Endless keys stay out here (their settle is a separate
+// path, cloud audit Q78); a processed key is history.
+function applyRosterContest(gr, starts, pending, signals, processed, now) {
+  const res = { contested: new Map(), dirty: false, touched: [] };
+  const byKey = {};
+  for (const r of starts || []) { const m = r.d[3] + '_' + r.d[4] + '_' + r.d[2]; (byKey[m] = byKey[m] || []).push(r); }
+  for (const m of Object.keys(gr.groups || {})) {
+    const g = gr.groups[m];
+    if (!g || !g.length || processed.has(m) || isEndlessMt(g[0].d[2] | 0)) continue;
+    const seats = rosterContestSeats(g.concat(byKey[m] || []), pending && pending[m]);
+    if (seats.length) res.contested.set(m, seats);
+  }
+  if (!res.contested.size) return res;
+  for (const list of [gr.consistentMatches, gr.inconsistentGroups]) {
+    if (!list) continue;
+    for (let i = list.length - 1; i >= 0; i--) if (res.contested.has(list[i].m)) list.splice(i, 1);
+  }
+  for (const [m, seats] of res.contested) {
+    const g = gr.groups[m];
+    if (recordFlag(signals, g, m, now)) res.dirty = true;
+    for (const r of g) if (res.touched.indexOf(String(r.steamID)) < 0) res.touched.push(String(r.steamID));
+    ghWarn('match=' + m + ': two accounts named for seat(s) ' + seats.join(',') + ' -- roster contest, not settled (Q75): '
+      + g.map(r => plog(r.steamID) + '@' + r.shard + '=' + (r.d[5] | 0)).join(' '));
+  }
+  return res;
+}
 // O93: the one-attester exception of reconcileStarts (solo competitive segment start)
 function soloStartAttested(att) {
   if (!att || att.length !== 1) return false;
@@ -983,6 +1035,7 @@ function writeRunSummary() {
       '| solo same-key forks (another signed record under a settled segment key) | ' + s('soloKeyFork', 0) + ' |',
       '| one-match-at-a-time deferrals | ' + s('writerPaced', 0) + ' |',
       '| absent seats named by others only, not convicted (Q69) | ' + s('unattested', 0) + ' |',
+      '| match keys with two accounts on one seat, not settled (Q75) | ' + s('contested', 0) + ' |',
       '| campaign grants / campaign endless | ' + s('campaign', '-') + ' / ' + s('campaignEndless', '-') + ' |',
       '| page-cap hits | ' + RUN.cap + ' |',
       '| solo segments held by the key policy (other channel / retired key; new this run) | ' + s('keyHeld', 0) + ' (' + s('keyHeldNew', 0) + ') |',
@@ -3200,6 +3253,12 @@ async function main() {
   // trust-tier candidates seen this run (real sids; signals stay HMAC-keyed -- the only
   // place real ids persist is the trust board itself, which is the public artifact anyway)
   const trustTouched = new Set();
+  // Q75: a key whose records name two different accounts for one seat is held out of every pass below (nobody rated,
+  //   nobody convicted, every writer flagged once) -- an outside account's record no longer counts as a vote
+  const rcRes = applyRosterContest(gr, starts, startsPending, signals, processed, Date.now());
+  if (rcRes.dirty) sigDirty = true;
+  for (const sid of rcRes.touched) trustTouched.add(sid);
+  RUN.contested = rcRes.contested.size;
   // Q51: a mode-2 group with exactly one dissenting writer strikes him; at the K-th strike it settles from
   //   the agreeing records (he is a consensus leaver), otherwise it stays unsettled with only him flagged.
   //   Q56: two or three teammates refusing together are struck one by one the same way (any one due settles it)
@@ -5293,3 +5352,4 @@ module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CHAT_MUTE: 
   RECOVER_FILE, loadRecover, recoverPick, readRecoverRows };   // client knife 5.0i one-shot pool recovery
 Object.assign(module.exports, { KEY_CHANNEL, loadJobPubTable, soloKeyHeld, soloRunHasHeld });   // cloud audit R1-A5-07 per-channel key policy (test/playtest-key-policy.js)
 Object.assign(module.exports, { noteOwnStarts, hasOwnStart, OWN_START_CAP });   // cloud audit Q69 own-record evidence for leaver verdicts
+Object.assign(module.exports, { rosterContestSeats, applyRosterContest });   // cloud audit Q75 one account per seat per match key
