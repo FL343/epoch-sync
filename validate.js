@@ -4632,6 +4632,26 @@ async function main() {
       // CP). Leave the group fresh; it settles whole once the boards resolve.
       const t = endlessTail(g[0].d);   // presence + domains guaranteed by the sanity gate above
       const isClassicSeg = !!((t.flags | 0) & attest.SEG_CLASSIC);   // N3: team classic segments gate on their own lifetime family board (no cp / casual pair)
+      // absent-seat hold for the endless lanes (Q47, cloud audit 2026-10; residual 1 of R1-B2-04): these lanes credit only the
+      //   seats that WROTE a record (best / XP / milestones), and a 3- or 4-seat group settled as soon as two writers agreed --
+      //   a seat whose record landed a little after the others' (or sat on a shard this run could not read) lost that segment's
+      //   best and XP for good (the key was processed). Same rule as the matchmade lanes (absenceHold), checked as soon as
+      //   each lane has its start entry (ahead of its pacing gate): settled in full once the record lands, or without the seat
+      //   once a complete read still lacks it after the grace. Never a flag, never a conviction (endless has no leaver economy).
+      //   A 2-seat run needs both writers to be consistent at all; the solo lane (pc=1) never reaches this block.
+      const endlessAbsence = (pendE) => {
+        const agreedE = pendE.agreed || (pendE.agreed = []);   // writers seen agreeing earlier: a record lost to shard rotation is not a gap
+        for (const sid of writerSids) { const h = pid(sid); if (agreedE.indexOf(h) < 0) agreedE.push(h); }
+        const absentE = absentRosterSeats(g).filter((x) => agreedE.indexOf(pid(String(x.steamID))) < 0);
+        return { absent: absentE, res: absenceHold(absentE, pendE, nowMs, shardsComplete, ABSENT_GRACE_MS) };
+      };
+      const endlessHeld = (lane, ab) => {
+        if (!ab.res.hold) return false;
+        RUN.absentHeld = (RUN.absentHeld | 0) + 1;
+        console.log('  absent-hold ' + c.m + ' (' + lane + '): seat' + (ab.absent.length > 1 ? 's ' : ' ') + ab.absent.map((x) => x.seat).join(',') + ' wrote no record -- '
+          + (ab.res.hold === 'read' ? 'not every record shard was read this run' : 'grace ' + Math.round(ab.res.waitMs / 1000) + 's left') + ', deferred (settles in full if the record lands)');
+        return true;
+      };
       if (!isClassicSeg && (!cpId || !bId || (seasonId >= 1 && !bSeasonId))) { console.log('  endless ' + c.m + ': cp/' + cas.label + '/seasonal board unresolved -- left pending'); continue; }
       const roster0 = rosterConsensus(g);
       const rosterSids = Object.values(roster0).map(String);
@@ -4663,6 +4683,8 @@ async function main() {
         }
         let pendK = startsPending[c.m];
         if (!pendK) { pendK = startsPending[c.m] = { t0: nowMs, mt: matchType, roster: {}, settled: [], synth: true }; for (const sid of writerSids) sigPlayer(signals, pid(sid), nowMs).ns += 1; sigDirty = true; }
+        const absK = endlessAbsence(pendK);   // Q47: wait out a seat whose record is missing (see endlessAbsence)
+        if (endlessHeld('team classic', absK)) continue;
         const reqK = endlessRequiredMs(f, plan.proven, CLASSIC.LEVEL_S_TEAM);
         if (nowMs - (pendK.t0 || 0) < reqK) {
           console.log('  endless-classic-pacing ' + c.m + ': depth ' + f.startDepth + '->' + f.endDepth + ' (proven ' + plan.proven + ') needs ' + Math.round(reqK / 1000) + 's real time, seen ' + Math.round((nowMs - (pendK.t0 || 0)) / 1000) + 's -- deferred');
@@ -4728,6 +4750,8 @@ async function main() {
         }
         let pendT = startsPending[c.m];
         if (!pendT) { pendT = startsPending[c.m] = { t0: nowMs, mt: matchType, roster: {}, settled: [], synth: true }; for (const sid of writerSids) sigPlayer(signals, pid(sid), nowMs).ns += 1; sigDirty = true; }
+        const absT = endlessAbsence(pendT);   // Q47: wait out a seat whose record is missing (see endlessAbsence)
+        if (endlessHeld('team comp', absT)) continue;
         const reqT = endlessRequiredMs(f, plan.proven);
         if (nowMs - (pendT.t0 || 0) < reqT) {
           console.log('  endless-comp-pacing ' + c.m + ': depth ' + f.startDepth + '->' + f.endDepth + ' (proven ' + plan.proven + ') needs ' + Math.round(reqT / 1000) + 's real time, seen ' + Math.round((nowMs - (pendT.t0 || 0)) / 1000) + 's -- deferred');
@@ -4799,6 +4823,8 @@ async function main() {
         for (const sid of writerSids) sigPlayer(signals, pid(sid), nowMs).ns += 1;
         sigDirty = true;
       }
+      const abs7 = endlessAbsence(pend7);   // Q47: wait out a seat whose record is missing (see endlessAbsence)
+      if (endlessHeld('co-op', abs7)) continue;
       const reqMs = endlessRequiredMs(t, chainMax);
       if (nowMs - (pend7.t0 || 0) < reqMs) {
         console.log('  endless-pacing ' + c.m + ': depth ' + t.startDepth + '->' + t.endDepth + ' (chain ' + chainMax + ') needs ' + Math.round(reqMs / 1000) + 's real time, seen ' + Math.round((nowMs - (pend7.t0 || 0)) / 1000) + 's -- deferred');

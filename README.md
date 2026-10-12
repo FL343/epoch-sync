@@ -19,8 +19,9 @@ authoritative half of the client's optimistic deduction, so it survives read-bac
 rather than being reverted. Single-side records can't frame a leaver (majority roster
 vote), and each match is penalized at most once (idempotent via `processed.json`).
 A missing record only counts as leaving once it is really gone: a consistent group that
-lacks a roster seat's record (any lane — the private and bot lanes convict nobody, but
-settling early would cost the late finisher their XP) waits until (a) a run has read every
+lacks a roster seat's record (any lane, endless included — the private, bot and endless
+lanes convict nobody, but settling early would cost the late finisher their XP and, on an
+endless segment, its best on the seat-count ladder) waits until (a) a run has read every
 record shard in full — the listing must hold exactly `LB_PREFIX`+0..N-1 (N = the client's
 shard count, `LEDGER_SHARDS`), and no shard read may fail (408 / 429 / 5xx retry first),
 hit the page cap or answer a 200 without its entries block — and (b) the gap has stood for
@@ -137,7 +138,7 @@ absent, so a run is unaffected before it is provisioned.
 - `test/void-consensus.js`, `test/leaver-absence.js`, `test/lp-penalty.js`,
   `test/xp-ladder.js`, `test/reduced-stakes.js`, `test/team-rank.js`, `test/team-lp.js`,
   `test/start-orphan.js`, `test/sanity-bounds.js`, `test/signals-collect.js`,
-  `test/absence-grace.js` — unit tests
+  `test/absence-grace.js`, `test/absence-grace-endless.js` — unit tests
   for the pure helpers (run one with
   `node test/<name>.js`; CI runs all of `test/*.js` before each reconcile).
 - `.github/workflows/validate.yml` — scheduled run + state persistence.
