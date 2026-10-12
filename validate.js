@@ -1182,7 +1182,7 @@ function writeRunSummary() {
       '| board writes rating/points/xp | ' + s('writes', '0/0 0/0 0/0') + ' |',
       '| endless settles / cp+board writes | ' + s('endless', 0) + ' (+' + s('endlessComp', 0) + ' team comp, +' + s('solo', 0) + ' solo) / ' + s('writesEndless', '0/0 0/0') + ' |',
       '| endless seats named by others only / CP not charged | ' + s('endlessNamedOnly', 0) + ' / ' + s('endlessNamedOnlyCp', 0) + ' |',
-      '| endless seats charged on the others\' word only: capped (no board, no XP) / CP not charged / balances clamped to int32 | ' + s('endlessUnattested', 0) + ' / ' + s('endlessUnattestedCp', 0) + ' / ' + s('cpClamped', 0) + ' |',
+      '| endless seats charged on the others\' word only (in full, A14): seats / CP / over 300 CP / balances clamped to int32 | ' + s('endlessOthersWord', 0) + ' / ' + s('endlessOthersWordCp', 0) + ' / ' + s('endlessOthersWordBig', 0) + ' / ' + s('cpClamped', 0) + ' |',
       '| endless groups held: a writer seated elsewhere than his own record (Q110) | ' + s('endlessSeatDispute', 0) + ' |',
       '| seedcap veto / reject-window discards | ' + s('seedcapVeto', 0) + ' / ' + s('seedcapReject', 0) + ' |',
       '| perk replay rejects | ' + s('perkRej', 0) + ' |',
@@ -3056,12 +3056,11 @@ function endlessDebits(contPacked) {
 //   cloud audit Q116). A member who left before the end (start attestation only) or reconnected straight onto results
 //   (all-zero tail, the M3 abstention) does not even carry them: the others alone write his count and could pack 15
 //   continues on him (17,477 CP) and, by packing their own seats too, push his rungs up the shared ladder (a third seat
-//   reached 3.35e9 CP). Such a seat's debit is capped at CONT_UNATTESTED_CP_MAX per settle; the rest is counted, not charged,
-//   and a capped writer (the all-zero tail) earns no board and no XP for the run -- otherwise a client that writes a zero
-//   tail for itself would pay the cap for any number of continues and still rank. Cost: a member who really paid more than
-//   the cap and then left gets the difference back on read-back; an honest reconnector whose continues cost more than the
-//   cap pays the cap and misses the run's board / XP (the full fix is a per-continue receipt written by the payer's client).
-const CONT_UNATTESTED_CP_MAX = 300;
+//   reached 3.35e9 CP). The user's call (A14, 2026-10-10): no cap -- co-op is played among friends; such a seat is charged
+//   in full and ranks as before, and the job only keeps every balance inside the cp_bank int32 (cpClamp) and counts these
+//   seats (run summary, log line, a `uc` row on the accounts whose records carried the count when one seat paid more than
+//   CONT_OTHERS_WORD_WATCH_CP) for the post-launch watch item next to player reports (O407). Counting only: nothing is capped.
+const CONT_OTHERS_WORD_WATCH_CP = 300;
 // pids of the group's writers whose record carries the agreed (non-zero) tail -- see endlessAbstention for the zero form
 function endlessAttested(g) {
   const out = new Set();
@@ -4717,7 +4716,8 @@ async function main() {
       //   flagged once per key (recordFlag dedups; later runs log quietly). No new power: an account in the group could always
       //   hold it by writing a different tail. One check covers both shapes (another name in his seat / his name in another
       //   seat): per-seat majorities are strict and no record names one account twice, so a writer whose own seat carries
-      //   his name cannot also be seated elsewhere.
+      //   his name cannot also be seated elsewhere. It does not depend on a continue cap (A14 dropped the cap): it keeps a
+      //   member who stayed and settled from paying for another seat's continues, which no cap ever covered.
       const offSeat = g.filter((r) => String(roster0[r.d[5] | 0]) !== String(r.steamID));
       if (offSeat.length) {
         RUN.endlessSeatDispute = (RUN.endlessSeatDispute | 0) + 1;
@@ -4935,12 +4935,11 @@ async function main() {
       let contOwn = t.continuesUsed | 0;
       for (const seatKey of Object.keys(roster0)) if (!isOwnE(roster0[seatKey])) contOwn &= ~(0xF << (4 * (seatKey | 0)));
       // Q110: a seat whose own record does not carry the agreed tail (left before the end, or a zero-tail reconnector) is
-      //   charged at most CONT_UNATTESTED_CP_MAX and, when capped, earns no board / XP; every balance stays inside int32 (cpClamp).
+      //   charged in full (A14: no cap) and counted for the O407 watch item; every balance stays inside int32 (cpClamp).
       const debitsAll = endlessDebits(t.continuesUsed);
       const debits = endlessDebits(contOwn);
       const attestE = endlessAttested(g);
-      let unattestedCapped = false;
-      const cappedSids = new Set();   // Q110 (review Z1): a capped seat earns no board and no XP for the run
+      let othersWordBig = false;
       for (let seat = 0; seat < pc7; seat++) {
         const sid = roster0[seat] != null ? String(roster0[seat]) : null;
         if (sid && !isOwnE(sid) && debitsAll[seat]) {
@@ -4948,14 +4947,12 @@ async function main() {
           console.log('  endless cp ' + c.m + ': seat ' + seat + ' ' + plog(sid) + ' ' + endlessNib(t.continuesUsed, seat) + ' continues (' + debitsAll[seat] + ') not charged -- never wrote an own record for this run (Q78)');
         }
         if (!sid || !debits[seat]) continue;
-        let debit = debits[seat];
-        if (debit > CONT_UNATTESTED_CP_MAX && !attestE.has(pid(sid))) {
-          RUN.endlessUnattested = (RUN.endlessUnattested | 0) + 1;
-          RUN.endlessUnattestedCp = (RUN.endlessUnattestedCp || 0) + (debit - CONT_UNATTESTED_CP_MAX);
-          unattestedCapped = true;
-          console.log('  endless cp ' + c.m + ': seat ' + seat + ' ' + plog(sid) + ' ' + endlessNib(t.continuesUsed, seat) + ' continues (' + debit + ') on the others\' word only -- charged ' + CONT_UNATTESTED_CP_MAX + ' (Q110)');
-          debit = CONT_UNATTESTED_CP_MAX;
-          cappedSids.add(sid);
+        const debit = debits[seat];
+        if (!attestE.has(pid(sid))) {
+          RUN.endlessOthersWord = (RUN.endlessOthersWord | 0) + 1;
+          RUN.endlessOthersWordCp = (RUN.endlessOthersWordCp || 0) + debit;
+          if (debit > CONT_OTHERS_WORD_WATCH_CP) { RUN.endlessOthersWordBig = (RUN.endlessOthersWordBig | 0) + 1; othersWordBig = true; }
+          console.log('  endless cp ' + c.m + ': seat ' + seat + ' ' + plog(sid) + ' ' + endlessNib(t.continuesUsed, seat) + ' continues (' + debit + ') on the others\' word only -- charged in full (Q110, A14)');
         }
         const cur = cp[sid] == null ? 0 : cp[sid];
         const next = cpClamp(cur - debit);
@@ -4963,7 +4960,7 @@ async function main() {
         cp[sid] = next; changedCp[sid] = cp[sid];
         console.log('  endless cp ' + c.m + ': seat ' + seat + ' ' + plog(sid) + ' -' + debit + ' (' + endlessNib(t.continuesUsed, seat) + ' continues) -> ' + cp[sid]);
       }
-      if (unattestedCapped) { for (const sid of writerSids) { const h = sigPlayer(signals, pid(sid), nowMs); h.uc = (h.uc | 0) + 1; } sigDirty = true; }
+      if (othersWordBig) { for (const sid of writerSids) if (attestE.has(pid(sid))) { const h = sigPlayer(signals, pid(sid), nowMs); h.uc = (h.uc | 0) + 1; sigDirty = true; } }   // O407 data only (trust_tier reads f / vur)
       // personal-best board write for RECORD WRITERS only (abandoning the run earns no credit);
       // packed key is lex-monotone in (depth, team score), so "greater = improved" suffices.
       let teamScore = 0;
@@ -4971,7 +4968,6 @@ async function main() {
       if ((t.endDepth | 0) > 0) {
         const packed = packEndlessScore(t.endDepth, teamScore);
         for (const sid of writerSids) {
-          if (cappedSids.has(String(sid))) { console.log('  endless best ' + c.m + ': ' + plog(sid) + ' charged the capped price for continues only the others vouched for -- no board credit (Q110)'); continue; }
           if (bBest[sid] == null || packed > bBest[sid]) {
             bBest[sid] = packed; bChanged[sid] = { s: packed, ts: teamScore, build: t.build >>> 0 };
             console.log('  endless best' + (cas.label !== 'endless' ? ' (' + cas.label + ')' : '') + ' ' + c.m + ': ' + plog(sid) + ' depth ' + t.endDepth + ' team ' + teamScore + ' -> board ' + packed);
@@ -4986,7 +4982,7 @@ async function main() {
       }
       // progress XP (2026-09-05): writers only, depth gain of THIS session; the pacing gate above already
       //   made the claimed gain cost real time, so the rate is bounded without a day cap.
-      if (xpId) creditXpEndless(g.filter((r) => !cappedSids.has(String(r.steamID))), t, xp, changedXp, spSet);   // Q110: a capped seat earns no XP
+      if (xpId) creditXpEndless(g, t, xp, changedXp, spSet);
       console.log('  endless settle ' + c.m + ': pc ' + pc7 + ' depth ' + t.startDepth + '->' + t.endDepth + ' team ' + teamScore + (c.void ? ' (void disp majority -- settled anyway: co-op has no outcome to void)' : ''));
       processed.add(c.m); settledEndless++;
       continue;

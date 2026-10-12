@@ -1,22 +1,26 @@
 'use strict';
 // Q110 (cloud audit 2026-10): an endless co-op seat whose own record does not carry the agreed tail (he left before the
 // end and wrote only his start, or reconnected onto results with an all-zero tail) has his continue count written by
-// the others alone. His debit is capped at CONT_UNATTESTED_CP_MAX per settle; every CP balance stays inside the board's
-// int32 (cpClamp at the debit and at the cp_bank write).
+// the others alone. The user's call (A14, 2026-10-10): no cap -- such a seat is charged in full and ranks as before; the job
+// counts it (run summary, log line, a `uc` row on the accounts whose records carried the count when one seat paid more
+// than CONT_OTHERS_WORD_WATCH_CP, the O407 watch item) and keeps every CP balance inside the board's int32 (cpClamp at the
+// debit and at the cp_bank write). A group whose consensus roster seats a writer off his own record is held.
 // End-to-end over the REAL validate.js main() against an offline stateless board stub (same harness as
 // test/endless-own-record.js): writes are logged, never applied, so every check reads the logged score writes.
 //   [1] the frame on a real leaver: V wrote his start and left; A and B write V's seat 15 continues, their own 0 --
-//       V charged the cap, not 17,477; logged, counted, the writers carry `uc`
-//   [2] escalation: A and B pack their own seats too (15 each) -- V still charged the cap, A and B their own full price
+//       V charged 17,477 in full (A14); logged, counted (seats / CP / over the watch line), the two writers carry `uc`
+//   [2] escalation: A and B pack their own seats too (15 each) -- V's rungs 31..45 (3,350,994,649) clamped to
+//       -2147483647, no wrap to a positive balance; A and B pay their own full price
 //   [3] three settlers with 15 each (all their own word): seat 2's 3,350,994,649 is clamped to -2147483647, no wrap
-//   [4] honest quitters under the cap: 2 continues from the bottom (50) and 2 continues on rungs 5..6 (253) -- full price
-//   [5] zero-tail writer (a reconnector onto results, or a client writing zero for itself -- review Z1): capped like a quitter
-//       and, when capped, no board and no XP for the run (the others still rank); under the cap he pays in full and ranks
-//   [6] a settler's own word stays uncapped: 15 continues on his own record cost 17,477
+//   [4] honest quitters: 2 continues from the bottom (50) and 2 continues on rungs 5..6 (253) -- full price, counted,
+//       below the watch line (no `uc`)
+//   [5] zero-tail writer (a reconnector onto results, or a client writing zero for itself -- review Z1): charged in full
+//       and ranks with XP like the others (A14 b); `uc` goes to the accounts whose records carried the count, not to him
+//   [6] a settler's own word: 15 continues on his own record cost 17,477, not counted as the others' word
 //   [7] the cp_bank write clamps every path (a team competitive resume fee on a balance already at the floor)
-//   [8] wiring pins
-//   [9] mutation self-checks (the attest gate / both clamps / the write clamp / the seat check / the capped board skip /
-//       the capped XP skip removed -> [1] / [3] / [7] / [10] / [5a] / [5a] go red)
+//   [8] wiring pins (nothing capped, the watch count, both clamps, the summary rows, the seat check before every lane)
+//   [9] mutation self-checks (both clamps / the write clamp / the seat check / the watch count / the `uc` gate removed
+//       -> [3] / [7] / [10] / [1] / [5a] go red)
 //   [10] review P1: inside the run, two writers re-seat the victim (their rosters put V at seat 0, where A's 15 continues
 //        are): held, nobody charged, flagged once; it settles normally once their records name the real roster
 //   [11] review P2: outside accounts copy V's record and seat V elsewhere: held, V not charged for W's continues
@@ -139,7 +143,7 @@ function start7(hash, seat, ros) {
 const SEG_SUSPENDED = 1, SEG_RESUMED = 4, SEG_COMP = 8;
 const seg7 = (hash, seat, ros, from, to, flags) => settle7(hash, seat, ros, 0, { startDepth: from, endDepth: to, flags, prog: 12 });
 
-const CP0 = 1000, FLOOR = -2147483647, CAP = 300;
+const CP0 = 1000, FLOOR = -2147483647, WATCH = 300;   // CONT_OTHERS_WORD_WATCH_CP: counting only (O407), nothing is capped
 // zero-tail settle (a cold reconnector who landed on results): same scores and roster, all-zero tail
 function zero7(hash, seat, ros) { const d = settle7(hash, seat, ros, 0); const at = 11 + 3 * ros.length; for (let i = at; i < d.length; i++) d[i] = 0; return d; }
 // recs: [{ sid, d }] spread over distinct shard rows (one account = one entry per shard); cpStart: { sid: score }
@@ -166,7 +170,7 @@ const cpWrites = (p, sid) => p.posts.filter(x => /SetLeaderboardScore/.test(x.ur
 const lastCp = (p, sid) => { const w = cpWrites(p, sid); if (!w.length) return null; const m = /score=(-?[0-9]+)/.exec(w[w.length - 1].body); return m ? Number(m[1]) : null; };
 const sig = (p) => p.last.state.SIGNALS_FILE || {};
 const playerRow = (p, sid) => (sig(p).players || {})[v.pid(sid)];
-const summaryRow = (p) => { const m = /\| endless seats charged on the others' word only: capped \(no board, no XP\) \/ CP not charged \/ balances clamped to int32 \| ([0-9]+) \/ ([0-9]+) \/ ([0-9]+) \|/g; let a = 0, b = 0, c = 0, x; while ((x = m.exec(p.summary))) { a += Number(x[1]); b += Number(x[2]); c += Number(x[3]); } return [a, b, c]; };
+const summaryRow = (p) => { const m = /\| endless seats charged on the others' word only \(in full, A14\): seats \/ CP \/ over 300 CP \/ balances clamped to int32 \| ([0-9]+) \/ ([0-9]+) \/ ([0-9]+) \/ ([0-9]+) \|/g; let a = 0, b = 0, c = 0, d = 0, x; while ((x = m.exec(p.summary))) { a += Number(x[1]); b += Number(x[2]); c += Number(x[3]); d += Number(x[4]); } return [a, b, c, d]; };
 const allZero = (p) => p.codes.every(c => c === 0);
 const disputeRow = (p) => { const m = /\| endless groups held: a writer seated elsewhere than his own record \(Q110\) \| ([0-9]+) \|/g; let a = 0, x; while ((x = m.exec(p.summary))) a += Number(x[1]); return a; };
 // score writes to a board id (trio casual ladder = 12, progress XP = 5)
@@ -174,7 +178,7 @@ const boardWrites = (p, id, sid) => p.posts.filter(x => /SetLeaderboardScore/.te
 const DEPTH = { endDepth: 5 };   // a run that reached level 5: board and XP writes happen (depth 0 writes neither)
 const ladder = (from, n) => { let s = 0; for (let k = from; k < from + n; k++) s += v.endlessContinueCost(k); return s; };
 
-console.log('=== endless co-op: others\' word capped, CP balances inside int32 (Q110) ===');
+console.log('=== endless co-op: others\' word charged in full and counted (A14), CP balances inside int32, off-seat writers held (Q110) ===');
 
 // a 3P run: everyone wrote his start; `settlers` wrote the settle with `cont`; `zeros` wrote a zero-tail settle
 function trio(base, cont, settlers, zeros, cpStart, script, o) {
@@ -188,24 +192,27 @@ function trio(base, cont, settlers, zeros, cpStart, script, o) {
 }
 
 // ---- [1] the frame on a real leaver ----
+const ucOf = (p, s) => ((playerRow(p, s) || {}).uc | 0);
 {
   const { p, A, B, V } = trio(10, 0xF00, [0, 1]);
   T('[1] all runs exit 0', allZero(p), p.last.out.slice(-800));
-  T('[1] V charged the cap (1000 -> ' + (CP0 - CAP) + '), not 17,477', lastCp(p, V) === CP0 - CAP, JSON.stringify(cpWrites(p, V).map(x => x.body.replace(/.*score=/, ''))));
-  T('[1] logged', /seat 2 [0-9a-f]+ 15 continues \(17477\) on the others' word only -- charged 300 \(Q110\)/.test(p.all), (p.all.match(/endless cp[^\n]*/g) || []).join(' | '));
+  T('[1] V charged 17,477 in full (1000 -> ' + (CP0 - 17477) + '; A14: no cap)', lastCp(p, V) === CP0 - 17477, JSON.stringify(cpWrites(p, V).map(x => x.body.replace(/.*score=/, ''))));
+  T('[1] logged', /seat 2 [0-9a-f]+ 15 continues \(17477\) on the others' word only -- charged in full \(Q110, A14\)/.test(p.all), (p.all.match(/endless cp[^\n]*/g) || []).join(' | '));
   T('[1] the writers pay nothing (their own seats are 0)', cpWrites(p, A).length === 0 && cpWrites(p, B).length === 0);
-  T('[1] each writer carries the uc signal once', ((playerRow(p, A) || {}).uc | 0) === 1 && ((playerRow(p, B) || {}).uc | 0) === 1, JSON.stringify([playerRow(p, A), playerRow(p, B)]));
-  T('[1] V carries no uc', ((playerRow(p, V) || {}).uc | 0) === 0);
-  T('[1] run summary counts 1 seat / ' + (17477 - CAP) + ' CP / 0 clamped', JSON.stringify(summaryRow(p)) === JSON.stringify([1, 17477 - CAP, 0]), JSON.stringify(summaryRow(p)));
+  T('[1] each writer carries the uc signal once (one seat over the watch line)', ucOf(p, A) === 1 && ucOf(p, B) === 1, JSON.stringify([playerRow(p, A), playerRow(p, B)]));
+  T('[1] V carries no uc', ucOf(p, V) === 0);
+  T('[1] uc touches no trust input (f stays 0)', [A, B, V].every(s => ((playerRow(p, s) || {}).f | 0) === 0));
+  T('[1] run summary counts 1 seat / 17477 CP / 1 over the watch line / 0 clamped', JSON.stringify(summaryRow(p)) === JSON.stringify([1, 17477, 1, 0]), JSON.stringify(summaryRow(p)));
 }
 
 // ---- [2] escalation by packing the writers' own seats ----
 {
   const { p, A, B, V } = trio(20, 0xFFF, [0, 1]);
   T('[2] all runs exit 0', allZero(p), p.last.out.slice(-800));
-  T('[2] V (rungs 31..45 on the ladder) charged the cap', lastCp(p, V) === CP0 - CAP, JSON.stringify(lastCp(p, V)));
+  T('[2] V (rungs 31..45: ' + ladder(31, 15) + ') clamped to ' + FLOOR + ', no wrap to a positive balance', lastCp(p, V) === FLOOR, JSON.stringify(cpWrites(p, V).map(x => x.body.replace(/.*score=/, ''))));
   T('[2] A pays his own word in full (rungs 1..15)', lastCp(p, A) === CP0 - ladder(1, 15), JSON.stringify(lastCp(p, A)));
   T('[2] B pays his own word in full (rungs 16..30)', lastCp(p, B) === CP0 - ladder(16, 15), JSON.stringify(lastCp(p, B)));
+  T('[2] run summary counts V on the others\' word (over the watch line) and the clamp', (() => { const r = summaryRow(p); return r[0] === 1 && r[1] === ladder(31, 15) && r[2] === 1 && r[3] >= 1; })(), JSON.stringify(summaryRow(p)));
 }
 
 // ---- [3] three settlers, 15 each: seat 2 beyond int32 ----
@@ -216,44 +223,46 @@ function trio(base, cont, settlers, zeros, cpStart, script, o) {
   T('[3] every cp write stays inside int32', p.posts.filter(x => /leaderboardid=8(&|$)/.test(x.body)).every(x => { const m = /score=(-?[0-9]+)/.exec(x.body); const n = m ? Number(m[1]) : NaN; return n >= FLOOR && n <= 2147483647; }));
   T('[3] warned', /seat 2 [0-9a-f]+ balance -?[0-9]+ outside int32 -> clamped to -2147483647 \(Q110\)/.test(p.all));
   T('[3] nothing capped (all their own word), A pays rungs 1..15', summaryRow(p)[0] === 0 && lastCp(p, A) === CP0 - ladder(1, 15), JSON.stringify([summaryRow(p), lastCp(p, A)]));
-  T('[3] run summary counts the clamp', summaryRow(p)[2] >= 1, JSON.stringify(summaryRow(p)));
+  T('[3] run summary counts the clamp', summaryRow(p)[3] >= 1, JSON.stringify(summaryRow(p)));
 }
 
-// ---- [4] honest quitters under the cap pay in full ----
+// ---- [4] honest quitters pay in full ----
 {
   const a = trio(40, 0x200, [0, 1]);
   T('[4a] V wrote his start, 2 continues from the bottom: charged 50', lastCp(a.p, a.V) === CP0 - 50, JSON.stringify(lastCp(a.p, a.V)));
   const b = trio(50, 0x222, [0, 1]);
   T('[4b] V wrote his start, 2 continues on rungs 5..6: charged ' + ladder(5, 2) + ' in full', lastCp(b.p, b.V) === CP0 - ladder(5, 2), JSON.stringify(lastCp(b.p, b.V)));
-  T('[4] no cap logged', !/\(Q110\)/.test(a.p.all + b.p.all) && summaryRow(a.p)[0] === 0 && summaryRow(b.p)[0] === 0);
+  T('[4] counted, below the watch line (' + WATCH + ' CP)', JSON.stringify(summaryRow(a.p)) === JSON.stringify([1, 50, 0, 0]) && JSON.stringify(summaryRow(b.p)) === JSON.stringify([1, ladder(5, 2), 0, 0]),
+    JSON.stringify([summaryRow(a.p), summaryRow(b.p)]));
+  T('[4] nobody carries uc (no seat over the watch line)', [a.A, a.B, a.V, b.A, b.B, b.V].every(s => ucOf(s === a.A || s === a.B || s === a.V ? a.p : b.p, s) === 0));
 }
 
 // ---- [5] zero-tail writer (a reconnector onto results; review Z1: the same record a client writing zero for itself sends) ----
 {
   const a = trio(60, 0xF00, [0, 1], [2], null, null, DEPTH);
   T('[5a] all runs exit 0', allZero(a.p), a.p.last.out.slice(-800));
-  T('[5a] V (all-zero tail) charged the cap', lastCp(a.p, a.V) === CP0 - CAP, JSON.stringify(lastCp(a.p, a.V)));
-  T('[5a] capped V gets no board write', boardWrites(a.p, 12, a.V).length === 0, JSON.stringify(boardWrites(a.p, 12, a.V).map(x => x.body)));
-  T('[5a] capped V gets no XP', boardWrites(a.p, 5, a.V).length === 0, JSON.stringify(boardWrites(a.p, 5, a.V).map(x => x.body)));
-  T('[5a] logged', /endless best [0-9_]+: [0-9a-f]+ charged the capped price for continues only the others vouched for -- no board credit \(Q110\)/.test(a.p.all));
-  T('[5a] the others still rank and earn XP', boardWrites(a.p, 12, a.A).length === 1 && boardWrites(a.p, 12, a.B).length === 1 && boardWrites(a.p, 5, a.A).length === 1 && boardWrites(a.p, 5, a.B).length === 1,
-    JSON.stringify([a.A, a.B].map(s => [boardWrites(a.p, 12, s).length, boardWrites(a.p, 5, s).length])));
+  T('[5a] V (all-zero tail) charged 17,477 in full', lastCp(a.p, a.V) === CP0 - 17477, JSON.stringify(lastCp(a.p, a.V)));
+  T('[5a] V ranks and earns XP like the others (A14 b)', [a.A, a.B, a.V].every(s => boardWrites(a.p, 12, s).length === 1 && boardWrites(a.p, 5, s).length === 1),
+    JSON.stringify([a.A, a.B, a.V].map(s => [boardWrites(a.p, 12, s).length, boardWrites(a.p, 5, s).length])));
+  T('[5a] logged as the others\' word', /seat 2 [0-9a-f]+ 15 continues \(17477\) on the others' word only -- charged in full \(Q110, A14\)/.test(a.p.all));
+  T('[5a] uc goes to A and B (their records carried the count), not to V', ucOf(a.p, a.A) === 1 && ucOf(a.p, a.B) === 1 && ucOf(a.p, a.V) === 0,
+    JSON.stringify([a.A, a.B, a.V].map(s => ucOf(a.p, s))));
+  T('[5a] no capped-seat line left', !/no board credit \(Q110\)/.test(a.p.all));
   const b = trio(70, 0x200, [0, 1], [2], null, null, DEPTH);
-  T('[5b] V (all-zero tail) with 2 continues: charged 50', lastCp(b.p, b.V) === CP0 - 50, JSON.stringify(lastCp(b.p, b.V)));
-  T('[5b] under the cap V ranks and earns XP as before', boardWrites(b.p, 12, b.V).length === 1 && boardWrites(b.p, 5, b.V).length === 1,
-    JSON.stringify([boardWrites(b.p, 12, b.V).length, boardWrites(b.p, 5, b.V).length]));
+  T('[5b] V (all-zero tail) with 2 continues: charged 50, ranks, earns XP', lastCp(b.p, b.V) === CP0 - 50 && boardWrites(b.p, 12, b.V).length === 1 && boardWrites(b.p, 5, b.V).length === 1,
+    JSON.stringify([lastCp(b.p, b.V), boardWrites(b.p, 12, b.V).length, boardWrites(b.p, 5, b.V).length]));
   // review Z1 by seat: A pressed 15 continues himself and wrote a zero tail; B and C settled honestly
   const z = trio(75, 0x00F, [1, 2], [0], null, null, DEPTH);
-  T('[5c] A (own 15, zero tail) charged the cap, no board, no XP', lastCp(z.p, z.A) === CP0 - CAP && boardWrites(z.p, 12, z.A).length === 0 && boardWrites(z.p, 5, z.A).length === 0,
+  T('[5c] A (own 15, zero tail) pays all 17,477 (the zero tail buys nothing), ranks, earns XP', lastCp(z.p, z.A) === CP0 - 17477 && boardWrites(z.p, 12, z.A).length === 1 && boardWrites(z.p, 5, z.A).length === 1,
     JSON.stringify([lastCp(z.p, z.A), boardWrites(z.p, 12, z.A).length, boardWrites(z.p, 5, z.A).length]));
   T('[5c] B and V rank, pay nothing', boardWrites(z.p, 12, z.B).length === 1 && boardWrites(z.p, 12, z.V).length === 1 && cpWrites(z.p, z.B).length === 0 && cpWrites(z.p, z.V).length === 0);
 }
 
-// ---- [6] a settler's own word stays uncapped ----
+// ---- [6] a settler's own word ----
 {
   const { p, V } = trio(80, 0xF00, [0, 1, 2]);
   T('[6] V settled with 15 continues on his own record: charged 17,477', lastCp(p, V) === CP0 - 17477, JSON.stringify(lastCp(p, V)));
-  T('[6] no cap logged', !/on the others' word only/.test(p.all));
+  T('[6] not counted as the others\' word', !/on the others' word only/.test(p.all) && summaryRow(p)[0] === 0, JSON.stringify(summaryRow(p)));
 }
 
 // ---- [7] the cp_bank write clamps every path ----
@@ -340,30 +349,30 @@ function outside(base, script) {
 
 // ---- [8] wiring pins ----
 {
-  T('[8] the cap applies only to a seat whose own record does not carry the agreed tail', /if \(debit > CONT_UNATTESTED_CP_MAX && !attestE\.has\(pid\(sid\)\)\) \{/.test(SRC) && /const attestE = endlessAttested\(g\);/.test(SRC));
+  T('[8] nothing capped: every seat pays its replayed debit (A14)', /const debit = debits\[seat\];/.test(SRC) && !/CONT_UNATTESTED_CP_MAX|cappedSids/.test(SRC));
+  T('[8] a seat whose own record does not carry the agreed tail is counted', /const attestE = endlessAttested\(g\);/.test(SRC) && /if \(!attestE\.has\(pid\(sid\)\)\) \{/.test(SRC) && /if \(debit > CONT_OTHERS_WORD_WATCH_CP\) \{/.test(SRC));
+  T('[8] uc only on the accounts whose records carried the count', /if \(othersWordBig\) \{ for \(const sid of writerSids\) if \(attestE\.has\(pid\(sid\)\)\) \{/.test(SRC));
   T('[8] the debit keeps the balance inside int32', /const next = cpClamp\(cur - debit\);/.test(SRC));
   T('[8] the cp_bank write sends the clamped score', /const score = cpClamp\(changedCp\[sid\]\);/.test(SRC) && /leaderboardid: cpId, steamid: sid, score, scoremethod/.test(SRC));
-  T('[8] run summary row', /s\('endlessUnattested', 0\) \+ ' \/ ' \+ s\('endlessUnattestedCp', 0\) \+ ' \/ ' \+ s\('cpClamped', 0\)/.test(SRC) && /s\('endlessSeatDispute', 0\)/.test(SRC));
+  T('[8] run summary rows', /s\('endlessOthersWord', 0\) \+ ' \/ ' \+ s\('endlessOthersWordCp', 0\) \+ ' \/ ' \+ s\('endlessOthersWordBig', 0\) \+ ' \/ ' \+ s\('cpClamped', 0\)/.test(SRC) && /s\('endlessSeatDispute', 0\)/.test(SRC));
   T('[8] the seat check runs before every endless lane (classic / competitive / casual)', (() => { const i = SRC.indexOf("const offSeat = g.filter((r) => String(roster0[r.d[5] | 0]) !== String(r.steamID));"), j = SRC.indexOf('if (isClassicSeg) {'), k = SRC.indexOf('if ((t.flags | 0) & attest.SEG_COMP) {'); return i > 0 && j > i && k > i; })());
-  T('[8] a capped seat is collected and skipped for the board and the XP', /cappedSids\.add\(sid\);/.test(SRC) && /if \(cappedSids\.has\(String\(sid\)\)\) \{/.test(SRC) && /creditXpEndless\(g\.filter\(\(r\) => !cappedSids\.has\(String\(r\.steamID\)\)\), t, xp, changedXp, spSet\)/.test(SRC));
+  T('[8] every writer earns the run\'s XP (no seat filtered out)', /if \(xpId\) creditXpEndless\(g, t, xp, changedXp, spSet\);/.test(SRC));
 }
 
 // ---- [9] mutation self-checks ----
 console.log('-- [9] mutation self-checks --');
 {
-  const frame = (script) => { const r = trio(110, 0xF00, [0, 1], null, null, script); return lastCp(r.p, r.V) === CP0 - 17477; };
   const wrap = (script) => { const r = trio(120, 0xFFF, [0, 1, 2], null, null, script); const c = lastCp(r.p, r.V); return c == null || c < FLOOR || c > 0; };
   const write = (script) => { const r = compChain(130, FLOOR, script); return lastCp(r.p, r.H) !== FLOOR; };
   const swap = (script) => { const w = reseat(160); const p = play(w.recs, w.cps, script); return cpWrites(p, w.V).length > 0; };
-  const rankCapped = (script) => { const r = trio(170, 0xF00, [0, 1], [2], null, script, DEPTH); return boardWrites(r.p, 12, r.V).length > 0; };
-  const xpCapped = (script) => { const r = trio(180, 0xF00, [0, 1], [2], null, script, DEPTH); return boardWrites(r.p, 5, r.V).length > 0; };
+  const uncounted = (script) => { const r = trio(110, 0xF00, [0, 1], null, null, script); return summaryRow(r.p)[0] !== 1 || ucOf(r.p, r.A) !== 1; };
+  const ucVictim = (script) => { const r = trio(170, 0xF00, [0, 1], [2], null, script, DEPTH); return ucOf(r.p, r.V) !== 0; };
   const mutants = [
-    ['attest gate removed', [['if (debit > CONT_UNATTESTED_CP_MAX && !attestE.has(pid(sid))) {', 'if (false) {']], frame],
     ['both clamps removed', [['const next = cpClamp(cur - debit);', 'const next = cur - debit;'], ['const score = cpClamp(changedCp[sid]);', 'const score = changedCp[sid];']], wrap],
     ['write clamp removed', [['const score = cpClamp(changedCp[sid]);', 'const score = changedCp[sid];']], write],
     ['seat check removed', [['const offSeat = g.filter((r) => String(roster0[r.d[5] | 0]) !== String(r.steamID));', 'const offSeat = [];']], swap],
-    ['capped board skip removed', [['if (cappedSids.has(String(sid))) {', 'if (false) {']], rankCapped],
-    ['capped XP skip removed', [['creditXpEndless(g.filter((r) => !cappedSids.has(String(r.steamID))), t,', 'creditXpEndless(g, t,']], xpCapped],
+    ['watch count removed', [['if (!attestE.has(pid(sid))) {', 'if (false) {']], uncounted],
+    ['uc gate removed (every writer)', [['for (const sid of writerSids) if (attestE.has(pid(sid))) {', 'for (const sid of writerSids) if (true) {']], ucVictim],
   ];
   for (const [label, edits, check] of mutants) {
     if (WITH_Q113 && label === 'seat check removed') { ok('[9] ' + label + ': skipped on a tree with Q113 (its roster hold catches the swap first)'); continue; }
