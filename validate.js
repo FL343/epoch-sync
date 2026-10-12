@@ -212,20 +212,20 @@ function noteOwnStarts(p, recs) {
 }
 function hasOwnStart(p, h) { return !!(p && Array.isArray(p.started) && p.started.indexOf(h) >= 0); }
 // ---- roster contest (cloud audit Q75) ----
-// A match key is no secret among its players, and the shard rows are open to every account: anyone a player hands the key
-// to can write a record for the match. Every vote the settle takes (the seat -> account map, the team-gamble winner claims,
-// the absent-seat majority) used to count such a record like a player's, so two losers and one outside account turned a
-// 2V2 around (3 claims to 2) and five outside accounts took a match over outright. What a stranger cannot fake is the
-// roster agreeing with itself: it is the host's START_GAME seat map, written into every start and settle record by every
-// player of the match, unchanged until a rematch (a new key), and a player writes at his own seat. So every honest record
-// of a key names the same account at every seat. Returns the seats where the key's records (settle and start, every copy;
-// a writer's own seat counts as his name) or the registered start roster name two different accounts -- [] = the key
-// agrees with itself. A seat a record leaves empty ('0': a bot seat, a missing id) names nobody and contests nothing.
-// pend.roster holds pid hashes (starts.json); record rosters hold steam ids.
-function rosterContestSeats(recs, pend) {
+// A match key is no secret: it is in every public start record, and the shard rows are open to every account. Until a
+// start roster is registered for the key (no start seen yet, a synthetic first-sighting entry, every seat claimed twice --
+// registerStartRosters) the job has no list of who played, and every vote the settle takes (the seat -> account map, the
+// team-gamble winner claims, the absent-seat majority) used to count an outside account's record like a player's: two
+// losers and one outside account turned a 2V2 around (3 claims to 2), five outside accounts took a match over outright.
+// What a stranger cannot fake is the roster agreeing with itself: it is the host's START_GAME seat map, written into every
+// start and settle record by every player of the match, unchanged until a rematch (a new key), and a player writes at his
+// own seat. So every honest record of a key names the same account at every seat. Returns the seats where the key's
+// records (settle and start, every copy; a writer's own seat counts as his name) name two different accounts -- [] = the
+// key agrees with itself. A seat a record leaves empty ('0': a bot seat, a missing id) names nobody and contests nothing.
+// Once a start roster is registered the seat gate decides who counts instead (Q80, applySeatGate).
+function rosterContestSeats(recs) {
   const at = {};
   const add = (seat, h) => { (at[seat] = at[seat] || new Set()).add(h); };
-  if (pend && pend.roster) for (const k of Object.keys(pend.roster)) if (pend.roster[k]) add(k | 0, String(pend.roster[k]));
   for (const r of recs || []) {
     if (!r || !r.d) continue;
     add(r.d[5] | 0, pid(String(r.steamID)));
@@ -235,10 +235,12 @@ function rosterContestSeats(recs, pend) {
 }
 // A contested key is held like an inconsistent one: pulled out of both group lists before any pass reads them (the
 // team-gamble dissent pass, the start cross-check, the settle loop), every writer flagged once per key, nobody rated, nobody
-// convicted from it. It does not count as consistent, so its start entry runs the orphan path at maturity: an honest
-// finisher wrote a settle record (exempt), a real quitter's own start still counts (Q69). Nothing sticky: when the
-// contesting records are gone the key settles from what is left. Endless keys stay out here (their settle is a separate
-// path, cloud audit Q78); a processed key is history.
+// convicted from it. Nothing sticky: when the contesting records are gone the key settles from what is left. Endless keys
+// stay out here (their settle is a separate path, cloud audit Q78); a processed key is history. A key with a registered
+// start roster its voters agree on is left to the seat gate (Q80: applySeatGate drops the off-seat records before
+// grouping). There the roster is the players' own, so a record that names someone else at a seat is one player's word
+// against the others' -- settled by the ordinary per-seat majority, as before -- and holding the key on it would hand
+// any player a way to void his match. A roster its voters split (startRosterSplit) gates nothing and stays here.
 function applyRosterContest(gr, starts, pending, signals, processed, now) {
   const res = { contested: new Map(), dirty: false, touched: [] };
   const byKey = {};
@@ -246,7 +248,8 @@ function applyRosterContest(gr, starts, pending, signals, processed, now) {
   for (const m of Object.keys(gr.groups || {})) {
     const g = gr.groups[m];
     if (!g || !g.length || processed.has(m) || isEndlessMt(g[0].d[2] | 0)) continue;
-    const seats = rosterContestSeats(g.concat(byKey[m] || []), pending && pending[m]);
+    if (seatGateRoster(pending && pending[m])) continue;   // Q80: a registered start roster already decides who counts (applySeatGate)
+    const seats = rosterContestSeats(g.concat(byKey[m] || []));
     if (seats.length) res.contested.set(m, seats);
   }
   if (!res.contested.size) return res;
@@ -269,21 +272,54 @@ function soloStartAttested(att) {
   const r = att[0];
   return isEndlessMt(r.d[2] | 0) && (r.d[8] | 0) === 1 && !!r.roster && String(r.roster[0]) === String(r.steamID);
 }
-// readComplete === false (some record shard unread this run, R1-B2-04 / O348-7): registration and the cumulative settled
-//   exemptions still run, but no matured entry is judged -- a finisher whose only settle record sits on the unread shard
-//   would read as never-settled. The verdict waits for the next complete read (counted in `held`).
-function reconcileStarts(starts, groups, consistentKeys, processed, pending, leavers, now, maturityMs, confState, readComplete) {
-  confState = confState || {};
+// Q80: the seat gate trusts a registered roster only when its voters agree on it: every seat more than half of them name
+// has a strict majority, and the roster seats every voter at the seat he started from. Each honest attester does both:
+// he writes from his own seat and names the same roster as the other players. Two colluding players who name other
+// accounts at the opponents' seats split the vote there (2 to 2 in a 2V2), so the roster would leave those seats empty
+// and the gate would drop the opponents' own records and settle the colluders' claim. A colluding majority of voters (an
+// opponent's start missing, an outside account voting from that seat) would seat an alt where an honest player started:
+// the same. A split roster gates nothing; the key stays with the Q75 roster contest (held while two accounts are named
+// for one seat), as before the seat gate.
+function startRosterSplit(att, votes, roster) {
+  for (const seatKey of Object.keys(votes)) {
+    let namers = 0;
+    for (const sid of Object.keys(votes[seatKey])) namers += votes[seatKey][sid];
+    if (namers * 2 > att.length && !roster[seatKey | 0]) return true;
+  }
+  return att.some((r) => roster[r.d[5] | 0] !== pid(String(r.steamID)));
+}
+// ---- start roster registration (sticky first-seen: shard entries may be overwritten later) ----
+// Q80 (cloud audit): one claimant per seat. The registered roster is what the seat gate below trusts, and a majority of
+// attesters used to be enough to set it: the match key is read off any public start record, so a few outside accounts
+// writing start records of their own before the job's first look (a 5-minute window) could outvote the players and seat
+// themselves. Every honest attester writes from his own seat (d[5]), one account per seat; an outside account has to
+// write from some seat too, and every seat a player started from is then claimed twice. A seat claimed by two or more
+// accounts gives none of them a vote (the honest claimant loses his too -- the other players' votes still name him), so
+// an outsider can take votes away but never add one where a player started: the majority below is the players'. Only
+// a seat nobody started from (a bot seat, a player who dropped before level 1) lets an outside account vote unopposed,
+// one vote per such seat. A key no roster registers for (fewer than two votes left) stays with the Q75 roster contest
+// (applyRosterContest: held, nobody rated or convicted) until the extra start rows are gone; so does a roster its voters
+// split (startRosterSplit: registered as before, marked split, gates nothing). Endless keys keep the plain count (their
+// settle is a separate path, cloud audit Q78).
+function registerStartRosters(starts, processed, pending, now) {
   const sg = {};
-  for (const r of starts) { const m = r.d[3] + '_' + r.d[4] + '_' + r.d[2]; (sg[m] = sg[m] || []).push(r); }
-  let registered = 0, convicted = 0, cleaned = 0, held = 0;
-  const consoledSids = [];   // interrupted-match consolation: real sids of still-visible settle writers at verdict time (in-memory only, never persisted -- state stays HMAC-keyed)
-  // 1) register new pending entries (sticky first-seen: shard entries may be overwritten later)
+  for (const r of starts || []) { const m = r.d[3] + '_' + r.d[4] + '_' + r.d[2]; (sg[m] = sg[m] || []).push(r); }
+  let registered = 0;
   for (const m of Object.keys(sg)) {
     if (processed.has(m) || pending[m]) continue;
     const bySid = {};   // one vote per distinct writer (a cold-reconnect duplicate collapses)
     for (const r of sg[m]) bySid[String(r.steamID)] = r;
-    const att = Object.values(bySid);
+    let att = Object.values(bySid);
+    if (!isEndlessMt(sg[m][0].d[2] | 0)) {
+      const claim = {};
+      for (const r of att) { const s = r.d[5] | 0; claim[s] = (claim[s] | 0) + 1; }
+      const disputed = Object.keys(claim).filter((s) => claim[s] > 1);
+      if (disputed.length) {
+        att = att.filter((r) => claim[r.d[5] | 0] === 1);
+        RUN.disputed = (RUN.disputed | 0) + 1;
+        console.log('  start-dispute ' + m + ': seat(s) ' + disputed.join(',') + ' claimed by two or more accounts -- those claimants do not vote (Q80)');
+      }
+    }
     // a single attestation convicts nobody (mirrors settle consensus) -- except an O93 solo competitive
     //   segment start (pc=1 endless, 2026-09-06): its ONE guard-written attestation is the segment's
     //   pacing anchor (endless keys are never convicted below), and its roster must name the writer at seat 0.
@@ -301,9 +337,72 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
     }
     if (!n) continue;
     pending[m] = { t0: now, mt: sg[m][0].d[2] | 0, roster, settled: [] };
+    if (!isEndlessMt(pending[m].mt) && startRosterSplit(att, votes, roster)) {
+      pending[m].split = 1;
+      RUN.split = (RUN.split | 0) + 1;
+      console.log('  start-split ' + m + ': the voters do not agree on the roster -- no seat gate, the roster contest decides (Q80)');
+    }
     registered++;
     console.log('  start-pending ' + m + ': ' + att.length + ' attesters, roster ' + n + ' seats');
   }
+  return registered;
+}
+// ---- seat gate (cloud audit Q80) ----
+// Once a key's start roster is registered, a record counts only when that roster seats its writer at the seat the record
+// is written from (d[5]). Before, any account holding the key -- it is in every public start record -- could write a
+// settle record for the match: two outside accounts wrote a matching pair naming themselves the winners before the real
+// result was in, the job settled it after the 5-minute pacing and absence grace, and the real players who had not written
+// their result yet were convicted as leavers (-100 points, an exit) while the real result arrived to a processed key.
+// Without a real result (everyone dropped) the same pair turned an exit into an exit plus -100; on the team-gamble
+// accusation path (Q43) outside refusals named the host. Q69's own-record rule did not help: the framed players wrote
+// their own start, and an outside account copying the key writes "its own" start too -- so being in pend.started is no
+// evidence of a seat either. A record off its seat now does not vote, does not name anybody, does not count as anyone's
+// own record and is not in any group; its writer is flagged once per key. Every honest record passes: a player writes
+// from his own seat, unchanged until a rematch (a new key). Returns the registered roster or null (no gate: no start
+// roster yet, a synthetic first-sighting entry, a roster its voters split, or an endless key -- cloud audit Q78).
+function seatGateRoster(p) {
+  if (!p || p.synth || p.split || !p.roster || isEndlessMt(p.mt | 0)) return null;
+  return Object.keys(p.roster).length ? p.roster : null;
+}
+function seatedOnRoster(p, r) {
+  const ro = seatGateRoster(p);
+  return !ro || ro[r.d[5] | 0] === pid(String(r.steamID));
+}
+// Drops, in place, every settle and start record the gate rejects. Returns { out: Map(key -> dropped records), n }.
+function applySeatGate(recs, starts, pending, processed) {
+  const out = new Map();
+  let n = 0;
+  const keep = (r) => {
+    const m = r.d[3] + '_' + r.d[4] + '_' + r.d[2];
+    if (processed.has(m) || seatedOnRoster(pending[m], r)) return true;
+    if (!out.has(m)) out.set(m, []);
+    out.get(m).push(r);
+    n++;
+    return false;
+  };
+  for (const list of [recs, starts]) {
+    if (!list) continue;
+    let w = 0;
+    for (let i = 0; i < list.length; i++) if (keep(list[i])) list[w++] = list[i];
+    list.length = w;
+  }
+  for (const [m, rs] of out) ghWarn('match=' + m + ': ' + rs.length + ' record(s) from accounts the start roster does not seat there -- not counted (Q80): '
+    + rs.map((r) => plog(r.steamID) + '@' + r.shard + '=' + (r.d[5] | 0) + (r.start ? 's' : '')).join(' '));
+  return { out, n };
+}
+// readComplete === false (some record shard unread this run, R1-B2-04 / O348-7): registration and the cumulative settled
+//   exemptions still run, but no matured entry is judged -- a finisher whose only settle record sits on the unread shard
+//   would read as never-settled. The verdict waits for the next complete read (counted in `held`).
+// preRegistered (Q80): main() registers this run's start rosters ahead of the seat gate and grouping and passes the count
+//   here; a direct caller leaves it out and the registration runs below as before.
+function reconcileStarts(starts, groups, consistentKeys, processed, pending, leavers, now, maturityMs, confState, readComplete, preRegistered) {
+  confState = confState || {};
+  const sg = {};
+  for (const r of starts) { const m = r.d[3] + '_' + r.d[4] + '_' + r.d[2]; (sg[m] = sg[m] || []).push(r); }
+  let convicted = 0, cleaned = 0, held = 0;
+  const consoledSids = [];   // interrupted-match consolation: real sids of still-visible settle writers at verdict time (in-memory only, never persisted -- state stays HMAC-keyed)
+  // 1) register new pending entries
+  const registered = preRegistered == null ? registerStartRosters(starts, processed, pending, now) : preRegistered;
   // 2) upkeep + maturity verdicts for pending entries
   for (const m of Object.keys(pending)) {
     if (processed.has(m)) { delete pending[m]; cleaned++; continue; }   // settled (or convicted) since
@@ -1036,6 +1135,7 @@ function writeRunSummary() {
       '| one-match-at-a-time deferrals | ' + s('writerPaced', 0) + ' |',
       '| absent seats named by others only, not convicted (Q69) | ' + s('unattested', 0) + ' |',
       '| match keys with two accounts on one seat, not settled (Q75) | ' + s('contested', 0) + ' |',
+      '| records off their start-roster seat, not counted / start keys with a seat claimed twice / start rosters the voters split, no seat gate (Q80) | ' + s('offSeat', 0) + ' / ' + s('disputed', 0) + ' / ' + s('split', 0) + ' |',
       '| campaign grants / campaign endless | ' + s('campaign', '-') + ' / ' + s('campaignEndless', '-') + ' |',
       '| page-cap hits | ' + RUN.cap + ' |',
       '| solo segments held by the key policy (other channel / retired key; new this run) | ' + s('keyHeld', 0) + ' (' + s('keyHeldNew', 0) + ') |',
@@ -3235,6 +3335,14 @@ async function main() {
     }
     return JSON.stringify(v);
   };
+  // Q80: register this run's new start rosters first, then drop every record its writer is not seated for (applySeatGate)
+  //   -- before grouping, so an outside account's record votes nowhere below (consistency, dissent, absent seats, own records)
+  const processed = loadProcessed();
+  const processedN0 = processed.size;   // grow-only set: a size change = keys added on this run (persistStartsSide)
+  const startsPending = loadStarts();
+  const registeredEarly = registerStartRosters(starts, processed, startsPending, Date.now());
+  const seatGate = applySeatGate(recs, starts, startsPending, processed);
+  RUN.offSeat = seatGate.n;
   const gr = groupRecords(recs, { vecOf, MAX_SEATS });   // audit 2026-09-06: pure, testable consensus grouping (writer-deduped); O156 lone bot lane (type 11, every channel)
   const groups = gr.groups, consistentMatches = gr.consistentMatches, inconsistentGroups = gr.inconsistentGroups;
   RUN.flagged = gr.flagged;
@@ -3242,10 +3350,7 @@ async function main() {
   // start/settle cross-check runs BEFORE the early returns: the very scenario it exists for
   // (a match that started and was never settled by anyone) produces no consistent matches at all,
   // so it must still be tracked, judged and persisted on those paths.
-  const processed = loadProcessed();
-  const processedN0 = processed.size;   // grow-only set: a size change = keys added on this run (persistStartsSide)
   const leavers = loadLeavers(); let leaverHits = 0;
-  const startsPending = loadStarts();
   // B6 signal collection state (loaded here, ahead of the start cross-check, because the team-gamble
   // lone-dissent pass below writes its strikes into it and decides which keys are consistent)
   const signals = loadSignals();
@@ -3253,6 +3358,8 @@ async function main() {
   // trust-tier candidates seen this run (real sids; signals stay HMAC-keyed -- the only
   // place real ids persist is the trust board itself, which is the public artifact anyway)
   const trustTouched = new Set();
+  // Q80: every account that wrote a record off its seat is flagged once per key (only its own writes can put it here)
+  for (const [m, rs] of seatGate.out) { if (recordFlag(signals, rs, m + '|seat', Date.now())) sigDirty = true; for (const r of rs) trustTouched.add(String(r.steamID)); }
   // Q75: a key whose records name two different accounts for one seat is held out of every pass below (nobody rated,
   //   nobody convicted, every writer flagged once) -- an outside account's record no longer counts as a vote
   const rcRes = applyRosterContest(gr, starts, startsPending, signals, processed, Date.now());
@@ -3270,7 +3377,7 @@ async function main() {
   const confState = loadConfessions();   // loaded before starts so the orphan verdict can skip confessed keys
   const consistentKeys = new Set(consistentMatches.map(c => c.m));
   const nowMs = Date.now();
-  const startsRes = reconcileStarts(starts, groups, consistentKeys, processed, startsPending, leavers, nowMs, STARTS_MATURITY_MS, confState, shardsComplete);
+  const startsRes = reconcileStarts(starts, groups, consistentKeys, processed, startsPending, leavers, nowMs, STARTS_MATURITY_MS, confState, shardsComplete, registeredEarly);
   if (startsRes.registered || startsRes.convicted || startsRes.cleaned || Object.keys(startsPending).length)
     console.log('starts: ' + Object.keys(startsPending).length + ' pending (+' + startsRes.registered + ' new), ' + startsRes.convicted + ' exit-rate hits, ' + startsRes.cleaned + ' cleaned' + (startsRes.held ? ', ' + startsRes.held + ' matured verdict(s) held (incomplete shard read)' : ''));
   RUN.pending = Object.keys(startsPending).length; RUN.convicted = startsRes.convicted;
@@ -5353,3 +5460,4 @@ module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CHAT_MUTE: 
 Object.assign(module.exports, { KEY_CHANNEL, loadJobPubTable, soloKeyHeld, soloRunHasHeld });   // cloud audit R1-A5-07 per-channel key policy (test/playtest-key-policy.js)
 Object.assign(module.exports, { noteOwnStarts, hasOwnStart, OWN_START_CAP });   // cloud audit Q69 own-record evidence for leaver verdicts
 Object.assign(module.exports, { rosterContestSeats, applyRosterContest });   // cloud audit Q75 one account per seat per match key
+Object.assign(module.exports, { registerStartRosters, startRosterSplit, seatGateRoster, seatedOnRoster, applySeatGate });   // cloud audit Q80 seat gate

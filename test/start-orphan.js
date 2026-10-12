@@ -10,8 +10,10 @@ const eq = (label, got, exp) => { const a = JSON.stringify(got), b = JSON.string
 
 const A = '76561198000000001', B = '76561198000000002', C = '76561198000000003', X = '76561198000099999';
 const HOUR = 3600 * 1000, MAT = 2 * HOUR;
-// start record: only the fields reconcileStarts reads (d[2]=mt d[3]=hash d[4]=seed) + roster + writer
-const mkStart = (writer, roster, hash, seed, mt) => { const d = []; d[2] = (mt == null ? 2 : mt); d[3] = (hash == null ? 111 : hash); d[4] = (seed == null ? 7 : seed); return { start: true, steamID: writer, d, roster }; };
+// start record: only the fields reconcileStarts reads (d[2]=mt d[3]=hash d[4]=seed d[5]=writer's seat) + roster + writer
+//   (Q80: the seat a start is written from is its claim; every client writes from the seat its roster gives it)
+const seatIn = (writer, roster) => { for (const k of Object.keys(roster || {})) if (roster[k] === writer) return k | 0; return -1; };
+const mkStart = (writer, roster, hash, seed, mt, seat) => { const d = []; d[2] = (mt == null ? 2 : mt); d[3] = (hash == null ? 111 : hash); d[4] = (seed == null ? 7 : seed); d[5] = (seat == null ? seatIn(writer, roster) : seat); return { start: true, steamID: writer, d, roster }; };
 const mkSettle = (writer) => ({ steamID: writer, d: [] });   // upkeep only reads groups[m][i].steamID
 const KEY = '111_7_2';
 
@@ -39,7 +41,7 @@ console.log('=== reconcileStarts (B7 start/settle cross-check) ===');
 }
 { // per-seat strict majority: 2 attesters split on seat1 (B vs X) -> seat dropped, agreeing seat kept
   const pending = {};
-  reconcileStarts([mkStart(A, { 0: A, 1: B }), mkStart(B, { 0: A, 1: X })], {}, new Set(), new Set(), pending, {}, 0, MAT);
+  reconcileStarts([mkStart(A, { 0: A, 1: B }), mkStart(B, { 0: A, 1: X }, null, null, null, 1)], {}, new Set(), new Set(), pending, {}, 0, MAT);
   eq('split seat dropped, agreed seat kept', pending[KEY].roster, { 0: pid(A) });
 }
 { // maturity verdict: exit-rate hit for every roster member without a settle record (each wrote his own start); idempotent via processed

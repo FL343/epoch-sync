@@ -1,24 +1,30 @@
 'use strict';
-// Q75 (cloud audit 2026-10): a record written by an account that was not in the match no longer counts as a vote.
-// Every honest record of a match key names the same account at every seat (the host's START_GAME seat map, unchanged until
-// a rematch, and a writer sits at his own seat), so a key whose records -- or its registered start roster -- name two
-// accounts for one seat is held like an inconsistent one: nobody rated, nobody convicted from it, every writer flagged once.
+// Q75 (cloud audit 2026-10): on a match key the job holds no start roster for, a record written by an account that was not
+// in the match no longer counts as a vote. Every honest record of a match key names the same account at every seat (the
+// host's START_GAME seat map, unchanged until a rematch, and a writer sits at his own seat), so a key whose records name
+// two accounts for one seat is held like an inconsistent one: nobody rated, nobody convicted from it, every writer flagged
+// once. Once a start roster is registered the seat gate decides who counts instead (Q80, test/seat-gate.js); the keys left
+// here are the ones without one: no start seen (rotated off, a synthetic first-sighting entry) or a start seat claimed by
+// two or more accounts so often that no roster could be registered.
 // End-to-end over the REAL validate.js main() against an offline stateful board stub (same harness as
 // test/leaver-own-record.js), plus the pure helpers.
-//   [1] rosterContestSeats / applyRosterContest units
-//   [2] control: an honest 2V2 (four starts, four settles) settles as before, no contest line, nobody flagged
-//   [3] two losers and one outside account turn a 2V2 around (review4-q43.js part 6): not settled, no points move, the
-//       true winner is no leaver, every writer flagged once over two runs, run summary row; at maturity the orphan path
-//       processes the key and convicts nobody (everybody wrote a settle record)
-//   [4] five outside accounts take a 2V2 over (review4-q43.js part 5): not settled, the outsiders gain nothing
-//   [5] doctored starts written first (the registered roster sides with the forgers): still not settled, nobody convicted
+//   [1] rosterContestSeats / applyRosterContest units (a registered start roster leaves the key to the seat gate)
+//   [2] control: an honest 2V2 (four starts, four settles) settles as before, no contest line, nobody flagged, both
+//       summary rows (Q75 / Q80) read 0
+//   [3] no start seen: two losers and one outside account turn a 2V2 around (review4-q43.js part 6): not settled, no
+//       points move, the true winner is no leaver, every writer flagged once over two runs, run summary row; no
+//       synthetic start entry, so nothing matures into a verdict later either
+//   [4] no start seen: five outside accounts take a 2V2 over (review4-q43.js part 5): not settled, the outsiders gain nothing
+//   [5] outside accounts write a start at every seat (no start roster can register): the key is held, nobody rated or
+//       convicted; once those rows are gone the roster registers and the key settles
 //   [6] nothing sticky: once the contesting rows are gone the honest records settle the key
-//   [7] a real quitter shielded by an outside account at his empty seat (that account's roster leaves the seat empty so the
-//       self-seat sanity check passes): not settled; at maturity the quitter's own start still convicts him
-//   [8] the true winners' rows rotated off: the registered start roster alone still holds the key
-//   [9] wiring pins + mutation self-checks (pass removed / registered roster ignored / writer seat ignored -> red)
-//   [10] with the team-gamble accusation pass (Q43) in the tree: five outside accounts no longer charge an honest host
-//        (review4-q43.js part 3); control; pin; mutant (the pass ignores the contest -> judged again). Skipped without Q43.
+//   [7] no start seen: a real quitter shielded by an outside account at his empty seat (that account's roster leaves the
+//       seat empty so the self-seat sanity check passes): not settled
+//   [8] a key with a registered start roster is left to the seat gate (part 6 with starts): no contest line, Q75 row 0
+//   [9] wiring pins + mutation self-checks (pass removed / writer seat ignored -> red)
+//   [10] with the team-gamble accusation pass (Q43) in the tree: five outside accounts that also start at every seat (no
+//        start roster) no longer charge an honest host (review4-q43.js part 3); control; pin; mutant (the pass ignores the
+//        contest -> judged again). Skipped without Q43.
 // State isolation is structural (every *_FILE var scanned and redirected, cwd = temp dir), like test/strict-gate.js.
 const { spawnSync } = require('child_process');
 const fs = require('fs'), path = require('path'), os = require('os');
@@ -156,7 +162,13 @@ const starts4 = (h) => [0, 1, 2, 3].map(s => ({ sid: ROS[s], d: t2start(h, s, RO
 const part6 = (h) => [{ sid: H, d: t2settle(h, 0, ROS, 0) }, { sid: V, d: t2settle(h, 1, ROS, 0) },
   { sid: X, d: t2settle(h, 0, DOC, 0) }, { sid: Y, d: t2settle(h, 1, DOC, 0) }, { sid: O, d: t2settle(h, 2, [X, Y, O, V], 0) }];
 
-console.log('=== one account per seat per match key (Q75) ===');
+const Q80ROW = (r, off, dis, split) => new RegExp('\\| records off their start-roster seat, not counted / start keys with a seat claimed twice / start rosters the voters split, no seat gate \\(Q80\\) \\| ' + off + ' / ' + dis + ' / ' + (split | 0) + ' \\|').test(r.summary);
+const pendOf = (r, key) => (r.state.STARTS_FILE || {})[key];
+// outside accounts that write a start record at every seat of the 2V2, agreeing among themselves
+const OUTS4 = [O, O2, O3, O4];
+const outStarts4 = (h) => [0, 1, 2, 3].map(s => ({ sid: OUTS4[s], d: t2start(h, s, OUTS4) }));
+
+console.log('=== one account per seat per match key without a start roster (Q75) ===');
 
 // ---- [1] units ----
 {
@@ -166,27 +178,31 @@ console.log('=== one account per seat per match key (Q75) ===');
   eq('[1] honest copies agree', v.rosterContestSeats([R(A, 0, r3), R(B, 1, r3), R(B, 1, r3)]), []);
   eq('[1] a writer at a seat the others give to someone else', v.rosterContestSeats([R(A, 0, r3), R(O, 0, { 1: B, 2: C })]), [0]);
   eq('[1] two rosters disagree at a seat nobody writes', v.rosterContestSeats([R(A, 0, r3), R(B, 1, { 0: A, 1: B, 2: O })]), [2]);
-  eq('[1] the registered start roster disagrees', v.rosterContestSeats([R(A, 0, r3), R(B, 1, r3)], { roster: { 0: v.pid(A), 1: v.pid(B), 2: v.pid(O) } }), [2]);
-  eq('[1] the registered start roster agrees', v.rosterContestSeats([R(A, 0, r3)], { roster: { 0: v.pid(A), 1: v.pid(B), 2: v.pid(C) } }), []);
   eq('[1] an empty seat names nobody', v.rosterContestSeats([R(A, 0, { 0: A, 1: B }), R(B, 1, r3)]), []);
   eq('[1] several seats, sorted', v.rosterContestSeats([R(H, 0, { 0: H, 1: V, 2: X, 3: Y }), R(X, 0, { 0: X, 1: Y, 2: H, 3: V })]), [0, 1, 2, 3]);
-  eq('[1] nothing in, nothing out', [v.rosterContestSeats(null), v.rosterContestSeats([], null), v.rosterContestSeats([{}])], [[], [], []]);
-  // applyRosterContest: lists spliced, flagged once, processed / endless keys untouched
+  eq('[1] nothing in, nothing out', [v.rosterContestSeats(null), v.rosterContestSeats([]), v.rosterContestSeats([{}])], [[], [], []]);
+  // applyRosterContest: lists spliced, flagged once, processed / endless / registered keys untouched
   const mk = (m, recs) => recs.map(r => Object.assign({}, r, { d: [0xB1, 3, Number(m.split('_')[2]), Number(m.split('_')[0]), Number(m.split('_')[1]), r.d[5]] }));
   const bad1 = mk('1_1_2', [R(A, 0, r3), R(O, 0, { 1: B, 2: C })]), good = mk('2_1_2', [R(A, 0, r3), R(B, 1, r3)]);
   const done = mk('3_1_2', [R(A, 0, r3), R(O, 0, { 1: B, 2: C })]), endless = mk('4_1_7', [R(A, 0, r3), R(O, 0, { 1: B, 2: C })]);
   const bad2 = mk('5_1_6', [R(A, 0, r3), R(B, 1, { 0: A, 1: B, 2: O })]);
-  const gr = { groups: { '1_1_2': bad1, '2_1_2': good, '3_1_2': done, '4_1_7': endless, '5_1_6': bad2 },
-    consistentMatches: [{ m: '1_1_2', g: bad1 }, { m: '2_1_2', g: good }, { m: '3_1_2', g: done }, { m: '4_1_7', g: endless }], inconsistentGroups: [{ m: '5_1_6', g: bad2 }] };
+  const reg = mk('6_1_2', [R(A, 0, r3), R(O, 0, { 1: B, 2: C })]), syn = mk('7_1_2', [R(A, 0, r3), R(O, 0, { 1: B, 2: C })]);
+  const gr = { groups: { '1_1_2': bad1, '2_1_2': good, '3_1_2': done, '4_1_7': endless, '5_1_6': bad2, '6_1_2': reg, '7_1_2': syn },
+    consistentMatches: [{ m: '1_1_2', g: bad1 }, { m: '2_1_2', g: good }, { m: '3_1_2', g: done }, { m: '4_1_7', g: endless }, { m: '6_1_2', g: reg }, { m: '7_1_2', g: syn }],
+    inconsistentGroups: [{ m: '5_1_6', g: bad2 }] };
+  const pending = {
+    '6_1_2': { t0: 1, mt: 2, roster: { 0: v.pid(A), 1: v.pid(B), 2: v.pid(C) }, settled: [] },   // registered start roster: the seat gate's
+    '7_1_2': { t0: 1, mt: 2, roster: {}, settled: [], synth: true },                                // synthetic first sighting: no roster
+  };
   const sig = { players: {}, flagged: {} };
-  const res = v.applyRosterContest(gr, [], {}, sig, new Set(['3_1_2']), 1000);
-  eq('[1] applyRosterContest: contested keys', Array.from(res.contested.keys()).sort(), ['1_1_2', '5_1_6']);
-  eq('[1] consistent list keeps the rest', gr.consistentMatches.map(c => c.m), ['2_1_2', '3_1_2', '4_1_7']);
+  const res = v.applyRosterContest(gr, [], pending, sig, new Set(['3_1_2']), 1000);
+  eq('[1] applyRosterContest: contested keys', Array.from(res.contested.keys()).sort(), ['1_1_2', '5_1_6', '7_1_2']);
+  eq('[1] consistent list keeps the rest (the registered key too)', gr.consistentMatches.map(c => c.m), ['2_1_2', '3_1_2', '4_1_7', '6_1_2']);
   eq('[1] inconsistent list loses the contested key', gr.inconsistentGroups.map(c => c.m), []);
-  T('[1] each writer flagged once, the key marked', sig.flagged['1_1_2'] === 1000 && sig.flagged['5_1_6'] === 1000 && (sig.players[v.pid(A)] || {}).f === 2 && (sig.players[v.pid(O)] || {}).f === 1, JSON.stringify(sig.players));
-  T('[1] dirty + touched', res.dirty === true && res.touched.slice().sort().join() === [A, B, O].sort().join());
+  T('[1] each writer flagged once, the key marked', sig.flagged['1_1_2'] === 1000 && sig.flagged['5_1_6'] === 1000 && !sig.flagged['6_1_2'] && (sig.players[v.pid(A)] || {}).f === 3 && (sig.players[v.pid(O)] || {}).f === 2, JSON.stringify(sig.players));
+  T('[1] dirty + touched', res.dirty === true && Array.from(new Set(res.touched)).sort().join() === [A, B, O].sort().join());
   const again = v.applyRosterContest({ groups: { '1_1_2': bad1 }, consistentMatches: [{ m: '1_1_2', g: bad1 }], inconsistentGroups: [] }, [], {}, sig, new Set(), 2000);
-  T('[1] a second sighting flags nobody again', again.contested.size === 1 && again.dirty === false && (sig.players[v.pid(A)] || {}).f === 2);
+  T('[1] a second sighting flags nobody again', again.contested.size === 1 && again.dirty === false && (sig.players[v.pid(A)] || {}).f === 3);
   // a start record of the key counts like a settle record (a writer at his own seat)
   const st = [{ steamID: O, d: [0xB2, 3, 2, 2, 1, 2], roster: { 0: A, 1: B, 2: O } }];
   const res2 = v.applyRosterContest({ groups: { '2_1_2': good }, consistentMatches: [{ m: '2_1_2', g: good }], inconsistentGroups: [] }, st, {}, { players: {}, flagged: {} }, new Set(), 1);
@@ -201,13 +217,13 @@ console.log('=== one account per seat per match key (Q75) ===');
   T('[2] the match settles', processedOf(r2).has(keyOf(recs[0].d)), r2.out.slice(-800));
   const up = (s) => pointsOf(r2, s).length === 1 && pointsOf(r2, s)[0] > 2500, down = (s) => pointsOf(r2, s).length === 1 && pointsOf(r2, s)[0] < 2500;
   T('[2] H and V win points, X and Y lose points', up(H) && up(V) && down(X) && down(Y), JSON.stringify([H, V, X, Y].map(s => pointsOf(r2, s))));
-  T('[2] no contest line, nobody flagged', !Q75.test(r1.out + r2.out) && [H, V, X, Y].every(s => fOf(r2, s) === 0));
-  T('[2] run summary row reads 0', /\| match keys with two accounts on one seat, not settled \(Q75\) \| 0 \|/.test(r2.summary), r2.summary.slice(0, 400));
+  T('[2] no contest or seat-gate line, nobody flagged', !Q75.test(r1.out + r2.out) && !/\(Q80\)/.test(r1.out + r2.out) && [H, V, X, Y].every(s => fOf(r2, s) === 0));
+  T('[2] run summary rows read 0', /\| match keys with two accounts on one seat, not settled \(Q75\) \| 0 \|/.test(r2.summary) && Q80ROW(r1, 0, 0) && Q80ROW(r2, 0, 0), r2.summary.slice(0, 400));
 }
 
-// ---- [3] two losers and one outside account turn the 2V2 around ----
+// ---- [3] no start seen: two losers and one outside account turn the 2V2 around ----
 {
-  const h = 0x7502, recs = part6(h).concat(starts4(h)), key = keyOf(recs[0].d);
+  const h = 0x7502, recs = part6(h), key = keyOf(recs[0].d);
   const { r1, r2 } = twoRuns(recs);
   T('[3] both runs exit 0', r1.code === 0 && r2.code === 0, r2.out.slice(-800));
   T('[3] not settled', !processedOf(r2).has(key));
@@ -216,15 +232,15 @@ console.log('=== one account per seat per match key (Q75) ===');
   T('[3] logged with the contested seats', /two accounts named for seat\(s\) 0,1,2,3 -- roster contest, not settled \(Q75\)/.test(r1.out), (r1.out.match(/[^\n]*Q75[^\n]*/) || [''])[0]);
   T('[3] every writer flagged once over two runs', [H, V, X, Y, O].every(s => fOf(r2, s) === 1), JSON.stringify([H, V, X, Y, O].map(s => fOf(r2, s))));
   T('[3] run summary row reads 1', /\| match keys with two accounts on one seat, not settled \(Q75\) \| 1 \|/.test(r1.summary));
+  T('[3] no synthetic start entry for the held key', !pendOf(r2, key), JSON.stringify(pendOf(r2, key)));
   const r3 = runCron(boardsWith(recs), advance(r2.state, MATURE));
-  T('[3] at maturity the orphan path processes the key', r3.code === 0 && processedOf(r3).has(key), r3.out.slice(-600));
-  T('[3] ... and convicts nobody (everybody wrote a settle record)', [H, V, X, Y, O].every(s => leavesOf(r3, s) === 0) && anyPoints(r3) === 0, JSON.stringify(posts(r3, 7)));
+  T('[3] much later: still held, nobody convicted, nothing moves', r3.code === 0 && !processedOf(r3).has(key) && [H, V, X, Y, O].every(s => leavesOf(r3, s) === 0) && anyPoints(r3) === 0, r3.out.slice(-600));
 }
 
-// ---- [4] five outside accounts take the 2V2 over ----
+// ---- [4] no start seen: five outside accounts take the 2V2 over ----
 {
   const h = 0x7503, win1 = 1;   // X and Y (seats 2 / 3) won this one
-  const recs = [0, 1, 2, 3].map(s => ({ sid: ROS[s], d: t2settle(h, s, ROS, win1) })).concat(starts4(h));
+  const recs = [0, 1, 2, 3].map(s => ({ sid: ROS[s], d: t2settle(h, s, ROS, win1) }));
   const fake = [H, V, O, O2];
   recs.push({ sid: O, d: t2settle(h, 2, fake, win1) }, { sid: O2, d: t2settle(h, 3, fake, win1) });
   for (const o of [O3, O4, O5]) recs.push({ sid: o, d: t2settle(h, 1, [H, o, O, O2], win1) });
@@ -233,35 +249,39 @@ console.log('=== one account per seat per match key (Q75) ===');
   T('[4] contest logged', Q75.test(r2.out));
 }
 
-// ---- [5] doctored starts written first: the registered roster sides with the forgers ----
+// ---- [5] outside accounts start at every seat: no start roster registers, the key is held until their rows are gone ----
 {
   const h = 0x7504, key = keyOf(t2start(h, 0, ROS));
-  const recs = [{ sid: X, d: t2start(h, 0, DOC) }, { sid: Y, d: t2start(h, 1, DOC) }, { sid: O, d: t2start(h, 2, [X, Y, O, V]) },
-    { sid: H, d: t2start(h, 0, ROS) }, { sid: V, d: t2start(h, 1, ROS) }].concat(part6(h).slice(0, 4));
+  const recs = honest4(h).concat(starts4(h), outStarts4(h));
   const { r1, r2 } = twoRuns(recs);
-  const pend = (r1.state.STARTS_FILE || {})[key] || {};
-  T('[5] run 1 registers the forged seat 0 (3 attesters to 2)', (pend.roster || {})[0] === v.pid(X), JSON.stringify(pend.roster));
-  T('[5] not settled, no points move', r2.code === 0 && !processedOf(r2).has(key) && anyPoints(r1) + anyPoints(r2) === 0, r2.out.slice(-600));
-  const r3 = runCron(boardsWith(recs), advance(r2.state, MATURE));
-  T('[5] at maturity: processed, nobody convicted', r3.code === 0 && processedOf(r3).has(key) && [H, V, X, Y, O].every(s => leavesOf(r3, s) === 0) && anyPoints(r3) === 0, r3.out.slice(-600));
+  T('[5] both runs exit 0', r1.code === 0 && r2.code === 0, r2.out.slice(-800));
+  T('[5] every start seat claimed twice: logged, no roster registered', /start-dispute [^\n]*: seat\(s\) 0,1,2,3 claimed by two or more accounts -- those claimants do not vote \(Q80\)/.test(r1.out) && !pendOf(r2, key), (r1.out.match(/[^\n]*start-dispute[^\n]*/) || [''])[0]);
+  T('[5] held as a contest: not settled, no points move, nobody convicted', !processedOf(r2).has(key) && anyPoints(r1) + anyPoints(r2) === 0 && Q75.test(r1.out) && [H, V, X, Y].every(s => leavesOf(r2, s) === 0), r2.out.slice(-600));
+  T('[5] summary rows: one contested key, one disputed start key', /\| match keys with two accounts on one seat, not settled \(Q75\) \| 1 \|/.test(r1.summary) && Q80ROW(r1, 0, 1), (r1.summary.match(/[^\n]*\(Q7[5]\)[^\n]*|[^\n]*\(Q80\)[^\n]*/g) || []).join(" ; "));
+  // the outside rows rotate off: the players' starts register now, and the key settles one floor later
+  const clean = honest4(h).concat(starts4(h));
+  const r3 = runCron(boardsWith(clean), advance(r2.state, FLOOR + 1000));
+  T('[5] the outside rows gone: the players\' roster registers', r3.code === 0 && pendOf(r3, key) && (pendOf(r3, key).roster || {})[0] === v.pid(H) && !Q75.test(r3.out), r3.out.slice(-600));
+  const r4 = runCron(boardsWith(clean), advance(r3.state, FLOOR + 1000));
+  T('[5] ... and the key settles: H and V win', r4.code === 0 && processedOf(r4).has(key) && pointsOf(r4, H)[0] > 2500 && pointsOf(r4, V)[0] > 2500, r4.out.slice(-600));
 }
 
 // ---- [6] nothing sticky ----
 {
   const h = 0x7505, key = keyOf(t2start(h, 0, ROS));
-  const r1 = runCron(boardsWith(part6(h).concat(starts4(h))));
+  const r1 = runCron(boardsWith(part6(h)));
   T('[6] run 1: contested', r1.code === 0 && Q75.test(r1.out));
   // X and Y overwrite their rows with what really happened, O's row rotates off
-  const r2 = runCron(boardsWith(honest4(h).concat(starts4(h))), advance(r1.state, FLOOR + 1000));
-  T('[6] run 2: the honest records settle the key', r2.code === 0 && processedOf(r2).has(key) && !Q75.test(r2.out), r2.out.slice(-600));
-  T('[6] H and V win points', pointsOf(r2, H)[0] > 2500 && pointsOf(r2, V)[0] > 2500, JSON.stringify([pointsOf(r2, H), pointsOf(r2, V)]));
+  const r2 = runCron(boardsWith(honest4(h)), advance(r1.state, FLOOR + 1000));
+  const r3 = runCron(boardsWith(honest4(h)), advance(r2.state, FLOOR + 1000));
+  T('[6] the honest records settle the key (one floor after their first sighting)', r2.code === 0 && r3.code === 0 && !Q75.test(r2.out + r3.out) && processedOf(r3).has(key), r3.out.slice(-600));
+  T('[6] H and V win points', pointsOf(r3, H)[0] > 2500 && pointsOf(r3, V)[0] > 2500, JSON.stringify([pointsOf(r3, H), pointsOf(r3, V)]));
 }
 
-// ---- [7] a real quitter shielded by an outside account at his empty seat ----
+// ---- [7] no start seen: a real quitter shielded by an outside account at his empty seat ----
 const part7 = (h) => {
   const ros = [A, B, C];
   return [{ sid: A, d: ffaSettle(h, 0, ros) }, { sid: B, d: ffaSettle(h, 1, ros) },
-    { sid: A, d: ffaStart(h, 0, ros) }, { sid: B, d: ffaStart(h, 1, ros) }, { sid: C, d: ffaStart(h, 2, ros) },
     { sid: O, d: ffaSettle(h, 2, [A, B, '0']) }];   // O copies the scores and sits at seat 2, leaving that seat empty in his roster
 };
 {
@@ -269,46 +289,33 @@ const part7 = (h) => {
   const { r2 } = twoRuns(recs);
   T('[7] not settled: O does not sit in for C', r2.code === 0 && !processedOf(r2).has(key) && anyPoints(r2) === 0, r2.out.slice(-600));
   T('[7] contest at seat 2', /two accounts named for seat\(s\) 2 -- roster contest/.test(r2.out));
-  const r3 = runCron(boardsWith(recs), advance(r2.state, MATURE));
-  T('[7] at maturity C is convicted on his own start, nobody else', r3.code === 0 && processedOf(r3).has(key) && leavesOf(r3, C) === 1 && [A, B, O].every(s => leavesOf(r3, s) === 0),
-    'C=' + leavesOf(r3, C) + ' ' + r3.out.slice(-500));
 }
 
-// ---- [8] the true winners' rows rotated off: the registered start roster still holds the key ----
-const part8 = (h) => {
-  const ros2 = [X, Y, O, V];   // the forgers agree among themselves this time
-  const r1 = starts4(h);
-  const r2 = [{ sid: X, d: t2settle(h, 0, ros2, 0) }, { sid: Y, d: t2settle(h, 1, ros2, 0) }, { sid: O, d: t2settle(h, 2, ros2, 0) }];
-  return { r1, r2 };
-};
+// ---- [8] a registered start roster: the key is left to the seat gate ----
 {
-  const h = 0x7507, p = part8(h), key = keyOf(p.r1[0].d);
-  const { r1, r2 } = twoRuns(p.r1, p.r2);
-  const r3 = runCron(boardsWith(p.r2), advance(r2.state, FLOOR + 1000));   // past the absent-seat grace for seat 3 too
-  T('[8] run 1 registers the honest roster', ((r1.state.STARTS_FILE || {})[key] || {}).roster && r1.state.STARTS_FILE[key].roster[0] === v.pid(H));
-  T('[8] not settled, V not convicted, X and Y gain nothing', r3.code === 0 && !processedOf(r3).has(key) && leavesOf(r3, V) === 0 && anyPoints(r2) + anyPoints(r3) === 0, r3.out.slice(-600));
+  const h = 0x7507, recs = part6(h).concat(starts4(h)), key = keyOf(recs[0].d);
+  const r1 = runCron(boardsWith(recs));
+  T('[8] the honest roster registers', r1.code === 0 && pendOf(r1, key) && pendOf(r1, key).roster[0] === v.pid(H), r1.out.slice(-600));
+  T('[8] no contest line, Q75 row reads 0; the seat gate drops the three off-seat records', !Q75.test(r1.out)
+    && /\| match keys with two accounts on one seat, not settled \(Q75\) \| 0 \|/.test(r1.summary) && Q80ROW(r1, 3, 0), r1.summary.slice(0, 600));
 }
 
 // ---- [9] wiring pins + mutation self-checks ----
 {
+  const iG = SRC.indexOf('const seatGate = applySeatGate(recs, starts, startsPending, processed);');
   const iC = SRC.indexOf('const rcRes = applyRosterContest(gr, starts, startsPending, signals, processed, Date.now());');
   const iD = SRC.indexOf('const t2ldRes = applyTeam2LoneDissent(gr, signals, processed, Date.now(), vecOf);');
   const iS = SRC.indexOf('const startsRes = reconcileStarts(starts, groups, consistentKeys,');
-  T('[9] the contest pass runs before the team-gamble dissent pass (when in the tree) and the start cross-check', iC > 0 && (iD < 0 || iD > iC) && iS > iC);
+  T('[9] the contest pass runs after the seat gate, before the team-gamble dissent pass (when in the tree) and the start cross-check', iG > 0 && iC > iG && (iD < 0 || iD > iC) && iS > iC);
   T('[9] contested writers go to the trust-tier candidates, signals saved', /for \(const sid of rcRes\.touched\) trustTouched\.add\(sid\);/.test(SRC) && /if \(rcRes\.dirty\) sigDirty = true;/.test(SRC));
   T('[9] run summary row', /s\('contested', 0\)/.test(SRC) && /RUN\.contested = rcRes\.contested\.size;/.test(SRC));
   T('[9] exports', typeof v.rosterContestSeats === 'function' && typeof v.applyRosterContest === 'function');
   const mutants = [
     ['contest pass removed', 'const rcRes = applyRosterContest(gr, starts, startsPending, signals, processed, Date.now());',
       'const rcRes = { contested: new Map(), dirty: false, touched: [] };', (script) => {
-        const { r2 } = twoRuns(part6(0x7511).concat(starts4(0x7511)), null, script);
-        return pointsOf(r2, X).some(n => n > 2500) || pointsOf(r2, Y).some(n => n > 2500);   // [3] the losers take the win again
-      }],
-    ['registered start roster ignored', 'if (pend && pend.roster) for (const k of Object.keys(pend.roster))', 'if (false) for (const k of Object.keys(pend.roster))', (script) => {
-        const p = part8(0x7512);
-        const { r2 } = twoRuns(p.r1, p.r2, script);
-        const r3 = runCron(boardsWith(p.r2), advance(r2.state, FLOOR + 1000), null, script);
-        return processedOf(r3).has(keyOf(p.r1[0].d)) && leavesOf(r3, V) === 1;   // [8] settles from the forgers' records, V convicted
+        const recs = part6(0x7511);
+        const { r2 } = twoRuns(recs, null, script);
+        return processedOf(r2).has(keyOf(recs[0].d)) || anyPoints(r2) > 0;   // [3] the forged result settles again
       }],
     ["writer's own seat ignored", '    add(r.d[5] | 0, pid(String(r.steamID)));\n', '', (script) => {
         const recs = part7(0x7513);
@@ -329,9 +336,10 @@ const part8 = (h) => {
 // ---- [10] with the team-gamble accusation pass (Q43) in the tree: outside accounts cannot charge a host ----
 // review4-q43.js part 3: a real 2V2 [P, A, B, C], all four wrote their records (and starts), the host P's team lost.
 //   Five outside accounts write refusals onto the key: two sit on the winning seats and name the host, three only vote
-//   the roster. Counted per account that is 5 to 4, so the roster moves the outsiders onto the winning seats and the
-//   host's costly refusal is charged; two keys with disjoint namers judge him a leaver. With Q75 the key is contested
-//   (two accounts for seats 1-3), the pass leaves it alone: no strike, no judgment.
+//   the roster. They also write a start record at every seat first, so no start roster registers (with one, the seat
+//   gate would drop their records -- test/seat-gate.js). Counted per account that is 5 to 4, so the roster used to move
+//   the outsiders onto the winning seats and charge the host's costly refusal; two keys with disjoint namers judged him a
+//   leaver. With Q75 the key is contested (two accounts for every seat), the pass leaves it alone: no strike, no judgment.
 if (typeof v.applyTeam2Accusations !== 'function') console.log('  skip  [10] no team-gamble accusation pass (Q43) in this tree');
 else {
   const P = SID(31), TAG = v.T2BY_TAG;
@@ -345,6 +353,7 @@ else {
     outs.slice(0, k).forEach((sid, j) => {
       const at = acc.indexOf(j), fake = [P, a, outs[acc[0]], outs[acc[1]]];
       recs.push({ sid, d: at >= 0 ? refuse(h, 2 + at, fake, 1) : refuse(h, 2, fake, 0) });
+      recs.push({ sid, d: t2start(h, j % 4, fake) });   // a start at every seat: no start roster registers
     });
     return { recs, key: keyOf(recs[0].d) };
   };
@@ -368,6 +377,7 @@ else {
   const r5 = play10(5);
   T('[10] five outside accounts: runs exit 0', !r5.bad, r5.bad);
   if (!r5.bad) {
+    T('[10] ... no start roster registers (every seat claimed twice)', (r5.out.match(/start-dispute [^\n]*seat\(s\) 0,1,2,3 claimed/g) || []).length >= 2, (r5.out.match(/[^\n]*start-dispute[^\n]*/) || [''])[0]);
     T('[10] ... the host is not struck or judged', !r5.av.some(x => x === 'free' || x === 'judge') && r5.leaves === 0, 'verdicts=' + JSON.stringify(r5.av) + ' leaves=' + r5.leaves);
     T('[10] ... both keys held as contested', (r5.out.match(/roster contest, not settled \(Q75\)/g) || []).length >= 2 && !/team2 accusation [^\n]*-> strike/.test(r5.out));
   }

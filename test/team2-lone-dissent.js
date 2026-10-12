@@ -354,7 +354,7 @@ let r3;
   const iKeys = SRC.indexOf('const consistentKeys = new Set(consistentMatches.map(c => c.m));');
   const iStarts = SRC.indexOf('const startsRes = reconcileStarts(starts, groups, consistentKeys');
   const iFlag = SRC.indexOf('for (const { m, g } of inconsistentGroups) {');
-  T('[11] the pass runs after grouping, before the consistent-key set, the start cross-check and the inconsistent flag loop', iGroup > 0 && iProc > iGroup && iPass > iProc && iPass < iKeys && iKeys < iStarts && iPass < iFlag);
+  T('[11] the pass runs after grouping, before the consistent-key set, the start cross-check and the inconsistent flag loop', iGroup > 0 && iProc > 0 && iPass > iGroup && iPass > iProc && iPass < iKeys && iKeys < iStarts && iPass < iFlag);
   T('[11] signals load once, before the pass', (SRC.match(/const signals = loadSignals\(\);/g) || []).length === 1 && SRC.indexOf('const signals = loadSignals();') < iPass);
   T('[11] exports', typeof v.team2LoneDissent === 'function' && typeof v.t2ldVerdict === 'function' && typeof v.applyTeam2LoneDissent === 'function' && !!v.T2LD);
   T('[11] strikes age out in pruneSignals', /s\.t2ld/.test(SRC.slice(SRC.indexOf('function pruneSignals'), SRC.indexOf('function saveSignals'))));
