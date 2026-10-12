@@ -51,6 +51,10 @@ settles from the agreeing records and his seat is a consensus leaver. Strikes in
 hosted by the same opposing player count once (a modded host cannot convict a victim alone)
 until `T2LD_K_HARD` (4) strikes in total convict whatever the host. The verdict of a match
 is decided at first sight and kept in `signals.json` (`t2ld` / `t2lv`).
+A dissenter's seat is where the agreeing writers' roster places him, never the seat his own
+records claim, and a refusal counts however many other records the same account wrote: a
+modded dissenter cannot step out of either shape (lone or team, below) by claiming another
+seat or adding a second record.
 Two or three TEAMMATES writing the rank-0 refusal together (a premade blocking the game
 connection as one) against an agreeing side that includes the host are a team dissent: each
 of them is struck the same way, and the match settles as soon as ANY of them is due; the ones

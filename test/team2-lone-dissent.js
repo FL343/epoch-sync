@@ -172,7 +172,8 @@ const recsOf = (list) => list.map(x => ({ steamID: x.sid, d: x.d, dispCode: x.d[
   const outsider = recsOf(match(6, 0x108, R4, { 2: { rank: 0 } })).map(r => (r.steamID === C ? Object.assign({}, r, { steamID: E }) : r));
   T('[1] a dissenting writer the others do not name at that seat: none', v.team2LoneDissent(outsider, vecOf) === null);
   const seatClash = recsOf(match(6, 0x109, R4, { 2: { rank: 0 } })).map(r => (r.steamID === C ? Object.assign({}, r, { d: r.d.slice(0, 5).concat([1], r.d.slice(6)) }) : r));
-  T('[1] a dissenter claiming an agreeing writer\'s seat: none', v.team2LoneDissent(seatClash, vecOf) === null);
+  const ldc = v.team2LoneDissent(seatClash, vecOf);
+  T('[1] a dissenter claiming an agreeing writer\'s seat: found at the seat the others name him (Q76)', ldc && ldc.sid === C && ldc.seat === 2 && ldc.opp === 1);
   T('[1] team brawl (mode 1, no gamble): none', v.team2LoneDissent(recsOf(match(4, 0x10A, R4, { 2: { rank: 0 } })), vecOf) === null);
   const R6 = [A, B, C, D, E, F];
   const ld6 = v.team2LoneDissent(recsOf(match(9, 0x10B, R6, { 5: { rank: 0 } })), vecOf);
@@ -185,7 +186,8 @@ const recsOf = (list) => list.map(x => ({ steamID: x.sid, d: x.d, dispCode: x.d[
   const ldx = v.team2LoneDissent(dupX, vecOf);
   T('[1] the dissenter with two records: found', ldx && ldx.sid === C && ldx.recs.length === 2);
   const dupS = recsOf(match(6, 0x10F, R4, { 2: { rank: 0 } })); dupS.push(Object.assign({}, dupS[2], { d: dupS[2].d.slice(0, 5).concat([3], dupS[2].d.slice(6)) }));
-  T('[1] the dissenter writing two records at different seats: none (forged shape, old path)', v.team2LoneDissent(dupS, vecOf) === null);
+  const lds = v.team2LoneDissent(dupS, vecOf);
+  T('[1] the dissenter writing two records at different seats: found at the seat the others name him (Q76)', lds && lds.sid === C && lds.seat === 2 && lds.recs.length === 2);
   const big = [5000000, 4000000, 3000000, 2000000];   // over the gamble score cap: the agreeing side is not settleable on its own
   T('[1] the agreeing side itself out of sanity bounds: none', v.team2LoneDissent(recsOf(match(6, 0x110, R4, { 0: { scores: big }, 1: { scores: big }, 3: { scores: big }, 2: { rank: 0 } })), vecOf) === null);
 }

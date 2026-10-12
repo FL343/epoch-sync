@@ -1743,9 +1743,23 @@ const T2LD = {
   K_HARD: Math.max(1, Number(process.env.T2LD_K_HARD || 4)),
   WINDOW_MS: Number(process.env.T2LD_WINDOW_MS || 30 * 86400000),
 };
+// Q76: a dissenter's seat is the one the agreeing writers' roster consensus names him at (not an agreeing writer's
+// own seat), else -1. The agreeing records share one seat count and pass sanity (no account twice in a roster), so
+// the consensus names him at most once and inside the seats. His own records never place him: the seat he writes
+// is the one field a modded dissenter could point at an agreeing seat (or split over a second record) to drop out
+// of the lone / team dissent shape, back to 'rank-conflict' (unsettled, every writer flagged).
+function team2RosterSeat(roster, sid, taken) {
+  const k = Object.keys(roster || {}).find(x => String(roster[x]) === String(sid));
+  return (k == null || taken.indexOf(k | 0) >= 0) ? -1 : (k | 0);
+}
+// Q76: an account's records include the rank-0 refusal (a rank outside 1..2*ts) -- one is enough. The team dissent
+// (Q56) counts its refusers with this: an honest client writes one record per match (a retry rewrites the same
+// bytes), so an account that ALSO wrote a non-refusal record is a modded one stepping onto the agreeing side to break
+// the shape. It stays a dissenter, and none of its records joins the agreeing side.
+function team2Refused(rs, ts) { return rs.some(r => { const k = r.d[6] | 0; return k < 1 || k > 2 * ts; }); }
 // g = one key's records (any shape); vecOf = the run's consistency vector. Returns null or
-// { sid, seat, recs, rest, win, host, opp } (sid / host = real ids; opp = 1 when the host plays on
-// the other team).
+// { sid, seat, recs, rest, win, host, opp } (sid / host = real ids; seat = team2RosterSeat; opp = 1 when the
+// host plays on the other team).
 function team2LoneDissent(g, vecOf) {
   if (!g || g.length < 3 || !isSubScoreMt(g[0].d[2] | 0)) return null;
   const by = new Map();
@@ -1767,11 +1781,10 @@ function team2LoneDissent(g, vecOf) {
   if (sanityFlags(hit.rest).length) return null;
   const taken = hit.rest.map(r => r.d[5] | 0);
   if (new Set(taken).size !== taken.length) return null;   // two writers on one seat
-  const seat = hit.recs[0].d[5] | 0, pc = hit.rest[0].d[8] | 0;
-  if (hit.recs.some(r => (r.d[5] | 0) !== seat) || taken.indexOf(seat) >= 0 || seat < 0 || seat >= pc) return null;
   if (voidByConsensus(hit.rest.map(r => r.dispCode | 0)).isVoid) return null;   // a void outcome was not the dissenter's doing
   const roster = rosterConsensus(hit.rest);
-  if (String(roster[seat]) !== hit.sid) return null;   // the agreeing writers must name him at that seat
+  const seat = team2RosterSeat(roster, hit.sid, taken);   // where the agreeing writers name him
+  if (seat < 0) return null;
   const ts = teamSizeOfMt(g[0].d[2] | 0);
   const host = roster[0] != null ? String(roster[0]) : null;
   const opp = (host && host !== hit.sid && teamOfSeat(seat, ts) !== teamOfSeat(0, ts)) ? 1 : 0;
@@ -1817,11 +1830,10 @@ function team2NamesSeat(r, seats) {
 function team2TeamDissent(g, vecOf) {
   if (!g || g.length < 4 || !isSubScoreMt(g[0].d[2] | 0)) return null;
   const ts = teamSizeOfMt(g[0].d[2] | 0);
-  const refuses = r => { const k = r.d[6] | 0; return k < 1 || k > 2 * ts; };
   const by = new Map();
   for (const r of g) { const s = String(r.steamID); if (!by.has(s)) by.set(s, []); by.get(s).push(r); }
   const dis = [], agree = [];
-  for (const [s, rs] of by) (rs.every(refuses) ? dis : agree).push(s);
+  for (const [s, rs] of by) (team2Refused(rs, ts) ? dis : agree).push(s);
   if (dis.length < 2 || agree.length < 2 || dis.length > ts || dis.length > agree.length) return null;
   const rest = g.filter(r => agree.indexOf(String(r.steamID)) >= 0);
   const v0 = vecOf(rest[0]);
@@ -1832,14 +1844,13 @@ function team2TeamDissent(g, vecOf) {
   const taken = rest.map(r => r.d[5] | 0);
   if (new Set(taken).size !== taken.length) return null;
   if (voidByConsensus(rest.map(r => r.dispCode | 0)).isVoid) return null;
-  const pc = rest[0].d[8] | 0, roster = rosterConsensus(rest);
+  const roster = rosterConsensus(rest);
   const host = roster[0] != null ? String(roster[0]) : null;
   if (!host || agree.indexOf(host) < 0) return null;
   const ds = [], seats = new Set();
   for (const s of dis) {
-    const recs = by.get(s), seat = recs[0].d[5] | 0;
-    if (recs.some(r => (r.d[5] | 0) !== seat) || seat < 0 || seat >= pc || taken.indexOf(seat) >= 0 || seats.has(seat)) return null;
-    if (String(roster[seat]) !== s) return null;
+    const recs = by.get(s), seat = team2RosterSeat(roster, s, taken);   // never the seat he writes (Q76)
+    if (seat < 0 || seats.has(seat)) return null;
     seats.add(seat);
     ds.push({ sid: s, seat, recs, opp: teamOfSeat(seat, ts) !== teamOfSeat(0, ts) ? 1 : 0 });
   }
@@ -1894,12 +1905,12 @@ function t2ldVerdict(prior, cur, now) {
 // or a new refuser left alone once the known ones' records rotated off -- they are set aside: excused for the
 // match (flagged once, kept in t2lv[m].lt, never struck, never a leaver) and the verdict stands. Without this the
 // group fell back to 'rank-conflict' for good (or a settle turned free), and the dissenters already due walked free.
-function team2LateRefusers(g, known) {   // pids of accounts outside `known` whose every record refuses (rank out of domain)
+function team2LateRefusers(g, known) {   // pids of accounts outside `known` that wrote a refusal (team2Refused, as the shape counts them)
   if (!g || !g.length || !isSubScoreMt(g[0].d[2] | 0)) return [];
   const ts = teamSizeOfMt(g[0].d[2] | 0), by = new Map();
   for (const r of g) { const h = pid(String(r.steamID)); if (!by.has(h)) by.set(h, []); by.get(h).push(r); }
   const out = [];
-  for (const [h, rs] of by) if (known.indexOf(h) < 0 && rs.every(r => { const k = r.d[6] | 0; return k < 1 || k > 2 * ts; })) out.push(h);
+  for (const [h, rs] of by) if (known.indexOf(h) < 0 && team2Refused(rs, ts)) out.push(h);
   return out;
 }
 function applyTeam2LoneDissent(gr, signals, processed, now, vecOf) {
@@ -1966,8 +1977,11 @@ function applyTeam2LoneDissent(gr, signals, processed, now, vecOf) {
         if (d.opp && td.host) { const hp = sigPlayer(signals, pid(td.host), now); hp.lh = (hp.lh | 0) + 1; }
         res.dirty = true;
         if (vd !== 'settle') flagNow.push(d);
-        if (td.lone && !prev) console.log('  team2 lone dissent ' + m + ': seat ' + d.seat + ' = ' + plog(d.sid) + ' (' + g.length + ' records, ' + (d.opp ? 'opposing host' : 'own-side host') + ') -> strike, verdict ' + vd);
-        else console.log('  team2 team dissent ' + m + ': seat ' + d.seat + ' = ' + plog(d.sid) + ' (' + td.ds.length + ' dissenters, ' + g.length + ' records, ' + (d.opp ? 'opposing host' : 'own-side host') + ') -> strike, own verdict ' + vd);
+        // Q76: seats he wrote himself that differ from the roster's (never read, logged for review)
+        const wrote = d.recs.map(r => r.d[5] | 0).filter((x, i, a) => x !== d.seat && a.indexOf(x) === i);
+        const seatLog = 'seat ' + d.seat + (wrote.length ? ' (wrote seat ' + wrote.join('/') + ')' : '');
+        if (td.lone && !prev) console.log('  team2 lone dissent ' + m + ': ' + seatLog + ' = ' + plog(d.sid) + ' (' + g.length + ' records, ' + (d.opp ? 'opposing host' : 'own-side host') + ') -> strike, verdict ' + vd);
+        else console.log('  team2 team dissent ' + m + ': ' + seatLog + ' = ' + plog(d.sid) + ' (' + td.ds.length + ' dissenters, ' + g.length + ' records, ' + (d.opp ? 'opposing host' : 'own-side host') + ') -> strike, own verdict ' + vd);
       }
       if (fresh.length) {
         const all = prevP.concat(fresh.map(d => pid(d.sid)));
