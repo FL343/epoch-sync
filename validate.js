@@ -1181,6 +1181,7 @@ function writeRunSummary() {
       '| team-gamble lone / team dissent unsettled / settled | ' + s('t2ld', '0/0') + ' |',
       '| board writes rating/points/xp | ' + s('writes', '0/0 0/0 0/0') + ' |',
       '| endless settles / cp+board writes | ' + s('endless', 0) + ' (+' + s('endlessComp', 0) + ' team comp, +' + s('solo', 0) + ' solo) / ' + s('writesEndless', '0/0 0/0') + ' |',
+      '| endless seats named by others only / CP not charged | ' + s('endlessNamedOnly', 0) + ' / ' + s('endlessNamedOnlyCp', 0) + ' |',
       '| seedcap veto / reject-window discards | ' + s('seedcapVeto', 0) + ' / ' + s('seedcapReject', 0) + ' |',
       '| perk replay rejects | ' + s('perkRej', 0) + ' |',
       '| token resumes: replays caught / burnt-run segments / untagged settled / untagged refused | ' + s('resumeReplay', 0) + ' / ' + s('runBurnt', 0) + ' / ' + s('resumeUntagged', 0) + ' / ' + s('resumeUntaggedRej', 0) + ' |',
@@ -3068,7 +3069,8 @@ function endlessRequiredMs(tail, chainMax, levelSeconds) {   // O216: classic pa
 }
 // consensus roster (seat -> sid): detectLeavers' per-seat strict-majority vote, but returning
 // every agreed seat rather than only the absent ones. CP debits target the ROSTER -- writing no
-// record must not dodge a debit the whole lobby witnessed.
+// settle record must not dodge a debit the whole lobby witnessed -- but only roster seats that
+// wrote their own record for the run (endlessOwnSet below, Q78).
 function rosterConsensus(g) {
   const votes = {};
   for (const r of g) for (const seatKey of Object.keys(r.roster || {})) {
@@ -3086,8 +3088,9 @@ function rosterConsensus(g) {
 // B6 signals, endless flavor: pair co-occurrence is real shared-match history (it backs report
 // verification), but win counters and score moments stay matchmade-only -- endless scores live on
 // another scale and would smear that calibration data. `e` = endless settles participated in.
-// Recorded for BOTH roster members (a debited player may have written no record, and the nightly
-// trusted-board closure audit requires every board identity to exist in state).
+// Recorded for every roster member that wrote his own record for the run (a debited player may
+// have written no SETTLE record, and the nightly trusted-board closure audit requires every board
+// identity to exist in state; a debit only ever lands on such a member, Q78).
 function recordEndlessSignals(s, rosterSids, now) {
   for (const sid of rosterSids) { const h = sigPlayer(s, pid(sid), now); h.e = (h.e | 0) + 1; }
   for (let i = 0; i < rosterSids.length; i++) for (let j = i + 1; j < rosterSids.length; j++) {
@@ -3095,6 +3098,21 @@ function recordEndlessSignals(s, rosterSids, now) {
     const e = s.pairs[k] || (s.pairs[k] = { n: 0, t: 0, x: 0, at: 0 });
     e.n += 1; e.t += 1; e.at = now;   // co-op partners are by definition together
   }
+}
+// Q78 (cloud audit 2026-10): who wrote his OWN record for endless key m (HMAC pids). A roster is what the writers
+// wrote: any two accounts that own the game can write a consistent pair of co-op records for a run that never
+// happened, name anyone at the other seats and pack continues onto those seats (the debit ladder climbs seat by
+// seat: 15 continues on a fourth seat cost 7.6M CP). Only a player's own record proves he was in the run:
+//   - his start attestation: pend.started (cumulative, where the Q69 leaver fix keeps it) + the starts read this run;
+//   - any settle record of his for the key: pend.settled (cumulative) + every record read this run (consistent or not).
+// Callers charge / seed / pair only these roster seats; a seat that only the writers name is counted, never charged.
+function endlessOwnSet(pend, m, recs, starts) {
+  const own = new Set();
+  if (pend) for (const h of [].concat(Array.isArray(pend.started) ? pend.started : [], Array.isArray(pend.settled) ? pend.settled : [])) own.add(String(h));
+  const keyOf = (r) => r.d[3] + '_' + r.d[4] + '_' + r.d[2];
+  for (const r of (recs || [])) if (r && r.d && keyOf(r) === m) own.add(pid(String(r.steamID)));
+  for (const r of (starts || [])) if (r && r.d && keyOf(r) === m) own.add(pid(String(r.steamID)));
+  return own;
 }
 // authoritative CP earn for one consistent MATCHMADE group (settled or consensus-VOID -- innocent
 // participation earns like XP does). Endless records are the SPEND side and never pass through
@@ -4655,6 +4673,23 @@ async function main() {
       if (!isClassicSeg && (!cpId || !bId || (seasonId >= 1 && !bSeasonId))) { console.log('  endless ' + c.m + ': cp/' + cas.label + '/seasonal board unresolved -- left pending'); continue; }
       const roster0 = rosterConsensus(g);
       const rosterSids = Object.values(roster0).map(String);
+      // Q78: a roster seat is charged (continue debit / resume fee), seeded (playtest starter wallet) or paired (co-op
+      //   co-presence, which backs report verification) only on his OWN record for this run -- see endlessOwnSet. A seat
+      //   only the writers name is logged and counted once at settle time (namedOnlyAt) and its writers carry the `un`
+      //   signal. Cost (the A06 call made for Q69): a client that writes neither a start nor a settle record for the run
+      //   dodges its continue debit; an honest one writes the start when level 1 begins.
+      const ownE = endlessOwnSet(startsPending[c.m], c.m, recs, starts);
+      for (const sid of writerSids) ownE.add(pid(sid));
+      const isOwnE = (sid) => ownE.has(pid(String(sid)));
+      const ownRosterSids = rosterSids.filter(isOwnE);
+      const namedOnlyAt = (lane) => {
+        const seats = Object.keys(roster0).filter((s) => !isOwnE(roster0[s]));
+        if (!seats.length) return;
+        RUN.endlessNamedOnly = (RUN.endlessNamedOnly | 0) + seats.length;
+        for (const sid of writerSids) { const h = sigPlayer(signals, pid(sid), nowMs); h.un = (h.un | 0) + 1; }
+        sigDirty = true;
+        console.log('  ' + lane + ' ' + c.m + ': seat ' + seats.map((s) => s + ' = ' + plog(roster0[s])).join(', ') + ' named by the others but never wrote an own record for this run -- not charged, not paired (Q78)');
+      };
       // ===== N3 team classic segment (SEG_CLASSIC in the tail flags; client knife 3.9b, 2026-09-16) =====
       //   Same consensus entry (2..4 seats agree on scores + tail); chain keyed by the roster SET + runSeed (lifetime rule set: no season in the
       //   key -- a classic run outlives seasons); the solo chain planner's classicResume rule (a resume may start at any proven depth = the guard
@@ -4692,7 +4727,8 @@ async function main() {
         }
         const dayK = sigDay(signals, nowMs);
         for (const sid of writerSids) dayK.n[pid(sid)] = (dayK.n[pid(sid)] || 0) + 1;
-        recordEndlessSignals(signals, rosterSids, nowMs); sigDirty = true;
+        recordEndlessSignals(signals, ownRosterSids, nowMs); sigDirty = true;   // Q78: own-record seats only
+        namedOnlyAt('endless-classic');
         soloAdvance(soloState, key, f, c.m, plan, nowMs);
         if (untaggedResume(f)) RUN.resumeUntagged = (RUN.resumeUntagged | 0) + 1;
         let teamK = 0;
@@ -4759,13 +4795,19 @@ async function main() {
         }
         const dayT = sigDay(signals, nowMs);
         for (const sid of writerSids) dayT.n[pid(sid)] = (dayT.n[pid(sid)] || 0) + 1;
-        recordEndlessSignals(signals, rosterSids, nowMs); sigDirty = true;
-        if (PT_MODE) ptSeedCp(cp, changedCp, [...new Set(rosterSids.concat(writerSids))]);
+        recordEndlessSignals(signals, ownRosterSids, nowMs); sigDirty = true;   // Q78: own-record seats only
+        namedOnlyAt('endless-comp');
+        if (PT_MODE) ptSeedCp(cp, changedCp, [...new Set(ownRosterSids.concat(writerSids))]);
         soloAdvance(soloState, key, f, c.m, plan, nowMs);
         if (plan.consume) {
           const host = rosterSids[0];
-          cp[host] = (cp[host] == null ? 0 : cp[host]) - COMP.RESUME_CP; changedCp[host] = cp[host];
-          console.log('  endless-comp cp ' + c.m + ': host ' + plog(host) + ' -' + COMP.RESUME_CP + ' resume (save@' + plan.consume + ') -> ' + cp[host]);
+          if (isOwnE(host)) {
+            cp[host] = (cp[host] == null ? 0 : cp[host]) - COMP.RESUME_CP; changedCp[host] = cp[host];
+            console.log('  endless-comp cp ' + c.m + ': host ' + plog(host) + ' -' + COMP.RESUME_CP + ' resume (save@' + plan.consume + ') -> ' + cp[host]);
+          } else {
+            RUN.endlessNamedOnlyCp = (RUN.endlessNamedOnlyCp || 0) + COMP.RESUME_CP;
+            console.log('  endless-comp cp ' + c.m + ': host ' + plog(host) + ' resume fee ' + COMP.RESUME_CP + ' not charged -- never wrote an own record for this run (Q78)');
+          }
         }
         let teamT = 0;
         for (let i = 0; i < pc7; i++) teamT += g[0].d[10 + i] | 0;
@@ -4832,19 +4874,29 @@ async function main() {
       }
       const day7 = sigDay(signals, nowMs);
       for (const sid of writerSids) day7.n[pid(sid)] = (day7.n[pid(sid)] || 0) + 1;
-      recordEndlessSignals(signals, rosterSids.length ? rosterSids : writerSids, nowMs);
+      recordEndlessSignals(signals, ownRosterSids.length ? ownRosterSids : writerSids, nowMs);   // Q78: own-record seats only
       sigDirty = true;
+      namedOnlyAt('endless');
       // playtest starter wallet: seed BEFORE the debit replay so a first run with continues
-      // debits from the starter baseline, not into synthetic debt. Roster included: a debit
-      // targets consensus-roster seats whether or not they wrote a record.
-      if (PT_MODE) ptSeedCp(cp, changedCp, [...new Set(rosterSids.concat(writerSids))]);
+      // debits from the starter baseline, not into synthetic debt. Roster seats included when
+      // they wrote an own record for the run: a debit targets them whether or not they settled.
+      if (PT_MODE) ptSeedCp(cp, changedCp, [...new Set(ownRosterSids.concat(writerSids))]);
       // CP debit per seat (canonical nibble replay). Targets the consensus ROSTER -- writing no
-      // record does not dodge a debit both ends witnessed. Debt is kept (no clamp): clamping
+      // settle record does not dodge a debit both ends witnessed. Debt is kept (no clamp): clamping
       // would forgive a forged continue, and a legit balance can only dip negative transiently
       // when the funding matchmade record settles a run later.
-      const debits = endlessDebits(t.continuesUsed);
+      // Q78: a seat that never wrote an own record for the run is neither charged nor counted on the ladder (its nibble
+      //   is masked out before the replay, so a fabricated seat cannot push a real member up the escalating price).
+      let contOwn = t.continuesUsed | 0;
+      for (const seatKey of Object.keys(roster0)) if (!isOwnE(roster0[seatKey])) contOwn &= ~(0xF << (4 * (seatKey | 0)));
+      const debitsAll = endlessDebits(t.continuesUsed);
+      const debits = endlessDebits(contOwn);
       for (let seat = 0; seat < pc7; seat++) {
         const sid = roster0[seat] != null ? String(roster0[seat]) : null;
+        if (sid && !isOwnE(sid) && debitsAll[seat]) {
+          RUN.endlessNamedOnlyCp = (RUN.endlessNamedOnlyCp || 0) + debitsAll[seat];
+          console.log('  endless cp ' + c.m + ': seat ' + seat + ' ' + plog(sid) + ' ' + endlessNib(t.continuesUsed, seat) + ' continues (' + debitsAll[seat] + ') not charged -- never wrote an own record for this run (Q78)');
+        }
         if (!sid || !debits[seat]) continue;
         const cur = cp[sid] == null ? 0 : cp[sid];
         cp[sid] = cur - debits[seat]; changedCp[sid] = cp[sid];

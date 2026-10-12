@@ -98,7 +98,8 @@ pin('points-board strict gate channel-aware', /if \(!lpId && !PT_MODE\) \{ stric
 pin('env: rating/points names optional on the channel', /if \(!RANKED_LB && !PT_MODE\) missing\.push/);
 pin('bootstrap refuses on forbidden boards', /forbidden board\(s\) exist on this app[\s\S]{0,200}?process\.exit\(1\)/);
 pin('bootstrap create failure is fatal (fail-closed provisioning)', /playtest bootstrap: board create failed[\s\S]{0,120}?process\.exit\(1\)/);
-pin('endless starter seed covers roster (debit targets)', /if \(PT_MODE\) ptSeedCp\(cp, changedCp, \[\.\.\.new Set\(rosterSids\.concat\(writerSids\)\)\]\)/);
+pin('endless starter seed covers the roster seats that can be debited (own record for the run, Q78)', /if \(PT_MODE\) ptSeedCp\(cp, changedCp, \[\.\.\.new Set\(ownRosterSids\.concat\(writerSids\)\)\]\)/);
+T('pin: no starter seed over the bare named roster (a seat only the writers name is never seeded, Q78)', !/ptSeedCp\(cp, changedCp, \[\.\.\.new Set\(rosterSids\.concat/.test(src));
 pin('matchmade starter seed covers writers', /if \(PT_MODE && cpId\) ptSeedCp\(cp, changedCp, writerSids\)/);
 
 // ---- 6) workflow pins (the job must actually run the channel it claims) ----
