@@ -69,8 +69,25 @@ console.log('-- reconcile twins --');
         T('env ' + k + ' identical across twins', ePt[k] === eDm[k], ePt[k] + ' / ' + eDm[k]);
       }
     }
-    // every produced (persisted-class) state file is persisted; rating-side files are deliberately not
+    // every produced (persisted-class) state file is persisted; rating-side files are deliberately not.
+    //   SC_STATE_FILE: a read-only consult here (seedcap.yml's twin jobs persist it). SKILL_FILE / GROUPS_FILE: PT_MODE
+    //   skips the rating update and group decay, so both stay empty -- verified, not trusted: test/channel-state-files.js
+    //   runs the real reconcile under each twin's env and goes red the day a file a twin does not persist carries data.
     const NOT_PERSISTED = new Set(['SC_STATE_FILE', 'SKILL_FILE', 'GROUPS_FILE']);
+    // every state file validate.js writes (writeStateFile(<var>, ...)) is named by both twins: an unnamed one falls back
+    //   to the main channel's file in the checkout (read as this channel's state, written over, never persisted) --
+    //   unless its lane is hard-off under PT_MODE (pinned: the lane returns before it touches the file)
+    const PT_OFF_LANES = {
+      CAMPAIGN_ENDLESS_FILE: /const processCampaignEndless = async \(\) => \{\s*if \(PT_MODE\) return;/,   // Gold Rush: the campaign never ships on these channels
+    };
+    const vjs = fs.readFileSync(path.join(__dirname, '..', 'validate.js'), 'utf8');
+    const written = [...new Set(Array.from(vjs.matchAll(/writeStateFile\(([A-Z0-9_]+_FILE),/g), m => m[1]))].sort();
+    T('validate.js state writes found (' + written.length + ')', written.length >= 10, written.join(','));
+    for (const k of written) {
+      if (PT_OFF_LANES[k]) T('state file ' + k + ' not named by the twins: its lane is hard-off under PT_MODE', PT_OFF_LANES[k].test(vjs));
+      else T('state file ' + k + ' (written by validate.js) named by both twins', k in ePt && k in eDm);
+    }
+    for (const k of Object.keys(PT_OFF_LANES)) T('PT-off lane ' + k + ' is still a validate.js state write (else drop the entry)', written.indexOf(k) >= 0);
     for (const [name, env, src] of [['playtest', ePt, pt], ['demo', eDm, dm]]) {
       const produced = Object.keys(env).filter(k => /_FILE$/.test(k) && !NOT_PERSISTED.has(k)).map(k => env[k]).sort();
       const persist = persisted(src, name).sort();

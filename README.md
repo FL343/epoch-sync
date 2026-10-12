@@ -147,7 +147,10 @@ absent, so a run is unaffected before it is provisioned.
   rating/points/redeem surface, channel boards provisioned idempotently, forbidden boards
   fail the run) with disjoint `pt-*.json` / `demo-*.json` state. `feedback.yml`,
   `sanctions.yml` and `seedcap.yml` carry per-channel twin jobs for the same app ids;
-  `test/channel-workflows.js` pins the twins to their template so they cannot drift apart.
+  `test/channel-workflows.js` pins the twins to their template so they cannot drift apart;
+  `test/channel-state-files.js` runs the real reconcile under each twin's own state-file names
+  and fails when a twin writes a file it does not persist with data in it (the rating-side
+  `skill` / `groups` files are left unpersisted only because `PT_MODE` keeps them empty).
 - `seedcap.js` / `seedcap.yml` — per-seed score-cap audit (replays every settled/pending
   match's seed through a compiled world model, derives the mathematical score ceiling per
   seat). Writes only its own `seedcap.json` (`audited` / `veto` / `suspects[pid]{n,t0,t1}` /
