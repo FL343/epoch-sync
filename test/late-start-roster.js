@@ -26,13 +26,16 @@
 //   [3] REVIEW-2 A8 (1V1): the loser and one alt start before level 1: split, held; mutant (the loser takes the win)
 //   [4] honest controls: a cold-reconnect copy of a start inside the window (no split, confirmed, settles); the first
 //       look reads half the starts (no split, settles); an outside account copying the players' roster from a played
-//       seat inside the window (no split: dropped by the gate, flagged); the summary rows
+//       seat inside the window (no split: dropped by the gate, not flagged since Q124); the summary rows
 //   [5] Q114: review-q80.js T9 -- an outside result on a settled 2V2: nobody flagged, also after the flag-memory prune;
 //       control: an inconsistent group on an unsettled key still flags its writers; mutant (settled keys flagged again)
 //   [6] wiring pins
 //   [7] Q127: the window is five minutes after registration -- a losing player's alt writing a start late in the match
 //       is dropped by the gate and the real result settles (REVIEW-2 of Q114 + Q118, D1); mutant (ten minutes again -> the
 //       loss is undone); D1e (pinned residual): inside the five minutes the start still splits the key, voided, nobody flagged
+//   [8] Q124 first step (REVIEW-2 of Q113, D1): the player who picks a 1V1's key and his alt register a roster of their own
+//       twenty minutes ahead; the opponent's honest start and result are dropped by the gate and he is flagged by nobody;
+//       pinned residual (the rest of Q124): the pair's own result settles; mutant (the seat gate flags again -> he is flagged)
 // State isolation is structural (every *_FILE var scanned and redirected, cwd = temp dir), like test/seat-gate.js.
 const { spawnSync } = require('child_process');
 const fs = require('fs'), path = require('path'), os = require('os');
@@ -387,8 +390,8 @@ const settledHonest = (tag, rs, key, settleRun) => {
   const S2 = S.concat([cp]), F = S2.concat(realSettles(h));
   const rs = timeline([[0, S], [2 * MIN, S2], [10 * MIN, F], [6 * MIN, F], [6 * MIN, F], [3 * HOUR, F]]);
   T('[4c] an outside copy of the roster: six runs exit 0', allOk(rs, 6), last(rs).out.slice(-800));
-  T('[4c] no split; the copy is dropped by the gate (not counted, flagged once), the players are not', !/start-split /.test(outOf(rs)) && Q80LINE.test(rs[1].out)
-    && fOf(last(rs), Q[5]) === 1 && RR.every(s => fOf(last(rs), s) === 0), JSON.stringify([Q[5]].concat(RR).map(s => fOf(last(rs), s))));
+  T('[4c] no split; the copy is dropped by the gate (not counted, nobody flagged: Q124), the players are not flagged either', !/start-split /.test(outOf(rs)) && Q80LINE.test(rs[1].out)
+    && fOf(last(rs), Q[5]) === 0 && RR.every(s => fOf(last(rs), s) === 0), JSON.stringify([Q[5]].concat(RR).map(s => fOf(last(rs), s))));
   T('[4c] the real result settles', processedOf(rs[2]).has(key) && up(rs, P1) && up(rs, P2) && none(rs, Q[5]));
 }
 
@@ -477,6 +480,38 @@ const settledHonest = (tag, rs, key, settleRun) => {
   T('[7] D1e (pinned residual): an alt\'s start inside the five minutes still splits the key -- held, voided, nobody rated, flagged or convicted',
     allOk(re, 6) && LATE.test(re[1].out) && Q75.test(outOf(re)) && processedOf(last(re)).has(keye) && [P1, P2, Q[3]].every(s => none(re, s) && fOf(last(re), s) === 0)
     && [P1, P2].every(s => leavesOf(last(re), s) === 0), JSON.stringify([P1, P2, Q[3]].map(s => [ptsIn(re, s), fOf(last(re), s)])));
+}
+
+// ---- [8] Q124 first step: a record the seat gate drops flags nobody, on a matchmade key too ----
+// REVIEW-2 of Q113, D1 (twenty minutes ahead): a 1V1 [V, M], M picks the key (the friends'-room host, the lobby owner).
+//   M and his alt A write starts naming [A, M] twenty minutes before level 1: two votes, the roster registers and is
+//   confirmed five minutes later. V's honest start and result name [V, M] at seat 0, A's seat: the gate drops them. Until
+//   now that flagged V once per match (three friends'-room matches: trust tier 1 for the same invitees). Nobody is flagged
+//   now. Pinned residual (the rest of Q124, P3): the pair's own result settles -- M wins against his alt, V's match is lost.
+{
+  const V = P1, M = P2, A = Q[4], RV = [V, M], RA = [A, M];
+  const d1 = (h) => {
+    const SE = [{ sid: A, d: v1start(h, 0, RA) }, { sid: M, d: v1start(h, 1, RA) }];
+    const S = SE.concat([{ sid: V, d: v1start(h, 0, RV) }]);
+    const F = S.concat([{ sid: V, d: v1settle(h, 0, RV, 0) }, { sid: A, d: v1settle(h, 0, RA, 1) }, { sid: M, d: v1settle(h, 1, RA, 1) }]);
+    return [[0, SE], [5 * MIN, SE], [15 * MIN, S], [5 * MIN, F], [5 * MIN, F], [3 * HOUR, F]];
+  };
+  const h = 0x9050, key = keyOf(v1start(h, 0, RV));
+  const rs = timeline(d1(h));
+  T('[8] six runs exit 0', allOk(rs, 6), last(rs).out.slice(-800));
+  T('[8] the pair\'s roster registers and is confirmed before V\'s start', pendOf(rs[1], key) && !('prov' in pendOf(rs[1], key)) && pendOf(rs[1], key).roster[0] === v.pid(A),
+    JSON.stringify(pendOf(rs[1], key)));
+  T('[8] V\'s start and result are dropped by the gate', Q80LINE.test(rs[2].out) && Q80LINE.test(rs[3].out) && offSeatN(rs) >= 2, String(offSeatN(rs)));
+  T('[8] nobody flagged -- V above all (Q124), nobody convicted', [V, M, A].every(s => fOf(last(rs), s) === 0) && [V, M, A].every(s => leavesOf(last(rs), s) === 0),
+    JSON.stringify([V, M, A].map(s => [fOf(last(rs), s), leavesOf(last(rs), s)])));
+  T('[8] pinned residual (rest of Q124): the pair\'s own result settles, V gets nothing', processedOf(last(rs)).has(key) && up(rs, M) && none(rs, V)
+    && ptsIn(rs, A).length === 1 && ptsIn(rs, A)[0] < 2500, JSON.stringify([V, M, A].map(s => ptsIn(rs, s))));
+  const script = mutant('  //   clean) and gains nothing by the records (dropped).\n', '  //   clean) and gains nothing by the records (dropped).\n'
+    + "  for (const [m, rs] of seatGate.out) { if (isEndlessMt(rs[0].d[2] | 0)) continue; if (recordFlag(signals, rs, m + '|seat', Date.now())) sigDirty = true; for (const r of rs) trustTouched.add(String(r.steamID)); }\n", '[8]');
+  if (script) try {
+    const m = timeline(d1(0x9051), script);
+    T('[8] mutant: the seat gate flags again (the Q113 loop) -> V is flagged for his own honest records', allOk(m, 6) && fOf(last(m), V) === 1, String(fOf(last(m), V)));
+  } finally { try { fs.unlinkSync(script); } catch (e) {} }
 }
 
 console.log('=== ' + (failN === 0 ? 'PASS' : 'FAIL') + ' -- ' + failN + ' fail (late-start-roster) ===');

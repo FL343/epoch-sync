@@ -13,8 +13,9 @@
 //       record must name the same seats out of the same seat count and the voters left the same accounts -- an endless
 //       key is split unless every start writer tells the same story, Q113), seatGateRoster (endless keys gated too --
 //       Q113), seatedOnRoster, applySeatGate
-//   [2] R1: two outside accounts write a fake result a minute after the real starts; dropped, flagged once, the real
-//       players are not convicted while they play, the real result settles twelve minutes in, nobody convicted at maturity
+//   [2] R1: two outside accounts write a fake result a minute after the real starts; dropped (nobody flagged, Q124), the
+//       real players are not convicted while they play, the real result settles twelve minutes in, nobody convicted at
+//       maturity
 //   [3] R1b: the outside accounts also copy the key into start records of their own a minute after the first look,
 //       naming their own roster: the roster is still provisional (Q118), so the key is split, the Q75 contest holds it
 //       while their rows are up and the real result settles once they are gone; R1d: the same once the roster is
@@ -27,7 +28,7 @@
 //   [5] R2: nobody writes a result, two outside accounts write a fake one twenty minutes in: dropped; at maturity the
 //       four players each get the exit their own starts earn, no -100
 //   [6] part 6 of review4-q43.js with starts (two losers move onto the winners' seats, one outside account): the three
-//       forged records are dropped, the winners win, the two forgers are leavers (their own starts), the outsider flagged
+//       forged records are dropped, the winners win, the two forgers are leavers (their own starts), nobody flagged (Q124)
 //   [7] a real quitter shielded by an outside account at his empty seat, with starts: the quitter is convicted
 //   [8] P2 of review-q69.js: sixteen outside accounts copy the quitter's start before the first look to crowd him out of
 //       the started list: their starts are dropped, the quitter is still convicted
@@ -36,7 +37,7 @@
 //   [10] pinned residual: a 1V1 where a second account starts at the opponent's seat before the first look: no roster
 //        can register, the key is held (nobody rated, nobody convicted) -- the same as the loser not writing his records
 //   [11] wiring pins + mutation self-checks (gate removed / dispute rule removed / registered keys contested again /
-//        start records not gated)
+//        start records not gated / off-seat writers flagged again, Q124)
 //   [12] with the team-gamble accusation pass (Q43) in the tree: five outside accounts no longer charge an honest host
 //        (review4-q43.js part 3, real starts registered); mutant (gate removed -> judged again). Skipped without Q43.
 //   [13] two colluding losers name other accounts at the winners' seats in their starts (a 2-2 split there): the roster is
@@ -383,7 +384,7 @@ console.log('=== a record counts only from the seat its start roster gives its w
     JSON.stringify(RR.map(s => ptsIn(rs, s))));
   T('[2] the outside pair gains nothing', none(rs, X1) && none(rs, Y1));
   T('[2] at maturity nobody is convicted', RR.concat([X1, Y1]).every(s => leavesOf(rs[5], s) === 0));
-  T('[2] the outside pair flagged once each over five sightings, the players not at all', fOf(rs[5], X1) === 1 && fOf(rs[5], Y1) === 1 && RR.every(s => fOf(rs[5], s) === 0),
+  T('[2] nobody flagged: the gate drops the pair\'s records, it does not flag them (Q124)', fOf(rs[5], X1) === 0 && fOf(rs[5], Y1) === 0 && RR.every(s => fOf(rs[5], s) === 0),
     JSON.stringify(RR.concat([X1, Y1]).map(s => fOf(rs[5], s))));
 }
 
@@ -458,7 +459,7 @@ console.log('=== a record counts only from the seat its start roster gives its w
   T('[6] the key settles: H and V win, X and Y are leavers (their own starts), O gains nothing', processedOf(rs[3]).has(key) && up(rs, H) && up(rs, V)
     && down(rs, X) && down(rs, Y) && leavesOf(rs[3], X) === 1 && leavesOf(rs[3], Y) === 1 && leavesOf(rs[3], H) + leavesOf(rs[3], V) === 0 && none(rs, O),
     JSON.stringify([H, V, X, Y, O].map(s => ptsIn(rs, s))) + ' leaves ' + JSON.stringify([H, V, X, Y].map(s => leavesOf(rs[3], s))));
-  T('[6] the three writers off their seats flagged once each', [X, Y, O].every(s => fOf(rs[3], s) === 1) && [H, V].every(s => fOf(rs[3], s) === 0),
+  T('[6] nobody flagged: the three records off their seats are dropped, not flagged (Q124)', [H, V, X, Y, O].every(s => fOf(rs[3], s) === 0),
     JSON.stringify([H, V, X, Y, O].map(s => fOf(rs[3], s))));
 }
 
@@ -520,7 +521,7 @@ console.log('=== a record counts only from the seat its start roster gives its w
   const iGr = SRC.indexOf('const gr = groupRecords(recs, { vecOf, MAX_SEATS });');
   T('[11] main: processed loaded, rosters registered, records gated -- in that order, before grouping', iP > 0 && iR > iP && iG > iR && iGr > iG);
   T('[11] the start cross-check is told registration already ran', /reconcileStarts\(starts, groups, consistentKeys, processed, startsPending, leavers, nowMs, STARTS_MATURITY_MS, confState, shardsComplete, registeredEarly\)/.test(SRC));
-  T('[11] dropped writers flagged per key and handed to the trust tier (endless keys flag nobody, Q113)', /for \(const \[m, rs\] of seatGate\.out\) \{ if \(isEndlessMt\(rs\[0\]\.d\[2\] \| 0\)\) continue; if \(recordFlag\(signals, rs, m \+ '\|seat', Date\.now\(\)\)\) sigDirty = true; for \(const r of rs\) trustTouched\.add\(String\(r\.steamID\)\); \}/.test(SRC));
+  T('[11] dropped writers are flagged on no key (Q124; endless since Q113)', !/recordFlag\(signals, rs, m \+ '\|seat'/.test(SRC) && !/of seatGate\.out\)/.test(SRC));
   T('[11] run summary row', /s\('offSeat', 0\) \+ ' \/ ' \+ s\('disputed', 0\)/.test(SRC) && /RUN\.offSeat = seatGate\.n;/.test(SRC));
   T('[11] exports', ['registerStartRosters', 'seatGateRoster', 'seatedOnRoster', 'applySeatGate'].every(f => typeof v[f] === 'function'));
   const mutants = [
@@ -540,6 +541,12 @@ console.log('=== a record counts only from the seat its start roster gives its w
     ['start records not gated', '  for (const list of [recs, starts]) {', '  for (const list of [recs]) {', (script) => {
         const rs = timeline(p2Steps(0x8018), script);   // [8] the sixteen copies crowd P4 out of the started list
         return leavesOf(last(rs), P4) === 0;
+      }],
+    ['off-seat writers flagged by the seat gate again (the Q113 loop)', '  //   clean) and gains nothing by the records (dropped).\n',
+      '  //   clean) and gains nothing by the records (dropped).\n'
+        + "  for (const [m, rs] of seatGate.out) { if (isEndlessMt(rs[0].d[2] | 0)) continue; if (recordFlag(signals, rs, m + '|seat', Date.now())) sigDirty = true; for (const r of rs) trustTouched.add(String(r.steamID)); }\n", (script) => {
+        const rs = timeline(r1Steps(0x801a), script);   // [2] the outside pair flagged once each again
+        return fOf(last(rs), X1) === 1 && fOf(last(rs), Y1) === 1;
       }],
   ];
   for (const [label, from, to, check, extra] of mutants) {

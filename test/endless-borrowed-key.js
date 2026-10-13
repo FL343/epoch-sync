@@ -37,7 +37,7 @@
 //   [5] wiring pins
 //   [6] mutation self-checks (gate excludes endless again / no endless split check / a tied key registers nothing /
 //       hold removed / remembered word not checked / this run's starts not checked / own word not required / testimony not
-//       remembered / endless keys register on a partial read / endless keys flagged by the seat gate again)
+//       remembered / endless keys register on a partial read / off-seat writers flagged by the seat gate again, Q124)
 //   [7] Q128 (REVIEW-2 of Q113, A5 / A5b): an outside settle that disagrees on an endless key without a seat gate (split at
 //       registration, split by a later start inside the provisional window, never registered) flags nobody; control: a gated
 //       key whose own players disagree still flags both; wiring; mutant (the endless skip removed -> V and W flagged again)
@@ -641,7 +641,9 @@ console.log('-- [6] mutation self-checks --');
       const x = rotatedLeaver(script);
       return lastCp(x.p, x.C) !== CP0 - 50;
     }],
-    ['endless keys flagged by the seat gate again', 'if (isEndlessMt(rs[0].d[2] | 0)) continue; ', '', (script) => {
+    ['off-seat writers flagged by the seat gate again (the Q80 loop, endless keys too)', '  //   clean) and gains nothing by the records (dropped).\n',
+      '  //   clean) and gains nothing by the records (dropped).\n'
+        + "  for (const [m, rs] of seatGate.out) { if (recordFlag(signals, rs, m + '|seat', Date.now())) sigDirty = true; for (const r of rs) trustTouched.add(String(r.steamID)); }\n", (script) => {
       const x = soloFirst(script);
       return flagsOf(x.p, x.V) > 0 || flagsOf(x.p, x.W) > 0;
     }],

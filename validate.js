@@ -3726,7 +3726,7 @@ async function main() {
   // trust-tier candidates seen this run (real sids; signals stay HMAC-keyed -- the only
   // place real ids persist is the trust board itself, which is the public artifact anyway)
   const trustTouched = new Set();
-  // Q80: every account that wrote a record off its seat is flagged once per key (only its own writes can put it here).
+  // Q80: every account that wrote a record off its seat was flagged once per key (only its own writes could put it here).
   // Q113 (review): except on endless keys. An endless roster registers from the first start read -- one solo-shaped start
   //   (its writer alone, at seat 0) is enough -- and everyone in a run knows its key (the host picks it; a team competitive
   //   segment's key is the run key + s + the segment number), so one player in the run can register a roster of his own
@@ -3734,7 +3734,14 @@ async function main() {
   //   after three runs, or within one team competitive run). The gate still drops those records (nobody is charged, seeded
   //   or paired by them; endless never convicts a leave and charges a seat only on its own word), it just flags nobody: the
   //   run stays unsettled, as when a player writes a result of his own that disagrees.
-  for (const [m, rs] of seatGate.out) { if (isEndlessMt(rs[0].d[2] | 0)) continue; if (recordFlag(signals, rs, m + '|seat', Date.now())) sigDirty = true; for (const r of rs) trustTouched.add(String(r.steamID)); }
+  // Q124 (cloud audit, first step): on no key at all. A matchmade or friends'-room roster registers first-seen from two
+  //   votes, and whoever picks the match key (the friends'-room host, the matchmaking lobby owner) can have two accounts --
+  //   himself and an alt, or two players queued together -- register a roster of their own ahead of the other players'
+  //   starts (written at level 1; with Q118, START_CONFIRM_MS ahead). Those players' honest records then land here and
+  //   were flagged once per match: three friends'-room matches put the same invitees at trust tier 1 (REVIEW-2 of Q113, D1
+  //   to D3). The gate still drops the records, applySeatGate's warning still names their writers and RUN.offSeat counts
+  //   them; nobody is flagged. An outside account writing off its seat loses nothing by a flag (a fresh account starts
+  //   clean) and gains nothing by the records (dropped).
   // Q75: a key whose records name two different accounts for one seat is held out of every pass below (nobody rated,
   //   nobody convicted, nobody flagged: Q114 review) -- an outside account's record no longer counts as a vote
   const rcRes = applyRosterContest(gr, starts, startsPending, signals, processed, Date.now());
