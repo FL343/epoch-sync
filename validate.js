@@ -1667,6 +1667,7 @@ function writeRunSummary() {
       '| token resumes: replays caught / burnt-run segments / untagged settled / untagged refused | ' + s('resumeReplay', 0) + ' / ' + s('runBurnt', 0) + ' / ' + s('resumeUntagged', 0) + ' / ' + s('resumeUntaggedRej', 0) + ' |',
       '| solo same-key forks (another signed record under a settled segment key) | ' + s('soloKeyFork', 0) + ' |',
       '| one-match-at-a-time deferrals | ' + s('writerPaced', 0) + ' |',
+      '| ranked matches that are a mismatch only with the rating as played on, the repeat-group decay set aside (Q160) | ' + s('heldMismatch', 0) + ' |',
       '| absent seats named by others only, not convicted (Q69) | ' + s('unattested', 0) + ' |',
       '| team matches with nobody on the losing team, settled without a rating move (Q136) | ' + s('noLoser', 0) + ' |',
       '| team matches with a losing seat nobody accounts for (named by the others only or left blank), settled without a rating move (Q149) | ' + s('namedLoser', 0) + ' |',
@@ -2009,6 +2010,13 @@ function saveStarts(s) { try { writeStateFile(STARTS_FILE, JSON.stringify(s, nul
 // player's opponents repeat from their previous match; more than half replaced resets the streak
 // (the user's blood-change rule). TTL keeps this a session-scoped memory, not a social graph.
 // State updates only on real settles (VOID/endless don't advance or reset a streak).
+// The rating as played on still counts for points (cloud audit Q160): a frozen rating also froze the mismatch check of the
+// points plan, so a repeat group kept full points stakes however lopsided it was -- two accounts writing every seat of a
+// 2V2 nobody played, beating the same two zero-points accounts back to back, took the full team win every match at
+// grandmaster, while the same matches spaced past the TTL fall to the compressed gain after three. So while a streak runs,
+// a member's entry also carries the rating he would have without the decay (sm / ss: mu / sigma, updated every match of the
+// streak by the same TrueSkill update from those undecayed ratings; dropped with the streak), and the points plan reads
+// that rating. The decayed rating stays what matchmaking and the rating board see.
 const GROUP_DECAY = { WEIGHTS: [1, 0.5, 0.25, 0], REPEAT_FRAC: 0.5, TTL_MS: 2 * 3600 * 1000, PRUNE_MS: 48 * 3600 * 1000 };
 const GROUPS_FILE = process.env.GROUPS_FILE || 'groups.json';
 function loadGroups() { try { return JSON.parse(fs.readFileSync(GROUPS_FILE, 'utf8')) || {}; } catch (e) { return {}; } }
@@ -2035,6 +2043,9 @@ function groupDecayPlan(groups, rosterPids, nowMs) {
     }
     groups[p] = { r: others, k, at: nowMs };
     out[p] = { k, w: GROUP_DECAY.WEIGHTS[Math.min(k - 1, GROUP_DECAY.WEIGHTS.length - 1)] };
+    if (k > 1 && prev && Number.isFinite(prev.sm) && Number.isFinite(prev.ss)) {   // Q160: the undecayed rating rides the streak only
+      groups[p].sm = prev.sm; groups[p].ss = prev.ss; out[p].sm = prev.sm; out[p].ss = prev.ss;
+    }
   }
   return out;
 }
@@ -6059,7 +6070,29 @@ async function main() {
       // visible-LP plan uses PRE-match ratings (tsIn) + current LP -> per-player adjusted delta + reveal flag.
       //   team matches: halved team-LP path (teamLpPlan); FFA: per-unit plan (premade pairs from the
       //   matchType mask settle at their average rank -- design line 66; solos = original formula).
-      const planIn = tsIn.map((t, i) => ({ steamID: t.id, seat: parts[i].seat | 0, mmr: ts.displayRating(t.mu, t.sigma), rank: t.rank, lp: (lp[t.id] == null ? 0 : lp[t.id]) }));
+      //   Q160: the rating side of the plan is the rating as played on -- for a member of a running repeat-group streak the
+      //   undecayed one the group memory carries (see GROUP_DECAY), else the stored one.
+      const asPlayed = tsIn.map((t) => { const g = gPlan[pid(t.id)]; return (g && g.sm != null) ? { id: t.id, mu: g.sm, sigma: g.ss, rank: t.rank } : t; });
+      const planIn = tsIn.map((t, i) => ({ steamID: t.id, seat: parts[i].seat | 0, mmr: ts.displayRating(asPlayed[i].mu, asPlayed[i].sigma), rank: t.rank, lp: (lp[t.id] == null ? 0 : lp[t.id]) }));
+      // ... and that rating moves on by the same update from the undecayed inputs, kept while the decay holds anything back
+      //   (a team match with one side fully present only; a whole team absent leaves it as it was)
+      let playedOut = null;
+      if (tsOut.length && tsIn.some((t, i) => asPlayed[i] !== t || ((gPlan[pid(t.id)] || {}).w < 1))) {
+        if (isTeamMt(matchType)) {
+          const winT = (t2Win != null) ? t2Win : (((scores[2] | 0) + (scores[3] | 0)) > ((scores[0] | 0) + (scores[1] | 0)) ? 1 : 0);
+          const sd = [[], []], _ts = teamSizeOfMt(matchType);
+          for (let i = 0; i < parts.length; i++) sd[teamOfSeat(parts[i].seat, _ts)].push(asPlayed[i]);
+          playedOut = (sd[0].length && sd[1].length) ? ts.updateTeamMatch([{ players: sd[winT], rank: 1 }, { players: sd[1 - winT], rank: 2 }]) : asPlayed;
+        } else playedOut = ts.updateMatch(asPlayed);
+      }
+      if (lpId && appliesLp(matchType) && asPlayed.some((a, i) => a !== tsIn[i])) {
+        const spread = (xs) => Math.max.apply(null, xs) - Math.min.apply(null, xs);
+        const bare = tsIn.map((t) => ts.displayRating(t.mu, t.sigma)), held = planIn.map((x) => x.mmr | 0);
+        const turned = spread(bare) <= RS_THRESHOLD && spread(held) > RS_THRESHOLD;
+        if (turned) RUN.heldMismatch = (RUN.heldMismatch | 0) + 1;
+        console.log('  held-back ' + c.m + ': repeat-group decay, rating as played on ' + tsIn.map((t, i) => plog(t.id) + ' ' + bare[i] + '->' + held[i]).join(', ')
+          + ' -- spread ' + spread(bare) + ' -> ' + spread(held) + (turned ? ' (mismatch only with the rating as played on, Q160)' : ''));
+      }
       const rsPlan = isTeamMt(matchType)
         ? teamLpPlan(planIn, matchType, scores, leavers0.concat(namedOnly).map(x => x.seat), t2Win)   // Q69: named-only seats still shield their teammates
         : reducedStakesPlan(planIn, matchType, premadeMaskOf(matchType), premadeTrioAtOf(matchType));
@@ -6078,6 +6111,13 @@ async function main() {
         }
         skill[pid(r.id)] = { mu: r.mu, sigma: r.sigma };
         changed[r.id] = { mu: r.mu, sigma: r.sigma };
+        {   // Q160: keep the rating as played on while it differs from the stored one (the streak memory drops it with the streak)
+          const ge = groupMem[pid(r.id)], po = playedOut && playedOut.find((x) => x.id === r.id);
+          if (ge) { delete ge.sm; delete ge.ss; }
+          if (ge && po && (Math.abs(po.mu - r.mu) > 1e-4 || Math.abs(po.sigma - r.sigma) > 1e-4)) {
+            ge.sm = Math.round(po.mu * 1e4) / 1e4; ge.ss = Math.round(po.sigma * 1e4) / 1e4;
+          }
+        }
         let lpLine = '';
         if (lpId && appliesLp(matchType)) {   // quick = MMR only; visible LP ladder is ranked-only
           const cur = lp[r.id] == null ? 0 : lp[r.id];
