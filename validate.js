@@ -381,6 +381,7 @@ function applyRosterContest(gr, starts, pending, signals, processed, now) {
     const recsM = g.concat(byKey[m] || []);
     const seats = rosterContestSeats(recsM);
     if (seats.length || seatLayoutsDisagree(recsM)) { res.contested.set(m, seats); markContest(pending, m, now); }   // Q80 third review: or two seat layouts; Q127: for good
+    if (res.contested.has(m)) noteContestParties(pending, m, now, contestParties(recsM));   // Q143: whose records
   }
   if (!res.contested.size) return res;
   for (const list of [gr.consistentMatches, gr.inconsistentGroups]) {
@@ -485,6 +486,8 @@ function lateStartSplit(p, recs, m) {
   });
   if (kept) RUN.lateOwnSeat = (RUN.lateOwnSeat | 0) + 1;
   if (!other) return false;
+  LATE_SPLIT_WHO.length = 0;   // Q143: the splitting starts, by the same test (prov is dropped next)
+  if (mm) for (const q of contestParties(recs, { roster: p.roster || {}, pc: 0 }, (r) => startSig(r) === p.prov || blankSeatStart(r) || ownSeat(r))) LATE_SPLIT_WHO.push(q);
   p.split = 1;
   delete p.prov;
   console.log('  start-split ' + m + ': a start record read after the roster was registered names another roster ('
@@ -596,6 +599,67 @@ function outvotedStarts(att, t, disputed) {
 const SEEN_KEEP_MS = 24 * 3600 * 1000;
 function seenNote(pending, m, now) { const k = '~' + m; return pending[k] || (pending[k] = { t0: now, s: [], r: 0, c: 0 }); }
 function markContest(pending, m, now) { if (pending && isMatchmadeMt(String(m).split('_')[2] | 0)) seenNote(pending, m, now).c = 1; }
+// ---- whose records contested a matchmade key (cloud audit Q143) ----
+// Since the note is sticky, one record read once holds a key until it voids: an outside account copies the key off a
+// public start, writes a start of its own (a player's seat before the job's first look, or one more seat while the roster
+// is provisional), lets one run read it and withdraws it -- the honest match voids two hours later, everybody gets the
+// consolation XP only, and no log line said whose record it was (REVIEW of Q130, B1-B3). It cannot go back to "withdrawn
+// = never written" (Q127's free choice after the result), and "only what is still up when the result is read" leaves a
+// loser the minutes between his result and the job's read. So for now the job remembers and counts, as for the absent
+// seats of Q69 (A06): when it marks a key contested it notes the writers of the records that disagree with the key's
+// table -- a record agrees when its seat count and roster are the table's and the table seats its writer at the seat he
+// writes from -- in the key's note (w, at most CONTEST_PARTY_CAP accounts, first come), logs them (contest-parties, and
+// again where the key voids) and counts each once per key in his B6 signals: co when another writer's record of the key
+// names him at some seat (a player who wrote another table; an outsider an accomplice names), cx when no other record
+// names him (an outside account; also the rare honest player whose seat alts registered first, Q118 -- the two look the
+// same, so nobody is flagged). The table is the registered roster for a start that splits a provisional one (the
+// splitting starts are the contesters, lateStartSplit's own test), and otherwise the per-seat strict majority of one
+// record per writer read this run, with the commonest seat count. A player whose seat an outsider claims writes an
+// agreeing record and is not noted. Nothing here holds, settles, rates or flags anything.
+const CONTEST_PARTY_CAP = 8;
+const CONTEST_PARTIES = [];   // [key, pid, named by another record] -- counted in main once signals are loaded
+const LATE_SPLIT_WHO = [];    // the starts that split a provisional roster, filled by lateStartSplit before it drops prov
+function pidCanon(ro) { return Object.keys(ro || {}).map(Number).sort((a, b) => a - b).map((s) => s + ':' + ro[s]).join(','); }
+function contestTable(recs) {
+  const one = {}, pcs = {};
+  for (const r of recs || []) if (r && r.d && !one[String(r.steamID)]) one[String(r.steamID)] = r;
+  const att = Object.values(one);
+  let pc = 0, best = 0;
+  for (const r of att) { const k = r.d[8] | 0; pcs[k] = (pcs[k] | 0) + 1; if (pcs[k] > best) { best = pcs[k]; pc = k; } }
+  return { roster: tallyStartVotes(att).roster, pc };
+}
+function contestParties(recs, table, agrees) {
+  const tab = table || contestTable(recs), canon = pidCanon(tab.roster);
+  const ok = agrees || ((r) => (r.d[8] | 0) === tab.pc && rosterCanon(r.roster) === canon && tab.roster[r.d[5] | 0] === pid(String(r.steamID)));
+  const namedBy = {};
+  for (const r of recs || []) {
+    if (!r || !r.d) continue;
+    const w = pid(String(r.steamID));
+    for (const k of Object.keys(r.roster || {})) { const h = pid(String(r.roster[k])); if (h !== w) namedBy[h] = 1; }
+  }
+  const out = new Map();
+  for (const r of recs || []) {
+    if (!r || !r.d || ok(r)) continue;
+    const h = pid(String(r.steamID));
+    if (!out.has(h)) out.set(h, { h, seat: r.d[5] | 0, on: !!namedBy[h] });
+  }
+  return [...out.values()];
+}
+function partyText(h, on, seat) { return h.slice(0, 8) + (seat == null ? '' : '@' + seat) + (on ? ' (named by another record)' : ' (named by no other record)'); }
+function noteParties(e) { return (e && e.w && e.w.length) ? e.w.map((x) => partyText(x.slice(0, 16), x.charAt(16) === 'o')).join(', ') : ''; }
+function noteContestParties(pending, m, now, parties) {
+  if (!pending || !isMatchmadeMt(String(m).split('_')[2] | 0)) return;
+  const e = seenNote(pending, m, now), fresh = [];
+  for (const q of parties || []) {
+    const w = e.w || (e.w = []);
+    if (w.length >= CONTEST_PARTY_CAP || w.some((x) => x.slice(0, 16) === q.h)) continue;
+    w.push(q.h + (q.on ? 'o' : 'x'));
+    fresh.push(q);
+    CONTEST_PARTIES.push([m, q.h, q.on]);
+  }
+  if (fresh.length) console.log('  contest-parties ' + m + ': ' + fresh.map((q) => partyText(q.h, q.on, q.seat)).join(', ')
+    + " -- their records disagree with the key's table; counted per account, nobody flagged (Q143)");
+}
 function startSeenId(r) { return pid(String(r.steamID)) + '@' + (r.d[5] | 0) + '#' + startSig(r); }
 function screenLateStarts(starts, recs, pending, processed, now, readComplete) {
   const keyOf = (r) => r.d[3] + '_' + r.d[4] + '_' + r.d[2];
@@ -634,7 +698,7 @@ function registerStartRosters(starts, processed, pending, now, readComplete) {
     if (processed.has(m)) continue;
     if (pending[m]) {
       if (isMatchmadeMt(sg[m][0].d[2] | 0)) noteBlankStarts(m, sg[m]);   // Q130
-      if (lateStartSplit(pending[m], sg[m], m)) { RUN.lateSplit = (RUN.lateSplit | 0) + 1; markContest(pending, m, now); }
+      if (lateStartSplit(pending[m], sg[m], m)) { RUN.lateSplit = (RUN.lateSplit | 0) + 1; markContest(pending, m, now); noteContestParties(pending, m, now, LATE_SPLIT_WHO); }
       continue;
     }   // Q118
     if (readComplete === false && isEndlessMt(sg[m][0].d[2] | 0)) { waiting++; continue; }   // Q113: next full read
@@ -654,6 +718,7 @@ function registerStartRosters(starts, processed, pending, now, readComplete) {
         att = att.filter((r) => claim[r.d[5] | 0] === 1);
         disputedN = disputed.length;
         markContest(pending, m, now);   // Q127
+        if (mm) noteContestParties(pending, m, now, contestParties(sg[m]));   // Q143: whose records
         RUN.disputed = (RUN.disputed | 0) + 1;
         console.log('  start-dispute ' + m + ': seat(s) ' + disputed.join(',') + ' claimed by two or more accounts -- those claimants do not vote (Q80)');
       }
@@ -692,6 +757,7 @@ function registerStartRosters(starts, processed, pending, now, readComplete) {
     } else if (seatsSplit || startRosterDisagrees(all)) {
       pending[m].split = 1;
       markContest(pending, m, now);   // Q127
+      if (mm) noteContestParties(pending, m, now, contestParties(sg[m]));   // Q143: whose records
       RUN.split = (RUN.split | 0) + 1;
       console.log('  start-split ' + m + ': the voters do not agree on the roster -- no seat gate, '
         + (isEndlessMt(pending[m].mt) ? 'the endless settle checks decide (Q113)' : 'the roster contest decides (Q80)'));
@@ -818,7 +884,9 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
       if (e.c && !pending[key] && !processed.has(key) && now - (e.t0 || 0) >= maturityMs) {
         processed.add(key);
         RUN.contestVoid = (RUN.contestVoid | 0) + 1;
-        console.log('  contest-void ' + key + ': contested since ' + new Date(e.t0 || 0).toISOString() + ', no start roster -- void, nobody rated (Q127)');
+        const who = noteParties(e);   // Q143
+        console.log('  contest-void ' + key + ': contested since ' + new Date(e.t0 || 0).toISOString() + ', no start roster -- void, nobody rated (Q127)'
+          + (who ? '; contested by ' + who + ' (Q143)' : ''));
       }
       if (processed.has(key) || now - (e.t0 || 0) > SEEN_KEEP_MS) delete pending[m];
       continue;
@@ -877,7 +945,10 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
     convicted += hit.length;
     processed.add(m);   // idempotent: a super-late settlement of a convicted key is skipped as stale
     delete pending[m];
-    console.log('  start-orphan ' + m + ': started, never settled -> ' + hit.length + ' exit-rate hits (' + hit.join(',') + ')' + (p.settled.length ? ', ' + p.settled.length + ' exempt (wrote a settle record)' : ''));
+    const cn = pending['~' + m], wasContested = !!(cn && cn.c), who = wasContested ? noteParties(cn) : '';   // Q143: a contested key voids here
+    if (wasContested) RUN.contestHeldVoid = (RUN.contestHeldVoid | 0) + 1;
+    console.log('  start-orphan ' + m + ': started, never settled -> ' + hit.length + ' exit-rate hits (' + hit.join(',') + ')' + (p.settled.length ? ', ' + p.settled.length + ' exempt (wrote a settle record)' : '')
+      + (wasContested ? '; contested once (Q127), nobody rated' + (who ? ', contested by ' + who : '') + ' (Q143)' : ''));
   }
   return { registered, convicted, cleaned, held, consoledSids };
 }
@@ -1563,6 +1634,8 @@ function writeRunSummary() {
       '| endless co-op groups held (records disagree on the roster, Q113) | ' + s('endlessHeld', 0) + ' |',
       '| endless keys without a seat gate whose records disagree, nobody flagged (Q128) | ' + s('endlessUngated', 0) + ' |',
       '| start rosters split by a later start / confirmed (Q118) | ' + s('lateSplit', 0) + ' / ' + s('confirmed', 0) + ' |',
+      '| contested matchmade keys voided, no start roster / held to maturity (Q127) | ' + s('contestVoid', 0) + ' / ' + s('contestHeldVoid', 0) + ' |',
+      "| accounts noted in contested keys' disagreeing records, named by another record / by none -- counted, nobody flagged (Q143) | " + s('contestOn', 0) + ' / ' + s('contestOff', 0) + ' |',
       '| settled keys with records that disagree, nobody flagged (Q114) | ' + s('lateMismatch', 0) + ' |',
       "| friends' room records whose writer is not on his own roster seat, not counted (Q123) | " + s('seatless', 0) + ' |',
       '| campaign grants / campaign endless | ' + s('campaign', '-') + ' / ' + s('campaignEndless', '-') + ' |',
@@ -3940,6 +4013,13 @@ async function main() {
   BLANK_STARTS.length = 0;
   const rcRes = applyRosterContest(gr, starts, startsPending, signals, processed, Date.now());
   if (rcRes.dirty) sigDirty = true;
+  // Q143: each account noted in a contested matchmade key's disagreeing records, once per key -- counted, nobody flagged
+  for (const [, h, on] of CONTEST_PARTIES) {
+    const sp = sigPlayer(signals, h, Date.now());
+    if (on) { sp.co = (sp.co | 0) + 1; RUN.contestOn = (RUN.contestOn | 0) + 1; } else { sp.cx = (sp.cx | 0) + 1; RUN.contestOff = (RUN.contestOff | 0) + 1; }
+    sigDirty = true;
+  }
+  CONTEST_PARTIES.length = 0;
   for (const sid of rcRes.touched) trustTouched.add(sid);
   RUN.contested = rcRes.contested.size;
   // Q51: a mode-2 group with exactly one dissenting writer strikes him; at the K-th strike it settles from
@@ -6212,3 +6292,4 @@ Object.assign(module.exports, { seatlessPrivate, dropSeatlessPrivate });   // cl
 Object.assign(module.exports, { startSig, lateStartSplit, START_CONFIRM_MS, START_CONFIRM_MIN_MS });   // cloud audit Q118 provisional start roster
 Object.assign(module.exports, { testimonyOf, recTestimony, noteTestimony, endlessRosterHold, endlessTestified });   // cloud audit Q113 endless testimony
 Object.assign(module.exports, { teamLossCounted });   // cloud audit Q136 the losing team must be somebody
+Object.assign(module.exports, { contestParties, contestTable, noteContestParties, noteParties, CONTEST_PARTY_CAP, CONTEST_PARTIES, LATE_SPLIT_WHO });   // cloud audit Q143 whose records contested a matchmade key
