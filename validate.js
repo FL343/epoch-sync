@@ -2667,9 +2667,18 @@ function reducedStakesPlan(parts, matchType, premadeMask, premadeTrioAt) {
       factor = Math.min(factor, RS_TRIO_WIN);
     }
     const adjDelta = Math.round(base * factor + seg.drip);
+    // Q160 (cloud audit): a premade's expected win in a mismatch is compressed at each member's OWN tier when that is
+    // the stronger compression (rs and drip both, min-composed -- nobody gets more than the unit plan): the unit average
+    // let a grandmaster farm by queueing with a zero-points account (grandmaster + zero averages to diamond, rs 0.30 and
+    // drip 2: +8 a match for ever, where his own tier gives 0). A member below the unit average keeps the unit delta.
+    const strongWin = mismatch && uMmr > mean && base >= 0 && u.length > 1;
     // won = top-half finish at the unit's (average) rank -- the same sign line the base uses;
     // consumed by the series clamp (crosslineDelta) at settle time.
-    for (const p of u) out[p.steamID] = { adjDelta, flag, normalDelta, won: prog >= 0.5 };
+    for (const p of u) {
+      const own = strongWin ? lpSeg(p.lp | 0) : null;
+      const d = own ? Math.round(base * Math.min(factor, own.rs) + Math.min(seg.drip, own.drip)) : adjDelta;
+      out[p.steamID] = { adjDelta: d, flag, normalDelta, won: prog >= 0.5 };
+    }
   }
   return out;
 }
@@ -2719,7 +2728,11 @@ function teamLpPlan(parts, matchType, scores, leaverSeats, winTeamOverride) {
       if (won) { factor = RS_UPSET_BONUS; flag = 1; }
       else { factor = tSeg.rs; protectedLoss = true; }
     } else if (mismatch && tAvgMmr > mean) {                   // strong team
-      factor = won ? tSeg.rs : RS_STRONG_UPSET_LOSS;
+      // Q160 (cloud audit): an expected win takes the stronger of the team-average and the member's own compression, so
+      // a grandmaster carrying zero-points teammates is held at his own tier (a 2V2 with one averages to diamond, rs 0.30:
+      // +4 a match for ever; a 3V3 with two to gold, rs 0.50). Design line 125 / 127 ("the team-average tier
+      // coefficient") now reads "the smaller of the team-average and the member's own". The upset loss is unchanged.
+      factor = won ? Math.min(tSeg.rs, ownSeg.rs) : RS_STRONG_UPSET_LOSS;
     }
     if (!won && shielded.has(p.steamID)) { factor = Math.min(factor, ownSeg.rs); protectedLoss = true; }
     const normalDelta = Math.round(base / 2 + ownSeg.drip);

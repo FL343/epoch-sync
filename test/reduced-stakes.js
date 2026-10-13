@@ -116,6 +116,61 @@ eq('tilt factors pinned (conservative start, B5/B6 calibration)', [RS_SOLO_VS_TR
   eq('quick (mt 1) with trio bits -> null', reducedStakesPlan(mk6([1, 2, 3, 4, 5, 6]), 1 | (trioAt << 8), 0, trioAt), null);
 }
 
+// ============================================================
+// Q160 (cloud audit): a strong side's expected win is compressed at the member's OWN tier when that is the stronger
+// compression. The team / unit average let a grandmaster farm by carrying zero-points accounts (grandmaster + zero
+// averages to diamond, rs 0.30), where his own tier gives 0. A member below the average keeps the average plan.
+// ============================================================
+console.log('=== Q160: a grandmaster carrying zero-points accounts gains nothing on an expected win ===');
+{
+  const { teamLpPlan } = require('../validate.js');
+  const t2 = teamLpPlan([{ steamID: 'g', seat: 0, mmr: 2000, lp: 8500 }, { steamID: 'z', seat: 1, mmr: 1000, lp: 0 },
+    { steamID: 'c', seat: 2, mmr: 1000, lp: 0 }, { steamID: 'd', seat: 3, mmr: 1000, lp: 0 }], 6, [6100, 5200, 4800, 3900], [], 0);
+  eq('2V2 grandmaster + zero vs two zeros: grandmaster 0 (own rs 0, not the diamond average 0.30: was +4)', t2.g.adjDelta, 0);
+  eq('2V2: the zero teammate keeps the team plan round(28*.3/2 + 5) = 9', t2.z.adjDelta, 9);
+  eq('2V2: normal deltas unchanged (round(28/2 + own drip))', [t2.g.normalDelta, t2.z.normalDelta], [14, 19]);
+  eq('2V2: strong side never flags', [t2.g.flag, t2.z.flag], [0, 0]);
+  const t3 = teamLpPlan([{ steamID: 'g', seat: 0, mmr: 2000, lp: 8500 }, { steamID: 'z1', seat: 1, mmr: 1000, lp: 0 }, { steamID: 'z2', seat: 2, mmr: 1000, lp: 0 },
+    { steamID: 'c', seat: 3, mmr: 1000, lp: 0 }, { steamID: 'd', seat: 4, mmr: 1000, lp: 0 }, { steamID: 'e', seat: 5, mmr: 1000, lp: 0 }], 9, [6100, 5200, 5000, 4800, 3900, 3000], [], 0);
+  eq('3V3 grandmaster + two zeros (gold average, rs .50): grandmaster 0', t3.g.adjDelta, 0);
+  eq('3V3: zero teammates keep round(35*.5/2 + 5) = 14', [t3.z1.adjDelta, t3.z2.adjDelta], [14, 14]);
+  const tf = teamLpPlan([{ steamID: 'g', seat: 0, mmr: 2000, lp: 8500 }, { steamID: 'f', seat: 1, mmr: 1600, lp: 2500 },
+    { steamID: 'c', seat: 2, mmr: 1000, lp: 2500 }, { steamID: 'd', seat: 3, mmr: 1000, lp: 2500 }], 6, [6100, 5200, 4800, 3900], [], 0);
+  eq('grandmaster + gold friend (diamond average): gold friend keeps round(28*.3/2 + 3) = 7, grandmaster 0', [tf.f.adjDelta, tf.g.adjDelta], [7, 0]);
+  const tu = teamLpPlan([{ steamID: 'g', seat: 0, mmr: 2000, lp: 8500 }, { steamID: 'z', seat: 1, mmr: 1000, lp: 0 },
+    { steamID: 'c', seat: 2, mmr: 1000, lp: 0 }, { steamID: 'd', seat: 3, mmr: 1000, lp: 0 }], 6, [3000, 2000, 6100, 5200], [], 1);
+  eq('strong team upset loss unchanged (round(-25*.5/2 + own drip))', [tu.g.adjDelta, tu.z.adjDelta], [-6, -1]);
+  const ts2 = teamLpPlan([{ steamID: 'g', seat: 0, mmr: 1000, lp: 8500 }, { steamID: 'z', seat: 1, mmr: 1000, lp: 0 },
+    { steamID: 'c', seat: 2, mmr: 2000, lp: 0 }, { steamID: 'd', seat: 3, mmr: 2000, lp: 0 }], 6, [6100, 5200, 4800, 3900], [], 0);
+  eq('weak team upset win unchanged (full: round(28/2 + own drip))', [ts2.g.adjDelta, ts2.z.adjDelta], [14, 19]);
+  // FFA pair: grandmaster + zero premade (seats 0-1), two zero solos
+  const pp = reducedStakesPlan([{ steamID: 'g', seat: 0, mmr: 2000, rank: 1, lp: 8500 }, { steamID: 'z', seat: 1, mmr: 1000, rank: 2, lp: 0 },
+    { steamID: 'c', seat: 2, mmr: 1000, rank: 3, lp: 0 }, { steamID: 'd', seat: 3, mmr: 1000, rank: 4, lp: 0 }], 0x12, 1);
+  eq('FFA pair grandmaster + zero, 1st and 2nd: grandmaster 0 (own rs 0, own drip 0: was +8)', pp.g.adjDelta, 0);
+  eq('FFA pair: the zero keeps the unit delta round(18.67*.3 + 2) = 8', pp.z.adjDelta, 8);
+  eq('FFA pair: one normal delta for the unit (21)', [pp.g.normalDelta, pp.z.normalDelta], [21, 21]);
+  eq('FFA pair: won kept', [pp.g.won, pp.z.won], [true, true]);
+  const ppl = reducedStakesPlan([{ steamID: 'g', seat: 0, mmr: 2000, rank: 3, lp: 8500 }, { steamID: 'z', seat: 1, mmr: 1000, rank: 4, lp: 0 },
+    { steamID: 'c', seat: 2, mmr: 1000, rank: 1, lp: 0 }, { steamID: 'd', seat: 3, mmr: 1000, rank: 2, lp: 0 }], 0x12, 1);
+  t('FFA pair upset loss: both members still share one delta', ppl.g.adjDelta === ppl.z.adjDelta);
+  // FFA trio: grandmaster + two zeros (seats 0-2) take 1-3 over three zero solos
+  const mkT = [0, 1, 2, 3, 4, 5].map((s) => ({ steamID: 'q' + s, seat: s, mmr: s === 0 ? 2000 : 1000, rank: s + 1, lp: s === 0 ? 8500 : 0 }));
+  const pt = reducedStakesPlan(mkT, 2, 0, 1);
+  eq('FFA trio grandmaster + two zeros: grandmaster 0', pt.q0.adjDelta, 0);
+  t('FFA trio: the zeros share one delta', pt.q1.adjDelta === pt.q2.adjDelta && pt.q1.adjDelta > 0);
+  // honest pair of one tier: unchanged (own == unit average)
+  const ph = reducedStakesPlan([{ steamID: 'a', seat: 0, mmr: 1600, rank: 1, lp: 300 }, { steamID: 'b', seat: 1, mmr: 1600, rank: 2, lp: 300 },
+    { steamID: 'c', seat: 2, mmr: 1000, rank: 3, lp: 300 }, { steamID: 'd', seat: 3, mmr: 900, rank: 4, lp: 300 }], 0x12, 1);
+  // only the strong side's expected win: a weak premade's upset win and a fair match keep one shared delta
+  const pw = reducedStakesPlan([{ steamID: 'a', seat: 0, mmr: 1000, rank: 1, lp: 3500 }, { steamID: 'b', seat: 1, mmr: 1000, rank: 2, lp: 300 },
+    { steamID: 'c', seat: 2, mmr: 2000, rank: 3, lp: 300 }, { steamID: 'd', seat: 3, mmr: 2000, rank: 4, lp: 300 }], 0x12, 1);
+  t('weak mixed-tier pair upset win: one shared full delta (UPSET)', pw.a.adjDelta === pw.b.adjDelta && pw.a.adjDelta === pw.a.normalDelta && pw.a.flag === 1);
+  const pf = reducedStakesPlan([{ steamID: 'g', seat: 0, mmr: 1500, rank: 1, lp: 8500 }, { steamID: 'f', seat: 1, mmr: 1500, rank: 2, lp: 2500 },
+    { steamID: 'c', seat: 2, mmr: 1400, rank: 3, lp: 2500 }, { steamID: 'd', seat: 3, mmr: 1300, rank: 4, lp: 2500 }], 0x12, 1);
+  t('fair match (no mismatch), grandmaster + gold pair wins: one shared full delta', pf.g.adjDelta === pf.f.adjDelta && pf.g.adjDelta === pf.g.normalDelta && pf.g.adjDelta > 0);
+  eq('honest same-tier strong pair: unchanged shared delta', [ph.a.adjDelta, ph.b.adjDelta], [Math.round(lpSeg(300).win * (2 * (2.5 / 3) - 1) * lpSeg(300).rs + lpSeg(300).drip), Math.round(lpSeg(300).win * (2 * (2.5 / 3) - 1) * lpSeg(300).rs + lpSeg(300).drip)]);
+}
+
 console.log('=== reveal magic ===');
 eq('RS_MAGIC = 0xC5', RS_MAGIC, 0xC5);
 
