@@ -347,7 +347,7 @@ console.log('-- [10] wiring pins --');
   const iPriv = SRC.indexOf('if (isPrivateMt(matchType)) {', iWriter), iBot = SRC.indexOf('if (isBotMt(matchType)) {', iWriter);
   T('[10] gap stamped before the start floor, judged after it, before the one-match claim and every lane', iHold > 0 && iHold < iPace && iPace < iGate && iGate < iWriter && iWriter < iPriv && iWriter < iBot);
   T('[10] the absent list skips writers seen agreeing earlier', /const absentNow = absentRosterSeats\(g\)\.filter\(\(x\) => agreed\.indexOf\(pid\(String\(x\.steamID\)\)\) < 0\);/.test(SRC));
-  T('[10] start verdicts get the run\'s completeness', /reconcileStarts\(starts, groups, consistentKeys, processed, startsPending, leavers, nowMs, STARTS_MATURITY_MS, confState, shardsComplete(, registeredEarly)?\)/.test(SRC));   // Q80 passes the early registration count after it
+  T('[10] start verdicts get the run\'s completeness', /reconcileStarts\(starts, groups, consistentKeys, processed, startsPending, leavers, nowMs, STARTS_MATURITY_MS, confState, shardsComplete(, registeredEarly(, seenKeys)?)?\)/.test(SRC));   // Q80 passes the early registration count after it, Q144 the keys read this run
   T('[10] shard reads are strict about the body (escape hatch SHARD_STRICT_BODY=0)', /readBoardAll\(id, 'shard ' \+ label, \{ strictBody: SHARD_STRICT_BODY, expectEntries: /.test(SRC) && /const SHARD_STRICT_BODY = process\.env\.SHARD_STRICT_BODY !== '0';/.test(SRC));
   T('[10] completeness starts from the shard listing check', /let shardsComplete = shards\.length > 0 && !shardSel\.missing\.length && !shardSel\.mismatch;/.test(SRC));
   T('[10] reads retry on transientStatus', /if \(transientStatus\(r\.status\) && attempt < 2\)/.test(SRC));

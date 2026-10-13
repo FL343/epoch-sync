@@ -552,12 +552,12 @@ console.log('=== a record counts only from the seat its start roster gives its w
 
 // ---- [11] wiring pins + mutation self-checks ----
 {
-  const iP = SRC.indexOf('  const processed = loadProcessed();\n  const processedN0 = processed.size;');
+  const iP = Math.max(SRC.indexOf('  const processed = loadProcessed();\n  const processedN0 = processed.size;'), SRC.indexOf('  const processed = loadProcessed();\n  let processedN0 = processed.size;'));   // let since Q144
   const iR = SRC.indexOf('const registeredEarly = registerStartRosters(starts, processed, startsPending, Date.now(), shardsComplete);');
   const iG = SRC.indexOf('const seatGate = applySeatGate(recs, starts, startsPending, processed);');
   const iGr = SRC.indexOf('const gr = groupRecords(recs, { vecOf, MAX_SEATS });');
   T('[11] main: processed loaded, rosters registered, records gated -- in that order, before grouping', iP > 0 && iR > iP && iG > iR && iGr > iG);
-  T('[11] the start cross-check is told registration already ran', /reconcileStarts\(starts, groups, consistentKeys, processed, startsPending, leavers, nowMs, STARTS_MATURITY_MS, confState, shardsComplete, registeredEarly\)/.test(SRC));
+  T('[11] the start cross-check is told registration already ran', /reconcileStarts\(starts, groups, consistentKeys, processed, startsPending, leavers, nowMs, STARTS_MATURITY_MS, confState, shardsComplete, registeredEarly(, seenKeys)?\)/.test(SRC));   // Q144 passes the keys read this run after it
   T('[11] dropped writers are flagged on no key (Q124; endless since Q113)', !/recordFlag\(signals, rs, m \+ '\|seat'/.test(SRC) && !/of seatGate\.out\)/.test(SRC));
   T('[11] run summary row', /s\('offSeat', 0\) \+ ' \/ ' \+ s\('disputed', 0\)/.test(SRC) && /RUN\.offSeat = seatGate\.n;/.test(SRC));
   T('[11] exports', ['registerStartRosters', 'seatGateRoster', 'seatedOnRoster', 'applySeatGate'].every(f => typeof v[f] === 'function'));

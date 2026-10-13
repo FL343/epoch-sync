@@ -866,8 +866,10 @@ function dropSeatlessPrivate(recs, starts, processed) {
 //   would read as never-settled. The verdict waits for the next complete read (counted in `held`).
 // preRegistered (Q80): main() registers this run's start rosters ahead of the seat gate and grouping and passes the count
 //   here; a direct caller leaves it out and the registration runs below as before.
-function reconcileStarts(starts, groups, consistentKeys, processed, pending, leavers, now, maturityMs, confState, readComplete, preRegistered) {
+function reconcileStarts(starts, groups, consistentKeys, processed, pending, leavers, now, maturityMs, confState, readComplete, preRegistered, seenKeys) {
   confState = confState || {};
+  // Q144: no record of key m on the shards on a complete read (seenKeys: every key read this run, in main) -- nothing of it left
+  const gone = (m) => !!seenKeys && readComplete !== false && !seenKeys.has(m);
   const sg = {};
   for (const r of starts) { const m = r.d[3] + '_' + r.d[4] + '_' + r.d[2]; (sg[m] = sg[m] || []).push(r); }
   let convicted = 0, cleaned = 0, held = 0;
@@ -876,7 +878,8 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
   const registered = preRegistered == null ? registerStartRosters(starts, processed, pending, now, readComplete) : preRegistered;
   // 2) upkeep + maturity verdicts for pending entries
   for (const m of Object.keys(pending)) {
-    if (m.charAt(0) === '~') {   // Q127: a key's note, kept until the key is processed or a day old
+    if (m === PRUNE_NOTE) continue;   // Q144: the processed list's prune candidate (pruneProcessed)
+    if (m.charAt(0) === '~') {   // Q127: a key's note, kept until the key is processed or a day old (Q144: or its records are gone)
       const key = m.slice(1), e = pending[m];
       // a contested key no start roster registered for (a seat claimed twice from the first look) has no entry that voids
       //   it at maturity: it voids here, at the same age (processed, nobody rated, convicted or consoled) -- else, held
@@ -889,6 +892,7 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
           + (who ? '; contested by ' + who + ' (Q143)' : ''));
       }
       if (processed.has(key) || now - (e.t0 || 0) > SEEN_KEEP_MS) delete pending[m];
+      else if (!pending[key] && gone(key) && now - (e.t0 || 0) >= maturityMs) { delete pending[m]; RUN.noteGone = (RUN.noteGone | 0) + 1; }   // Q144
       continue;
     }
     if (processed.has(m)) { delete pending[m]; cleaned++; continue; }   // settled (or convicted) since
@@ -909,6 +913,7 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
     // O156: bot matches (type 11) likewise -- leaving a bot match is free by design (no leaver economy).
     if (isEndlessMt(p.mt) || isPrivateMt(p.mt) || isBotMt(p.mt)) {
       if (now - (p.t0 || 0) > ENDLESS.PENDING_TTL_MS) { delete pending[m]; cleaned++; }
+      else if (gone(m) && now - (p.t0 || 0) >= maturityMs) { delete pending[m]; cleaned++; RUN.entryGone = (RUN.entryGone | 0) + 1; }   // Q144: its rows are gone
       continue;
     }
     if (now - (p.t0 || 0) < maturityMs) continue;
@@ -1611,6 +1616,8 @@ function writeRunSummary() {
       '| consistent / fresh | ' + s('consistent', 0) + ' / ' + s('fresh', 0) + ' |',
       '| flagged inconsistent / sanity | ' + s('flagged', 0) + ' / ' + s('sanity', 0) + ' |',
       '| starts pending / exit-rate hits | ' + s('pending', 0) + ' / ' + s('convicted', 0) + ' |',
+      '| starts-state notes / endless, friends\' room and bot entries dropped, no record of the key left on the shards (Q144) | ' + s('noteGone', 0) + ' / ' + s('entryGone', 0) + ' |',
+      '| processed keys remembered / dropped past the cap (Q144) | ' + s('processedN', 0) + ' / ' + s('processedPruned', 0) + ' |',
       '| absent-seat holds (incomplete read / grace) | ' + s('absentHeld', 0) + ' |',
       '| groups waiting for a seat that started but has no result yet, until the match must be over (Q121) | ' + s('leaveWait', 0) + ' |',
       '| confessions seen/penalized/refunded | ' + s('confess', '0/0/0') + ' |',
@@ -1727,6 +1734,58 @@ async function readUserEntry(id, sid, label) {
 function writeStateFile(file, text) { const tmp = file + '.tmp'; fs.writeFileSync(tmp, text); fs.renameSync(tmp, file); }
 function loadProcessed() { try { return new Set(JSON.parse(fs.readFileSync(PROCESSED_FILE, 'utf8'))); } catch (e) { return new Set(); } }
 function saveProcessed(set) { try { writeStateFile(PROCESSED_FILE, JSON.stringify([...set], null, 0)); } catch (e) { ghWarn('write ' + PROCESSED_FILE + ' failed: ' + (e && e.message)); } }
+// ---- what the job remembers about keys whose records are gone (cloud audit Q144) ----
+// Every account that owns the game can write ledger rows for match keys it makes up, as many as it has shard rows,
+// new ones every run. The job kept some of what such keys leave behind for a day or for good: the note of a matchmade
+// key (pending['~' + key], Q127) a day; an endless, friends'-room or bot match entry 30 days (one endless start that
+// seats its writer alone registers one); the processed key list for good. One account writing 50 made-up keys every run
+// grew the starts state about 1.3 MB with notes (held at a day's worth) and 2.4 MB a day with endless entries (to about
+// 70 MB at the 30 days); two accounts making up 25 matches every run grew the processed list 7200 keys a day for good.
+// The state is committed every run and GitHub refuses a file over 100 MB: two accounts writing endless starts for three
+// weeks, or a few dozen writing notes, could stop the job (REVIEW of Q130, section 6; measure-q144.js). Now:
+//   - a note, and an endless / friends'-room / bot entry, is dropped once it is STARTS_MATURITY_MS old and no record of
+//     its key (result, start or confession) was on the shards on a complete read: a key whose rows are gone has nothing
+//     left to settle, hold or pace -- its players have written over them -- and should a row of it be written again, the
+//     key starts afresh, like a key never seen (what any account can already do with a new key). Its players' word
+//     about the run (Q113, noteTestimony) and who started (Q69 / Q78) go with it: a seat nobody's visible record proves
+//     is never charged, so forgetting is the safe side. A matchmade entry keeps its own end (the verdict at maturity);
+//   - the processed list keeps at most PROCESSED_CAP keys. Above that, the oldest keys not on the shards are dropped
+//     down to PROCESSED_KEEP, but only when they were off the shards on two complete reads at least
+//     PROCESSED_PRUNE_WAIT_MS apart (the first read arms a candidate in the starts state, PRUNE_NOTE) -- a key still on
+//     a shard is never dropped (it would settle again), and one read that misses a row cannot drop it. A dropped key
+//     whose rows come back counts as a new key: the same records any two accounts can write for a key they make up; a
+//     guard-signed solo segment replayed by its owner meets its run's chain memory (overlap credits nothing).
+// A record is "on the shards" when this run read it, before any gate dropped it (seenKeys in main). An incomplete read
+// drops nothing.
+const PROCESSED_CAP = Number(process.env.PROCESSED_CAP || 300000);   // about 8 MB of keys; the live lists hold about a thousand
+const PROCESSED_KEEP = Number(process.env.PROCESSED_KEEP || 250000);
+const PROCESSED_PRUNE_WAIT_MS = Number(process.env.PROCESSED_PRUNE_WAIT_MS || 3600 * 1000);
+const PRUNE_NOTE = '~#processed-prune';   // a note slot: no loop that reads rosters sees it, an older build drops it after a day
+function pruneProcessed(processed, pending, seen, readComplete, now) {
+  const res = { dropped: 0, armed: 0, kept: 0 };
+  if (!seen || readComplete === false) return res;
+  const c = pending[PRUNE_NOTE];
+  if (processed.size <= PROCESSED_CAP) { if (c) delete pending[PRUNE_NOTE]; return res; }
+  const arr = [...processed];
+  const fits = !!(c && (c.n | 0) > 0 && c.n <= arr.length && arr[0] === c.a && arr[c.n - 1] === c.b && Array.isArray(c.v));
+  if (c && !fits) delete pending[PRUNE_NOTE];   // the front of the list changed since: arm again
+  if (fits && now - (c.t0 || 0) >= PROCESSED_PRUNE_WAIT_MS) {
+    const keep = new Set(c.v);
+    for (let i = 0; i < c.n; i++) {
+      const k = arr[i];
+      if (keep.has(k) || seen.has(k)) { res.kept++; continue; }
+      processed.delete(k); res.dropped++;
+    }
+    delete pending[PRUNE_NOTE];
+    return res;
+  }
+  if (fits) return res;   // armed, waiting
+  let want = arr.length - PROCESSED_KEEP, n = 0;
+  const v = [];
+  for (; n < arr.length && want > 0; n++) { if (seen.has(arr[n])) v.push(arr[n]); else want--; }
+  if (n > v.length) { pending[PRUNE_NOTE] = { t0: now, n, a: arr[0], b: arr[n - 1], v }; res.armed = n - v.length; }
+  return res;
+}
 const SKILL_FILE = process.env.SKILL_FILE || 'skill.json';
 function loadSkill() { try { return JSON.parse(fs.readFileSync(SKILL_FILE, 'utf8')) || {}; } catch (e) { return {}; } }
 function saveSkill(s) { try { writeStateFile(SKILL_FILE, JSON.stringify(s, null, 0)); } catch (e) { ghWarn('write ' + SKILL_FILE + ' failed: ' + (e && e.message)); } }
@@ -3942,6 +4001,8 @@ async function main() {
   }
   console.log('records: ' + recs.length + (starts.length ? ' (+' + starts.length + ' start attestations)' : '') + (confessions.length ? ' (+' + confessions.length + ' abandon confessions)' : ''));
   RUN.rec = recs.length; RUN.starts = starts.length;
+  // Q144: every key with a record on the shards this run (results, starts, confessions), before any gate drops one
+  const seenKeys = new Set(recs.concat(starts).map((r) => r.d[3] + '_' + r.d[4] + '_' + r.d[2]).concat(confessions.map((c) => c.m)));
 
   const MAX_SEATS = 8;
   // consistency vector: the per-seat score slice, plus (endless only) the 4-int depth tail --
@@ -3962,8 +4023,16 @@ async function main() {
   // Q80: register this run's new start rosters first, then drop every record its writer is not seated for (applySeatGate)
   //   -- before grouping, so an outside account's record votes nowhere below (consistency, dissent, absent seats, own records)
   const processed = loadProcessed();
-  const processedN0 = processed.size;   // grow-only set: a size change = keys added on this run (persistStartsSide)
+  let processedN0 = processed.size;   // grow-only set: a size change = keys added on this run (persistStartsSide)
   const startsPending = loadStarts();
+  // Q144: past PROCESSED_CAP, the oldest keys off the shards on two complete reads an hour apart are dropped
+  const prunedP = pruneProcessed(processed, startsPending, seenKeys, shardsComplete, Date.now());
+  if (prunedP.dropped) {
+    processedN0 = -1;   // saved below whatever this run adds
+    RUN.processedPruned = prunedP.dropped;
+    console.log('processed: ' + prunedP.dropped + ' oldest key(s) off the shards on two complete reads dropped, ' + prunedP.kept + ' still on a shard kept -- ' + processed.size + ' remembered (cap ' + PROCESSED_CAP + ', Q144)');
+  } else if (prunedP.armed) console.log('processed: ' + (processed.size) + ' keys > cap ' + PROCESSED_CAP + ' -- the oldest ' + prunedP.armed + ' off the shards go if they are still off in ' + Math.round(PROCESSED_PRUNE_WAIT_MS / 60000) + ' min (Q144)');
+  RUN.processedN = processed.size;
   // Q123: a friends'-room record whose writer is not on his own roster seat counts nowhere -- dropped ahead of registration
   //   (its start votes on no roster, splits nothing) and of grouping; nobody flagged
   RUN.seatless = dropSeatlessPrivate(recs, starts, processed).n;
@@ -4033,7 +4102,7 @@ async function main() {
   const confState = loadConfessions();   // loaded before starts so the orphan verdict can skip confessed keys
   const consistentKeys = new Set(consistentMatches.map(c => c.m));
   const nowMs = Date.now();
-  const startsRes = reconcileStarts(starts, groups, consistentKeys, processed, startsPending, leavers, nowMs, STARTS_MATURITY_MS, confState, shardsComplete, registeredEarly);
+  const startsRes = reconcileStarts(starts, groups, consistentKeys, processed, startsPending, leavers, nowMs, STARTS_MATURITY_MS, confState, shardsComplete, registeredEarly, seenKeys);   // Q144: + seenKeys
   if (startsRes.registered || startsRes.convicted || startsRes.cleaned || Object.keys(startsPending).length)
     console.log('starts: ' + Object.keys(startsPending).length + ' pending (+' + startsRes.registered + ' new), ' + startsRes.convicted + ' exit-rate hits, ' + startsRes.cleaned + ' cleaned' + (startsRes.held ? ', ' + startsRes.held + ' matured verdict(s) held (incomplete shard read)' : ''));
   RUN.pending = Object.keys(startsPending).filter((m) => m.charAt(0) !== '~').length; RUN.convicted = startsRes.convicted;
@@ -6282,6 +6351,7 @@ module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CHAT_MUTE: 
   absentRosterSeats, absenceHold, shardPlan, transientStatus, ABSENT_GRACE_MS, ABSENT_GRACE_MIN_MS, LEDGER_SHARDS,   // R1-B2-04 / R1-X14 absent-seat hold
   PERKS_CFG: perks.PERKS_CFG, verifyPerkPicks: perks.verifyPerkPicks,
   pruneConfessions, CONFESS_PRUNE_MS,   // confession entries outlive the window while their record is still on a shard
+  pruneProcessed, PROCESSED_CAP, PROCESSED_KEEP, PROCESSED_PRUNE_WAIT_MS, PRUNE_NOTE,   // cloud audit Q144 what the job remembers about keys whose records are gone
   RECOVER_FILE, loadRecover, recoverPick, readRecoverRows };   // client knife 5.0i one-shot pool recovery
 Object.assign(module.exports, { KEY_CHANNEL, loadJobPubTable, soloKeyHeld, soloRunHasHeld });   // cloud audit R1-A5-07 per-channel key policy (test/playtest-key-policy.js)
 Object.assign(module.exports, { noteOwnStarts, hasOwnStart, OWN_START_CAP });   // cloud audit Q69 own-record evidence for leaver verdicts

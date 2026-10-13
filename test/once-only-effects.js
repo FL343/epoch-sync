@@ -263,7 +263,7 @@ console.log('-- [5] honest reconnect-and-finish --');
   console.log('-- [6] wiring pins --');
   const pin = (label, re) => T('[6] pin: ' + label, re.test(SRC));
   pin('early-exit persist saves processed on growth, not on conviction count', /const persistStartsSide = \(\) => \{[\s\S]{0,900}?if \(processed\.size !== processedN0\) saveProcessed\(processed\);/);
-  pin('processed size captured right after load', /const processed = loadProcessed\(\);\s*\n\s*const processedN0 = processed\.size;/);
+  pin('processed size captured right after load', /const processed = loadProcessed\(\);\s*\n\s*(?:const|let) processedN0 = processed\.size;/);   // let since Q144 (a prune sets it to -1)
   T('[6] pin: both confession saves pass the visibility set (none left without it)', (SRC.match(/saveConfessions\(confState, nowMs, confLive\)/g) || []).length === 2 && !/saveConfessions\(confState, nowMs\)/.test(SRC));
   pin('a failed shard read marks the run partial', /else \{ shardsComplete = false; ghWarn\('read shard failed: '/);
   pin('a PAGE_CAP-cut shard read marks the run partial', /const \{ ents, complete \} = await readBoardAll\(id, 'shard ' \+ label, \{ strictBody: SHARD_STRICT_BODY[^\n]*\n\s*if \(!complete\) shardsComplete = false;/);
