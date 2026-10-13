@@ -46,7 +46,9 @@
 //        (review4-q43.js part 3, real starts registered); mutant (gate removed -> judged again). Skipped without Q43.
 //   [13] two colluding losers name other accounts at the winners' seats in their starts (a 2-2 split there): the roster is
 //        marked split, gates nothing, the Q75 contest holds the key (the gate would have dropped the winners' records);
-//        mutant (a split roster gates, and the sticky contest note of Q127 is ignored -> the losers take the win)
+//        mutant (a split roster gates, and the sticky contest note of Q127 and the losing-team check of Q136 are ignored ->
+//        the losers take the win; with Q136 alone the made-up result settles unrated: the winners' seats name accounts that
+//        never wrote)
 //   [14] a colluding majority of voters (an opponent dropped before level 1, an outside account starting from his seat)
 //        seats an alt where an honest player started: split too, held; same mutant
 //   [15] review-q80.js T1 / T2: before the first look, outside accounts vote from seat numbers past the players' seat
@@ -219,6 +221,11 @@ const NOQ121 = (src) => src.replace('    if (lcHold.hold) {', '    if (false && 
 //   needs this second layer switched off, or the note holds the key anyway and the mutant shows nothing
 const STICKY = '    if (seen && seen.c) { res.contested.set(m, []); (res.sticky = res.sticky || new Set()).add(m); continue; }   // Q127: contested once, held until it voids\n';
 const NOSTICKY = (src) => src.replace(STICKY, '');   // its anchor is pinned in [11]
+// Q136: a team match whose losing team counts nobody (no writer on a losing seat, nobody there convicted on his own record)
+//   moves no rating. A mutant that lets a made-up result through by taking away an earlier layer, with the losing seats
+//   named after accounts that never wrote ([13]), also needs this layer switched off, or nobody is rated anyway
+const NOLOSER_AT = '    const noRating = !!(lossSide && !lossSide.counted);';
+const NOLOSER = (src) => src.replace(NOLOSER_AT, '    const noRating = false;');   // its anchor is pinned in [13]
 const noteOf = (r, key) => (r.state.STARTS_FILE || {})['~' + key];
 SC[2] = [7000, 4000];   // 1V1 scores (rec() picks the row by player count)
 const Q80LINE = /record\(s\) from accounts the start roster does not seat there -- not counted \(Q80\)/;
@@ -689,12 +696,12 @@ else {
       && !processedOf(rs[2]).has(key));
     T(tag + ' nobody rated; the honest players are no leavers at maturity', honest.concat(cheats).every(s => none(rs, s)) && honest.every(s => leavesOf(last(rs), s) === 0),
       JSON.stringify(honest.concat(cheats).map(s => [ptsIn(rs, s), leavesOf(last(rs), s)])));
-    if (SRC.split(SPLIT_FROM).length !== 2) { bad(tag + ' mutant: anchor not found exactly once'); continue; }
+    if (SRC.split(SPLIT_FROM).length !== 2 || SRC.split(NOLOSER_AT).length !== 2) { bad(tag + ' mutant: anchor not found exactly once'); continue; }
     const script = path.join(__dirname, '..', '.mutant-seat-gate-split-' + process.pid + '.js');
     try {
-      fs.writeFileSync(script, NOSTICKY(SRC.replace(SPLIT_FROM, SPLIT_TO)));
+      fs.writeFileSync(script, NOLOSER(NOSTICKY(SRC.replace(SPLIT_FROM, SPLIT_TO))));
       const m = timeline(steps, script);
-      T(tag + ' mutant: a split roster gates (and the sticky contest note of Q127 is ignored) -> the colluders take the win', cheats.every(s => up(m, s)) && honest.every(s => !up(m, s)),
+      T(tag + ' mutant: a split roster gates (and the sticky contest note of Q127 and the losing-team check of Q136 are ignored) -> the colluders take the win', cheats.every(s => up(m, s)) && honest.every(s => !up(m, s)),
         JSON.stringify(honest.concat(cheats).map(s => ptsIn(m, s))));
     } finally { try { fs.unlinkSync(script); } catch (e) {} }
   }

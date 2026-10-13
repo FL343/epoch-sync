@@ -1557,6 +1557,7 @@ function writeRunSummary() {
       '| solo same-key forks (another signed record under a settled segment key) | ' + s('soloKeyFork', 0) + ' |',
       '| one-match-at-a-time deferrals | ' + s('writerPaced', 0) + ' |',
       '| absent seats named by others only, not convicted (Q69) | ' + s('unattested', 0) + ' |',
+      '| team matches with nobody on the losing team, settled without a rating move (Q136) | ' + s('noLoser', 0) + ' |',
       '| match keys with two accounts on one seat or two seat layouts, not settled (Q75) | ' + s('contested', 0) + ' |',
       '| records off their start-roster seat, not counted / start keys with a seat claimed twice / start rosters the voters split, no seat gate (Q80) | ' + s('offSeat', 0) + ' / ' + s('disputed', 0) + ' / ' + s('split', 0) + ' |',
       '| endless co-op groups held (records disagree on the roster, Q113) | ' + s('endlessHeld', 0) + ' |',
@@ -2544,6 +2545,30 @@ function teamLpPlan(parts, matchType, scores, leaverSeats, winTeamOverride) {
     out[p.steamID] = { adjDelta, flag, normalDelta, won };   // won feeds the series clamp at settle
   }
   return out;
+}
+// ---- the losing side of a team match must be somebody (cloud audit Q136) ----
+// Two accounts (no game launched) can write one consistent team result for a match key nobody played, each from his own
+// seat, both on the winning team, every other seat named after an account that never wrote a word for the key. Nothing in
+// it is off: the roster is not split, each record sits on its writer's seat, the rank claims agree. Q69 keeps the named
+// seats named-only (not convicted, not rated), so the settle rated the two writers as a team that beat nobody: both took a
+// team win every match (ranked: the halved team-LP win, the series clamp promoting them at a tier line; quick: an ordinal
+// update between the two teammates), at the one-match-at-a-time pace of real play. The side that would pay was empty.
+// A team match therefore moves ratings only when its losing team counts somebody at this settle: a writer rated on a losing
+// seat (present), or a losing seat's player convicted on his own record (leavers: his start, result or confession for the
+// key -- he pays the leave). Not counted: a seat named by the others only (Q69), and a seat whose record was seen agreeing
+// and is gone now (pend.agreed): that player is neither rated nor convicted, so a third account could write the loss while
+// the group waits, withdraw it and cost nothing.
+// The losing team is the one teamLpPlan and the TrueSkill update mark second: winTeamOverride (mode 2, the writers' rank
+// claims) or, for mode 1, the money sums over the 2 x teamSize seats (tie -> team A).
+//   present, leavers: seat numbers. Returns { win, lose, counted }.
+function teamLossCounted(matchType, scores, winTeamOverride, present, leavers) {
+  const ts = teamSizeOfMt(matchType);
+  let a = 0, b = 0;
+  for (let s = 0; s < 2 * ts; s++) { const v = (scores && scores[s]) | 0; if (teamOfSeat(s, ts) === 0) a += v; else b += v; }
+  const win = (winTeamOverride == null) ? (b > a ? 1 : 0) : (winTeamOverride | 0);
+  const lose = 1 - win;
+  const counted = (present || []).concat(leavers || []).some((s) => teamOfSeat(s, ts) === lose);
+  return { win, lose, counted };
 }
 
 // ===== authoritative XP ladder: client optimistic value = display only, this job = truth. =====
@@ -5655,6 +5680,22 @@ async function main() {
     // Q56 team-gamble dissent settle: dissenters not yet due are EXCUSED (pids) -- they stay in leavers0 (absent seats:
     //   teammate shield, repeat-group memory) but get no conviction and no placement seed, like a confessed leave
     const t2ex = new Set(Array.isArray(c.t2ex) ? c.t2ex.map(String) : []);
+    // Q136 (see teamLossCounted): a team match whose losing team counts nobody at this settle -- no writer on a losing seat,
+    //   no losing seat convicted on his own record -- moves no rating: no TrueSkill update, no points, no placement seed of a
+    //   writer, no group-decay step. Nobody is flagged (each writer already carries the Q69 `un` signal per named-only seat);
+    //   XP / CP / career above were credited as for any settle. The leaver loop below still runs (a leaver still seeds first).
+    //   A Q56-excused dissenter does not count either: he is never convicted, and the dissenter whose due verdict excused him
+    //   may have withdrawn his own record (no start) before the settle, so neither of them pays.
+    //   Cost: an honest team match whose whole losing team wrote nothing of its own (all dropped before the level-1 start
+    //   landed, no confession; or every loser's record seen agreeing and rotated off while the group waited) settles unrated
+    //   for the winners.
+    const lossSide = (!PT_MODE && isTeamMt(matchType)) ? teamLossCounted(matchType, scores, t2Win, parts.map((p) => p.seat), leavers0.filter((x) => !t2ex.has(pid(String(x.steamID)))).map((x) => x.seat)) : null;
+    const noRating = !!(lossSide && !lossSide.counted);
+    if (noRating) {
+      RUN.noLoser = (RUN.noLoser | 0) + 1;
+      console.log('  no-loser ' + c.m + ': nobody on the losing team (team ' + lossSide.lose + ') wrote a record of his own or was convicted, '
+        + parts.length + ' writers all on team ' + lossSide.win + ' -- settled without a rating move (Q136)');
+    }
     // ===== playtest channel: no rating/points surface (lock layer 3) -- the TrueSkill update,
     // placement seeding, group-decay memory and every points write are skipped wholesale, so
     // skill.json/groups.json stay untouched and the changed/changedLp pools stay empty. The
@@ -5691,7 +5732,7 @@ async function main() {
           console.log('  seed ' + c.m + ': ' + plog(sid) + ' ' + tag +
             (prevE ? (', soft-reset from ' + (prevE.score | 0)) : (', display ' + disp)) + ' -> pts ' + lp[sid]);
         };
-        for (const t of tsIn) if (lp[t.id] == null) await seedOne(t.id, t.mu, t.sigma, 'first settle this season');
+        for (const t of tsIn) if (!noRating && lp[t.id] == null) await seedOne(t.id, t.mu, t.sigma, 'first settle this season');
         for (const x of leavers0) {
           if (t2ex.has(pid(String(x.steamID)))) continue;   // Q56 excused: this match does not count for him
           if (lp[x.steamID] == null) {
@@ -5703,11 +5744,13 @@ async function main() {
       // repeat-group decay: advance streak memory for the WHOLE consensus roster (writers + leavers)
       //   and fetch each rated player's update weight. Applied to the TrueSkill delta below;
       //   points/XP/CP untouched (real play is not zero-sum -- only rating farming is sealed).
-      const gPlan = groupDecayPlan(groupMem,
+      const gPlan = noRating ? {} : groupDecayPlan(groupMem,
         parts.map(p => pid(p.steamID)).concat(leavers0.map(x => pid(x.steamID))), nowMs);
-      groupsDirty = true;
+      if (!noRating) groupsDirty = true;
       let tsOut;
-      if (isTeamMt(matchType)) {
+      if (noRating) {
+        tsOut = [];   // Q136: nothing below moves (no TrueSkill update, no points line)
+      } else if (isTeamMt(matchType)) {
         // M3: team modes rate as TWO TEAMS (strength = sum mu, binary outcome) -- the ordinal pairwise
         // update would also transfer rating between TEAMMATES (rank 1 vs rank 2), which team play must not.
         // Mode 2: the binary outcome comes from the sub-score-derived winner, never the money sums.
@@ -6168,3 +6211,4 @@ Object.assign(module.exports, { registerStartRosters, startRosterSplit, rosterCa
 Object.assign(module.exports, { seatlessPrivate, dropSeatlessPrivate });   // cloud audit Q123
 Object.assign(module.exports, { startSig, lateStartSplit, START_CONFIRM_MS, START_CONFIRM_MIN_MS });   // cloud audit Q118 provisional start roster
 Object.assign(module.exports, { testimonyOf, recTestimony, noteTestimony, endlessRosterHold, endlessTestified });   // cloud audit Q113 endless testimony
+Object.assign(module.exports, { teamLossCounted });   // cloud audit Q136 the losing team must be somebody
