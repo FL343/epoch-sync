@@ -10,8 +10,9 @@
 // End-to-end over the REAL validate.js main() against an offline stateful board stub (same harness as
 // test/roster-contest.js), plus the pure helpers.
 //   [1] units: registerStartRosters (dispute rule, endless keeps the plain count, a split roster is marked, every start
-//       record must name the same seats out of the same seat count and the voters left the same accounts),
-//       seatGateRoster, seatedOnRoster, applySeatGate
+//       record must name the same seats out of the same seat count and the voters left the same accounts -- an endless
+//       key is split unless every start writer tells the same story, Q113), seatGateRoster (endless keys gated too --
+//       Q113), seatedOnRoster, applySeatGate
 //   [2] R1: two outside accounts write a fake result a minute after the real starts; dropped, flagged once, the real
 //       players are not convicted while they play, the real result settles twelve minutes in, nobody convicted at maturity
 //   [3] R1b: the outside accounts also copy the key into start records of their own after the first look: dropped, not
@@ -278,7 +279,11 @@ console.log('=== a record counts only from the seat its start roster gives its w
   T('[1] a cold-reconnect duplicate is one claimant, not a dispute', v.registerStartRosters(honest.concat([S(P3, 2, RO)]), new Set(), pend, 5) === 1 && JSON.stringify(pend['77_1_6'].roster) === JSON.stringify(PR));
   pend = {};
   const en = [S(P1, 0, { 0: P1, 1: P2 }, 7), S(P2, 1, { 0: P1, 1: P2 }, 7), S(Q[0], 0, { 0: P1, 1: P2 }, 7)];
-  T('[1] endless keys keep the plain count (cloud audit Q78)', v.registerStartRosters(en, new Set(), pend, 5) === 1 && !!pend['77_1_7']);
+  T('[1] endless keys keep the plain count (cloud audit Q78); an account at a seat its own start names for another is a split (Q113)',
+    v.registerStartRosters(en, new Set(), pend, 5) === 1 && !!pend['77_1_7'] && pend['77_1_7'].split === 1, JSON.stringify(pend));
+  pend = {};
+  T('[1] endless starts that all tell the same story: registered, not split (Q113)',
+    v.registerStartRosters(en.slice(0, 2), new Set(), pend, 5) === 1 && !!pend['77_1_7'] && !('split' in pend['77_1_7']), JSON.stringify(pend));
   pend = { '77_1_6': { t0: 1, mt: 6, roster: {}, settled: [], synth: true } };
   T('[1] a key already pending or processed is left alone', v.registerStartRosters(honest, new Set(), pend, 5) === 0 && pend['77_1_6'].synth === true
     && v.registerStartRosters(honest, new Set(['77_1_6']), {}, 5) === 0);
@@ -336,9 +341,10 @@ console.log('=== a record counts only from the seat its start roster gives its w
     && pend['77_1_6'].split === 1 && pend['77_1_6'].roster[0] === v.pid(P1), JSON.stringify(pend));
   // seatGateRoster / seatedOnRoster
   const reg = { t0: 1, mt: 6, roster: PR, settled: [] };
-  eq('[1] seatGateRoster: no entry / synthetic / empty roster / endless / split -> no gate', [v.seatGateRoster(undefined), v.seatGateRoster({ t0: 1, mt: 6, roster: {}, settled: [], synth: true }),
-    v.seatGateRoster({ t0: 1, mt: 6, roster: {}, settled: [] }), v.seatGateRoster({ t0: 1, mt: 7, roster: PR, settled: [] }),
-    v.seatGateRoster({ t0: 1, mt: 6, roster: PR, settled: [], split: 1 })], [null, null, null, null, null]);
+  eq('[1] seatGateRoster: no entry / synthetic / empty roster / split / endless split -> no gate', [v.seatGateRoster(undefined), v.seatGateRoster({ t0: 1, mt: 6, roster: {}, settled: [], synth: true }),
+    v.seatGateRoster({ t0: 1, mt: 6, roster: {}, settled: [] }), v.seatGateRoster({ t0: 1, mt: 6, roster: PR, settled: [], split: 1 }),
+    v.seatGateRoster({ t0: 1, mt: 7, roster: PR, settled: [], split: 1 })], [null, null, null, null, null]);
+  T('[1] seatGateRoster: an endless key is gated too (cloud audit Q113)', v.seatGateRoster({ t0: 1, mt: 7, roster: PR, settled: [] }) === PR);
   T('[1] seatGateRoster: a registered roster', v.seatGateRoster(reg) === PR);
   const R = (sid, seat) => ({ steamID: sid, d: [0xB1, 3, 6, 77, 1, seat] });
   eq('[1] seatedOnRoster: his seat / another account\'s seat / a seat the roster leaves empty / no gate',
@@ -479,12 +485,12 @@ console.log('=== a record counts only from the seat its start roster gives its w
 // ---- [11] wiring pins + mutation self-checks ----
 {
   const iP = SRC.indexOf('  const processed = loadProcessed();\n  const processedN0 = processed.size;');
-  const iR = SRC.indexOf('const registeredEarly = registerStartRosters(starts, processed, startsPending, Date.now());');
+  const iR = SRC.indexOf('const registeredEarly = registerStartRosters(starts, processed, startsPending, Date.now(), shardsComplete);');
   const iG = SRC.indexOf('const seatGate = applySeatGate(recs, starts, startsPending, processed);');
   const iGr = SRC.indexOf('const gr = groupRecords(recs, { vecOf, MAX_SEATS });');
   T('[11] main: processed loaded, rosters registered, records gated -- in that order, before grouping', iP > 0 && iR > iP && iG > iR && iGr > iG);
   T('[11] the start cross-check is told registration already ran', /reconcileStarts\(starts, groups, consistentKeys, processed, startsPending, leavers, nowMs, STARTS_MATURITY_MS, confState, shardsComplete, registeredEarly\)/.test(SRC));
-  T('[11] dropped writers flagged per key and handed to the trust tier', /for \(const \[m, rs\] of seatGate\.out\) \{ if \(recordFlag\(signals, rs, m \+ '\|seat', Date\.now\(\)\)\) sigDirty = true; for \(const r of rs\) trustTouched\.add\(String\(r\.steamID\)\); \}/.test(SRC));
+  T('[11] dropped writers flagged per key and handed to the trust tier (endless keys flag nobody, Q113)', /for \(const \[m, rs\] of seatGate\.out\) \{ if \(isEndlessMt\(rs\[0\]\.d\[2\] \| 0\)\) continue; if \(recordFlag\(signals, rs, m \+ '\|seat', Date\.now\(\)\)\) sigDirty = true; for \(const r of rs\) trustTouched\.add\(String\(r\.steamID\)\); \}/.test(SRC));
   T('[11] run summary row', /s\('offSeat', 0\) \+ ' \/ ' \+ s\('disputed', 0\)/.test(SRC) && /RUN\.offSeat = seatGate\.n;/.test(SRC));
   T('[11] exports', ['registerStartRosters', 'seatGateRoster', 'seatedOnRoster', 'applySeatGate'].every(f => typeof v[f] === 'function'));
   const mutants = [
@@ -577,8 +583,8 @@ else {
 //   from the empty seat 1 name another account at seat 0, three votes to P1's one, so the roster seats that account where
 //   P1 started. Both rosters are marked split: no seat gate, the Q75 contest holds the key, nobody rated or convicted.
 {
-  const SPLIT_FROM = '  if (!p || p.synth || p.split || !p.roster || isEndlessMt(p.mt | 0)) return null;';
-  const SPLIT_TO = '  if (!p || p.synth || !p.roster || isEndlessMt(p.mt | 0)) return null;';
+  const SPLIT_FROM = '  if (!p || p.synth || p.split || !p.roster) return null;';
+  const SPLIT_TO = '  if (!p || p.synth || !p.roster) return null;';
   const cases = [
     ['[13]', 0x8030, () => {
       const h = 0x8030, SPL = [Q[0], Q[1], P3, P4];
@@ -621,8 +627,8 @@ else {
 //   seats. Without the agreement check their roster registered unsplit, the gate dropped the winners' records and the
 //   outside pair took the win.
 {
-  const FROM = '    if (!isEndlessMt(pending[m].mt) && (startRosterSplit(att, votes, roster) || startRosterDisagrees(all))) {';
-  const TO = '    if (!isEndlessMt(pending[m].mt) && (startRosterSplit(att, votes, roster))) {';
+  const FROM = '    if (!n || startRosterSplit(att, votes, roster) || startRosterDisagrees(all)) {';
+  const TO = '    if (!n || startRosterSplit(att, votes, roster)) {';
   const cases = [
     ['[15] T1 2V2', 0x8040, () => {
       const h = 0x8040, R7 = [Q[0], Q[1], P3, P4, Q[2], Q[3], Q[4]], F4 = [Q[0], Q[1], P3, P4];
