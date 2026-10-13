@@ -59,6 +59,11 @@ const ABSENT_GRACE_MS = Math.max(ABSENT_GRACE_MIN_MS, Number(process.env.ABSENT_
 // write their starts): character select 30 s + the loading wait 120 s + the intro.
 const START_CONFIRM_MIN_MS = 180000;
 const START_CONFIRM_MS = Math.max(START_CONFIRM_MIN_MS, Number(process.env.START_CONFIRM_MS || 600000));
+// Q121: a group that would settle without a seat whose player wrote his OWN start for the match, and no result or
+// confession yet, first waits until the match must be over: LEAVE_CONFIRM_MS after this job first read that player's
+// start (see leaveConfirmHold). Default 60 min, floor 45 min (the longest match stays under it, see the note there).
+const LEAVE_CONFIRM_MIN_MS = 2700000;
+const LEAVE_CONFIRM_MS = Math.max(LEAVE_CONFIRM_MIN_MS, Number(process.env.LEAVE_CONFIRM_MS || 3600000));
 
 const pid = (s) => crypto.createHmac('sha256', String(SALT || '')).update(String(s)).digest('hex').slice(0, 16);
 const plog = (s) => pid(s).slice(0, 8);
@@ -160,6 +165,63 @@ function absenceHold(absent, pend, now, complete, graceMs) {
   const wait = Math.max(ABSENT_GRACE_MIN_MS, Number(graceMs) || 0) - (now - at);
   return wait > 0 ? { hold: 'grace', waitMs: wait } : { hold: null, waitMs: 0 };
 }
+// ---- leave confirmation (cloud audit Q121) ----
+// Two players in a match (modified clients; no outside account, no extra account) wrote one consistent made-up result a
+// minute in, each from his own seat: themselves on top, everyone else copied at his real seat. Nothing in it is off: the
+// roster is not split, every record sits on its writer's seat, so the seat gate and the roster checks (Q75 / Q80) pass
+// it. The players still at the table had written their start but no result yet, so after the start floor and the absence
+// grace the job settled the made-up result -- them convicted as leavers (ranked: -100 points and an exit; quick: an
+// exit), the two writers rated as the winners -- and the real result, ten-odd minutes later, reached a processed key.
+// Same in a bot match with two humans: one writes a result at the start (one record settles there), the other's real
+// result arrives to a processed key and he gets nothing.
+// A missing result is only evidence that a player left once his match must be over. So an absent seat whose player wrote
+// his OWN start for the key, has no result of his own for it and did not confess (a confession is his own word that he
+// left, counted on its own path) holds the group until `confirmMs` after this job first read that start (pend.startSeen,
+// relative to t0). Measured from his start, not t0: a modified host picks the match key and can write his own start
+// early; he cannot move when the other players' starts appear (they write them when level 1 begins). When the real result
+// lands inside the wait, the key turns inconsistent: nobody settles, nobody is convicted (every result writer is exempt
+// from the start verdict), the start verdict processes a matchmade key at maturity with the consolation XP. A friend room
+// or a bot match is never processed by the start verdict: there neither writer gets the match XP (the made-up result
+// gains nothing; one player can always void his own match by writing a different result, the same as before).
+// The wait covers the whole match, from the start record (written as level 1 begins) to the result (written on the
+// results screen), counted from the client's own timeouts: a matchmade match (6 levels, 7 with a 2V2 / 3V3 sudden death)
+// with every level at its longest clock (90 s) and every possible overtime, every shop / slot / gamble barrier at its
+// timeout, two host migrations and a reconnect stays under about 30 min; a 9-level 2V2 friend room the same way, about
+// 41 min; a failed upload retries for up to 2 min more. The job sees a start record no earlier than it was written, so
+// waiting from the first read only adds margin. Hence 60 min, floor 45 min. Seats named by the others only
+// (Q69), seats whose record was seen agreeing (pend.agreed, filtered by the caller) and players who confessed are not
+// waited for: none of them can be framed by an early result.
+// The absent seats come from the result's own roster, and the made-up result is written by the framers: they can leave
+// the still-playing seats empty ('0', the bot-seat form) or name two alts there, and then nobody is absent at all. So the
+// caller adds every seat of the registered start roster (seatGateRoster: the seat gate's roster, each player's own start
+// record decides his seat) whose player wrote no record in the group; the tests above apply to them unchanged, and
+// whether the settle convicts anybody still follows the result's roster. An unregistered or split start roster adds
+// nothing (the roster contest holds that key already). An honest result's roster is the start roster (the seats are fixed
+// before level 1), so honest groups add nobody.
+// Cost: a match with a real leaver who did not confess (a crash, a dropped connection) settles this much later on the
+// job (the client shows its optimistic result meanwhile); a match whose real result disagrees with a made-up one stays
+// unsettled (every writer flagged once, as with any disagreement).
+//   absent    : the caller's absent seats ([{ seat, steamID }] from the result roster, [{ seat, pid }] from the start
+//               roster; pend.agreed already removed)
+//   ownResult : pid -> true when that player wrote a result for the key (pend.settled, this run's records)
+//   confessed : pid -> true when that player confessed for the key
+// Returns { hold, waitMs, seats }.
+function leaveConfirmHold(absent, pend, now, confirmMs, ownResult, confessed) {
+  const out = { hold: false, waitMs: 0, seats: [] };
+  if (!absent || !absent.length || !pend) return out;
+  const seen = pend.startSeen || {};
+  for (const x of absent) {
+    const h = x.pid || pid(String(x.steamID));   // a start roster seat comes as its pid
+    if (!hasOwnStart(pend, h)) continue;
+    if ((ownResult && ownResult(h)) || (confessed && confessed(h))) continue;
+    let at = (Number(pend.t0) || 0) + (Number(seen[h]) > 0 ? Number(seen[h]) : 0);
+    if (!(at > 0) || at > now) at = now;   // a stamp from the future (clock skew / foreign state) restarts the wait, never skips it
+    const w = Math.max(LEAVE_CONFIRM_MIN_MS, Number(confirmMs) || 0) - (now - at);
+    if (w > 0) { out.seats.push(x.seat); if (w > out.waitMs) out.waitMs = w; }
+  }
+  out.hold = out.seats.length > 0;
+  return out;
+}
 // Which listed boards are the record shards (R1-B2-04 / O348-3). Live channels: exactly PREFIX+0 .. PREFIX+(n-1). A name
 // missing from the listing makes the run's view incomplete (the listing can drop a board for a while); any other board
 // that only starts with the prefix is not read (each run reads every shard, so an extra board is pure cost). A listing
@@ -210,10 +272,26 @@ function shardPlan(listedNames, prefix, n, sandbox) {
 // the write goes unpunished -- an honest quitter still confesses (0xB5), a loading-screen drop was
 // never meant to be a leave (B7), and a suppressed write is a modified client.
 const OWN_START_CAP = 16;   // a roster has at most 8 seats: the cap only bounds what extra writers can grow
-function noteOwnStarts(p, recs) {
+// Q121: the seats of a registered start roster (seat -> pid) whose player wrote no record in the settle group g and is
+// neither among the result roster's absent seats nor seen agreeing -> [{ seat, pid }] (see leaveConfirmHold).
+function startRosterGaps(ro, g, absent, agreed) {
+  const out = [];
+  if (!ro) return out;
+  const skip = new Set((agreed || []).concat(g.map((r) => pid(String(r.steamID))), (absent || []).map((x) => pid(String(x.steamID)))));
+  for (const s of Object.keys(ro)) { const h = ro[s]; if (h && !skip.has(h)) { skip.add(h); out.push({ seat: s | 0, pid: h }); } }
+  return out;
+}
+function noteOwnStarts(p, recs, now) {
   if (!p || !recs || !recs.length) return;
   const st = Array.isArray(p.started) ? p.started : (p.started = []);
-  for (const r of recs) { const h = pid(String(r.steamID)); if (st.indexOf(h) < 0 && st.length < OWN_START_CAP) st.push(h); }
+  for (const r of recs) {
+    const h = pid(String(r.steamID));
+    if (st.indexOf(h) >= 0 || st.length >= OWN_START_CAP) continue;
+    st.push(h);
+    // Q121: when this job first read it, as ms after the entry's t0 (so it moves with t0); none = read within a second of
+    //   t0 (the run that registered the entry) or an entry from an older build
+    if (Number(now) > 0) { const dt = Math.round(Number(now) - (Number(p.t0) || Number(now))); if (dt >= 1000) (p.startSeen || (p.startSeen = {}))[h] = dt; }
+  }
 }
 function hasOwnStart(p, h) { return !!(p && Array.isArray(p.started) && p.started.indexOf(h) >= 0); }
 // Q113: what each writer's own records said about his seat on an endless key (testimonyOf hash, pid -> hash), cumulative
@@ -543,7 +621,7 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
     // anyone who wrote ANY settle record was present at the end -> exempt. Tracked cumulatively:
     // a lone settle (e.g. the finishing side of a 2P match) can be overwritten before maturity.
     if (groups[m]) for (const r of groups[m]) { const h = pid(r.steamID); if (p.settled.indexOf(h) < 0) p.settled.push(h); }
-    noteOwnStarts(p, sg[m]);   // Q69: who wrote his OWN start for this key, cumulative (entries from older builds start empty)
+    noteOwnStarts(p, sg[m], now);   // Q69: who wrote his OWN start for this key, cumulative (entries from older builds start empty); Q121: and when
     if (isEndlessMt(p.mt)) noteTestimony(p, (sg[m] || []).concat(groups[m] || []));   // Q113: and what his records said about his seat
     if (consistentKeys.has(m)) continue;   // consistent settle group -> the normal pipeline owns this key
     // endless (type 7): never convicted from an orphaned start. Co-op runs are excluded from the
@@ -1256,6 +1334,7 @@ function writeRunSummary() {
       '| flagged inconsistent / sanity | ' + s('flagged', 0) + ' / ' + s('sanity', 0) + ' |',
       '| starts pending / exit-rate hits | ' + s('pending', 0) + ' / ' + s('convicted', 0) + ' |',
       '| absent-seat holds (incomplete read / grace) | ' + s('absentHeld', 0) + ' |',
+      '| groups waiting for a seat that started but has no result yet, until the match must be over (Q121) | ' + s('leaveWait', 0) + ' |',
       '| confessions seen/penalized/refunded | ' + s('confess', '0/0/0') + ' |',
       '| reports seen / counted | ' + s('repSeen', 0) + ' / ' + s('repCounted', 0) + ' |',
       '| trust writes / deletes | ' + s('trustW', 0) + ' / ' + s('trustD', 0) + ' |',
@@ -5185,6 +5264,22 @@ async function main() {
         + (absHold.hold === 'read' ? 'not every record shard was read this run' : 'grace ' + Math.round(absHold.waitMs / 1000) + 's left') + ', deferred (settles in full if the record lands)');
       continue;
     }
+    // Q121 (see leaveConfirmHold): an absent seat whose player wrote his own start, but no result or confession, holds the
+    //   group until his match must be over -- every lane, ahead of the one-match-at-a-time claim (a held group claims no slot)
+    noteOwnStarts(pend, starts.filter((r) => (r.d[3] + '_' + r.d[4] + '_' + r.d[2]) === c.m), nowMs);
+    const resultBy = new Set(pend.settled || []);
+    for (const r of recs) if ((r.d[3] + '_' + r.d[4] + '_' + r.d[2]) === c.m) resultBy.add(pid(String(r.steamID)));
+    //   The absent seats are the result roster's, which the writers chose: a seat of the registered start roster whose
+    //   player wrote no record in this group is waited for too (a made-up result can blank the seats still playing or
+    //   name alts there).
+    const lcAbsent = absentNow.concat(startRosterGaps(seatGateRoster(pend), g, absentNow, agreed));
+    const lcHold = leaveConfirmHold(lcAbsent, pend, nowMs, LEAVE_CONFIRM_MS, (h) => resultBy.has(h), (h) => confSeen.has(h + '|' + c.m) || !!confState[h + '|' + c.m]);
+    if (lcHold.hold) {
+      RUN.leaveWait = (RUN.leaveWait | 0) + 1;
+      console.log('  leave-wait ' + c.m + ': seat' + (lcHold.seats.length > 1 ? 's ' : ' ') + lcHold.seats.join(',') + ' wrote a start but no result yet -- '
+        + Math.round(lcHold.waitMs / 1000) + 's until the match must be over, deferred (Q121)');
+      continue;
+    }
     // one match at a time per account; the private and bot lanes apply it after their own level-scaled floor below
     if (!isPrivateMt(matchType) && !isBotMt(matchType) && writerPaced(c.m, writerSids, pend.t0, SANITY.MIN_START_AGE_MS)) continue;
     // per-UTC-day settle counts are recorded as a pure SIGNAL (no gate): the future judgment
@@ -5298,7 +5393,7 @@ async function main() {
     //   run for the key, consistent or not: a team-gamble dissenter wrote one) or his confession (counted on its own path). A seat that only the writers' rosters name (two accounts can write
     //   a consistent pair of records for a match that never happened) is not convicted, seeded or group-decayed; it stays
     //   a §7 shield seat for its teammates (namedOnly), like before. `un` = writer signal: named a seat that never wrote.
-    noteOwnStarts(pend, starts.filter((r) => (r.d[3] + '_' + r.d[4] + '_' + r.d[2]) === c.m));
+    noteOwnStarts(pend, starts.filter((r) => (r.d[3] + '_' + r.d[4] + '_' + r.d[2]) === c.m), nowMs);
     const own = new Set((pend.started || []).concat(pend.settled || []));
     for (const r of recs) if ((r.d[3] + '_' + r.d[4] + '_' + r.d[2]) === c.m) own.add(pid(String(r.steamID)));
     const namedOnly = [];
@@ -5828,6 +5923,7 @@ module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CHAT_MUTE: 
   RECOVER_FILE, loadRecover, recoverPick, readRecoverRows };   // client knife 5.0i one-shot pool recovery
 Object.assign(module.exports, { KEY_CHANNEL, loadJobPubTable, soloKeyHeld, soloRunHasHeld });   // cloud audit R1-A5-07 per-channel key policy (test/playtest-key-policy.js)
 Object.assign(module.exports, { noteOwnStarts, hasOwnStart, OWN_START_CAP });   // cloud audit Q69 own-record evidence for leaver verdicts
+Object.assign(module.exports, { leaveConfirmHold, startRosterGaps, LEAVE_CONFIRM_MS, LEAVE_CONFIRM_MIN_MS });   // cloud audit Q121 leave confirmation
 Object.assign(module.exports, { rosterContestSeats, applyRosterContest, seatLayout, seatLayoutsDisagree });   // cloud audit Q75 one account per seat per match key (+ Q80 third review seat layout)
 Object.assign(module.exports, { registerStartRosters, startRosterSplit, rosterCanon, startRosterDisagrees, seatGateRoster, seatedOnRoster, applySeatGate });   // cloud audit Q80 seat gate
 Object.assign(module.exports, { startSig, lateStartSplit, START_CONFIRM_MS, START_CONFIRM_MIN_MS });   // cloud audit Q118 provisional start roster

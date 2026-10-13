@@ -14,6 +14,8 @@
 //   [3] late record (complete reads): held, still held two minutes later, settled in full when it lands
 //   [4] a genuine leaver: held for the grace, then convicted exactly once (an empty shard answering an odd 200 does not
 //       make the read incomplete)
+//       Q121: that seat wrote his own start, so after the grace the group still waits until the match must be over
+//       (LEAVE_CONFIRM_MS from the start), then convicts
 //   [4b] Q69: the same absence, but the absent seat never wrote his own start record (only the others name him): held, then not convicted
 //   [5] grace already over but this run's read is incomplete: still held; convicted on the next complete read
 //   [6] private room (3 seats): the late finisher gets their XP (the group used to settle without them)
@@ -149,6 +151,7 @@ function world(rows) {
 // A on shard 0, B on shard 1, C on shard 2 (C's row only when withC)
 const rows3 = (mk, h, withC) => [{ shard: 0, sid: A, d: mk(h, 0) }, { shard: 1, sid: B, d: mk(h, 1) }].concat(withC ? [{ shard: 2, sid: C, d: mk(h, 2) }] : []);
 const FLOOR = v.SANITY.MIN_START_AGE_MS, GRACE = v.ABSENT_GRACE_MS, MIN = 60000;
+const LEAVE = v.LEAVE_CONFIRM_MS;   // Q121: an absent seat with his own start is waited for this long from that start
 // the human sids of a settle record's roster (a bot seat = sid 0 is skipped)
 const rosterSids = (d) => { const pc = d[8], out = []; for (let i = 0; i < pc; i++) { const s = (BigInt(d[12 + pc + 2 * i] >>> 0) << 32n) | BigInt(d[11 + pc + 2 * i] >>> 0); if (s) out.push(s.toString()); } return out; };
 // the match's start attestation was sighted by an earlier run, past the start floor (30 s margin: clock skew between this process and the child runs);
@@ -230,12 +233,15 @@ console.log('-- [4] genuine leaver --');
   const r1 = runCron(boards, attested(ranked(h, 0)));
   T('[4] run 1: held', !processedOf(r1).has(m) && convictLines(r1) === 0);
   // run 2: the grace has passed; an EMPTY shard (listing says 0 entries) answering a 200 with no entries block is not a fault
-  const r2 = runCron(boards, advance(r1.state, GRACE + 1000), { STUB_MALFORMED: JSON.stringify(['shard_9']) });
-  T('[4] run 2 (grace over, complete read): C convicted once, the others settle', processedOf(r2).has(m) && settleLines(r2, m) === 2 && convictLines(r2) === 1 && leavesOf(r2, C) === 1,
+  const r1b = runCron(boards, advance(r1.state, GRACE + 1000), { STUB_MALFORMED: JSON.stringify(['shard_9']) });
+  T('[4] run 2 (grace over, complete read): C wrote his own start -- still waited for until the match must be over (Q121)',
+    !processedOf(r1b).has(m) && convictLines(r1b) === 0 && leavesOf(r1b, C) === 0 && /leave-wait [^\n]*seat 2 [^\n]*\(Q121\)/.test(r1b.out), r1b.out.slice(-500));
+  const r2 = runCron(boards, advance(r1b.state, LEAVE), { STUB_MALFORMED: JSON.stringify(['shard_9']) });
+  T('[4] run 3 (the match must be over, complete read): C convicted once, the others settle', processedOf(r2).has(m) && settleLines(r2, m) === 2 && convictLines(r2) === 1 && leavesOf(r2, C) === 1,
     'processed=' + processedOf(r2).has(m) + ' settleLines=' + settleLines(r2, m) + ' convict=' + convictLines(r2) + ' leaves=' + leavesOf(r2, C));
-  T('[4] run 2: the leaver points penalty is written for C', writes(r2, 7, C).length === 1 && /leaver LP [^\n]*pts 2000-100->1900/.test(r2.out));
+  T('[4] run 3: the leaver points penalty is written for C', writes(r2, 7, C).length === 1 && /leaver LP [^\n]*pts 2000-100->1900/.test(r2.out));
   const r3 = runCron(boards, advance(r2.state, MIN));
-  T('[4] run 3: nothing more (processed)', convictLines(r3) === 0 && leavesOf(r3, C) === 1 && writes(r3, 7).length === 0);
+  T('[4] run 4: nothing more (processed)', convictLines(r3) === 0 && leavesOf(r3, C) === 1 && writes(r3, 7).length === 0);
   // Q69: the same absence, but C never wrote his own start record (only A's and B's rosters name him): held for the grace
   // like any absent seat, then the others settle and C is not convicted
   const h2 = 0x4200, m2 = keyOf(ranked(h2, 0));
@@ -256,7 +262,7 @@ console.log('-- [5] grace over, incomplete read --');
   const r1 = runCron(boards, attested(ranked(h, 0)));
   const r2 = runCron(boards, advance(r1.state, GRACE + MIN), { STUB_FAIL: JSON.stringify({ shard_9: 503 }) });
   T('[5] run 2 (grace over, one shard failed): still held, nobody convicted', !processedOf(r2).has(m) && convictLines(r2) === 0 && leavesOf(r2, C) === 0 && /absent-hold [^\n]*not every record shard/.test(r2.out));
-  const r3 = runCron(boards, advance(r2.state, MIN));
+  const r3 = runCron(boards, advance(r2.state, LEAVE));   // Q121: past the wait for C's own start as well
   T('[5] run 3 (complete read): convicted now, once', processedOf(r3).has(m) && convictLines(r3) === 1 && leavesOf(r3, C) === 1);
 }
 
@@ -286,8 +292,10 @@ console.log('-- [7] bot match --');
   const h2 = 0x7200, m2 = keyOf(bot3(h2, 0));
   const lone = [{ shard: 0, sid: A, d: bot3(h2, 0) }];
   const q1 = runCron(world(lone), attested(bot3(h2, 0), reqB + 30000));
-  const q2 = runCron(world(lone), advance(q1.state, GRACE + 1000));
-  T('[7b] B never lands: after the grace the lone record settles (A only), nobody convicted', !processedOf(q1).has(m2) && processedOf(q2).has(m2) && /lone lane/.test(q2.out) && writes(q2, 5, A).length === 1 && writes(q2, 5, B).length === 0 && leavesOf(q2, B) === 0,
+  const q1b = runCron(world(lone), advance(q1.state, GRACE + 1000));
+  T('[7b] B never lands: after the grace the lone record still waits for B (his own start, Q121)', !processedOf(q1b).has(m2) && /leave-wait [^\n]*\(Q121\)/.test(q1b.out) && writes(q1b, 5).length === 0, q1b.out.slice(-400));
+  const q2 = runCron(world(lone), advance(q1b.state, LEAVE));
+  T('[7b] B never lands: once his match must be over the lone record settles (A only), nobody convicted', !processedOf(q1).has(m2) && processedOf(q2).has(m2) && /lone lane/.test(q2.out) && writes(q2, 5, A).length === 1 && writes(q2, 5, B).length === 0 && leavesOf(q2, B) === 0,
     (q2.out.match(/bots settle[^\n]*/) || [''])[0]);
 }
 
@@ -351,8 +359,8 @@ console.log('-- [11] mutation self-checks --');
 {
   const mutants = [
     ['absent-seat gate removed', 'if (absHold.hold) {', 'if (false && absHold.hold) {', (script) => {
-      const h = 0xB100;
-      const r = runCron(world(rows3(ranked, h, false)), attested(ranked(h, 0)), null, script);
+      const h = 0xB100;   // the start is past the Q121 wait (a late finisher of a long match): only the grace stands between him and a conviction
+      const r = runCron(world(rows3(ranked, h, false)), attested(ranked(h, 0), LEAVE + MIN), null, script);
       return convictLines(r) === 1;   // [3] run 1 convicts the late finisher again
     }],
     ['verdict hold removed', "if (readComplete === false) { held++; continue; }", "if (false) { held++; continue; }", (script) => {

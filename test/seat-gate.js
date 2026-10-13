@@ -204,6 +204,11 @@ const part6 = (h) => [{ sid: H, d: t2settle(h, 0, ROS, 0) }, { sid: V, d: t2sett
 
 const MIN = 60000, HOUR = 3600 * 1000;
 const GRACE = (v.ABSENT_GRACE_MS || 0) + 60000;
+// Q121: a seat that wrote its own start but no result yet holds the key until the match must be over
+const LEAVE = v.LEAVE_CONFIRM_MS + MIN;
+const LEAVE_WAIT = /leave-wait [^\n]*until the match must be over, deferred \(Q121\)/;
+// a mutant also needs the Q121 hold switched off when the scenario it checks is a conviction the hold now also stops
+const NOQ121 = (src) => src.replace('    if (lcHold.hold) {', '    if (false && lcHold.hold) {');
 SC[2] = [7000, 4000];   // 1V1 scores (rec() picks the row by player count)
 const Q80LINE = /record\(s\) from accounts the start roster does not seat there -- not counted \(Q80\)/;
 const Q80ROW = (r, off, dis, split) => new RegExp('\\| records off their start-roster seat, not counted / start keys with a seat claimed twice / start rosters the voters split, no seat gate \\(Q80\\) \\| ' + off + ' / ' + dis + ' / ' + (split | 0) + ' \\|').test(r.summary);
@@ -250,7 +255,7 @@ const swingSteps = (h) => {
 const p2Steps = (h) => {
   const S = realStarts(h).slice(0, 3).concat(Q.slice(0, 16).map(sid => ({ sid, d: t2start(h, 3, RR) })), realStarts(h).slice(3));
   const R = realSettles(h).slice(0, 3);
-  return [[0, S], [6 * MIN, S.concat(R)], [GRACE, S.concat(R)]];
+  return [[0, S], [6 * MIN, S.concat(R)], [GRACE, S.concat(R)], [LEAVE, S.concat(R)]];
 };
 // [9]: the loser P3 doctors his own roster (an outside account at seat 3); everyone else honest
 const doctorSteps = (h) => {
@@ -445,14 +450,16 @@ console.log('=== a record counts only from the seat its start roster gives its w
 // ---- [6] review4-q43.js part 6 with starts ----
 {
   const h = 0x8006, recs = part6(h).concat(starts4(h)), key = keyOf(recs[0].d);
-  const rs = timeline([[0, recs], [FLOOR + 1000, recs], [GRACE, recs]]);
-  T('[6] three runs exit 0', allOk(rs, 3), last(rs).out.slice(-800));
+  const rs = timeline([[0, recs], [FLOOR + 1000, recs], [GRACE, recs], [LEAVE, recs]]);
+  T('[6] four runs exit 0', allOk(rs, 4), last(rs).out.slice(-800));
   T('[6] the three forged records are dropped, no contest', Q80ROW(rs[0], 3, 0) && !Q75.test(outOf(rs)), rowOf(rs[0]));
-  T('[6] the key settles: H and V win, X and Y are leavers (their own starts), O gains nothing', processedOf(rs[2]).has(key) && up(rs, H) && up(rs, V)
-    && down(rs, X) && down(rs, Y) && leavesOf(rs[2], X) === 1 && leavesOf(rs[2], Y) === 1 && leavesOf(rs[2], H) + leavesOf(rs[2], V) === 0 && none(rs, O),
-    JSON.stringify([H, V, X, Y, O].map(s => ptsIn(rs, s))) + ' leaves ' + JSON.stringify([H, V, X, Y].map(s => leavesOf(rs[2], s))));
-  T('[6] the three writers off their seats flagged once each', [X, Y, O].every(s => fOf(rs[2], s) === 1) && [H, V].every(s => fOf(rs[2], s) === 0),
-    JSON.stringify([H, V, X, Y, O].map(s => fOf(rs[2], s))));
+  T('[6] past the absence grace the key still waits for the match to be over (X and Y started, no counted result; Q121)',
+    LEAVE_WAIT.test(rs[2].out) && !processedOf(rs[2]).has(key) && [H, V, X, Y].every(s => none(rs.slice(0, 3), s)), rs[2].out.slice(-600));
+  T('[6] the key settles: H and V win, X and Y are leavers (their own starts), O gains nothing', processedOf(rs[3]).has(key) && up(rs, H) && up(rs, V)
+    && down(rs, X) && down(rs, Y) && leavesOf(rs[3], X) === 1 && leavesOf(rs[3], Y) === 1 && leavesOf(rs[3], H) + leavesOf(rs[3], V) === 0 && none(rs, O),
+    JSON.stringify([H, V, X, Y, O].map(s => ptsIn(rs, s))) + ' leaves ' + JSON.stringify([H, V, X, Y].map(s => leavesOf(rs[3], s))));
+  T('[6] the three writers off their seats flagged once each', [X, Y, O].every(s => fOf(rs[3], s) === 1) && [H, V].every(s => fOf(rs[3], s) === 0),
+    JSON.stringify([H, V, X, Y, O].map(s => fOf(rs[3], s))));
 }
 
 // ---- [7] a real quitter shielded by an outside account at his empty seat, with starts ----
@@ -462,22 +469,26 @@ console.log('=== a record counts only from the seat its start roster gives its w
     { sid: A, d: ffaStart(h, 0, ros) }, { sid: B, d: ffaStart(h, 1, ros) }, { sid: C, d: ffaStart(h, 2, ros) },
     { sid: O, d: ffaSettle(h, 2, [A, B, '0']) }];
   const key = keyOf(recs[0].d);
-  const rs = timeline([[0, recs], [FLOOR + 1000, recs], [GRACE, recs]]);
-  T('[7] three runs exit 0', allOk(rs, 3), last(rs).out.slice(-800));
-  T('[7] O is dropped; the key settles with C a leaver on his own start', Q80ROW(rs[0], 1, 0) && processedOf(rs[2]).has(key) && leavesOf(rs[2], C) === 1
-    && [A, B, O].every(s => leavesOf(rs[2], s) === 0) && none(rs, O) && up(rs, A), JSON.stringify([A, B, C, O].map(s => ptsIn(rs, s))) + ' C=' + leavesOf(rs[2], C));
+  const rs = timeline([[0, recs], [FLOOR + 1000, recs], [GRACE, recs], [LEAVE, recs]]);
+  T('[7] four runs exit 0', allOk(rs, 4), last(rs).out.slice(-800));
+  T('[7] past the absence grace the key waits for the match to be over (C started, no result; Q121)', LEAVE_WAIT.test(rs[2].out) && !processedOf(rs[2]).has(key)
+    && leavesOf(rs[2], C) === 0, rs[2].out.slice(-600));
+  T('[7] O is dropped; the key settles with C a leaver on his own start', Q80ROW(rs[0], 1, 0) && processedOf(rs[3]).has(key) && leavesOf(rs[3], C) === 1
+    && [A, B, O].every(s => leavesOf(rs[3], s) === 0) && none(rs, O) && up(rs, A), JSON.stringify([A, B, C, O].map(s => ptsIn(rs, s))) + ' C=' + leavesOf(rs[3], C));
 }
 
 // ---- [8] P2: sixteen outside starts at the quitter's seat ahead of his own ----
 {
   const h = 0x8008, key = keyOf(t2start(h, 0, RR));
   const rs = timeline(p2Steps(h));
-  T('[8] three runs exit 0', allOk(rs, 3), last(rs).out.slice(-800));
+  T('[8] four runs exit 0', allOk(rs, 4), last(rs).out.slice(-800));
   const st = (pendOf(rs[0], key) || {}).started || [];
   T('[8] seat 3 disputed, the roster registers from the other three; the sixteen starts dropped', Q80ROW(rs[0], 16, 1) && pendOf(rs[0], key).roster[3] === v.pid(P4)
     && st.length === 4 && st.indexOf(v.pid(P4)) >= 0, rowOf(rs[0]) + ' started=' + st.length);
-  T('[8] the quitter P4 is still convicted (-100, an exit)', processedOf(rs[2]).has(key) && leavesOf(rs[2], P4) === 1 && down(rs, P4) && Q.slice(0, 16).every(s => none(rs, s)),
-    'P4 leaves ' + leavesOf(rs[2], P4) + ' ' + JSON.stringify(ptsIn(rs, P4)));
+  T('[8] past the absence grace the key waits for the match to be over (P4 started, no result; Q121)', LEAVE_WAIT.test(rs[2].out) && leavesOf(rs[2], P4) === 0,
+    rs[2].out.slice(-600));
+  T('[8] the quitter P4 is still convicted (-100, an exit)', processedOf(rs[3]).has(key) && leavesOf(rs[3], P4) === 1 && down(rs, P4) && Q.slice(0, 16).every(s => none(rs, s)),
+    'P4 leaves ' + leavesOf(rs[3], P4) + ' ' + JSON.stringify(ptsIn(rs, P4)));
 }
 
 // ---- [9] a player doctors his own roster on a registered key ----
@@ -516,7 +527,7 @@ console.log('=== a record counts only from the seat its start roster gives its w
     ['seat gate removed', 'const seatGate = applySeatGate(recs, starts, startsPending, processed);', 'const seatGate = { out: new Map(), n: 0 };', (script) => {
         const rs = timeline(r1Steps(0x8011), script);   // [2] the outside pair's result settles first, P1 / P2 convicted
         return [P1, P2].every(s => leavesOf(last(rs), s) === 1);
-      }],
+      }, NOQ121],
     ['dispute rule removed', '    if (!isEndlessMt(sg[m][0].d[2] | 0)) {\n      const claim = {};', '    if (false) {\n      const claim = {};', (script) => {
         const rs = timeline(swingSteps(0x8014), script);   // [4] the outside roster registers: the real result no longer settles
         const key = keyOf(t2start(0x8014, 0, RR));          //   (held as a split roster, or the outside accounts take the win)
@@ -531,12 +542,23 @@ console.log('=== a record counts only from the seat its start roster gives its w
         return leavesOf(last(rs), P4) === 0;
       }],
   ];
-  for (const [label, from, to, check] of mutants) {
+  for (const [label, from, to, check, extra] of mutants) {
     if (SRC.split(from).length !== 2) { bad('[11] ' + label + ': anchor not found exactly once'); continue; }
     const script = path.join(__dirname, '..', '.mutant-seat-gate-' + process.pid + '.js');
     try {
-      fs.writeFileSync(script, SRC.replace(from, to));
-      T('[11] ' + label + ' -> the scenario goes red', check(script));
+      fs.writeFileSync(script, (extra || ((x) => x))(SRC.replace(from, to)));
+      T('[11] ' + label + (extra ? ' (and the Q121 leave hold)' : '') + ' -> the scenario goes red', check(script));
+    } finally { try { fs.unlinkSync(script); } catch (e) {} }
+  }
+  // Q121 as a second layer: the seat gate removed but the leave hold on -- P1 / P2 started and wrote no result yet when the
+  //   outside pair's result is in, so the key waits; their real result then disagrees with it and nobody is convicted
+  {
+    const script = path.join(__dirname, '..', '.mutant-seat-gate-q121-' + process.pid + '.js');
+    try {
+      fs.writeFileSync(script, SRC.replace('const seatGate = applySeatGate(recs, starts, startsPending, processed);', 'const seatGate = { out: new Map(), n: 0 };'));
+      const rs = timeline(r1Steps(0x8011), script);
+      T('[11] seat gate removed, Q121 leave hold on -> P1 / P2 are not convicted', allOk(rs, 6) && [P1, P2].every(s => rs.every(r => leavesOf(r, s) === 0)) && LEAVE_WAIT.test(outOf(rs)),
+        JSON.stringify([P1, P2].map(s => leavesOf(last(rs), s))));
     } finally { try { fs.unlinkSync(script); } catch (e) {} }
   }
 }
@@ -788,10 +810,10 @@ else {
   const LTO = '    if (seats.length) res.contested.set(m, seats);';
   const PFROM = "  return (r.d[8] | 0) + '|' + Object.keys(r.roster || {}).map(Number).sort((a, b) => a - b).join(',');";
   const PTO = "  return String(r.d[8] | 0);";
-  const mut = (from, to, tag) => {
+  const mut = (from, to, tag, keepQ121) => {
     if (SRC.split(from).length !== 2) { bad(tag + ': anchor not found exactly once'); return null; }
     const script = path.join(__dirname, '..', '.mutant-seat-gate-layout-' + process.pid + '.js');
-    fs.writeFileSync(script, SRC.replace(from, to));
+    fs.writeFileSync(script, (keepQ121 ? (x) => x : NOQ121)(SRC.replace(from, to)));
     return script;
   };
   const gained = (rs, c) => c.lane === 'points' ? c.takers.some(s => up(rs, s)) : c.takers.some(s => xpPosts(rs, s).length > 0);
@@ -809,8 +831,14 @@ else {
     let script = mut(LFROM, LTO, tag + ' mutant (layout check removed)');
     if (script) try {
       const m = timeline(c.steps, script);
-      T(tag + ' mutant: the layout check removed -> the real players are convicted / lose their XP, the cheaters gain', framed(m, c) && gained(m, c),
+      T(tag + ' mutant: the layout check and the Q121 leave hold removed -> the real players are convicted / lose their XP, the cheaters gain', framed(m, c) && gained(m, c),
         JSON.stringify(every.map(s => [ptsIn(m, s), leavesOf(last(m), s), xpPosts(m, s).length])));
+    } finally { try { fs.unlinkSync(script); } catch (e) {} }
+    script = mut(LFROM, LTO, tag + ' mutant (layout check removed, Q121 on)', true);
+    if (script) try {
+      const m = timeline(c.steps, script);
+      T(tag + ' mutant: the layout check removed, the Q121 leave hold on -> no real player convicted or left without XP', allOk(m, 6) && !framed(m, c)
+        && c.honest.every(s => m.every(r => leavesOf(r, s) === 0)), JSON.stringify(every.map(s => [ptsIn(m, s), leavesOf(last(m), s), xpPosts(m, s).length])));
     } finally { try { fs.unlinkSync(script); } catch (e) {} }
   }
   // the cost (README: one outside start record alone): from a seat the match does not have, written before the first look,

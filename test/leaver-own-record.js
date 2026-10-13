@@ -125,6 +125,14 @@ function twoRuns(recs1, recs2) {
   const r2 = runCron(boardsWith(recs2 || recs1), advance(r1.state, FLOOR + 1000));
   return { r1, r2 };
 }
+// Q121: a group missing a seat that wrote his own start (and no result) waits until that player's match must be over;
+//   run 3 is past it
+function threeRuns(recs1, recs2) {
+  const { r1, r2 } = twoRuns(recs1, recs2);
+  const r3 = runCron(boardsWith(recs2 || recs1), advance(r2.state, v.LEAVE_CONFIRM_MS));
+  return { r1, r2, r3 };
+}
+const leaveWait = (r) => /leave-wait [^\n]*\(Q121\)/.test(r.out);
 
 console.log('=== leaver conviction needs the player\'s own record (Q69) ===');
 
@@ -150,9 +158,10 @@ for (const withStarts of [true, false]) {
   const ros = [A, B, C], h = 0x6903;
   const recs = [{ sid: A, d: settle(2, h, 0, ros) }, { sid: B, d: settle(2, h, 1, ros) },
     { sid: A, d: startRec(2, h, 0, ros) }, { sid: B, d: startRec(2, h, 1, ros) }, { sid: C, d: startRec(2, h, 2, ros) }];
-  const { r1, r2 } = twoRuns(recs);
+  const { r1, r2: r2w, r3: r2 } = threeRuns(recs);
   const st1 = ((((r1.state.STARTS_FILE || {})[keyOf(settle(2, h, 0, ros))]) || {}).started || []).slice().sort();
   T('[2] run 1: start pending carries the three own starts', JSON.stringify(st1) === JSON.stringify([v.pid(A), v.pid(B), v.pid(C)].sort()), JSON.stringify(st1));
+  T('[2] run 2: C is waited for until the match must be over (Q121), nobody convicted yet', leaveWait(r2w) && leavesOf(r2w, C) === 0 && !processedOf(r2w).has(keyOf(settle(2, h, 0, ros))), r2w.out.slice(-400));
   T('[2] C convicted: one exit-rate hit', leavesOf(r2, C) === 1, 'leaves=' + leavesOf(r2, C));
   const w = pointsWritesFor(r2, C);
   T('[2] C loses 100 points (2500 -> 2400)', w.length === 1 && /score=2400(&|$)/.test(w[0].body), JSON.stringify(w));
@@ -165,7 +174,7 @@ for (const withStarts of [true, false]) {
   const ros = [A, B, C], h = 0x6904;
   const base = [{ sid: A, d: settle(2, h, 0, ros) }, { sid: B, d: settle(2, h, 1, ros) },
     { sid: A, d: startRec(2, h, 0, ros) }, { sid: B, d: startRec(2, h, 1, ros) }];
-  const { r2 } = twoRuns(base.concat([{ sid: C, d: startRec(2, h, 2, ros) }]), base);
+  const { r3: r2 } = threeRuns(base.concat([{ sid: C, d: startRec(2, h, 2, ros) }]), base);
   T('[3] C convicted on his remembered own start', leavesOf(r2, C) === 1 && pointsWritesFor(r2, C).length === 1, 'leaves=' + leavesOf(r2, C));
 }
 
@@ -175,7 +184,7 @@ for (const withStarts of [true, false]) {
   const { r2 } = twoRuns([{ sid: A, d: settle(1, h, 0, ros) }, { sid: B, d: settle(1, h, 1, ros) }]);
   T('[4] framed quick: V no exit-rate hit', processedOf(r2).has(keyOf(settle(1, h, 0, ros))) && leavesOf(r2, V) === 0, 'leaves=' + leavesOf(r2, V));
   const ros2 = [A, B, C], h2 = 0x6906;
-  const { r2: q2 } = twoRuns([{ sid: A, d: settle(1, h2, 0, ros2) }, { sid: B, d: settle(1, h2, 1, ros2) }, { sid: C, d: startRec(1, h2, 2, ros2) }]);
+  const { r3: q2 } = threeRuns([{ sid: A, d: settle(1, h2, 0, ros2) }, { sid: B, d: settle(1, h2, 1, ros2) }, { sid: C, d: startRec(1, h2, 2, ros2) }]);
   T('[4] honest quick leaver (own start) still gets the exit-rate hit', leavesOf(q2, C) === 1, 'leaves=' + leavesOf(q2, C));
   T('[4] quick never writes points', pointsWritesFor(q2, C).length === 0);
 }
@@ -185,7 +194,7 @@ for (const withStarts of [true, false]) {
   const at = SRC.indexOf('const leavers0 = detectLeavers(g).filter((x) => {');
   T('[5] the leaver filter routes every absent seat through the own-record check', at > 0 && SRC.indexOf('return ownOrNamed(x);', at) > at && SRC.indexOf('return ownOrNamed(x);', at) < SRC.indexOf('});', at));
   T('[5] named-only seats still shield their teammates', /teamLpPlan\(planIn, matchType, scores, leavers0\.concat\(namedOnly\)\.map\(x => x\.seat\), t2Win\)/.test(SRC));
-  T('[5] the orphan path remembers own starts every run', /noteOwnStarts\(p, sg\[m\]\);/.test(SRC) && /if \(!hasOwnStart\(p, h\)\) continue;/.test(SRC));
+  T('[5] the orphan path remembers own starts every run', /noteOwnStarts\(p, sg\[m\](, now)?\);/.test(SRC) && /if \(!hasOwnStart\(p, h\)\) continue;/.test(SRC));
   T('[5] the settle filter takes a confession as his own record', /if \(own\.has\(hx\) \|\| confSeen\.has\(hx \+ '\|' \+ c\.m\) \|\| confState\[hx \+ '\|' \+ c\.m\]\) return true;/.test(SRC));
   T('[5] run summary row', /s\('unattested', 0\)/.test(SRC));
   T('[5] exports', typeof v.noteOwnStarts === 'function' && typeof v.hasOwnStart === 'function' && v.OWN_START_CAP === 16);
