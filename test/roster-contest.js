@@ -2,8 +2,8 @@
 // Q75 (cloud audit 2026-10): on a match key the job holds no start roster for, a record written by an account that was not
 // in the match no longer counts as a vote. Every honest record of a match key names the same account at every seat (the
 // host's START_GAME seat map, unchanged until a rematch, and a writer sits at his own seat), so a key whose records name
-// two accounts for one seat is held like an inconsistent one: nobody rated, nobody convicted from it, every writer flagged
-// once. Once a start roster is registered the seat gate decides who counts instead (Q80, test/seat-gate.js); the keys left
+// two accounts for one seat is held like an inconsistent one: nobody rated, nobody convicted from it (Q114 review: nobody
+// flagged either -- an outside start record alone makes such a key). Once a start roster is registered the seat gate decides who counts instead (Q80, test/seat-gate.js); the keys left
 // here are the ones without one: no start seen (rotated off, a synthetic first-sighting entry) or a start seat claimed by
 // two or more accounts so often that no roster could be registered.
 // End-to-end over the REAL validate.js main() against an offline stateful board stub (same harness as
@@ -12,7 +12,7 @@
 //   [2] control: an honest 2V2 (four starts, four settles) settles as before, no contest line, nobody flagged, both
 //       summary rows (Q75 / Q80) read 0
 //   [3] no start seen: two losers and one outside account turn a 2V2 around (review4-q43.js part 6): not settled, no
-//       points move, the true winner is no leaver, every writer flagged once over two runs, run summary row; no
+//       points move, the true winner is no leaver, nobody flagged over two runs (Q114 review), run summary row; no
 //       synthetic start entry, so nothing matures into a verdict later either
 //   [4] no start seen: five outside accounts take a 2V2 over (review4-q43.js part 5): not settled, the outsiders gain nothing
 //   [5] outside accounts write a start at every seat (no start roster can register): the key is held, nobody rated or
@@ -182,7 +182,7 @@ console.log('=== one account per seat per match key without a start roster (Q75)
   eq('[1] an empty seat names nobody', v.rosterContestSeats([R(A, 0, { 0: A, 1: B }), R(B, 1, r3)]), []);
   eq('[1] several seats, sorted', v.rosterContestSeats([R(H, 0, { 0: H, 1: V, 2: X, 3: Y }), R(X, 0, { 0: X, 1: Y, 2: H, 3: V })]), [0, 1, 2, 3]);
   eq('[1] nothing in, nothing out', [v.rosterContestSeats(null), v.rosterContestSeats([]), v.rosterContestSeats([{}])], [[], [], []]);
-  // applyRosterContest: lists spliced, flagged once, processed / endless / registered keys untouched
+  // applyRosterContest: lists spliced, nobody flagged (Q114 review), processed / endless / registered keys untouched
   const mk = (m, recs) => recs.map(r => Object.assign({}, r, { d: [0xB1, 3, Number(m.split('_')[2]), Number(m.split('_')[0]), Number(m.split('_')[1]), r.d[5]] }));
   const bad1 = mk('1_1_2', [R(A, 0, r3), R(O, 0, { 1: B, 2: C })]), good = mk('2_1_2', [R(A, 0, r3), R(B, 1, r3)]);
   const done = mk('3_1_2', [R(A, 0, r3), R(O, 0, { 1: B, 2: C })]), endless = mk('4_1_7', [R(A, 0, r3), R(O, 0, { 1: B, 2: C })]);
@@ -200,10 +200,10 @@ console.log('=== one account per seat per match key without a start roster (Q75)
   eq('[1] applyRosterContest: contested keys', Array.from(res.contested.keys()).sort(), ['1_1_2', '5_1_6', '7_1_2']);
   eq('[1] consistent list keeps the rest (the registered key too)', gr.consistentMatches.map(c => c.m), ['2_1_2', '3_1_2', '4_1_7', '6_1_2']);
   eq('[1] inconsistent list loses the contested key', gr.inconsistentGroups.map(c => c.m), []);
-  T('[1] each writer flagged once, the key marked', sig.flagged['1_1_2'] === 1000 && sig.flagged['5_1_6'] === 1000 && !sig.flagged['6_1_2'] && (sig.players[v.pid(A)] || {}).f === 3 && (sig.players[v.pid(O)] || {}).f === 2, JSON.stringify(sig.players));
-  T('[1] dirty + touched', res.dirty === true && Array.from(new Set(res.touched)).sort().join() === [A, B, O].sort().join());
+  T('[1] nobody flagged, no key marked (Q114 review)', !Object.keys(sig.flagged).length && !Object.keys(sig.players).length, JSON.stringify(sig));
+  T('[1] not dirty, nobody touched', res.dirty === false && res.touched.length === 0);
   const again = v.applyRosterContest({ groups: { '1_1_2': bad1 }, consistentMatches: [{ m: '1_1_2', g: bad1 }], inconsistentGroups: [] }, [], {}, sig, new Set(), 2000);
-  T('[1] a second sighting flags nobody again', again.contested.size === 1 && again.dirty === false && (sig.players[v.pid(A)] || {}).f === 3);
+  T('[1] a second sighting flags nobody either', again.contested.size === 1 && again.dirty === false && !(sig.players[v.pid(A)] || {}).f);
   // a start record of the key counts like a settle record (a writer at his own seat)
   const st = [{ steamID: O, d: [0xB2, 3, 2, 2, 1, 2], roster: { 0: A, 1: B, 2: O } }];
   const res2 = v.applyRosterContest({ groups: { '2_1_2': good }, consistentMatches: [{ m: '2_1_2', g: good }], inconsistentGroups: [] }, st, {}, { players: {}, flagged: {} }, new Set(), 1);
@@ -231,7 +231,7 @@ console.log('=== one account per seat per match key without a start roster (Q75)
   T('[3] no points move for anybody', anyPoints(r1) === 0 && anyPoints(r2) === 0, JSON.stringify(posts(r2, 7)));
   T('[3] the true winner V is no leaver', leavesOf(r2, V) === 0 && !/leaver LP /.test(r2.out));
   T('[3] logged with the contested seats', /two accounts named for seat\(s\) 0,1,2,3 -- roster contest, not settled \(Q75\)/.test(r1.out), (r1.out.match(/[^\n]*Q75[^\n]*/) || [''])[0]);
-  T('[3] every writer flagged once over two runs', [H, V, X, Y, O].every(s => fOf(r2, s) === 1), JSON.stringify([H, V, X, Y, O].map(s => fOf(r2, s))));
+  T('[3] nobody flagged over two runs (Q114 review)', [H, V, X, Y, O].every(s => fOf(r2, s) === 0), JSON.stringify([H, V, X, Y, O].map(s => fOf(r2, s))));
   T('[3] run summary row reads 1', /\| match keys with two accounts on one seat or two seat layouts, not settled \(Q75\) \| 1 \|/.test(r1.summary));
   T('[3] no synthetic start entry for the held key', !pendOf(r2, key), JSON.stringify(pendOf(r2, key)));
   const r3 = runCron(boardsWith(recs), advance(r2.state, MATURE));

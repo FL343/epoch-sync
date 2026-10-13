@@ -54,6 +54,11 @@ const LEDGER_SHARDS = Math.max(1, Number(process.env.LEDGER_SHARDS || (PT_MODE ?
 //   keeps them from being convicted, but once every finisher has rotated off, the group can no longer settle at all).
 const ABSENT_GRACE_MIN_MS = 180000;
 const ABSENT_GRACE_MS = Math.max(ABSENT_GRACE_MIN_MS, Number(process.env.ABSENT_GRACE_MS || 300000));
+// Q118: a start roster stays provisional this long after the job first registered it (registerStartRosters). The floor
+// covers the client's longest gap from START_GAME (the match key known to every player) to level 1 (where the players
+// write their starts): character select 30 s + the loading wait 120 s + the intro.
+const START_CONFIRM_MIN_MS = 180000;
+const START_CONFIRM_MS = Math.max(START_CONFIRM_MIN_MS, Number(process.env.START_CONFIRM_MS || 600000));
 
 const pid = (s) => crypto.createHmac('sha256', String(SALT || '')).update(String(s)).digest('hex').slice(0, 16);
 const plog = (s) => pid(s).slice(0, 8);
@@ -274,8 +279,8 @@ function seatLayoutsDisagree(recs) {
   return false;
 }
 // A contested key is held like an inconsistent one: pulled out of both group lists before any pass reads them (the
-// team-gamble dissent pass, the start cross-check, the settle loop), every writer flagged once per key, nobody rated, nobody
-// convicted from it. Nothing sticky: when the contesting records are gone the key settles from what is left. Endless keys
+// team-gamble dissent pass, the start cross-check, the settle loop), nobody rated, nobody convicted from it, nobody flagged
+// (cloud audit Q114 review; the loop below says why). Nothing sticky: when the contesting records are gone the key settles from what is left. Endless keys
 // stay out here (their settle is a separate path, cloud audit Q78); a processed key is history. A key with a registered
 // start roster its voters agree on is left to the seat gate (Q80: applySeatGate drops the off-seat records before
 // grouping). There the roster is the players' own, so a record that names someone else at a seat is one player's word
@@ -298,12 +303,14 @@ function applyRosterContest(gr, starts, pending, signals, processed, now) {
     if (!list) continue;
     for (let i = list.length - 1; i >= 0; i--) if (res.contested.has(list[i].m)) list.splice(i, 1);
   }
+  // Q114 review: a held key flags nobody. Every contest needs a key no seat gate covers, and an outside account makes one
+  //   with a single start record naming another roster (before the job's first look, or in the Q118 provisional time):
+  //   flagging the settle writers here flagged every honest player of the match and never the outsider (he wrote no
+  //   result), once per match -- the per-match flag Q114 takes away after the settle. Counted (contested) and logged, no flag.
   for (const [m, seats] of res.contested) {
     const g = gr.groups[m];
-    if (recordFlag(signals, g, m, now)) res.dirty = true;
-    for (const r of g) if (res.touched.indexOf(String(r.steamID)) < 0) res.touched.push(String(r.steamID));
     ghWarn('match=' + m + ': ' + (seats.length ? 'two accounts named for seat(s) ' + seats.join(',') : 'records that disagree on the seat count or the seat map')
-      + ' -- roster contest, not settled (Q75): '
+      + ' -- roster contest, not settled (Q75), nobody flagged (Q114 review): '
       + g.map(r => plog(r.steamID) + '@' + r.shard + '=' + (r.d[5] | 0)).join(' '));
   }
   return res;
@@ -359,6 +366,33 @@ function testimonyOf(pc, seat, ro) {
   return crypto.createHash('sha256').update((pc | 0) + '|' + (seat | 0) + '|' + rosterCanon(ro)).digest('hex').slice(0, 12);
 }
 function recTestimony(r) { return testimonyOf(r.d[8], r.d[5], r.roster); }
+// ---- a registered roster is provisional for a while (cloud audit Q118) ----
+// Every player learns the match key at START_GAME, minutes before level 1, where the honest starts are written. A modded
+// player had his alts write starts of their own from the honest players' seats, naming the alts, in that gap; a job run
+// that looked once in between registered the alts' roster (first-seen, sticky), the seat gate then dropped every honest
+// record and the colluders settled the win (REVIEW-2 A6 / A8). startRosterDisagrees already splits a key whose starts
+// name two rosters -- but only among the starts of the run that registers it. So a registered roster stays provisional
+// (pending.prov = its signature, the same pc + roster startRosterDisagrees compares) until START_CONFIRM_MS after its
+// registration and a complete read: a start of the key read in that time that names another roster -- from any seat, an
+// off-seat or disputed one included -- splits the key, as if the job had seen both on its first look (no seat gate, the
+// Q75 roster contest holds a matchmade key, the Q113 settle checks an endless one). After that the roster is final and a
+// start naming another roster is one more record off its seat. Every honest start of a key carries the same roster and
+// pc, a cold-reconnect copy included, so an honest key never splits here. The cost: an outside start naming another
+// roster pauses the match until START_CONFIRM_MS after the job's first look, not only before it (Q80 review T6).
+// An entry registered before this change has no prov: it counts as confirmed.
+function startSig(r) {
+  return crypto.createHash('sha256').update((r.d[8] | 0) + '|' + rosterCanon(r.roster)).digest('hex').slice(0, 12);
+}
+function lateStartSplit(p, recs, m) {
+  if (!p || !p.prov || p.split) return false;
+  const other = (recs || []).find((r) => startSig(r) !== p.prov);
+  if (!other) return false;
+  p.split = 1;
+  delete p.prov;
+  console.log('  start-split ' + m + ': a start record read after the roster was registered names another roster ('
+    + plog(other.steamID) + '@' + other.shard + '=' + (other.d[5] | 0) + ') -- no seat gate (Q118)');
+  return true;
+}
 // ---- start roster registration (sticky first-seen: shard entries may be overwritten later) ----
 // Q80 (cloud audit): one claimant per seat. The registered roster is what the seat gate below trusts, and a majority of
 // attesters used to be enough to set it: the match key is read off any public start record, so a few outside accounts
@@ -390,7 +424,8 @@ function registerStartRosters(starts, processed, pending, now, readComplete) {
   for (const r of starts || []) { const m = r.d[3] + '_' + r.d[4] + '_' + r.d[2]; (sg[m] = sg[m] || []).push(r); }
   let registered = 0, waiting = 0;
   for (const m of Object.keys(sg)) {
-    if (processed.has(m) || pending[m]) continue;
+    if (processed.has(m)) continue;
+    if (pending[m]) { if (lateStartSplit(pending[m], sg[m], m)) RUN.lateSplit = (RUN.lateSplit | 0) + 1; continue; }   // Q118
     if (readComplete === false && isEndlessMt(sg[m][0].d[2] | 0)) { waiting++; continue; }   // Q113: next full read
     const bySid = {};   // one vote per distinct writer (a cold-reconnect duplicate collapses)
     for (const r of sg[m]) bySid[String(r.steamID)] = r;
@@ -430,11 +465,17 @@ function registerStartRosters(starts, processed, pending, now, readComplete) {
       RUN.split = (RUN.split | 0) + 1;
       console.log('  start-split ' + m + ': the voters do not agree on the roster -- no seat gate, '
         + (isEndlessMt(pending[m].mt) ? 'the endless settle checks decide (Q113)' : 'the roster contest decides (Q80)'));
-    }
+    } else pending[m].prov = startSig(all[0]);   // Q118: provisional until START_CONFIRM_MS and a complete read
     registered++;
     console.log('  start-pending ' + m + ': ' + att.length + ' attesters, roster ' + n + ' seats');
   }
   if (waiting) console.log('  start-wait: ' + waiting + ' endless key(s) not registered -- a record shard went unread this run, the next full read registers them (Q113)');
+  // Q118: a provisional roster no start has contradicted by START_CONFIRM_MS after its registration, on a complete read
+  //   (checked above first, so every start of the key on the shards was compared), is final
+  if (readComplete !== false) for (const m of Object.keys(pending)) {
+    const p = pending[m];
+    if (p && p.prov && !p.split && now - (p.t0 || 0) >= START_CONFIRM_MS) { delete p.prov; RUN.confirmed = (RUN.confirmed | 0) + 1; }
+  }
   return registered;
 }
 // ---- seat gate (cloud audit Q80) ----
@@ -1233,6 +1274,8 @@ function writeRunSummary() {
       '| match keys with two accounts on one seat or two seat layouts, not settled (Q75) | ' + s('contested', 0) + ' |',
       '| records off their start-roster seat, not counted / start keys with a seat claimed twice / start rosters the voters split, no seat gate (Q80) | ' + s('offSeat', 0) + ' / ' + s('disputed', 0) + ' / ' + s('split', 0) + ' |',
       '| endless co-op groups held (records disagree on the roster, Q113) | ' + s('endlessHeld', 0) + ' |',
+      '| start rosters split by a later start / confirmed (Q118) | ' + s('lateSplit', 0) + ' / ' + s('confirmed', 0) + ' |',
+      '| settled keys with records that disagree, nobody flagged (Q114) | ' + s('lateMismatch', 0) + ' |',
       '| campaign grants / campaign endless | ' + s('campaign', '-') + ' / ' + s('campaignEndless', '-') + ' |',
       '| page-cap hits | ' + RUN.cap + ' |',
       '| solo segments held by the key policy (other channel / retired key; new this run) | ' + s('keyHeld', 0) + ' (' + s('keyHeldNew', 0) + ') |',
@@ -3563,7 +3606,7 @@ async function main() {
   //   run stays unsettled, as when a player writes a result of his own that disagrees.
   for (const [m, rs] of seatGate.out) { if (isEndlessMt(rs[0].d[2] | 0)) continue; if (recordFlag(signals, rs, m + '|seat', Date.now())) sigDirty = true; for (const r of rs) trustTouched.add(String(r.steamID)); }
   // Q75: a key whose records name two different accounts for one seat is held out of every pass below (nobody rated,
-  //   nobody convicted, every writer flagged once) -- an outside account's record no longer counts as a vote
+  //   nobody convicted, nobody flagged: Q114 review) -- an outside account's record no longer counts as a vote
   const rcRes = applyRosterContest(gr, starts, startsPending, signals, processed, Date.now());
   if (rcRes.dirty) sigDirty = true;
   for (const sid of rcRes.touched) trustTouched.add(sid);
@@ -3667,6 +3710,15 @@ async function main() {
   // forgery-flag counters for the inconsistent groups seen this run
   // (they are never processed, so they re-surface every run -- recordFlag dedups by match key).
   for (const { m, g } of inconsistentGroups) {
+    // Q114: a settled key is history (applySeatGate keeps its records, applyRosterContest skips it). The key is in every
+    //   public start record and its roster left with the settle, so a record written after the settle that does not
+    //   match the settled group -- an outside account's or a player's -- turned the group inconsistent and flagged every
+    //   player of the match once (review-q80.js T9; again after each SIG_PAIR_WINDOW_MS prune). Nobody is flagged on it.
+    if (processed.has(m)) {
+      RUN.lateMismatch = (RUN.lateMismatch | 0) + 1;
+      console.log('  late-mismatch ' + m + ': ' + g.length + ' records disagree after the key settled -- nobody flagged (Q114)');
+      continue;
+    }
     if (recordFlag(signals, g, m, nowMs)) sigDirty = true;
     for (const r of g) trustTouched.add(String(r.steamID));
   }
@@ -5778,4 +5830,5 @@ Object.assign(module.exports, { KEY_CHANNEL, loadJobPubTable, soloKeyHeld, soloR
 Object.assign(module.exports, { noteOwnStarts, hasOwnStart, OWN_START_CAP });   // cloud audit Q69 own-record evidence for leaver verdicts
 Object.assign(module.exports, { rosterContestSeats, applyRosterContest, seatLayout, seatLayoutsDisagree });   // cloud audit Q75 one account per seat per match key (+ Q80 third review seat layout)
 Object.assign(module.exports, { registerStartRosters, startRosterSplit, rosterCanon, startRosterDisagrees, seatGateRoster, seatedOnRoster, applySeatGate });   // cloud audit Q80 seat gate
+Object.assign(module.exports, { startSig, lateStartSplit, START_CONFIRM_MS, START_CONFIRM_MIN_MS });   // cloud audit Q118 provisional start roster
 Object.assign(module.exports, { testimonyOf, recTestimony, noteTestimony, endlessRosterHold, endlessTestified });   // cloud audit Q113 endless testimony
