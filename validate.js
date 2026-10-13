@@ -1381,6 +1381,9 @@ function writerClaim(signals, writerSids, readyAt, now) {
 const SIGNALS_FILE = process.env.SIGNALS_FILE || 'signals.json';
 const SIG_PAIR_WINDOW_MS = Number(process.env.SIG_PAIR_WINDOW_MS || 45 * 86400000);
 const SIG_PLAYER_WINDOW_MS = Number(process.env.SIG_PLAYER_WINDOW_MS || 90 * 86400000);
+// Q161: a named-only seat of a losing team that unrated its match, counted on the account (signals.players[pid].nl / .nlo;
+//   .tw / .tl = the team results the account wrote itself), only an account that already has signals
+const NL_OPP_CAP = 8, NL_REPEAT = 3;
 const SIG_PAIRS_CAP = Number(process.env.SIG_PAIRS_CAP || 200000);
 function loadSignals() { try { const s = JSON.parse(fs.readFileSync(SIGNALS_FILE, 'utf8')) || {}; s.day = s.day || { d: 0, n: {} }; s.players = s.players || {}; s.pairs = s.pairs || {}; s.flagged = s.flagged || {}; s.rep = s.rep || {}; s.rseen = s.rseen || {}; return s; } catch (e) { return { day: { d: 0, n: {} }, players: {}, pairs: {}, flagged: {}, rep: {}, rseen: {} }; } }
 function pruneSignals(s, now) {
@@ -1712,6 +1715,7 @@ function writeRunSummary() {
       '| absent seats named by others only, not convicted (Q69) | ' + s('unattested', 0) + ' |',
       '| team matches with nobody on the losing team, settled without a rating move (Q136) | ' + s('noLoser', 0) + ' |',
       '| team matches with a losing seat nobody accounts for (named by the others only or left blank), settled without a rating move (Q149) | ' + s('namedLoser', 0) + ' |',
+      '| named-only losing seats counted on their account / of them repeated: ' + NL_REPEAT + ' or more such matches and different opponents / of those more losses unwritten than written / not counted, no signals of his own (Q161, nobody flagged) | ' + s('nlSeat', 0) + ' / ' + s('nlRepeat', 0) + ' / ' + s('nlUnwritten', 0) + ' / ' + s('nlNone', 0) + ' |',
       '| match keys with two accounts on one seat or two seat layouts, not settled (Q75) | ' + s('contested', 0) + ' |',
       '| records off their start-roster seat, not counted / start keys with a seat claimed twice / start rosters the voters split, no seat gate (Q80) | ' + s('offSeat', 0) + ' / ' + s('disputed', 0) + ' / ' + s('split', 0) + ' |',
       '| endless co-op groups held (records disagree on the roster, Q113) | ' + s('endlessHeld', 0) + ' |',
@@ -6036,10 +6040,55 @@ async function main() {
     }
     if (namedLose.length) lossSide.counted = false;
     const noRating = !!(lossSide && !lossSide.counted);
+    // Q161: the team results each writer wrote for himself, rated or not, on his signals (recordMatchSignals above made the
+    //   entry): `tw` on the winning team, `tl` on the losing team -- the other half of the named-only count below
+    if (lossSide) {
+      const tszW = teamSizeOfMt(matchType);
+      for (const p of parts) {
+        const h = signals.players[pid(String(p.steamID))];
+        if (!h) continue;
+        const t = teamOfSeat(p.seat, tszW);
+        if (t === lossSide.win) h.tw = (h.tw | 0) + 1; else if (t === lossSide.lose) h.tl = (h.tl | 0) + 1;
+      }
+      sigDirty = true;
+    }
     if (noRating && namedLose.length) {
       RUN.namedLoser = (RUN.namedLoser | 0) + 1;
       console.log('  named-loser ' + c.m + ': ' + namedLose.map((x) => 'seat ' + x.seat + (x.blank ? ' (no account on the roster)' : ' (named by the others only)')).join(', ')
         + ' of the losing team (team ' + lossSide.lose + ') -- no record, leave or agreement of his own for this match, settled without a rating move (Q149)');
+      // Q161 (cloud audit, found doing Q149): cron cannot tell a loser who dropped before the level-1 start (an honest remake)
+      //   from a modified client that writes nothing for the key on purpose -- each of its losses unrates the match: the
+      //   winners gain nothing, its teammates lose nothing. And "he is never rated himself" (Q149 above) holds for the lost
+      //   match only: the same client can write its wins (rated as any win) and nothing for its losses, so it counts only
+      //   its wins. Counted only, on the seat's account: `nl` = such matches, `nlo` = the different accounts that wrote the
+      //   win against him (up to NL_OPP_CAP), next to `tw` / `tl` = the team results he wrote himself (counted above).
+      //   Only an account that already has signals of its own is counted (he wrote records this cron kept): any account can
+      //   name anybody on a made-up losing team, and a new entry per made-up name would grow the signals file without end;
+      //   the count does not refresh the entry (it ages out SIG_PLAYER_WINDOW_MS after his own last record). `nl` alone can
+      //   be pumped onto an account that has signals; `nlo` cannot without as many accounts that own the game. A count with
+      //   NL_REPEAT or more of both is logged `repeated`; with more of his team losses unwritten than written (nl > tl: a
+      //   client that writes its wins only) also `more losses unwritten than written`; both counted in the summary.
+      //   Nobody is flagged, the settle is as above.
+      const tszL = teamSizeOfMt(matchType);
+      const nlOpp = parts.filter((p) => teamOfSeat(p.seat, tszL) === lossSide.win).map((p) => pid(String(p.steamID)));
+      for (const x of namedOnly) {
+        if (teamOfSeat(x.seat, tszL) !== lossSide.lose) continue;
+        const h = signals.players[pid(String(x.steamID))];
+        if (!h) {
+          RUN.nlNone = (RUN.nlNone | 0) + 1;
+          console.log('  named-loser-account ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' -- no signals of his own (no record of his this cron kept), not counted (Q161)');
+          continue;
+        }
+        h.nl = (h.nl | 0) + 1;
+        const o = Array.isArray(h.nlo) ? h.nlo : (h.nlo = []);
+        for (const q of nlOpp) if (o.length < NL_OPP_CAP && o.indexOf(q) < 0) o.push(q);
+        const rep = h.nl >= NL_REPEAT && o.length >= NL_REPEAT;
+        const unw = rep && h.nl > (h.tl | 0);
+        sigDirty = true; RUN.nlSeat = (RUN.nlSeat | 0) + 1; if (rep) RUN.nlRepeat = (RUN.nlRepeat | 0) + 1; if (unw) RUN.nlUnwritten = (RUN.nlUnwritten | 0) + 1;
+        console.log('  named-loser-account ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' -- ' + h.nl + ' such match(es), '
+          + o.length + (o.length >= NL_OPP_CAP ? '+' : '') + ' different opponent(s), team results he wrote ' + (h.tw | 0) + ' won / ' + (h.tl | 0) + ' lost'
+          + (rep ? ', repeated' : '') + (unw ? ', more losses unwritten than written' : '') + '; counted, nobody flagged (Q161)');
+      }
     } else if (noRating) {
       RUN.noLoser = (RUN.noLoser | 0) + 1;
       console.log('  no-loser ' + c.m + ': nobody on the losing team (team ' + lossSide.lose + ') wrote a record of his own or was convicted, '
@@ -6597,6 +6646,7 @@ module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CHAT_MUTE: 
   RECOVER_FILE, loadRecover, recoverPick, readRecoverRows };   // client knife 5.0i one-shot pool recovery
 Object.assign(module.exports, { KEY_CHANNEL, loadJobPubTable, soloKeyHeld, soloRunHasHeld });   // cloud audit R1-A5-07 per-channel key policy (test/playtest-key-policy.js)
 Object.assign(module.exports, { noteOwnStarts, hasOwnStart, OWN_START_CAP });   // cloud audit Q69 own-record evidence for leaver verdicts
+Object.assign(module.exports, { NL_OPP_CAP, NL_REPEAT });   // cloud audit Q161 named-only losing seats counted on the account
 Object.assign(module.exports, { leaveConfirmHold, startRosterGaps, LEAVE_CONFIRM_MS, LEAVE_CONFIRM_MIN_MS });   // cloud audit Q121 leave confirmation
 Object.assign(module.exports, { rosterContestSeats, applyRosterContest, seatLayout, seatLayoutsDisagree });   // cloud audit Q75 one account per seat per match key (+ Q80 third review seat layout)
 Object.assign(module.exports, { registerStartRosters, startRosterSplit, rosterCanon, startRosterDisagrees, seatGateRoster, seatedOnRoster, applySeatGate });   // cloud audit Q80 seat gate
