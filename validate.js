@@ -2712,18 +2712,11 @@ function reducedStakesPlan(parts, matchType, premadeMask, premadeTrioAt) {
       factor = Math.min(factor, RS_TRIO_WIN);
     }
     const adjDelta = Math.round(base * factor + seg.drip);
-    // Q160 (cloud audit): a premade's expected win in a mismatch is compressed at each member's OWN tier when that is
-    // the stronger compression (rs and drip both, min-composed -- nobody gets more than the unit plan): the unit average
-    // let a grandmaster farm by queueing with a zero-points account (grandmaster + zero averages to diamond, rs 0.30 and
-    // drip 2: +8 a match for ever, where his own tier gives 0). A member below the unit average keeps the unit delta.
-    const strongWin = mismatch && uMmr > mean && base >= 0 && u.length > 1;
     // won = top-half finish at the unit's (average) rank -- the same sign line the base uses;
-    // consumed by the series clamp (crosslineDelta) at settle time.
-    for (const p of u) {
-      const own = strongWin ? lpSeg(p.lp | 0) : null;
-      const d = own ? Math.round(base * Math.min(factor, own.rs) + Math.min(seg.drip, own.drip)) : adjDelta;
-      out[p.steamID] = { adjDelta: d, flag, normalDelta, won: prog >= 0.5 };
-    }
+    // consumed by the series clamp (crosslineDelta) at settle time. Q160 layer 5 (cloud audit): one delta for the whole
+    // unit, its strong member's expected win included (see teamLpPlan: held at his own tier, the honest grandmaster in a
+    // pair with a gold friend gained nothing; a premade carry of zero-points accounts stays a known residual).
+    for (const p of u) out[p.steamID] = { adjDelta, flag, normalDelta, won: prog >= 0.5 };
   }
   return out;
 }
@@ -2773,11 +2766,13 @@ function teamLpPlan(parts, matchType, scores, leaverSeats, winTeamOverride) {
       if (won) { factor = RS_UPSET_BONUS; flag = 1; }
       else { factor = tSeg.rs; protectedLoss = true; }
     } else if (mismatch && tAvgMmr > mean) {                   // strong team
-      // Q160 (cloud audit): an expected win takes the stronger of the team-average and the member's own compression, so
-      // a grandmaster carrying zero-points teammates is held at his own tier (a 2V2 with one averages to diamond, rs 0.30:
-      // +4 a match for ever; a 3V3 with two to gold, rs 0.50). Design line 125 / 127 ("the team-average tier
-      // coefficient") now reads "the smaller of the team-average and the member's own". The upset loss is unchanged.
-      factor = won ? Math.min(tSeg.rs, ownSeg.rs) : RS_STRONG_UPSET_LOSS;
+      // Q160 layer 5 (cloud audit): an expected win compresses at the TEAM-average tier for every member, the strong one
+      // included. Holding him at his own tier instead (the rework's fourth layer) cut a grandmaster carrying zero-points
+      // accounts, but cut the honest grandmaster queued with lower-tier friends as hard (a gold friend, 6 wins in 8: -12
+      // where this gives +12; a master with a diamond friend +20 for +30), and the carry came back once the zeros were
+      // walked to silver (14 matches). Architecture decision 10 keeps the honest side whole: the carry is a known residual
+      // (+4 a 2V2 win, +9 a 3V3), as the third farming form is, held by O226 and the manual top-100 check.
+      factor = won ? tSeg.rs : RS_STRONG_UPSET_LOSS;
     }
     if (!won && shielded.has(p.steamID)) { factor = Math.min(factor, ownSeg.rs); protectedLoss = true; }
     const normalDelta = Math.round(base / 2 + ownSeg.drip);

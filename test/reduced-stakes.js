@@ -117,57 +117,68 @@ eq('tilt factors pinned (conservative start, B5/B6 calibration)', [RS_SOLO_VS_TR
 }
 
 // ============================================================
-// Q160 (cloud audit): a strong side's expected win is compressed at the member's OWN tier when that is the stronger
-// compression. The team / unit average let a grandmaster farm by carrying zero-points accounts (grandmaster + zero
-// averages to diamond, rs 0.30), where his own tier gives 0. A member below the average keeps the average plan.
+// Q160 layer 5 (cloud audit): a strong side's expected win is compressed at the team / unit average tier for every
+// member, the strong one included (architecture decision 10). The rework's fourth layer held the strong member at his
+// own tier: it cut a grandmaster carrying zero-points accounts (a known residual now, +4 a 2V2 win, +9 a 3V3) but cut
+// the honest grandmaster queued with lower-tier friends as hard (a gold friend, 6 wins in 8: -12 where this gives +12).
 // ============================================================
-console.log('=== Q160: a grandmaster carrying zero-points accounts gains nothing on an expected win ===');
+console.log('=== Q160 layer 5: the strong member of a mixed-tier party takes the team plan on an expected win ===');
 {
   const { teamLpPlan } = require('../validate.js');
-  const t2 = teamLpPlan([{ steamID: 'g', seat: 0, mmr: 2000, lp: 8500 }, { steamID: 'z', seat: 1, mmr: 1000, lp: 0 },
-    { steamID: 'c', seat: 2, mmr: 1000, lp: 0 }, { steamID: 'd', seat: 3, mmr: 1000, lp: 0 }], 6, [6100, 5200, 4800, 3900], [], 0);
-  eq('2V2 grandmaster + zero vs two zeros: grandmaster 0 (own rs 0, not the diamond average 0.30: was +4)', t2.g.adjDelta, 0);
-  eq('2V2: the zero teammate keeps the team plan round(28*.3/2 + 5) = 9', t2.z.adjDelta, 9);
+  const P = (id, seat, mmr, lp) => ({ steamID: id, seat, mmr, lp });
+  // one line for every member of a strong team on an expected win: adjDelta less the member's own drip is the team's
+  const sameLine = (plan, ids) => {
+    const v = ids.map((id, i) => plan[id].adjDelta - lpSeg(LPS[id]).drip);
+    return v.every((x) => Math.abs(x - v[0]) <= 1);
+  };
+  const LPS = { g: 8500, f: 2500, z: 0, z1: 0, z2: 0, m: 6500, d: 4500, p: 3500, b: 300 };
+  // the honest case the fourth layer cut: grandmaster + gold friend (diamond average, rs .30) beat two golds
+  const tf = teamLpPlan([P('g', 0, 2000, 8500), P('f', 1, 1600, 2500), P('c', 2, 1000, 2500), P('d', 3, 1000, 2500)], 6, [6100, 5200, 4800, 3900], [], 0);
+  eq('grandmaster + gold friend 2V2 expected win: grandmaster round(28*.3/2 + 0) = 4 (fourth layer: 0), gold round(28*.3/2 + 3) = 7', [tf.g.adjDelta, tf.f.adjDelta], [4, 7]);
+  t('grandmaster + gold friend: one team line (adjDelta less own drip)', sameLine(tf, ['g', 'f']));
+  const tfl = teamLpPlan([P('g', 0, 2000, 8500), P('f', 1, 1600, 2500), P('c', 2, 1000, 2500), P('d', 3, 1000, 2500)], 6, [3000, 2000, 6100, 5200], [], 1);
+  eq('grandmaster + gold friend upset loss unchanged round(-25*.5/2 + own drip)', [tfl.g.adjDelta, tfl.f.adjDelta], [-6, -3]);
+  // 8 matches, 6 wins (the review's H8): 6 x 4 - 2 x 6 = +12 for the grandmaster, never a net loss on a winning run
+  eq('grandmaster + gold friend, 6 wins in 8: grandmaster +12 (fourth layer: -12)', 6 * tf.g.adjDelta + 2 * tfl.g.adjDelta, 12);
+  // a master with a diamond friend (one tier apart): master takes the team plan too
+  const tm = teamLpPlan([P('m', 0, 2000, 6500), P('d', 1, 1700, 4500), P('c', 2, 1200, 4500), P('e', 3, 1200, 4500)], 6, [6100, 5200, 4800, 3900], [], 0);
+  t('master + diamond friend expected win: one team line, master above his own-tier plan', sameLine(tm, ['m', 'd'])
+    && tm.m.adjDelta > Math.round(lpSeg(5500).win * lpSeg(6500).rs / 2 + lpSeg(6500).drip));
+  // the carry (known residual, accepted under decision 10): grandmaster + zero vs two zeros
+  const t2 = teamLpPlan([P('g', 0, 2000, 8500), P('z', 1, 1000, 0), P('c', 2, 1000, 0), P('e', 3, 1000, 0)], 6, [6100, 5200, 4800, 3900], [], 0);
+  eq('2V2 grandmaster + zero (residual): grandmaster 4, zero round(28*.3/2 + 5) = 9', [t2.g.adjDelta, t2.z.adjDelta], [4, 9]);
   eq('2V2: normal deltas unchanged (round(28/2 + own drip))', [t2.g.normalDelta, t2.z.normalDelta], [14, 19]);
   eq('2V2: strong side never flags', [t2.g.flag, t2.z.flag], [0, 0]);
-  const t3 = teamLpPlan([{ steamID: 'g', seat: 0, mmr: 2000, lp: 8500 }, { steamID: 'z1', seat: 1, mmr: 1000, lp: 0 }, { steamID: 'z2', seat: 2, mmr: 1000, lp: 0 },
-    { steamID: 'c', seat: 3, mmr: 1000, lp: 0 }, { steamID: 'd', seat: 4, mmr: 1000, lp: 0 }, { steamID: 'e', seat: 5, mmr: 1000, lp: 0 }], 9, [6100, 5200, 5000, 4800, 3900, 3000], [], 0);
-  eq('3V3 grandmaster + two zeros (gold average, rs .50): grandmaster 0', t3.g.adjDelta, 0);
-  eq('3V3: zero teammates keep round(35*.5/2 + 5) = 14', [t3.z1.adjDelta, t3.z2.adjDelta], [14, 14]);
-  const tf = teamLpPlan([{ steamID: 'g', seat: 0, mmr: 2000, lp: 8500 }, { steamID: 'f', seat: 1, mmr: 1600, lp: 2500 },
-    { steamID: 'c', seat: 2, mmr: 1000, lp: 2500 }, { steamID: 'd', seat: 3, mmr: 1000, lp: 2500 }], 6, [6100, 5200, 4800, 3900], [], 0);
-  eq('grandmaster + gold friend (diamond average): gold friend keeps round(28*.3/2 + 3) = 7, grandmaster 0', [tf.f.adjDelta, tf.g.adjDelta], [7, 0]);
-  const tu = teamLpPlan([{ steamID: 'g', seat: 0, mmr: 2000, lp: 8500 }, { steamID: 'z', seat: 1, mmr: 1000, lp: 0 },
-    { steamID: 'c', seat: 2, mmr: 1000, lp: 0 }, { steamID: 'd', seat: 3, mmr: 1000, lp: 0 }], 6, [3000, 2000, 6100, 5200], [], 1);
-  eq('strong team upset loss unchanged (round(-25*.5/2 + own drip))', [tu.g.adjDelta, tu.z.adjDelta], [-6, -1]);
-  const ts2 = teamLpPlan([{ steamID: 'g', seat: 0, mmr: 1000, lp: 8500 }, { steamID: 'z', seat: 1, mmr: 1000, lp: 0 },
-    { steamID: 'c', seat: 2, mmr: 2000, lp: 0 }, { steamID: 'd', seat: 3, mmr: 2000, lp: 0 }], 6, [6100, 5200, 4800, 3900], [], 0);
+  const t3 = teamLpPlan([P('g', 0, 2000, 8500), P('z1', 1, 1000, 0), P('z2', 2, 1000, 0), P('c', 3, 1000, 0), P('d', 4, 1000, 0), P('e', 5, 1000, 0)], 9, [6100, 5200, 5000, 4800, 3900, 3000], [], 0);
+  eq('3V3 grandmaster + two zeros (gold average, rs .50, residual): grandmaster round(35*.5/2) = 9, zeros 14', [t3.g.adjDelta, t3.z1.adjDelta, t3.z2.adjDelta], [9, 14, 14]);
+  t('3V3: one team line', sameLine(t3, ['g', 'z1', 'z2']));
+  const ts2 = teamLpPlan([P('g', 0, 1000, 8500), P('z', 1, 1000, 0), P('c', 2, 2000, 0), P('d', 3, 2000, 0)], 6, [6100, 5200, 4800, 3900], [], 0);
   eq('weak team upset win unchanged (full: round(28/2 + own drip))', [ts2.g.adjDelta, ts2.z.adjDelta], [14, 19]);
-  // FFA pair: grandmaster + zero premade (seats 0-1), two zero solos
-  const pp = reducedStakesPlan([{ steamID: 'g', seat: 0, mmr: 2000, rank: 1, lp: 8500 }, { steamID: 'z', seat: 1, mmr: 1000, rank: 2, lp: 0 },
+  // FFA pair: grandmaster + gold friend premade (seats 0-1) takes 1st and 2nd over two golds: one unit delta
+  const pp = reducedStakesPlan([{ steamID: 'g', seat: 0, mmr: 2000, rank: 1, lp: 8500 }, { steamID: 'f', seat: 1, mmr: 1600, rank: 2, lp: 2500 },
+    { steamID: 'c', seat: 2, mmr: 1000, rank: 3, lp: 2500 }, { steamID: 'd', seat: 3, mmr: 1000, rank: 4, lp: 2500 }], 0x12, 1);
+  t('FFA pair grandmaster + gold friend, 1st and 2nd: one shared delta, above zero (fourth layer: grandmaster 0)', pp.g.adjDelta === pp.f.adjDelta && pp.g.adjDelta > 0);
+  eq('FFA pair: one normal delta for the unit', pp.g.normalDelta, pp.f.normalDelta);
+  eq('FFA pair: won kept', [pp.g.won, pp.f.won], [true, true]);
+  const pz = reducedStakesPlan([{ steamID: 'g', seat: 0, mmr: 2000, rank: 1, lp: 8500 }, { steamID: 'z', seat: 1, mmr: 1000, rank: 2, lp: 0 },
     { steamID: 'c', seat: 2, mmr: 1000, rank: 3, lp: 0 }, { steamID: 'd', seat: 3, mmr: 1000, rank: 4, lp: 0 }], 0x12, 1);
-  eq('FFA pair grandmaster + zero, 1st and 2nd: grandmaster 0 (own rs 0, own drip 0: was +8)', pp.g.adjDelta, 0);
-  eq('FFA pair: the zero keeps the unit delta round(18.67*.3 + 2) = 8', pp.z.adjDelta, 8);
-  eq('FFA pair: one normal delta for the unit (21)', [pp.g.normalDelta, pp.z.normalDelta], [21, 21]);
-  eq('FFA pair: won kept', [pp.g.won, pp.z.won], [true, true]);
-  const ppl = reducedStakesPlan([{ steamID: 'g', seat: 0, mmr: 2000, rank: 3, lp: 8500 }, { steamID: 'z', seat: 1, mmr: 1000, rank: 4, lp: 0 },
-    { steamID: 'c', seat: 2, mmr: 1000, rank: 1, lp: 0 }, { steamID: 'd', seat: 3, mmr: 1000, rank: 2, lp: 0 }], 0x12, 1);
-  t('FFA pair upset loss: both members still share one delta', ppl.g.adjDelta === ppl.z.adjDelta);
-  // FFA trio: grandmaster + two zeros (seats 0-2) take 1-3 over three zero solos
-  const mkT = [0, 1, 2, 3, 4, 5].map((s) => ({ steamID: 'q' + s, seat: s, mmr: s === 0 ? 2000 : 1000, rank: s + 1, lp: s === 0 ? 8500 : 0 }));
+  eq('FFA pair grandmaster + zero (residual): one unit delta round(18.67*.3 + 2) = 8', [pz.g.adjDelta, pz.z.adjDelta], [8, 8]);
+  const ppl = reducedStakesPlan([{ steamID: 'g', seat: 0, mmr: 2000, rank: 3, lp: 8500 }, { steamID: 'f', seat: 1, mmr: 1600, rank: 4, lp: 2500 },
+    { steamID: 'c', seat: 2, mmr: 1000, rank: 1, lp: 2500 }, { steamID: 'd', seat: 3, mmr: 1000, rank: 2, lp: 2500 }], 0x12, 1);
+  t('FFA pair upset loss: both members still share one delta', ppl.g.adjDelta === ppl.f.adjDelta && ppl.g.adjDelta < 0);
+  // FFA trio: grandmaster + two gold friends (seats 0-2) take 1-3 over three gold solos: one unit delta
+  const mkT = [0, 1, 2, 3, 4, 5].map((s) => ({ steamID: 'q' + s, seat: s, mmr: s === 0 ? 2000 : (s < 3 ? 1500 : 1000), rank: s + 1, lp: s === 0 ? 8500 : 2500 }));
   const pt = reducedStakesPlan(mkT, 2, 0, 1);
-  eq('FFA trio grandmaster + two zeros: grandmaster 0', pt.q0.adjDelta, 0);
-  t('FFA trio: the zeros share one delta', pt.q1.adjDelta === pt.q2.adjDelta && pt.q1.adjDelta > 0);
-  // honest pair of one tier: unchanged (own == unit average)
-  const ph = reducedStakesPlan([{ steamID: 'a', seat: 0, mmr: 1600, rank: 1, lp: 300 }, { steamID: 'b', seat: 1, mmr: 1600, rank: 2, lp: 300 },
-    { steamID: 'c', seat: 2, mmr: 1000, rank: 3, lp: 300 }, { steamID: 'd', seat: 3, mmr: 900, rank: 4, lp: 300 }], 0x12, 1);
-  // only the strong side's expected win: a weak premade's upset win and a fair match keep one shared delta
+  t('FFA trio grandmaster + two gold friends: one shared delta, above zero', pt.q0.adjDelta === pt.q1.adjDelta && pt.q1.adjDelta === pt.q2.adjDelta && pt.q0.adjDelta > 0);
+  // a weak premade's upset win and a fair match keep one shared delta (as before)
   const pw = reducedStakesPlan([{ steamID: 'a', seat: 0, mmr: 1000, rank: 1, lp: 3500 }, { steamID: 'b', seat: 1, mmr: 1000, rank: 2, lp: 300 },
     { steamID: 'c', seat: 2, mmr: 2000, rank: 3, lp: 300 }, { steamID: 'd', seat: 3, mmr: 2000, rank: 4, lp: 300 }], 0x12, 1);
   t('weak mixed-tier pair upset win: one shared full delta (UPSET)', pw.a.adjDelta === pw.b.adjDelta && pw.a.adjDelta === pw.a.normalDelta && pw.a.flag === 1);
   const pf = reducedStakesPlan([{ steamID: 'g', seat: 0, mmr: 1500, rank: 1, lp: 8500 }, { steamID: 'f', seat: 1, mmr: 1500, rank: 2, lp: 2500 },
     { steamID: 'c', seat: 2, mmr: 1400, rank: 3, lp: 2500 }, { steamID: 'd', seat: 3, mmr: 1300, rank: 4, lp: 2500 }], 0x12, 1);
   t('fair match (no mismatch), grandmaster + gold pair wins: one shared full delta', pf.g.adjDelta === pf.f.adjDelta && pf.g.adjDelta === pf.g.normalDelta && pf.g.adjDelta > 0);
+  const ph = reducedStakesPlan([{ steamID: 'a', seat: 0, mmr: 1600, rank: 1, lp: 300 }, { steamID: 'b', seat: 1, mmr: 1600, rank: 2, lp: 300 },
+    { steamID: 'c', seat: 2, mmr: 1000, rank: 3, lp: 300 }, { steamID: 'd', seat: 3, mmr: 900, rank: 4, lp: 300 }], 0x12, 1);
   eq('honest same-tier strong pair: unchanged shared delta', [ph.a.adjDelta, ph.b.adjDelta], [Math.round(lpSeg(300).win * (2 * (2.5 / 3) - 1) * lpSeg(300).rs + lpSeg(300).drip), Math.round(lpSeg(300).win * (2 * (2.5 / 3) - 1) * lpSeg(300).rs + lpSeg(300).drip)]);
 }
 
