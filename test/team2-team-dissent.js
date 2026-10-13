@@ -16,7 +16,7 @@
 //   [4] ranked 2v2, the whole other team refuses for the first time: free, both struck, only they flagged; at
 //       maturity nobody gets an exit-rate hit
 //   [5] the same pair again under an unrelated host: settles, both leavers, the winners rated as a team (no
-//       rating moves between the two winning teammates)
+//       rating moves between the two winning teammates; Q160: their ranked rating too)
 //   [6] a main account with a fresh partner: settles, the main is the leaver, the partner is excused (6b: and not
 //       seeded when he has no points this season)
 //   [7] framed by a modded pair taking turns hosting: still free ([7b]: each leaving the partner's seat blank)
@@ -474,6 +474,8 @@ let r4;
   T('[5] the winners gain points', scoreTo(r, POINTS, G) > 2000 && scoreTo(r, POINTS, H) > 2000, [G, H].map(s => scoreTo(r, POINTS, s)).join(','));
   const sG = skillOf(r, G), sH = skillOf(r, H);
   T('[5] both winners\' hidden rating rises (no rating moved between teammates)', sG && sH && sG.mu > tsm.MU0 && sH.mu > tsm.MU0, JSON.stringify([sG, sH]));
+  T('[5] their ranked rating moves the same way (Q160: rated against the absent team\'s pre-match ranked ratings)', sG && sH && Number.isFinite(sG.rm)
+    && Number.isFinite(sH.rm) && Math.abs(sG.rm - sG.mu) < 1e-9 && Math.abs(sH.rm - sH.mu) < 1e-9 && Math.abs(sG.rv - sG.sigma) < 1e-9, JSON.stringify([sG, sH]));
   T('[5] the absent team\'s ratings never move', !skillOf(r, C) && !skillOf(r, D) && scoreTo(r, RATING, C) == null && scoreTo(r, RATING, D) == null);
   T('[5] logged', /whole team 1 absent -> rated against its 2 pre-match rating/.test(r.out) && /leaver .* seat 2 = /.test(r.out) && /leaver .* seat 3 = /.test(r.out));
   T('[5] the agreeing pair is not flagged', fOf(r, G) === 0 && fOf(r, H) === 0);

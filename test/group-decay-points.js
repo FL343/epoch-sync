@@ -1,26 +1,35 @@
 'use strict';
-// Q160 (cloud audit 2026-10, found while working Q149): the points plan reads the rating as played on, the repeat-group decay set aside.
-// The repeat-group decay (GROUP_DECAY) freezes the rating of a group that plays back to back, and the reduced stakes read
-//   that rating: a frozen rating never spread past RS_THRESHOLD, so the group kept full points stakes however lopsided it was.
-//   Two accounts (no game launched) writing every seat of a ranked 2V2 nobody played, beating the same two zero-points
-//   accounts back to back, took the full team win every match at grandmaster (+10 / match); the same matches spaced past the
-//   decay TTL fell to the compressed gain after three. Now while a streak runs a member's group entry also carries the rating
-//   he would have without the decay (sm / ss, moved every match by the same TrueSkill update from those undecayed ratings,
-//   dropped with the streak), and the points plan reads it: back to back settles the same points as spaced. The decayed
-//   rating stays the stored one. Logged `held-back` (ranked only), counted in its own summary row when only the rating as
-//   played on makes the match a mismatch.
+// Q160 (cloud audit 2026-10, found while working Q149; reworked after its review): the points plan reads the ranked rating.
+// The reduced stakes of the points plan read a rating, and the stored one (mu / sigma) is shared with quick matches and frozen
+//   by the repeat-group decay, so whoever writes the results steered the check:
+//   - a group playing back to back stayed under RS_THRESHOLD however lopsided it was: two accounts (no game launched) writing
+//     every seat of a ranked 2V2 nobody played, beating the same two zero-points accounts back to back, took the full team win
+//     every match at grandmaster (+10 / match), the same matches spaced past the decay TTL fell to the compressed gain after three;
+//   - a quick match lost between two ranked ones pulled the spread back under it (review of the first draft): grandmaster 1V1,
+//     the full +20 every ranked match, back to back or spaced.
+//   Now the plan reads a rating only ranked settles move, never held back: rm / rv in the player's skill entry (RANKED RATING),
+//   moved at every ranked settle by the same TrueSkill update from those ranked ratings, kept as it is by a quick settle. The
+//   stored rating stays decayed and moved by quick matches (matchmaking and the rating board read it). Logged `ranked-rating`
+//   (ranked only, when the two disagree), counted in a summary row when the ranked rating turns a match into / out of a mismatch.
 // End-to-end over the REAL validate.js main() against an offline board stub (the harness of test/team-loss-side.js):
-//   [0] wiring pins: groupDecayPlan carries sm / ss, the plan reads them, the settle stores them, the summary row
-//   [1] groupDecayPlan: sm / ss ride the streak (k > 1) and are dropped with it (blood change, TTL; a fresh entry has none)
+//   [0] wiring pins: the ranked rating helper, the plan reads it, the settle stores it, the streak memory carries no rating, the row
+//   [1] groupDecayPlan: an entry is { r, k, at } only (a stale rating carried by an older draft is dropped at its next plan)
 //   [2] ranked 2V2, X / Y (grandmaster) beat two zero-points accounts, every seat writes, six matches back to back: the same
-//       points match by match as the same six spaced past the TTL, the held-back line and row, the rating still decayed
-//       (lower than spaced); mutant (the plan reads the bare display) -> full stakes every match
-//   [3] ranked 1V1 back to back, X beats a zero-points account (gold): the same points as spaced; ranked mode-1 2V2 (the
-//       money decides the winning team) back to back: the same points as spaced; a pair already far apart on the stored
-//       rating, back to back: the held-back line carries no Q160 mark and the row stays 0 (the mismatch was there anyway)
+//       points match by match as the same six spaced past the TTL, the ranked-rating line and row, the stored rating still decayed
+//       (lower than spaced) and the ranked one equal to spaced play's; mutant (the plan reads the stored rating) -> full stakes
+//   [3] ranked 1V1 back to back, X beats a zero-points account (gold): the same points as spaced, the ranked rating equal to
+//       spaced play's; ranked mode-1 2V2 (the money decides the winning team) back to back: the same points as spaced, the
+//       ranked rating equal to spaced play's (the richer team rated the winner); a pair
+//       already far apart on the stored rating, back to back: the ranked-rating line carries no Q160 mark and the row stays 0
 //   [4] honest ranked back to back, trading wins (2V2 teams, and a 1V1 pair): no match turns into a mismatch, points as
 //       with the Q160 lines off (the same group playing on is not punished when it is even)
-//   [5] quick 2V2 back to back (no points): no held-back line, rating writes as with the Q160 lines off
+//   [5] quick 2V2 back to back (no points): no ranked-rating line, rating writes as with the Q160 lines off, no ranked rating stored
+//   [6] ranked 1V1, X (grandmaster) beats a zero-points account, a quick 1V1 between every two ranked ones where the zero-points
+//       account wins (back to back, and spaced): from the fourth ranked match on X makes 0, the quick settles leave the ranked
+//       rating as it was while the stored one moves; mutant (the plan reads the stored rating) -> +20 every ranked match
+//   [7] gold 1V1 pair: ranked, eight quick wins for X (spaced), ranked: the stored ratings are far apart, the ranked ones are
+//       not -- the last ranked match is no mismatch with the ranked rating (logged, the row's second number counts it);
+//       mutant (the plan reads the stored rating) -> that win compressed
 // State isolation is structural (every *_FILE var scanned and redirected, cwd = temp dir), like test/team-loss-side.js.
 const { spawnSync } = require('child_process');
 const fs = require('fs'), path = require('path'), os = require('os');
@@ -144,7 +153,7 @@ const MIN = 60000, HOUR = 3600 * 1000;
 //   (team modes: the winning team; 1V1: the winning seat); `gap` = time from the previous match's last run to the next start.
 //   The points board carries every posted value into the next match (lp0: the points each account starts at).
 function series(mt, ros, win, n, gap, lp0, script, files0) {
-  const team = ros.length === 4;
+  const team = ros.length === 4, mtOf = typeof mt === 'function' ? mt : () => mt;
   const cur = {}; for (const s of ros) cur[s] = lp0[s] != null ? lp0[s] : 2500;
   const boards = (recs) => {
     const b = [];
@@ -158,10 +167,10 @@ function series(mt, ros, win, n, gap, lp0, script, files0) {
   const runs = [], perMatch = [], keys = [];
   let state = null;
   for (let i = 0; i < n; i++) {
-    const h = 0xC1600 + i * 7 + (mt << 12), w = win(i);
-    const S = ros.map((s, seat) => ({ sid: s, d: rec(0xB2, mt, h, seat, 0, false, ros) }));
-    const R = ros.map((s, seat) => ({ sid: s, d: team ? rec(0xB1, mt, h, seat, teamRank(seat, w), (((seat / 2) | 0) & 1) === w, ros)
-      : rec(0xB1, mt, h, seat, seat === w ? 1 : 2, seat === w, ros, w === 0 ? [6100, 3000] : [3000, 6100]) }));
+    const m = mtOf(i), h = 0xC1600 + i * 7 + (m << 12), w = win(i);
+    const S = ros.map((s, seat) => ({ sid: s, d: rec(0xB2, m, h, seat, 0, false, ros) }));
+    const R = ros.map((s, seat) => ({ sid: s, d: team ? rec(0xB1, m, h, seat, teamRank(seat, w), (((seat / 2) | 0) & 1) === w, ros)
+      : rec(0xB1, m, h, seat, seat === w ? 1 : 2, seat === w, ros, w === 0 ? [6100, 3000] : [3000, 6100]) }));
     keys.push(keyOf(S[0].d));
     const before = Object.assign({}, cur);
     for (const [ms, recs] of [[i === 0 ? 0 : gap, S], [6 * MIN, S.concat(R)], [6 * MIN, S.concat(R)], [6 * MIN, S.concat(R)]]) {
@@ -186,42 +195,38 @@ function withMutant(tag, from, to, fn) {
   if (!script) return;
   try { fn(script); } finally { try { fs.unlinkSync(script); } catch (e) {} }
 }
-const HELD = 'return (g && g.sm != null) ? { id: t.id, mu: g.sm, sigma: g.ss, rank: t.rank } : t;';
-const HELD_OFF = 'return t;';
-const ROW = (r) => /\| ranked matches that are a mismatch only with the rating as played on, the repeat-group decay set aside \(Q160\) \| ([0-9]+) \|/.exec(r.summary);
-const rowSum = (s) => s.runs.reduce((a, r) => a + (ROW(r) ? Number(ROW(r)[1]) : 0), 0);
+const HELD = 'const rIn = (sid, base) => { const rr = rankedNow ? rankedRatingOf(skill[pid(sid)]) : null; return rr ? Object.assign({}, base, { mu: rr.mu, sigma: rr.sigma }) : base; };';
+const HELD_OFF = 'const rIn = (sid, base) => base;';
+const ROW = (r) => /\| ranked matches the ranked rating turns into \/ out of a mismatch, quick matches and the repeat-group decay set aside \(Q160\) \| ([0-9]+) \/ ([0-9]+) \|/.exec(r.summary);
+const rowSum = (s, k) => s.runs.reduce((a, r) => a + (ROW(r) ? Number(ROW(r)[k || 1]) : 0), 0);
 const J = (x) => JSON.stringify(x);
-const muOf = (s, sid) => { const k = ((s.state || {}).SKILL_FILE || {})[v.pid(sid)]; return k ? k.mu : null; };
+const skOf = (s, sid) => ((s.state || {}).SKILL_FILE || {})[v.pid(sid)] || null;
+const muOf = (s, sid) => { const k = skOf(s, sid); return k ? k.mu : null; };
+const rmOf = (s, sid) => { const k = skOf(s, sid); return k ? k.rm : null; };
+const MARK = /  ranked-rating [^\n]*\(mismatch only with the ranked rating, Q160\)/;
 
-console.log('=== the points plan reads the rating as played on, the repeat-group decay set aside (Q160) ===');
+console.log('=== the points plan reads the ranked rating: quick matches and the repeat-group decay set aside (Q160) ===');
 
 // ---- [0] wiring pins ----
 {
-  T('[0] groupDecayPlan carries sm / ss through the streak only', /if \(k > 1 && prev && Number\.isFinite\(prev\.sm\) && Number\.isFinite\(prev\.ss\)\) \{/.test(SRC));
-  T('[0] the points plan reads the rating as played on', SRC.split(HELD).length === 2
-    && /mmr: ts\.displayRating\(asPlayed\[i\]\.mu, asPlayed\[i\]\.sigma\)/.test(SRC));
-  T('[0] the settle stores it while it differs from the stored rating', /ge\.sm = Math\.round\(po\.mu \* 1e4\) \/ 1e4; ge\.ss = Math\.round\(po\.sigma \* 1e4\) \/ 1e4;/.test(SRC));
-  T('[0] summary row', SRC.indexOf("'| ranked matches that are a mismatch only with the rating as played on, the repeat-group decay set aside (Q160) | ' + s('heldMismatch', 0) + ' |'") >= 0);
+  T('[0] the ranked rating lives in the skill entry (rm / rv)', /function rankedRatingOf\(sk\) \{ return \(sk && Number\.isFinite\(sk\.rm\) && Number\.isFinite\(sk\.rv\)\) \? \{ mu: sk\.rm, sigma: sk\.rv \} : null; \}/.test(SRC));
+  T('[0] the points plan reads it at a ranked settle', SRC.split(HELD).length === 2 && /const rankedNow = !!\(lpId && appliesLp\(matchType\)\);/.test(SRC)
+    && /const asPlayed = tsIn\.map\(\(t\) => rIn\(t\.id, t\)\);/.test(SRC) && /mmr: ts\.displayRating\(asPlayed\[i\]\.mu, asPlayed\[i\]\.sigma\)/.test(SRC));
+  T('[0] the settle stores it (moved at a ranked settle, kept at a quick one)', /if \(po\) \{ ent\.rm = po\.mu; ent\.rv = po\.sigma; \}\n\s*else if \(prevR\) \{ ent\.rm = prevR\.mu; ent\.rv = prevR\.sigma; \}\n\s*skill\[pid\(r\.id\)\] = ent;/.test(SRC));
+  T('[0] the streak memory carries no rating', !/prev\.sm|ge\.sm|g\.sm/.test(SRC));
+  T('[0] summary row', SRC.indexOf("'| ranked matches the ranked rating turns into / out of a mismatch, quick matches and the repeat-group decay set aside (Q160) | ' + s('heldMismatch', 0) + ' / ' + s('heldMismatchOff', 0) + ' |'") >= 0);
 }
 
-// ---- [1] groupDecayPlan: sm / ss ride the streak and are dropped with it ----
+// ---- [1] groupDecayPlan: an entry is { r, k, at } only ----
 {
   const T0 = 1000000000000;
   const mem = {};
-  const p1 = v.groupDecayPlan(mem, ['a', 'b', 'c', 'd'], T0);
-  T('[1] a fresh entry carries no rating as played on', !('sm' in mem.a) && !('sm' in p1.a), J(mem.a));
-  mem.a.sm = 27.5; mem.a.ss = 6.1; mem.c.sm = 22.5; mem.c.ss = 6.1;
+  v.groupDecayPlan(mem, ['a', 'b', 'c', 'd'], T0);
+  T('[1] a fresh entry is { r, k, at }', J(Object.keys(mem.a).sort()) === J(['at', 'k', 'r']), J(mem.a));
+  mem.a.sm = 27.5; mem.a.ss = 6.1;   // what the first draft of this fix kept in the streak memory
   const p2 = v.groupDecayPlan(mem, ['a', 'b', 'c', 'd'], T0 + MIN);
-  T('[1] the same four again: it rides the streak (k 2)', p2.a.k === 2 && p2.a.sm === 27.5 && p2.a.ss === 6.1 && mem.a.sm === 27.5 && mem.c.ss === 6.1
-    && p2.c.sm === 22.5 && !('sm' in p2.b) && !('sm' in mem.b), J(mem));
-  const p3 = v.groupDecayPlan(mem, ['a', 'b', 'x', 'y'], T0 + 2 * MIN);
-  T('[1] blood change (2 of 3 opponents new): dropped with the streak', p3.a.k === 1 && !('sm' in p3.a) && !('sm' in mem.a) && !('ss' in mem.a), J(mem.a));
-  mem.c.sm = 20; mem.c.ss = 5;
-  const p4 = v.groupDecayPlan(mem, ['c', 'a', 'b', 'd'], T0 + 2 * MIN + v.GROUP_DECAY.TTL_MS + 1);
-  T('[1] past the TTL: dropped', p4.c.k === 1 && !('sm' in p4.c) && !('sm' in mem.c), J(mem.c));
-  mem.d.sm = 'x'; mem.d.ss = 5;
-  const p5 = v.groupDecayPlan(mem, ['c', 'a', 'b', 'd'], T0 + 2 * MIN + v.GROUP_DECAY.TTL_MS + 2);
-  T('[1] a malformed value is not carried', p5.d.k === 2 && !('sm' in p5.d) && !('sm' in mem.d), J(mem.d));
+  T('[1] the same four again (k 2): a stale rating is dropped, the plan carries the weight only', p2.a.k === 2 && J(Object.keys(mem.a).sort()) === J(['at', 'k', 'r'])
+    && J(Object.keys(p2.a).sort()) === J(['k', 'w']), J([mem.a, p2.a]));
 }
 
 // ---- [2] ranked 2V2 back to back, every seat written, X / Y (grandmaster) beat two zero-points accounts ----
@@ -231,19 +236,17 @@ const GM = { [X]: 8200, [Y]: 8200, [Z1]: 0, [Z2]: 0 };
   const tight = series(6, ros, win, 6, MIN, GM), spaced = series(6, ros, win, 6, 3 * HOUR, GM);
   T('[2] both series settle every match', tight.ok && spaced.ok, (tight.out || '').slice(-600));
   T('[2] back to back: the same points match by match as spaced past the TTL', J(tight.perMatch) === J(spaced.perMatch), 'tight ' + J(tight.perMatch) + ' spaced ' + J(spaced.perMatch));
-  T('[2] the rating as played on turns the mismatch: held-back line, the row counts it', /  held-back [^\n]*\(mismatch only with the rating as played on, Q160\)/.test(tight.out) && rowSum(tight) >= 1
-    && !/  held-back /.test(spaced.out) && rowSum(spaced) === 0, 'row ' + rowSum(tight) + '/' + rowSum(spaced));
-  T('[2] the rating itself stays decayed (X back to back below X spaced)', muOf(tight, X) != null && muOf(spaced, X) != null && muOf(tight, X) < muOf(spaced, X) - 0.5,
+  T('[2] the ranked rating turns the mismatch: ranked-rating line, the row counts it', MARK.test(tight.out) && rowSum(tight) >= 1
+    && !/  ranked-rating /.test(spaced.out) && rowSum(spaced) === 0, 'row ' + rowSum(tight) + '/' + rowSum(spaced));
+  T('[2] the stored rating stays decayed (X back to back below X spaced)', muOf(tight, X) != null && muOf(spaced, X) != null && muOf(tight, X) < muOf(spaced, X) - 0.5,
     muOf(tight, X) + ' / ' + muOf(spaced, X));
-  {
-    const gm = tight.state.GROUPS_FILE || {}, gx = gm[v.pid(X)] || {}, gz = gm[v.pid(Z1)] || {};
-    T('[2] the streak memory carries the rating as played on (X above his stored rating, Z1 below)', gx.sm > muOf(tight, X) + 0.5 && gz.sm < muOf(tight, Z1) - 0.5
-      && Math.abs(gx.sm - muOf(spaced, X)) < 0.01 && Math.abs(gz.sm - muOf(spaced, Z1)) < 0.01, J([gx, gz, muOf(tight, X), muOf(spaced, X), muOf(spaced, Z1)]));
-  }
+  T('[2] the ranked rating is the one spaced play has (X above his stored rating, Z1 below)', rmOf(tight, X) > muOf(tight, X) + 0.5 && rmOf(tight, Z1) < muOf(tight, Z1) - 0.5
+    && Math.abs(rmOf(tight, X) - muOf(spaced, X)) < 1e-9 && Math.abs(rmOf(tight, Z1) - muOf(spaced, Z1)) < 1e-9 && rmOf(spaced, X) === muOf(spaced, X),
+    J([skOf(tight, X), skOf(tight, Z1), muOf(spaced, X), muOf(spaced, Z1)]));
   withMutant('bare', HELD, HELD_OFF, (script) => {
     const m = series(6, ros, win, 6, MIN, GM, script);
     const x = m.perMatch.map(p => p[0]);
-    T('[2] mutant (the plan reads the bare display): the full team win every match back to back', m.ok && x.length === 6 && x.every(d => d === x[0]) && J(m.perMatch) !== J(spaced.perMatch),
+    T('[2] mutant (the plan reads the stored rating): the full team win every match back to back', m.ok && x.length === 6 && x.every(d => d === x[0]) && J(m.perMatch) !== J(spaced.perMatch),
       J(m.perMatch));
   });
 }
@@ -253,29 +256,30 @@ const GM = { [X]: 8200, [Y]: 8200, [Z1]: 0, [Z2]: 0 };
   const ros = [X, Z1], win = () => 0, lp0 = { [X]: 2500, [Z1]: 0 };
   const tight = series(2, ros, win, 6, MIN, lp0), spaced = series(2, ros, win, 6, 3 * HOUR, lp0);
   T('[3] 1V1 back to back: the same points as spaced', tight.ok && spaced.ok && J(tight.perMatch) === J(spaced.perMatch), 'tight ' + J(tight.perMatch) + ' spaced ' + J(spaced.perMatch));
-  const gm = tight.state.GROUPS_FILE || {}, gx = gm[v.pid(X)] || {}, gz = gm[v.pid(Z1)] || {};
-  T('[3] 1V1: the streak memory carries the rating spaced play would have', Math.abs(gx.sm - muOf(spaced, X)) < 0.01 && Math.abs(gz.sm - muOf(spaced, Z1)) < 0.01
-    && Math.abs(gx.ss - ((spaced.state.SKILL_FILE || {})[v.pid(X)] || {}).sigma) < 0.01, J([gx, gz, muOf(spaced, X), muOf(spaced, Z1)]));
+  T('[3] 1V1: the ranked rating is the one spaced play has', Math.abs(rmOf(tight, X) - muOf(spaced, X)) < 1e-9 && Math.abs(rmOf(tight, Z1) - muOf(spaced, Z1)) < 1e-9
+    && Math.abs(skOf(tight, X).rv - skOf(spaced, X).sigma) < 1e-9, J([skOf(tight, X), skOf(tight, Z1), skOf(spaced, X), skOf(spaced, Z1)]));
 }
 {
   const ros = [X, Y, Z1, Z2], win = () => 0;
   const tight = series(4, ros, win, 6, MIN, GM), spaced = series(4, ros, win, 6, 3 * HOUR, GM);
   T('[3] ranked mode-1 2V2 (money decides the winning team) back to back: the same points as spaced', tight.ok && spaced.ok && J(tight.perMatch) === J(spaced.perMatch)
     && rowSum(tight) >= 1, 'tight ' + J(tight.perMatch) + ' spaced ' + J(spaced.perMatch) + ' row ' + rowSum(tight));
+  T('[3] mode-1 2V2: the ranked rating is the one spaced play has (the richer team rated the winner)', Math.abs(rmOf(tight, X) - muOf(spaced, X)) < 1e-9
+    && Math.abs(rmOf(tight, Z1) - muOf(spaced, Z1)) < 1e-9 && rmOf(tight, X) > 25 && rmOf(tight, Z1) < 25, J([skOf(tight, X), skOf(tight, Z1), skOf(spaced, X), skOf(spaced, Z1)]));
 }
 {
   const ros = [X, Z1], win = () => 0, lp0 = { [X]: 2500, [Z1]: 2500 };
   const files0 = { SKILL_FILE: { [v.pid(X)]: { mu: 35, sigma: 3 }, [v.pid(Z1)]: { mu: 15, sigma: 3 } } };   // display 2040 / 1240: a mismatch already
   const s = series(2, ros, win, 4, MIN, lp0, null, files0);
-  T('[3] already far apart on the stored rating: held-back without the Q160 mark, the row stays 0', s.ok && /  held-back /.test(s.out)
-    && !/mismatch only with the rating as played on/.test(s.out) && rowSum(s) === 0, 'row ' + rowSum(s) + ' ' + ((s.out || '').match(/  held-back [^\n]*/g) || []).join(' | '));
+  T('[3] already far apart on the stored rating: ranked-rating line without the Q160 mark, the row stays 0', s.ok && /  ranked-rating /.test(s.out)
+    && !/mismatch only with the ranked rating/.test(s.out) && rowSum(s) === 0 && rowSum(s, 2) === 0, 'row ' + rowSum(s) + ' ' + ((s.out || '').match(/  ranked-rating [^\n]*/g) || []).join(' | '));
 }
 
 // ---- [4] honest ranked 2V2 back to back, the teams trade wins ----
 {
   const ros = [P, Q, Z1, Z2], win = (i) => i % 2, lp0 = { [P]: 2500, [Q]: 2500, [Z1]: 2500, [Z2]: 2500 };
   const s = series(6, ros, win, 6, MIN, lp0);
-  T('[4] even group back to back: no match turns into a mismatch', s.ok && rowSum(s) === 0 && !/mismatch only with the rating as played on/.test(s.out), 'row ' + rowSum(s));
+  T('[4] even group back to back: no match turns into a mismatch', s.ok && rowSum(s) === 0 && !/mismatch only with the ranked rating/.test(s.out), 'row ' + rowSum(s));
   withMutant('off', HELD, HELD_OFF, (script) => {
     const m = series(6, ros, win, 6, MIN, lp0, script);
     T('[4] points as with the Q160 lines off', m.ok && J(m.perMatch) === J(s.perMatch), J(s.perMatch) + ' / ' + J(m.perMatch));
@@ -284,7 +288,7 @@ const GM = { [X]: 8200, [Y]: 8200, [Z1]: 0, [Z2]: 0 };
 {
   const ros = [P, Q], win = (i) => i % 2, lp0 = { [P]: 2500, [Q]: 2500 };
   const s = series(2, ros, win, 12, MIN, lp0);
-  T('[4] 1V1 pair trading wins, twelve back to back: no match turns into a mismatch', s.ok && rowSum(s) === 0 && !/mismatch only with the rating as played on/.test(s.out), 'row ' + rowSum(s));
+  T('[4] 1V1 pair trading wins, twelve back to back: no match turns into a mismatch', s.ok && rowSum(s) === 0 && !/mismatch only with the ranked rating/.test(s.out), 'row ' + rowSum(s));
   withMutant('off1', HELD, HELD_OFF, (script) => {
     const m = series(2, ros, win, 12, MIN, lp0, script);
     T('[4] 1V1: points as with the Q160 lines off', m.ok && J(m.perMatch) === J(s.perMatch), J(s.perMatch) + ' / ' + J(m.perMatch));
@@ -296,10 +300,46 @@ const GM = { [X]: 8200, [Y]: 8200, [Z1]: 0, [Z2]: 0 };
   const ros = [X, Y, Z1, Z2], win = () => 0;
   const s = series(5, ros, win, 6, MIN, GM);
   const rate = (x) => J(x.runs.map(r => [X, Y, Z1, Z2].map(sid => ratingOf(r, sid))));
-  T('[5] quick: no held-back line, no row', s.ok && !/  held-back /.test(s.out) && rowSum(s) === 0);
+  T('[5] quick: no ranked-rating line, no row, no ranked rating stored', s.ok && !/  ranked-rating /.test(s.out) && rowSum(s) === 0 && rowSum(s, 2) === 0
+    && ros.every(sid => skOf(s, sid) && !('rm' in skOf(s, sid)) && !('rv' in skOf(s, sid))), J(ros.map(sid => skOf(s, sid))));
   withMutant('quick', HELD, HELD_OFF, (script) => {
     const m = series(5, ros, win, 6, MIN, GM, script);
     T('[5] rating writes as with the Q160 lines off', m.ok && rate(m) === rate(s));
+  });
+}
+
+// ---- [6] a quick match lost between two ranked ones (review of the first draft) ----
+{
+  const ros = [X, Z1], lp0 = { [X]: 8200, [Z1]: 0 };
+  const mt = (i) => (i % 2 ? 1 : 2), win = (i) => (i % 2 ? 1 : 0);   // even: ranked 1V1 X wins; odd: quick 1V1 Z1 wins
+  const tight = series(mt, ros, win, 12, MIN, lp0), spaced = series(mt, ros, win, 12, 3 * HOUR, lp0);
+  const xr = (s) => s.perMatch.filter((p, i) => i % 2 === 0).map(p => p[0]);
+  T('[6] both series settle every match', tight.ok && spaced.ok, (tight.out || '').slice(-600));
+  T('[6] from the fourth ranked match on X makes 0, back to back and spaced', xr(tight).length === 6 && xr(tight).slice(3).every(d => d === 0)
+    && xr(spaced).slice(3).every(d => d === 0) && xr(tight)[0] === 20, 'tight ' + J(xr(tight)) + ' spaced ' + J(xr(spaced)));
+  T('[6] the quick matches move no points', tight.perMatch.filter((p, i) => i % 2 === 1).every(p => p[0] === 0 && p[1] === 0), J(tight.perMatch));
+  {   // the last match is quick: its settle left the ranked rating as it was and moved the stored one
+    const sk = skOf(spaced, X), z = skOf(spaced, Z1);
+    T('[6] the quick settle keeps the ranked rating, the stored one moves (X stored below his ranked, Z1 above)', sk && z && sk.rm > sk.mu + 0.5 && z.rm < z.mu - 0.5, J([sk, z]));
+  }
+  withMutant('quick6', HELD, HELD_OFF, (script) => {
+    const m = series(mt, ros, win, 12, 3 * HOUR, lp0, script);
+    T('[6] mutant (the plan reads the stored rating): +20 every ranked match', m.ok && xr(m).every(d => d === 20), J(xr(m)));
+  });
+}
+
+// ---- [7] quick matches drive the stored ratings apart, the ranked ones stay close: no mismatch with the ranked rating ----
+{
+  const ros = [X, Z1], lp0 = { [X]: 2500, [Z1]: 2500 };
+  const mt = (i) => ((i === 0 || i === 9) ? 2 : 1), win = () => 0;   // ranked, eight quick X wins, ranked; spaced past the TTL
+  const s = series(mt, ros, win, 10, 3 * HOUR, lp0);
+  const OFF = /  ranked-rating [^\n]*\(no mismatch with the ranked rating, Q160\)/;
+  T('[7] settles every match', s.ok, (s.out || '').slice(-600));
+  T('[7] the last ranked match: no mismatch with the ranked rating, the row counts it out', OFF.test(s.out) && rowSum(s, 2) === 1 && rowSum(s) === 0,
+    'row ' + rowSum(s) + ' / ' + rowSum(s, 2) + ' ' + ((s.out || '').match(/  ranked-rating [^\n]*/g) || []).join(' | '));
+  withMutant('off7', HELD, HELD_OFF, (script) => {
+    const m = series(mt, ros, win, 10, 3 * HOUR, lp0, script);
+    T('[7] mutant (the plan reads the stored rating): the last ranked win compressed', m.ok && m.perMatch[9][0] < s.perMatch[9][0], J([s.perMatch[9], m.perMatch[9]]));
   });
 }
 
