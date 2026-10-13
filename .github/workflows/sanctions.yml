@@ -26,7 +26,7 @@ concurrency:
 jobs:
   sanctions:
     if: github.repository == 'FL343/epoch-sync'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: write
@@ -87,7 +87,7 @@ jobs:
   playtest-sanctions:
     if: ${{ always() && github.repository == 'FL343/epoch-sync' }}
     needs: sanctions
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: write
@@ -135,7 +135,7 @@ jobs:
   demo-sanctions:
     if: ${{ always() && github.repository == 'FL343/epoch-sync' }}
     needs: playtest-sanctions
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: write

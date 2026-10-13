@@ -17,7 +17,7 @@ concurrency:
 jobs:
   feedback:
     if: github.repository == 'FL343/epoch-sync'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: write
@@ -75,7 +75,7 @@ jobs:
   playtest-feedback:
     if: ${{ always() && github.repository == 'FL343/epoch-sync' }}
     needs: feedback
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: write
@@ -118,7 +118,7 @@ jobs:
   demo-feedback:
     if: ${{ always() && github.repository == 'FL343/epoch-sync' }}
     needs: playtest-feedback
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: write

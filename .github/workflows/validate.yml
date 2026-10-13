@@ -11,7 +11,7 @@ concurrency:
 jobs:
   reconcile:
     if: github.repository == 'FL343/epoch-sync'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # a wedged HTTP call must not hold the concurrency group for the 6h default
     timeout-minutes: 10
     permissions:
