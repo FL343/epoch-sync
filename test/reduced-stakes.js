@@ -30,12 +30,20 @@ eq('strong flag = none(0)', p3.S.flag, 0);
 eq('strong upset-loss mild (FP-safe: -15*0.5+5 -> -2)', p3.S.adjDelta, -2);
 t('strong upset-loss milder than full loss', p3.S.adjDelta > p3.S.normalDelta);
 
-console.log('=== grandmaster strong stomp -> gain crushed (rs 0.05) ===');
+console.log('=== grandmaster strong stomp -> gain crushed to nothing (rs 0, zero-sum top, Q160) ===');
 const p4 = reducedStakesPlan([{ steamID: 'G', mmr: 2000, rank: 1, lp: 8500 }, { steamID: 'W', mmr: 1000, rank: 2, lp: 300 }], 2);
 eq('grandmaster normal gain = 20', p4.G.normalDelta, 20);
-eq('grandmaster crushed gain (20*0.05 -> 1)', p4.G.adjDelta, 1);
+eq('grandmaster crushed gain (20*0 -> 0)', p4.G.adjDelta, 0);
 eq('grandmaster flag none', p4.G.flag, 0);
 eq('weak flag PROTECTED', p4.W.flag, 2);
+{
+  const { teamLpPlan } = require('../validate.js');
+  const t4 = teamLpPlan([{ steamID: 'a', seat: 0, mmr: 2000, lp: 8500 }, { steamID: 'b', seat: 1, mmr: 2000, lp: 8500 },
+    { steamID: 'c', seat: 2, mmr: 1000, lp: 0 }, { steamID: 'd', seat: 3, mmr: 1000, lp: 0 }], 6, [6100, 5200, 4800, 3900], [], 0);
+  eq('grandmaster team expected win: normal round(20/2) = 10 each', [t4.a.normalDelta, t4.b.normalDelta], [10, 10]);
+  eq('grandmaster team expected win crushed to nothing (round(20*0/2) + 0)', [t4.a.adjDelta, t4.b.adjDelta], [0, 0]);
+  eq('grandmaster upset loss stays the mild penalty (-20*0.5 = -10)', reducedStakesPlan([{ steamID: 'G', mmr: 2000, rank: 2, lp: 8500 }, { steamID: 'W', mmr: 1000, rank: 1, lp: 300 }], 2).G.adjDelta, -10);
+}
 
 console.log('=== drip never discounted (only the win/loss component is scaled) ===');
 const seg = lpSeg(1000);

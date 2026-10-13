@@ -2058,7 +2058,11 @@ const LEAVER_LP_PENALTY = Number(process.env.LEAVER_LP_PENALTY || 100);   // ran
 //   promotion), wide top. The four legacy tier lines (2000/4000/6000/8000) are unchanged, so every
 //   promotion-series invariant below still holds: band width 2*120=240 < narrowest span 600, and
 //   the largest natural swing (45+5=50) < BOUNDARY_MARGIN. Mirrored by the client ranked-config
-//   LP_SEG + rating-store TIERS (lockstep-pinned by the client test suite).
+//   LP_SEG + rating-store TIERS (lockstep-pinned by the client test suite; rs is cron-only, not mirrored).
+// Grandmaster rs 0 (cloud audit Q160; was 0.05): the top is zero-sum, so an expected result in a mismatch moves nothing.
+//   At 0.05 a grandmaster's expected win still made +1 (20 * 0.05) out of nobody: a loser at the points floor pays nothing,
+//   so two accounts writing every seat of matches nobody played (one always winning, one kept at 0 points) climbed the top
+//   one point a match without end, about 290 a day at the one-match-at-a-time pace. Below grandmaster rs is unchanged.
 const LP_SEG = [
   { min: 0, win: 45, loss: 15, drip: 5, rs: 0.70 },     // bronze (600 wide)
   { min: 600, win: 40, loss: 17, drip: 4, rs: 0.60 },   // silver
@@ -2066,7 +2070,7 @@ const LP_SEG = [
   { min: 3000, win: 31, loss: 22, drip: 2, rs: 0.40 },  // platinum
   { min: 4000, win: 28, loss: 25, drip: 2, rs: 0.30 },  // diamond
   { min: 6000, win: 22, loss: 22, drip: 1, rs: 0.15 },  // master
-  { min: 8000, win: 20, loss: 20, drip: 0, rs: 0.05 },  // grandmaster (zero-sum top)
+  { min: 8000, win: 20, loss: 20, drip: 0, rs: 0 },     // grandmaster (zero-sum top; rs 0, Q160)
 ];
 function lpSeg(lp) { let s = LP_SEG[0]; for (const x of LP_SEG) if (lp >= x.min) s = x; return s; }
 // placement seeding (2026-07-14): a player's FIRST ranked settle starts from a TrueSkill-derived
