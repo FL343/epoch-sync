@@ -545,6 +545,13 @@ const BLANK_STARTS = [];   // [key, record] -- flagged in main once signals are 
 function noteBlankStarts(m, recs) {
   for (const r of recs || []) if (blankSeatStart(r)) BLANK_STARTS.push([m, r]);
 }
+// Q166 rework: the keys read this run plus the m|blank|pid of every blank start noted this run (pruneFlagged looks a blank
+//   flag up by its writer); main calls it after registerStartRosters, before the blank flags are recorded
+function blankSeen(seenKeys) {
+  const out = new Set(seenKeys);
+  for (const [m, r] of BLANK_STARTS) out.add(m + '|blank|' + pid(String(r.steamID)));
+  return out;
+}
 // The plain tally below: one vote per voter per seat, strict majority per seat (raw = the winning account, unhashed).
 function tallyStartVotes(att) {
   const votes = {};
@@ -1421,12 +1428,19 @@ function recordFlag(s, g, m, now) {
 //   writer writes it again -- counting him again then is right. Before, an entry left only after SIG_PAIR_WINDOW_MS (45
 //   days) with no cap: a rejected solo segment flags its key and leaves the shards the next run, so one account writing
 //   50 a run grew the file by about 21 MB in 45 days (five accounts past GitHub's 100 MB file limit: the state push
-//   fails, settling stops). Now an entry whose match key (an m|blank|pid flag: its match key m) was off the shards on two
-//   complete reads at least FLAG_PRUNE_WAIT_MS apart is dropped: the first such read arms it (s.flagOff), a read that
+//   fails, settling stops). Now an entry whose match key was off the shards on two complete reads at least
+//   FLAG_PRUNE_WAIT_MS apart is dropped (an m|blank|pid flag: its writer's own blank start of m, not the key m -- see
+//   below): the first such read arms it (s.flagOff), a read that
 //   finds the key again disarms it. A read that is not complete changes nothing (main also passes false while the
 //   one-shot recovery pools are configured: their rows are not covered by shardsComplete). An account holds at most one
 //   row per shard, so the flags whose keys stay on the shards are bounded by the accounts writing them. No oldest-first
 //   cap like the pairs: it would drop entries whose records are still on a shard.
+// Q166 rework (review): a blank-start flag (m|blank|pid, Q130: one per key AND writer) is looked up by its writer. By the
+//   key m, N accounts taking turns on one set of 50N matchmade keys (each key held by one blank start a run, the holder
+//   rotating) kept every account's flag on every key: 50N^2 flags, none ever armed (about 190 accounts past 100 MB in
+//   16 hours). Looked up by the writer, a flag stays while that account's own blank start of m is on the shards -- an
+//   account holds one row per shard, so its flags stay at 50 live plus an hour of arms, as for every other flag. main
+//   passes the m|blank|pid of every blank start read this run (BLANK_STARTS, filled by registerStartRosters before).
 const FLAG_PRUNE_WAIT_MS = Number(process.env.FLAG_PRUNE_WAIT_MS || 3600 * 1000);
 function flagBaseKey(k) { const i = String(k).indexOf('|'); return i < 0 ? String(k) : String(k).slice(0, i); }
 function pruneFlagged(s, seen, readComplete, now) {
@@ -1434,7 +1448,7 @@ function pruneFlagged(s, seen, readComplete, now) {
   if (!seen || !readComplete) return res;
   const off = s.flagOff || {};
   for (const k of Object.keys(s.flagged || {})) {
-    if (seen.has(flagBaseKey(k))) { if (off[k] != null) { delete off[k]; res.disarmed++; } continue; }
+    if (k.indexOf('|blank|') >= 0 ? seen.has(k) : seen.has(flagBaseKey(k))) { if (off[k] != null) { delete off[k]; res.disarmed++; } continue; }   // Q166 rework: a blank flag by its writer
     if (off[k] == null) { off[k] = now; res.armed++; continue; }
     if (now - (Number(off[k]) || 0) >= FLAG_PRUNE_WAIT_MS) { delete s.flagged[k]; delete off[k]; res.dropped++; }
   }
@@ -4188,7 +4202,7 @@ async function main() {
   const signals = loadSignals();
   let sigDirty = false;
   // Q166: a flag whose key was off the shards on two complete reads an hour apart is dropped (pruneFlagged)
-  const prunedF = pruneFlagged(signals, seenKeys, shardsComplete && !recCfg, Date.now());
+  const prunedF = pruneFlagged(signals, blankSeen(seenKeys), shardsComplete && !recCfg, Date.now());   // Q166 rework: + each blank start's m|blank|pid
   if (prunedF.dropped || prunedF.armed || prunedF.disarmed) sigDirty = true;
   if (prunedF.dropped) console.log('signals: ' + prunedF.dropped + ' flag(s) of keys off the shards on two complete reads dropped, ' + Object.keys(signals.flagged).length + ' kept (Q166)');
   // trust-tier candidates seen this run (real sids; signals stay HMAC-keyed -- the only
@@ -6592,4 +6606,4 @@ Object.assign(module.exports, { testimonyOf, recTestimony, noteTestimony, endles
 Object.assign(module.exports, { teamLossCounted });   // cloud audit Q136 the losing team must be somebody
 Object.assign(module.exports, { contestParties, contestTable, noteContestParties, noteParties, CONTEST_PARTY_CAP, CONTEST_PARTIES, LATE_SPLIT_WHO });   // cloud audit Q143 whose records contested a matchmade key
 Object.assign(module.exports, { soloKeyGone, pruneSoloDone, soloDoneNote, SOLO_DONE_CAP, SEEN_PER_WRITER, screenLateStarts });   // cloud audit Q144 rework: processed solo segments remembered while their key verifies, a room per writer across the start-seen notes
-Object.assign(module.exports, { pruneFlagged, flagBaseKey, FLAG_PRUNE_WAIT_MS });   // cloud audit Q166 a signals flag goes once its key left the shards
+Object.assign(module.exports, { pruneFlagged, flagBaseKey, FLAG_PRUNE_WAIT_MS, blankSeen, BLANK_STARTS });   // cloud audit Q166 a signals flag goes once its key left the shards

@@ -5,8 +5,9 @@
 //   100 MB file limit). Now an entry whose match key was off the shards on two complete reads an hour apart is dropped.
 //   [0] wiring pins
 //   [1] pruneFlagged (pure): kept while on the shards, armed on the first complete read that misses it, dropped on one an
-//       hour later, disarmed when the key is back, an incomplete read changes nothing, m|blank|pid flags by m, the arm
-//       goes with its flag (pruneSignals), no flagOff field when nothing is armed
+//       hour later, disarmed when the key is back, an incomplete read changes nothing, an m|blank|pid flag by its writer's
+//       own blank start of m (Q166 rework: not by m), blankSeen, the arm goes with its flag (pruneSignals), no flagOff field
+//       when nothing is armed
 //   [2] main(): one account, 50 forged solo segments a run for two hours at the five-minute cadence: the flags stop
 //       growing (before: +50 a run); every forged key is counted once (f) as before
 //   [3] main(): a key whose two players disagree, its records kept on the shards for three hours: flagged once, never
@@ -17,6 +18,12 @@
 //       the next one an hour later drops
 //   [6] main(): its records gone while the one-shot recovery pools are configured: nothing armed; past the file, armed and
 //       dropped
+//   [7] main() (Q166 rework, the review's R2): six accounts take turns on one set of 300 matchmade keys, each account a
+//       different 50 a run (one per shard), every key always on the shards, a blank seat in every start, 30-minute
+//       cadence: each account keeps at most its live 50 plus two runs of arms (150; 900 in all; before: every account on
+//       every key, 50N^2 = 1800), counted again (f) once its flag was dropped, never fewer
+//   [8] main() (Q166 rework): one account keeps its blank start of one matchmade key on the shards for three hours: its
+//       flag is never armed, f 1 (not dropped and counted again)
 // State isolation is structural (every *_FILE var redirected, cwd = temp dir), like test/state-prune.js.
 const { spawnSync } = require('child_process');
 const fs = require('fs'), path = require('path'), os = require('os'), crypto = require('crypto');
@@ -45,11 +52,14 @@ console.log('=== Q166: signals.flagged entries of keys off the shards are droppe
   const pin = (label, s) => T('[0] ' + label, SRC.split(s).length === 2, 'not found exactly once: ' + s.slice(0, 120));
   pin('main prunes the flags right after loading the signals, on a complete read without recovery pools',
     "  const signals = loadSignals();\n  let sigDirty = false;\n  // Q166: a flag whose key was off the shards on two complete reads an hour apart is dropped (pruneFlagged)\n" +
-    "  const prunedF = pruneFlagged(signals, seenKeys, shardsComplete && !recCfg, Date.now());\n  if (prunedF.dropped || prunedF.armed || prunedF.disarmed) sigDirty = true;\n");
+    "  const prunedF = pruneFlagged(signals, blankSeen(seenKeys), shardsComplete && !recCfg, Date.now());   // Q166 rework: + each blank start's m|blank|pid\n  if (prunedF.dropped || prunedF.armed || prunedF.disarmed) sigDirty = true;\n");
+  pin('a blank flag by its writer (Q166 rework)', "    if (k.indexOf('|blank|') >= 0 ? seen.has(k) : seen.has(flagBaseKey(k))) {");
+  pin('blankSeen adds every blank start read this run', "  for (const [m, r] of BLANK_STARTS) out.add(m + '|blank|' + pid(String(r.steamID)));\n");
+  T('[0] the blank starts are read (registerStartRosters) before the flags are pruned', SRC.indexOf('  const registeredEarly = registerStartRosters(') > 0 && SRC.indexOf('  const registeredEarly = registerStartRosters(') < SRC.indexOf('  const prunedF = pruneFlagged('));
   pin('an arm goes with its flag', "  for (const k of Object.keys(s.flagOff || {})) if (!s.flagged[k]) delete s.flagOff[k];   // Q166: an arm goes with its flag (pruneFlagged)\n");
   pin('the wait default (an hour)', 'const FLAG_PRUNE_WAIT_MS = Number(process.env.FLAG_PRUNE_WAIT_MS || 3600 * 1000);');
   T('[0] seenKeys is built before the signals load (every key read this run, before any gate)', SRC.indexOf('  const seenKeys = new Set(') > 0 && SRC.indexOf('  const seenKeys = new Set(') < SRC.indexOf('  const signals = loadSignals();'));
-  eq('[0] exported', [typeof v.pruneFlagged, typeof v.flagBaseKey, v.FLAG_PRUNE_WAIT_MS], ['function', 'function', HOUR]);
+  eq('[0] exported', [typeof v.pruneFlagged, typeof v.flagBaseKey, v.FLAG_PRUNE_WAIT_MS, typeof v.blankSeen, Array.isArray(v.BLANK_STARTS)], ['function', 'function', HOUR, 'function', true]);
 }
 
 // ---- [1] pruneFlagged (pure) ----
@@ -57,24 +67,30 @@ console.log('=== Q166: signals.flagged entries of keys off the shards are droppe
   const t0 = 1e12;
   const S = () => ({ flagged: { k1: t0, k2: t0, 'k3|blank|abc': t0 }, players: {}, pairs: {}, rep: {}, rseen: {} });
   let s = S();
-  eq('[1] every key on the shards: kept, nothing armed, no flagOff field', [v.pruneFlagged(s, new Set(['k1', 'k2', 'k3']), true, t0 + HOUR), Object.keys(s.flagged).length, 'flagOff' in s],
+  eq('[1] every key on the shards: kept, nothing armed, no flagOff field', [v.pruneFlagged(s, new Set(['k1', 'k2', 'k3', 'k3|blank|abc']), true, t0 + HOUR), Object.keys(s.flagged).length, 'flagOff' in s],
     [{ dropped: 0, armed: 0, disarmed: 0 }, 3, false]);
-  eq('[1] the first complete read that misses k2: armed, kept', [v.pruneFlagged(s, new Set(['k1', 'k3']), true, t0 + HOUR), Object.keys(s.flagged).sort(), s.flagOff],
+  eq('[1] the first complete read that misses k2: armed, kept', [v.pruneFlagged(s, new Set(['k1', 'k3', 'k3|blank|abc']), true, t0 + HOUR), Object.keys(s.flagged).sort(), s.flagOff],
     [{ dropped: 0, armed: 1, disarmed: 0 }, ['k1', 'k2', 'k3|blank|abc'], { k2: t0 + HOUR }]);
-  eq('[1] off again 59 minutes later: kept', [v.pruneFlagged(s, new Set(['k1', 'k3']), true, t0 + HOUR + 59 * MIN), Object.keys(s.flagged).length], [{ dropped: 0, armed: 0, disarmed: 0 }, 3]);
+  eq('[1] off again 59 minutes later: kept', [v.pruneFlagged(s, new Set(['k1', 'k3', 'k3|blank|abc']), true, t0 + HOUR + 59 * MIN), Object.keys(s.flagged).length], [{ dropped: 0, armed: 0, disarmed: 0 }, 3]);
   eq('[1] an incomplete read an hour later: nothing changes', [v.pruneFlagged(s, new Set(['k1', 'k3']), false, t0 + 2 * HOUR), Object.keys(s.flagged).length, s.flagOff], [{ dropped: 0, armed: 0, disarmed: 0 }, 3, { k2: t0 + HOUR }]);
   eq('[1] no key set: nothing changes', [v.pruneFlagged(s, null, true, t0 + 2 * HOUR), Object.keys(s.flagged).length], [{ dropped: 0, armed: 0, disarmed: 0 }, 3]);
-  eq('[1] off on a complete read an hour after the arm: dropped with its arm', [v.pruneFlagged(s, new Set(['k1', 'k3']), true, t0 + 2 * HOUR), Object.keys(s.flagged).sort(), s.flagOff],
+  eq('[1] off on a complete read an hour after the arm: dropped with its arm', [v.pruneFlagged(s, new Set(['k1', 'k3', 'k3|blank|abc']), true, t0 + 2 * HOUR), Object.keys(s.flagged).sort(), s.flagOff],
     [{ dropped: 1, armed: 0, disarmed: 0 }, ['k1', 'k3|blank|abc'], {}]);
   s = S();
-  v.pruneFlagged(s, new Set(['k2', 'k3']), true, t0);
-  eq('[1] k1 back before the hour: disarmed, kept', [v.pruneFlagged(s, new Set(['k1', 'k2', 'k3']), true, t0 + 30 * MIN), s.flagOff], [{ dropped: 0, armed: 0, disarmed: 1 }, {}]);
-  eq('[1] k1 off again: armed afresh (the hour counts from now)', [v.pruneFlagged(s, new Set(['k2', 'k3']), true, t0 + 40 * MIN), v.pruneFlagged(s, new Set(['k2', 'k3']), true, t0 + 90 * MIN), 'k1' in s.flagged],
+  v.pruneFlagged(s, new Set(['k2', 'k3', 'k3|blank|abc']), true, t0);
+  eq('[1] k1 back before the hour: disarmed, kept', [v.pruneFlagged(s, new Set(['k1', 'k2', 'k3', 'k3|blank|abc']), true, t0 + 30 * MIN), s.flagOff], [{ dropped: 0, armed: 0, disarmed: 1 }, {}]);
+  eq('[1] k1 off again: armed afresh (the hour counts from now)', [v.pruneFlagged(s, new Set(['k2', 'k3', 'k3|blank|abc']), true, t0 + 40 * MIN), v.pruneFlagged(s, new Set(['k2', 'k3', 'k3|blank|abc']), true, t0 + 90 * MIN), 'k1' in s.flagged],
     [{ dropped: 0, armed: 1, disarmed: 0 }, { dropped: 0, armed: 0, disarmed: 0 }, true]);
   s = S();
   v.pruneFlagged(s, new Set(['k1', 'k2']), true, t0);
-  eq('[1] m|blank|pid flags by its match key m: armed when m is off', s.flagOff, { 'k3|blank|abc': t0 });
-  eq('[1] ... kept while a start of m is on the shards', [v.pruneFlagged(s, new Set(['k1', 'k2', 'k3']), true, t0 + 2 * HOUR), 'k3|blank|abc' in s.flagged], [{ dropped: 0, armed: 0, disarmed: 1 }, true]);
+  eq('[1] m|blank|pid by its writer, not by m: armed when the writer\'s own blank start of m is off (m on the shards)', s.flagOff, { 'k3|blank|abc': t0 });
+  eq('[1] ... dropped an hour later though m stays on the shards (another account\'s start)', [v.pruneFlagged(s, new Set(['k1', 'k2', 'k3']), true, t0 + HOUR), Object.keys(s.flagged).sort()], [{ dropped: 1, armed: 0, disarmed: 0 }, ['k1', 'k2']]);
+  s = S();
+  v.pruneFlagged(s, new Set(['k1', 'k2', 'k3']), true, t0);
+  eq('[1] ... kept while the writer\'s own blank start of m is on the shards (disarmed)', [v.pruneFlagged(s, new Set(['k1', 'k2', 'k3', 'k3|blank|abc']), true, t0 + 2 * HOUR), 'k3|blank|abc' in s.flagged], [{ dropped: 0, armed: 0, disarmed: 1 }, true]);
+  v.BLANK_STARTS.push(['k5', { steamID: '765611980000001' }], ['k6', { steamID: '765611980000002' }]);
+  eq('[1] blankSeen: the keys read plus each blank start\'s m|blank|pid', Array.from(v.blankSeen(new Set(['k1']))).sort(), ['k1', 'k5|blank|' + v.pid('765611980000001'), 'k6|blank|' + v.pid('765611980000002')].sort());
+  v.BLANK_STARTS.length = 0;
   eq('[1] flagBaseKey', [v.flagBaseKey('1_2_3'), v.flagBaseKey('1_2_3|blank|ff'), v.flagBaseKey('')], ['1_2_3', '1_2_3', '']);
   // the arm goes with its flag (the 45-day window, pruneSignals)
   s = { day: { d: 0, n: {} }, players: {}, pairs: {}, rep: {}, rseen: {}, flagged: { old: t0, young: t0 + 44 * 86400000 }, flagOff: { old: t0 + HOUR, young: t0 + HOUR, stray: t0 } };
@@ -83,7 +99,7 @@ console.log('=== Q166: signals.flagged entries of keys off the shards are droppe
   // a key dropped and written again is counted again (recordFlag)
   s = S();
   v.recordFlag(s, [{ steamID: '765611980000001' }], 'k9', t0);
-  v.pruneFlagged(s, new Set(['k1', 'k2', 'k3']), true, t0 + HOUR); v.pruneFlagged(s, new Set(['k1', 'k2', 'k3']), true, t0 + 2 * HOUR);
+  v.pruneFlagged(s, new Set(['k1', 'k2', 'k3', 'k3|blank|abc']), true, t0 + HOUR); v.pruneFlagged(s, new Set(['k1', 'k2', 'k3', 'k3|blank|abc']), true, t0 + 2 * HOUR);
   eq('[1] a dropped key written again is flagged and counted again', [v.recordFlag(s, [{ steamID: '765611980000001' }], 'k9', t0 + 3 * HOUR), s.players[v.pid('765611980000001')].f], [true, 2]);
 }
 
@@ -313,6 +329,53 @@ const keyOf = (d) => d[3] + '_' + d[4] + '_' + d[2];
     const k = keyOf(both[0].d);
     T('[6] the recovery pools were read on the first three runs', rs.slice(0, 3).every((r) => /recover: 0 solo segment\(s\)/.test(r.out)) && !/recover: /.test(rs[3].out));
     eq('[6] flagged / armed per run', rs.map((r) => (flags(r).indexOf(k) >= 0 ? 'F' : '-') + (arms(r).indexOf(k) >= 0 ? 'A' : '-')), ['F-', 'F-', 'F-', 'FA', '--']);
+  }
+}
+
+// ---- [7] main() (Q166 rework, the review's R2): N accounts take turns on one set of 50N matchmade keys ----
+// a matchmade start (mt 1) written by the account at `seat`, `roster` its claimed seat list (null = a seat left empty)
+function start(hash, seed, seat, roster) {
+  const pc = roster.length;
+  const d = [0xB2, 3, 1, hash | 0, seed | 0, seat, 1 + seat, 0, pc, 0];
+  for (let i = 0; i < pc; i++) d.push(0);
+  d.push(0);   // disp
+  for (const x of roster) { const p = x ? sidPair(x) : [0, 0]; d.push(p[0], p[1]); }
+  return d;
+}
+{
+  const N = 6, RUNS = 9;
+  const acct = Array.from({ length: N }, (_, a) => SID(1660 + a));
+  const keys = Array.from({ length: 50 * N }, (_, j) => 0x166e000 + j);
+  const steps = [];
+  for (let run = 0; run < RUNS; run++) steps.push([30 * MIN, () => {
+    const rows = [];
+    for (let a = 0; a < N; a++) { const g = (a + run) % N; for (let sh = 0; sh < 50; sh++) rows.push({ shard: sh, sid: acct[a], d: start(keys[g * 50 + sh], 4242, 0, [acct[a], null]) }); }
+    return rows;
+  }]);
+  const rs = timeline(steps);
+  if (!brk(rs, RUNS, '[7]')) {
+    const mine = (r, a) => flags(r).filter((k) => k.endsWith('|blank|' + v.pid(acct[a]))).length;
+    const n = rs.map((r) => flags(r).length);
+    console.log('  flags after each run ' + JSON.stringify(n) + ' · per account at the end ' + JSON.stringify(acct.map((_, a) => mine(rs[RUNS - 1], a))) + ' · f ' + JSON.stringify(acct.map((x) => fOf(rs[RUNS - 1], x))));
+    T('[7] every blank start flagged when written (the first run: 50 per account)', n[0] === 50 * N && acct.every((_, a) => mine(rs[0], a) === 50), String(n[0]));
+    T('[7] each account keeps at most its live 50 plus two runs of arms (150), 900 in all (before: 50N^2 = 1800)',
+      rs.every((r) => acct.every((_, a) => mine(r, a) <= 150)) && Math.max(...n) <= 150 * N && n.slice(-4).every((x) => x === n[n.length - 1]), JSON.stringify(n));
+    T('[7] the arms are flags (a writer whose start of the key is off)', arms(rs[RUNS - 1]).length > 0 && arms(rs[RUNS - 1]).every((k) => k.indexOf('|blank|') > 0 && (sigOf(rs[RUNS - 1]).flagged || {})[k] != null));
+    T('[7] every account counted again once its flag was dropped and it wrote the key again (f 450: 50 a run; before: 300)', acct.every((x) => fOf(rs[RUNS - 1], x) === 50 * RUNS), JSON.stringify(acct.map((x) => fOf(rs[RUNS - 1], x))));
+  }
+}
+
+// ---- [8] main() (Q166 rework): a blank start kept on the shards keeps its writer's flag ----
+{
+  const W = SID(1670), K = 0x166f1;
+  const d = start(K, 4242, 0, [W, null]);
+  const steps = [];
+  for (let run = 0; run < 7; run++) steps.push([30 * MIN, [{ shard: 3, sid: W, d }]]);
+  const rs = timeline(steps);
+  if (!brk(rs, 7, '[8]')) {
+    const k = keyOf(d) + '|blank|' + v.pid(W);
+    eq('[8] flagged / armed per run', rs.map((r) => (flags(r).indexOf(k) >= 0 ? 'F' : '-') + (arms(r).indexOf(k) >= 0 ? 'A' : '-')), ['F-', 'F-', 'F-', 'F-', 'F-', 'F-', 'F-']);
+    eq('[8] f 1 (flagged once, not dropped and counted again)', fOf(rs[6], W), 1);
   }
 }
 
