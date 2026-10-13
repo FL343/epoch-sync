@@ -661,24 +661,45 @@ function noteContestParties(pending, m, now, parties) {
     + " -- their records disagree with the key's table; counted per account, nobody flagged (Q143)");
 }
 function startSeenId(r) { return pid(String(r.steamID)) + '@' + (r.d[5] | 0) + '#' + startSig(r); }
+// Q144 rework (REVIEW section 9 item 2): the seen-start ids ONE writer has across EVERY note, at most SEEN_PER_WRITER. A key
+//   kept on the shards with a fresh roster in every start (or a few accounts writing each other's keys) grew its note by 50
+//   ids a run for a day -- about 478 KB per account. A room per key would let an outside account fill an honest key's room
+//   first (the players' own starts read after the result would then be late); a room per account and key does not stop
+//   accounts that write each other's keys. The writer is the row owner, so nobody spends another account's room; an honest
+//   account has a few unsettled matches at once (a note goes when its key settles). A start past the room is not remembered:
+//   read before the result it counts exactly as before (registration, own start), read after it is late like every start
+//   its note does not hold; the note marks that one was seen (n), so the result still closes the note -- a loser who spent
+//   his room first cannot keep his after-the-result starts counting.
+const SEEN_PER_WRITER = 64;
 function screenLateStarts(starts, recs, pending, processed, now, readComplete) {
   const keyOf = (r) => r.d[3] + '_' + r.d[4] + '_' + r.d[2];
   const sg = {}, settled = new Set();
   for (const r of starts || []) if (isMatchmadeMt(r.d[2] | 0)) { const m = keyOf(r); (sg[m] = sg[m] || []).push(r); }
   for (const r of recs || []) if (isMatchmadeMt(r.d[2] | 0)) settled.add(keyOf(r));
   const late = new Set();
+  const perW = {}, over = new Set();   // Q144 rework: ids per writer across every note (SEEN_PER_WRITER)
+  for (const k of Object.keys(pending)) { const e = pending[k]; if (k.charAt(0) === '~' && e && Array.isArray(e.s)) for (const x of e.s) { const w = String(x).split('@')[0]; perW[w] = (perW[w] | 0) + 1; } }
   for (const m of new Set(Object.keys(sg).concat([...settled]))) {
     if (processed.has(m)) continue;
     const e = (sg[m] || pending['~' + m]) ? seenNote(pending, m, now) : null;
     if (!e) continue;
     // the result, read (on a complete read) in a run after a start was -- not while a registered roster is provisional: the
     //   Q118 alts register first and write a result of their own at once, and the honest starts read after it must split
-    if (!e.r && readComplete !== false && settled.has(m) && e.s.length && !(pending[m] && pending[m].prov)) e.r = now;
+    //   (Q144 rework: a start seen but not remembered, past its writer's room, counts as seen)
+    if (!e.r && readComplete !== false && settled.has(m) && (e.s.length || e.n) && !(pending[m] && pending[m].prov)) e.r = now;
     for (const r of sg[m] || []) {
       const id = startSeenId(r);
       if (e.s.indexOf(id) >= 0) continue;
-      if (!e.r) e.s.push(id); else late.add(r);
+      if (e.r) { late.add(r); continue; }
+      const w = id.split('@')[0];
+      if ((perW[w] | 0) >= SEEN_PER_WRITER) { e.n = 1; over.add(w); continue; }   // Q144 rework: past the writer's room
+      e.s.push(id); perW[w] = (perW[w] | 0) + 1;
     }
+  }
+  if (over.size) {
+    RUN.seenCapped = over.size;
+    console.log('  start-seen-room: ' + over.size + ' account(s) hold ' + SEEN_PER_WRITER + ' remembered starts across the notes -- their new starts still count until the result, '
+      + 'not remembered (Q144): ' + [...over].slice(0, 8).map((w) => w.slice(0, 8)).join(' ') + (over.size > 8 ? ' ...' : ''));
   }
   if (late.size) {
     let w = 0;
@@ -1618,6 +1639,8 @@ function writeRunSummary() {
       '| starts pending / exit-rate hits | ' + s('pending', 0) + ' / ' + s('convicted', 0) + ' |',
       '| starts-state notes / endless, friends\' room and bot entries dropped, no record of the key left on the shards (Q144) | ' + s('noteGone', 0) + ' / ' + s('entryGone', 0) + ' |',
       '| processed keys remembered / dropped past the cap (Q144) | ' + s('processedN', 0) + ' / ' + s('processedPruned', 0) + ' |',
+      '| signed solo segments remembered while their key verifies / written back after they left the processed list (Q144) | ' + s('soloDone', 0) + ' / ' + s('soloReplay', 0) + ' |',
+      '| accounts whose remembered starts across the notes are at the room (Q144) | ' + s('seenCapped', 0) + ' |',
       '| absent-seat holds (incomplete read / grace) | ' + s('absentHeld', 0) + ' |',
       '| groups waiting for a seat that started but has no result yet, until the match must be over (Q121) | ' + s('leaveWait', 0) + ' |',
       '| confessions seen/penalized/refunded | ' + s('confess', '0/0/0') + ' |',
@@ -2984,6 +3007,49 @@ function soloRunHasHeld(st, key, m, nowMs) {
   return false;
 }
 function saveSolo(st, nowMs) { pruneSolo(st, nowMs); try { writeStateFile(SOLO_FILE, JSON.stringify(st, null, 0)); } catch (e) { ghWarn('write ' + SOLO_FILE + ' failed: ' + (e && e.message)); } }
+// ---- the signed solo segments this job processed (cloud audit Q144 rework, REVIEW section 9 item 1) ----
+// pruneProcessed drops a key once it was off the shards on two complete reads -- safe for every key whose records only its
+//   own players can write together (they could as well make up a new match), but a guard-signed solo segment is the one
+//   record a modified client cannot make and its owner CAN write back: the signature still verifies, so a dropped segment
+//   key settled a second time (its resumed segments while the run's chain memory lives, the whole run after it, 45 days:
+//   XP again). st.done remembers every segment the solo lane processed after its signature and owner binding verified
+//   ({ key: [keyName, seconds] }); the lane treats a remembered key as processed. An entry goes once no table this job
+//   verifies solo records with (soloPub, soloPubRec) can verify its key any more: the key is in the table, no public half
+//   of it is usable and every held one is retired past the grace or revoked -- a segment written back then is held by the
+//   key policy (pending, never settled). A key missing from the table (a lost push), held for another channel (a label
+//   slip a table fix undoes) or still inside its grace keeps its entries. Only verified segments are remembered, so only
+//   real play (or a holder of a live signing key, who can sign new segments anyway) grows it; SOLO_DONE_CAP is a fuse.
+const SOLO_DONE_CAP = Number(process.env.SOLO_DONE_CAP || 200000);   // about 10 MB; a segment is five levels of real play
+function soloDoneNote(st, m, keyName, nowMs) { (st.done || (st.done = {}))[m] = [String(keyName || ''), Math.floor(nowMs / 1000)]; }
+function soloKeyGone(name, tables) {
+  let seen = false;
+  for (const t of tables || []) {
+    const ent = t && t[name];
+    if (!ent || !Array.isArray(ent.pubs)) continue;
+    seen = true;
+    if (ent.pubs.length) return false;
+    if (!(Array.isArray(ent.held) && ent.held.length && ent.held.every((h) => h && (h.reason === 'retired' || h.reason === 'revoked')))) return false;
+  }
+  return seen;
+}
+function pruneSoloDone(st, tables) {
+  const d = st.done;
+  if (!d || typeof d !== 'object') return { gone: 0, fuse: 0 };
+  let gone = 0, fuse = 0;
+  const byKey = {};
+  for (const m of Object.keys(d)) {
+    const name = Array.isArray(d[m]) ? String(d[m][0]) : '';
+    if (byKey[name] == null) byKey[name] = soloKeyGone(name, tables);
+    if (byKey[name]) { delete d[m]; gone++; }
+  }
+  const ks = Object.keys(d);
+  if (ks.length > SOLO_DONE_CAP) {
+    ks.sort((a, b) => ((d[a] && d[a][1]) | 0) - ((d[b] && d[b][1]) | 0));
+    for (let i = 0; i < ks.length - SOLO_DONE_CAP; i++) { delete d[ks[i]]; fuse++; }
+    ghWarn('endless-solo done ' + ks.length + ' > cap ' + SOLO_DONE_CAP + ' -- oldest ' + fuse + ' forgotten (a written-back segment of theirs would settle again); plan the move to external state storage');
+  }
+  return { gone, fuse };
+}
 function soloRunKey(p, seasonId, runSeed) { return p + '|' + (seasonId | 0) + '|' + (runSeed | 0); }
 // team run chain key: the roster SET (order-free, de-identified) + season + runSeed. A resume must bring the same people --
 //   the save row belongs to the host's guard and the lobby refuses another roster; the cron mirrors that by never finding
@@ -5085,8 +5151,18 @@ async function main() {
   };
   // a settled casual / classic token resume with no tag = a build before the fix still resuming (the lever's flip signal)
   const untaggedResume = (f) => !!((f.flags | 0) & attest.SEG_RESUMED) && !!((f.flags | 0) & (attest.SEG_CASUAL | attest.SEG_CLASSIC)) && !resumeTagsOf(f).length;
+  // Q144 rework: forget the processed segments whose key no table here verifies any more (pruneSoloDone)
+  const soloDonePruned = pruneSoloDone(soloState, [soloPub, soloPubRec]);
+  if (soloDonePruned.gone) console.log('endless-solo: ' + soloDonePruned.gone + ' processed segment(s) forgotten, their key verifies no more (retired past the grace / revoked; Q144)');
   const soloSettle = async (c) => {
     const m = c.m;
+    // Q144 rework: a signed segment this lane processed before, its key since dropped from the processed list (pruneProcessed)
+    //   and the segment written back -- back in the list, nothing else (no signal, no flag: its owner wrote his own record)
+    if (soloState.done && soloState.done[m]) {
+      processed.add(m); RUN.soloReplay = (RUN.soloReplay | 0) + 1;
+      console.log('  solo ' + m + ': ' + plog(String(c.g[0].steamID)) + ' processed before (key ' + soloState.done[m][0] + '), its key had left the processed list -- back in it, nothing settles (Q144)');
+      return false;
+    }
     // audit 2026-09-06 B-F10: a group can hold several pc=1 records under one key (a foreign same-key record beside the real
     //   guard-signed segment) -- settle the first candidate whose signature + owner binding verifies; judge the rest as before
     let r = c.g[0], sid = String(r.steamID), p = pid(sid), v = null, gate = null;
@@ -5115,6 +5191,7 @@ async function main() {
       return false;
     }
     const f = v.fields;
+    const soloDone = () => { processed.add(m); soloDoneNote(soloState, m, f.keyName, nowMs); };   // Q144 rework: a verified segment this lane processed (pruneSoloDone)
     // R1-A3-02 residual watch: another signed record under this segment key that verifies too but differs from the one settled here
     //   (the guard re-signing a segment after an ambiguous write, or a modified client that reused the session id for a replay and got
     //   both copies onto the board inside one tick -- the first verified copy settles, the other is never looked at again). Counted only.
@@ -5149,7 +5226,7 @@ async function main() {
       RUN.soloRej = (RUN.soloRej | 0) + 1;
       noteResumeRule(plan.reason, casual || classic, sid);
       ghWarn('match=' + m + ': solo segment ' + plog(sid) + ' chain REJECT (' + plan.reason + ') depth ' + f.startDepth + '->' + f.endDepth);
-      processed.add(m);
+      soloDone();
       return false;
     }
     // reroll chain (2026-09-11): bitmap bits only at askable target depths + monotone across the run's segments (causal, like the perk chain)
@@ -5158,7 +5235,7 @@ async function main() {
     if (rc) {
       RUN.soloRej = (RUN.soloRej | 0) + 1;
       ghWarn('match=' + m + ': solo segment ' + plog(sid) + ' reroll chain REJECT (' + rc + ') depth ' + f.startDepth + '->' + f.endDepth + ' rr=' + (f.rerollHi >>> 0).toString(16) + ':' + (f.rerollLo >>> 0).toString(16));
-      processed.add(m);
+      soloDone();
       return false;
     }
     // perk replay (2026-09-07): the pick log must reproduce the build (perk_forge) and extend the run's previous log (perk_chain).
@@ -5167,7 +5244,7 @@ async function main() {
     if (!pv.ok) {
       recordFlag(signals, c.g, m, nowMs); sigDirty = true; trustTouched.add(sid); RUN.perkRej = (RUN.perkRej | 0) + 1;
       ghWarn('match=' + m + ': solo segment ' + plog(sid) + ' perk REJECT (' + pv.reason + ': ' + pv.why + ') build ' + (f.build >>> 0) + ' depth ' + f.startDepth + '->' + f.endDepth);
-      processed.add(m);
+      soloDone();
       return false;
     }
     if (SEEDCAP_REJECT && seedcap && seedcap.suspects && seedcapRejectActive(seedcap.suspects[p], Math.floor(nowMs / 60000))) {
@@ -5178,7 +5255,7 @@ async function main() {
       RUN.seedcapReject = (RUN.seedcapReject | 0) + 1;
       soloAdvance(soloState, key, f, m, plan, nowMs);
       ghWarn('match=' + m + ': solo segment ' + plog(sid) + ' inside seedcap reject window -- own settlement discarded (chain advanced to ' + f.endDepth + ', no ladder/CP/XP)');
-      processed.add(m);
+      soloDone();
       return false;
     }
     const cas = casual ? casualLadderOf(1) : null;   // O218: the casual solo ladder pair (endless_board_solo + season twin)
@@ -5240,7 +5317,7 @@ async function main() {
     }
     if (xpId) creditXpEndless(c.g, { startDepth: Math.max(f.startDepth | 0, plan.proven | 0), endDepth: f.endDepth }, xp, changedXp, spSet, classic ? CLASSIC.XP_MUL : 1);   // audit B-F2: overlap credits new depth only; O216 classic x0.5
     console.log('  solo settle ' + m + ': ' + plog(sid) + (classic ? ' classic' : (casual ? ' casual' : '')) + ' depth ' + f.startDepth + '->' + f.endDepth + ' bank ' + f.score + ' flags ' + f.flags + ((f.dispCode | 0) === attest.DISP_USER_QUIT ? ' (quit)' : '') + ' key=' + f.keyName + (v.sealed ? '' : ' [dev]') + (plan.overlap != null ? ' (overlap from ' + plan.overlap + ', proven ' + plan.proven + ')' : '') + (plan.truncated ? ' (recovered pool segment: truncated chain, head ' + plan.proven + ')' : '') + (plan.revive ? (classic ? ' (revived by a classic token resume)' : ' (revived by a casual token resume)') : ''));
-    processed.add(m);
+    soloDone();
     return true;
   };
   for (const c of fresh) {
@@ -6319,6 +6396,7 @@ async function main() {
   if (groupsDirty) saveGroups(groupMem, nowMs);
   saveLeavers(leavers);
   saveStarts(startsPending);
+  RUN.soloDone = Object.keys(soloState.done || {}).length;   // Q144 rework
   saveSolo(soloState, nowMs);
   saveConfessions(confState, nowMs, confLive);
   if (sigDirty) saveSignals(signals, nowMs);
@@ -6363,3 +6441,4 @@ Object.assign(module.exports, { startSig, lateStartSplit, START_CONFIRM_MS, STAR
 Object.assign(module.exports, { testimonyOf, recTestimony, noteTestimony, endlessRosterHold, endlessTestified });   // cloud audit Q113 endless testimony
 Object.assign(module.exports, { teamLossCounted });   // cloud audit Q136 the losing team must be somebody
 Object.assign(module.exports, { contestParties, contestTable, noteContestParties, noteParties, CONTEST_PARTY_CAP, CONTEST_PARTIES, LATE_SPLIT_WHO });   // cloud audit Q143 whose records contested a matchmade key
+Object.assign(module.exports, { soloKeyGone, pruneSoloDone, soloDoneNote, SOLO_DONE_CAP, SEEN_PER_WRITER, screenLateStarts });   // cloud audit Q144 rework: processed solo segments remembered while their key verifies, a room per writer across the start-seen notes
