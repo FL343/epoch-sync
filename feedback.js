@@ -49,6 +49,7 @@ const FB_BODY_MAX = 208;                       // bytes; client enforces, we re-
 const FB_CATS = ['bug', 'idea', 'balance', 'other'];
 const FB_EPOCH0 = Date.UTC(2026, 0, 1);        // ms; tsMin = minutes since this
 const FB_VOTE_WINDOW = 30;                     // votes per rolling upload (2+30*2=62<=64)
+const FB_TS_AHEAD_MAX = 400 * 1440;            // minutes a box stamp may run ahead of the cron (decodeBoxEntry)
 const FB_LB = process.env.FB_LB || 'feedback_box';
 const FB_VOTE_LB = process.env.FB_VOTE_LB || 'feedback_vote';
 const FB_FEED_PREFIX = process.env.FB_FEED_PREFIX || 'feedback_feed';
@@ -369,6 +370,12 @@ function governItems(items, votes, mod, nowMin) {
 // ts is the author's clock: a stamp ahead of ours (wrong time zone + hand-set clock) is clamped to
 // nowMin instead of dropped, so a fast clock neither loses the item nor dates it in the future (the
 // daily cap, the hot/new order and the digest all key on item.ts). itemId keeps the author's stamp.
+// The provenance check binds itemId to sid + stamp, but itemId is an unkeyed 32-bit hash, so what keeps
+// another account's row off a chosen itemId is how few stamps one account may use: with every future
+// stamp accepted (2^31 per account), seconds of search find a stamp that lands on any given item. Stamps
+// more than FB_TS_AHEAD_MAX ahead are dropped again (400 days: a clock set a year ahead still passes),
+// which keeps the stamps per account at about a million, within a small factor of the old +1 day limit;
+// main() also never lets a row speak for an item admitted for another author (foreignBoxRow).
 function decodeBoxEntry(sid, words, nowMin) {
   if (!words || words.length < 6 || words[0] !== FB_MAGIC) return null;
   const w1 = words[1] | 0;
@@ -377,12 +384,26 @@ function decodeBoxEntry(sid, words, nowMin) {
   if (len < 1 || len > FB_BODY_MAX || words.length < 5 + ((len + 3) >> 2)) return null;
   const lang = unpackLang(words[2] | 0), itemId = words[3] | 0, ts = words[4] | 0;
   if (ts < 0) return null;                                          // before the epoch = not a real stamp
+  if (nowMin != null && ts > (nowMin | 0) + FB_TS_AHEAD_MAX) return null;   // see above
   if (fnv1a32(String(sid) + ':' + ts) !== itemId) return null;      // provenance check
   const text = sanitizeText(unpackText(words, 5, len, enc));
   if (!text) return null;
   // A tampered oversize body re-encodes past the cap -> fail closed.
   if (Buffer.byteLength(text, 'utf8') > FB_BODY_MAX * 3) return null;
   return { itemId, cat, lang, ts: nowMin == null ? ts : Math.min(ts, nowMin | 0), text };
+}
+
+// True when a box row decodes to an item the state already holds for another author. Two accounts'
+// rows can carry the same itemId (see decodeBoxEntry); taken as is, such a row becomes that item's
+// author for the feed writes: the post is shown under the other account and the real author's slot is
+// deleted (an admin release of a filtered item likewise lands under the other account). main() skips
+// the row, so an item is only ever attributed to the author it was admitted for: item.ap, the same
+// pseudonym (v.pid) as the admission. A new itemId seen twice in one run is covered too: the first row
+// admits the item before the second is read.
+function foreignBoxRow(items, sid, words, nowMin) {
+  const it = decodeBoxEntry(sid, words, nowMin);
+  const item = it && items[String(it.itemId)];
+  return !!item && item.ap !== v.pid(String(sid));
 }
 
 // Decode one voice_vote entry into [{itemId, dir, ts}] (window order kept).
@@ -616,6 +637,7 @@ async function main() {
   };
   const boxId = await findBoard(FB_LB), voteId = await findBoard(FB_VOTE_LB);
   if (!boxId) { console.log('feedback box board absent (pre-create ' + FB_LB + ', client-writable) -- skip run'); return; }
+  let foreignN = 0;                            // box rows naming an item admitted for another author (skipped)
 
   // ---- harvest submissions (admission gate: filter + daily cap) ----
   const sidByItem = {};                        // runtime only, never persisted
@@ -624,6 +646,7 @@ async function main() {
   let newItems = 0, filteredN = 0, cappedN = 0;
   for (const e of box.ents) {
     const sid = String(e.steamID);
+    if (foreignBoxRow(st.items, sid, v.decodeDetails(e.detailData), nowMin)) { foreignN++; continue; }   // an item keeps its author
     const it = decodeBoxEntry(sid, v.decodeDetails(e.detailData), nowMin);
     if (!it) continue;
     sidByItem[String(it.itemId)] = sid;
@@ -640,6 +663,8 @@ async function main() {
       newItems++; dirty = true;
     }
   }
+  if (foreignN) v.ghWarn('feedback: skipped ' + foreignN + ' box row(s) carrying the id of an item admitted for another author ' +
+    '(an id collision attempt, or STATE_SALT changed without resetting the feedback state)');
 
   // ---- harvest votes ----
   let voteEnts = 0;
@@ -766,7 +791,8 @@ async function main() {
   console.log('feedback: items+' + newItems + ' (total ' + Object.keys(st.items).length +
     ', filtered ' + (cnt.filtered || 0) + ', capped ' + (cnt.capped || 0) +
     ', held ' + (cnt.held || 0) + ', blocked ' + (cnt.blocked || 0) + '), voteEnts=' + voteEnts +
-    ', feed writes=' + writes + ' tombs=' + tombs + ' dels=' + dels + (writeFail ? ' FAILED=' + writeFail : '') + (dirty ? ' state saved' : ' no state change'));
+    ', feed writes=' + writes + ' tombs=' + tombs + ' dels=' + dels + (writeFail ? ' FAILED=' + writeFail : '') +
+    (foreignN ? ' foreignRows=' + foreignN : '') + (dirty ? ' state saved' : ' no state change'));
 }
 
 if (require.main === module) {
@@ -774,10 +800,10 @@ if (require.main === module) {
 }
 module.exports = {
   FB_MAGIC, FB_VOTE_MAGIC, FB_VER, FB_BODY_MAX, FB_CATS, FB_EPOCH0,
-  FB_VOTE_WINDOW, FB_LB, FB_VOTE_LB, FB_FEED_PREFIX, FB_FEED_CAP,
+  FB_VOTE_WINDOW, FB_LB, FB_VOTE_LB, FB_FEED_PREFIX, FB_FEED_CAP, FB_TS_AHEAD_MAX,
   FB_DAILY_CAP, FB_REPORT_HOLD, FB_WORDLIST_FILE, FB_MOD_FILE,
   feedBoardName, packLang, unpackLang, fnv1a32, unpackText, packText, sanitizeText,
-  nowTsMin, decodeBoxEntry, decodeVoteEntry, mergeVotes, tallyVotes, hotScoreOf, packFeedDetails,
+  nowTsMin, decodeBoxEntry, foreignBoxRow, decodeVoteEntry, mergeVotes, tallyVotes, hotScoreOf, packFeedDetails,
   dayOfTs, loadWordlist, adSurfaces, adReason, filterReason, countAuthorDay,
   loadMod, reportsSince, trustPenaltyOf, governItems, maybeSendDigest,
   wlHash, wlSubHit, wlWordHit, foldForWordlist, asciiJson,
