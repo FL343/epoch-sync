@@ -601,6 +601,48 @@ function applySeatGate(recs, starts, pending, processed) {
     + rs.map((r) => plog(r.steamID) + '@' + r.shard + '=' + (r.d[5] | 0) + (r.start ? 's' : '')).join(' '));
   return { out, n };
 }
+// ---- a friends' room record whose writer is not on his own seat (cloud audit Q123) ----
+// A friends' room (type 10) seats bots at empty roster entries (the game writes 0 there), and the room's records meet no
+// start roster gate while its roster is split (one outside start before the job's first look does that) or before any
+// start is read (the job saw a result first). An outside account copying the room's key and roster could then write from
+// a bot seat with its own seat left empty: its seat layout is the players' (the writer's own seat is not compared), no
+// seat is named twice, so neither the Q75 contest nor its layout hold saw it, and the job paid it the room's XP (review 4
+// of Q75/Q80: C2 copied the real scores, joined the players' group and took +44; C1 two of them wrote a result of their
+// own a minute in and settled it, the players got nothing). Every honest friends'-room record names its writer at his own
+// seat: the host builds the seat table once at launch from the lobby members (his own entry is filled since D12.4c),
+// every end writes that table, nothing re-seats inside a key (a team rematch re-seats only when every seat is named, and
+// it is a new key). So such a record counts nowhere: it is dropped before registration and grouping, like a record off
+// its registered seat, and nobody is flagged for it -- flagging its group (a sanity flag) would also mark every player
+// whose result it copied, and pause their room while it stays up. The bot-match lane and the matchmade lanes keep their
+// own checks: a bot match already requires each writer at a human seat naming himself, and a matchmade record from an
+// empty seat either collides with a player's seat or changes the seat layout (both held by the Q75 contest).
+function seatlessPrivate(r) {
+  return isPrivateMt(r.d[2] | 0) && !(r.roster && r.roster[r.d[5] | 0] != null);
+}
+// Drops, in place, every friends'-room start and settle record whose roster leaves its writer's own seat empty (records of
+// a processed key are left alone, as the seat gate leaves them). Returns { out: Map(key -> dropped records), n }.
+function dropSeatlessPrivate(recs, starts, processed) {
+  const out = new Map();
+  let n = 0;
+  const keep = (r) => {
+    if (!seatlessPrivate(r)) return true;
+    const m = r.d[3] + '_' + r.d[4] + '_' + r.d[2];
+    if (processed && processed.has(m)) return true;
+    if (!out.has(m)) out.set(m, []);
+    out.get(m).push(r);
+    n++;
+    return false;
+  };
+  for (const list of [starts, recs]) {
+    if (!list) continue;
+    let w = 0;
+    for (let i = 0; i < list.length; i++) if (keep(list[i])) list[w++] = list[i];
+    list.length = w;
+  }
+  for (const [m, rs] of out) ghWarn('match=' + m + ': ' + rs.length + " friends' room record(s) whose writer is not on his own roster seat -- not counted, nobody flagged (Q123): "
+    + rs.map((r) => plog(r.steamID) + '@' + r.shard + '=' + (r.d[5] | 0) + (r.start ? 's' : '')).join(' '));
+  return { out, n };
+}
 // readComplete === false (some record shard unread this run, R1-B2-04 / O348-7): registration (endless keys aside, Q113)
 //   and the cumulative settled exemptions still run, but no matured entry is judged -- a finisher whose only settle record sits on the unread shard
 //   would read as never-settled. The verdict waits for the next complete read (counted in `held`).
@@ -1355,6 +1397,7 @@ function writeRunSummary() {
       '| endless co-op groups held (records disagree on the roster, Q113) | ' + s('endlessHeld', 0) + ' |',
       '| start rosters split by a later start / confirmed (Q118) | ' + s('lateSplit', 0) + ' / ' + s('confirmed', 0) + ' |',
       '| settled keys with records that disagree, nobody flagged (Q114) | ' + s('lateMismatch', 0) + ' |',
+      "| friends' room records whose writer is not on his own roster seat, not counted (Q123) | " + s('seatless', 0) + ' |',
       '| campaign grants / campaign endless | ' + s('campaign', '-') + ' / ' + s('campaignEndless', '-') + ' |',
       '| page-cap hits | ' + RUN.cap + ' |',
       '| solo segments held by the key policy (other channel / retired key; new this run) | ' + s('keyHeld', 0) + ' (' + s('keyHeldNew', 0) + ') |',
@@ -3657,6 +3700,9 @@ async function main() {
   const processed = loadProcessed();
   const processedN0 = processed.size;   // grow-only set: a size change = keys added on this run (persistStartsSide)
   const startsPending = loadStarts();
+  // Q123: a friends'-room record whose writer is not on his own roster seat counts nowhere -- dropped ahead of registration
+  //   (its start votes on no roster, splits nothing) and of grouping; nobody flagged
+  RUN.seatless = dropSeatlessPrivate(recs, starts, processed).n;
   const registeredEarly = registerStartRosters(starts, processed, startsPending, Date.now(), shardsComplete);   // Q113: endless keys wait for a full read
   const seatGate = applySeatGate(recs, starts, startsPending, processed);
   RUN.offSeat = seatGate.n;
@@ -5926,5 +5972,6 @@ Object.assign(module.exports, { noteOwnStarts, hasOwnStart, OWN_START_CAP });   
 Object.assign(module.exports, { leaveConfirmHold, startRosterGaps, LEAVE_CONFIRM_MS, LEAVE_CONFIRM_MIN_MS });   // cloud audit Q121 leave confirmation
 Object.assign(module.exports, { rosterContestSeats, applyRosterContest, seatLayout, seatLayoutsDisagree });   // cloud audit Q75 one account per seat per match key (+ Q80 third review seat layout)
 Object.assign(module.exports, { registerStartRosters, startRosterSplit, rosterCanon, startRosterDisagrees, seatGateRoster, seatedOnRoster, applySeatGate });   // cloud audit Q80 seat gate
+Object.assign(module.exports, { seatlessPrivate, dropSeatlessPrivate });   // cloud audit Q123
 Object.assign(module.exports, { startSig, lateStartSplit, START_CONFIRM_MS, START_CONFIRM_MIN_MS });   // cloud audit Q118 provisional start roster
 Object.assign(module.exports, { testimonyOf, recTestimony, noteTestimony, endlessRosterHold, endlessTestified });   // cloud audit Q113 endless testimony
