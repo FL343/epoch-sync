@@ -1380,6 +1380,7 @@ function pruneSignals(s, now) {
   for (const k of Object.keys(s.pairs)) if (now - (s.pairs[k].at || 0) > SIG_PAIR_WINDOW_MS) delete s.pairs[k];
   for (const k of Object.keys(s.players)) if (now - (s.players[k].at || 0) > SIG_PLAYER_WINDOW_MS) delete s.players[k];
   for (const k of Object.keys(s.flagged)) if (now - (s.flagged[k] || 0) > SIG_PAIR_WINDOW_MS) delete s.flagged[k];
+  for (const k of Object.keys(s.flagOff || {})) if (!s.flagged[k]) delete s.flagOff[k];   // Q166: an arm goes with its flag (pruneFlagged)
   for (const k of Object.keys(s.rep || {})) if (now - (s.rep[k].at || 0) > SIG_PAIR_WINDOW_MS) delete s.rep[k];
   for (const k of Object.keys(s.rseen || {})) if (now - (s.rseen[k] || 0) > SIG_PAIR_WINDOW_MS) delete s.rseen[k];
   // Q51 lone-dissent strikes age out of their own window; the per-match verdicts live as long as a flag does
@@ -1413,6 +1414,32 @@ function recordFlag(s, g, m, now) {
   s.flagged[m] = now;
   for (const sid of new Set(g.map(r => String(r.steamID)))) sigPlayer(s, pid(sid), now).f += 1;
   return true;
+}
+// Q166 (cloud audit 2026-10): a flag stays only while its key can come back on its own. A key whose records are on the
+//   shards re-surfaces every run, so its entry must stay (dropped, every player of it would be counted again: trust tier).
+//   A shard row is overwritten, never restored, so a key none of whose records is on the shards comes back only when a
+//   writer writes it again -- counting him again then is right. Before, an entry left only after SIG_PAIR_WINDOW_MS (45
+//   days) with no cap: a rejected solo segment flags its key and leaves the shards the next run, so one account writing
+//   50 a run grew the file by about 21 MB in 45 days (five accounts past GitHub's 100 MB file limit: the state push
+//   fails, settling stops). Now an entry whose match key (an m|blank|pid flag: its match key m) was off the shards on two
+//   complete reads at least FLAG_PRUNE_WAIT_MS apart is dropped: the first such read arms it (s.flagOff), a read that
+//   finds the key again disarms it. A read that is not complete changes nothing (main also passes false while the
+//   one-shot recovery pools are configured: their rows are not covered by shardsComplete). An account holds at most one
+//   row per shard, so the flags whose keys stay on the shards are bounded by the accounts writing them. No oldest-first
+//   cap like the pairs: it would drop entries whose records are still on a shard.
+const FLAG_PRUNE_WAIT_MS = Number(process.env.FLAG_PRUNE_WAIT_MS || 3600 * 1000);
+function flagBaseKey(k) { const i = String(k).indexOf('|'); return i < 0 ? String(k) : String(k).slice(0, i); }
+function pruneFlagged(s, seen, readComplete, now) {
+  const res = { dropped: 0, armed: 0, disarmed: 0 };
+  if (!seen || !readComplete) return res;
+  const off = s.flagOff || {};
+  for (const k of Object.keys(s.flagged || {})) {
+    if (seen.has(flagBaseKey(k))) { if (off[k] != null) { delete off[k]; res.disarmed++; } continue; }
+    if (off[k] == null) { off[k] = now; res.armed++; continue; }
+    if (now - (Number(off[k]) || 0) >= FLAG_PRUNE_WAIT_MS) { delete s.flagged[k]; delete off[k]; res.dropped++; }
+  }
+  if (res.armed && !s.flagOff) s.flagOff = off;
+  return res;
 }
 function sigDay(s, now) { const d = Math.floor(now / 86400000); if (s.day.d !== d) s.day = { d, n: {} }; return s.day; }
 // ---- player reports (client-written report_box board -> directional edges; record-only) ----
@@ -4160,6 +4187,10 @@ async function main() {
   // lone-dissent pass below writes its strikes into it and decides which keys are consistent)
   const signals = loadSignals();
   let sigDirty = false;
+  // Q166: a flag whose key was off the shards on two complete reads an hour apart is dropped (pruneFlagged)
+  const prunedF = pruneFlagged(signals, seenKeys, shardsComplete && !recCfg, Date.now());
+  if (prunedF.dropped || prunedF.armed || prunedF.disarmed) sigDirty = true;
+  if (prunedF.dropped) console.log('signals: ' + prunedF.dropped + ' flag(s) of keys off the shards on two complete reads dropped, ' + Object.keys(signals.flagged).length + ' kept (Q166)');
   // trust-tier candidates seen this run (real sids; signals stay HMAC-keyed -- the only
   // place real ids persist is the trust board itself, which is the public artifact anyway)
   const trustTouched = new Set();
@@ -6561,3 +6592,4 @@ Object.assign(module.exports, { testimonyOf, recTestimony, noteTestimony, endles
 Object.assign(module.exports, { teamLossCounted });   // cloud audit Q136 the losing team must be somebody
 Object.assign(module.exports, { contestParties, contestTable, noteContestParties, noteParties, CONTEST_PARTY_CAP, CONTEST_PARTIES, LATE_SPLIT_WHO });   // cloud audit Q143 whose records contested a matchmade key
 Object.assign(module.exports, { soloKeyGone, pruneSoloDone, soloDoneNote, SOLO_DONE_CAP, SEEN_PER_WRITER, screenLateStarts });   // cloud audit Q144 rework: processed solo segments remembered while their key verifies, a room per writer across the start-seen notes
+Object.assign(module.exports, { pruneFlagged, flagBaseKey, FLAG_PRUNE_WAIT_MS });   // cloud audit Q166 a signals flag goes once its key left the shards
