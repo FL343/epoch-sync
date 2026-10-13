@@ -1,5 +1,5 @@
 'use strict';
-// Q149 (cloud audit 2026-10, found by the Q136 review): a losing seat named by the others only leaves a team match unrated.
+// Q149 (cloud audit 2026-10, found by the Q136 review): a losing seat nobody accounts for leaves a team match unrated.
 // Q136 moves no rating when nobody on the losing team counts. It still rated a team match whose losing team had a writer
 //   AND a seat named after an account that never wrote a word for the key (Q69 named-only): the named-only seat counted as
 //   a teammate who left (§7 shield), so the loser lost only the shielded share. Two accounts on opposite teams (no game
@@ -10,24 +10,42 @@
 //   unrated as Q136 does (no TrueSkill update, no points, no writer seed, no group-decay step, nobody flagged; XP / CP /
 //   career still credited), logged `named-loser` and counted in its own summary row. A named-only seat on the winning team
 //   changes nothing; FFA is not a team match.
+// Rework (review of the first draft): the made-up teammate can be left blank instead ('0' on every roster, the bot-seat
+//   form): decodeRoster skips the seat, so it is neither absent nor named-only, the first draft did not see it and the
+//   losing team lost its full share -- the grandmaster floor feeder still gave the two winners +10 a match. Now every seat
+//   of the losing team must be accounted for: a writer on it, its player convicted on his own record or excused as a Q56
+//   dissenter, or seen agreeing earlier (his record gone now). A matchmade roster only leaves a bot seat blank, and no bot
+//   match is a team match.
 // End-to-end over the REAL validate.js main() against an offline board stub (the harness of test/team-loss-side.js):
-//   [0] wiring pins: the Q149 filter (losing team, team size of the match type), the summary row
+//   [0] wiring pins: the Q149 check (every seat of the losing team, by the team size of the match type, accounted for by a
+//       writer, a leaver / excused dissenter or an agreement seen earlier), the log forms, the summary row
 //   [1] ranked 2V2, X (seat 0) and Y (seat 2) each with a made-up teammate, X's team wins -> unrated, named-loser line and
 //       row, the named seats named-only (not convicted, not seeded), nobody flagged, no group memory, XP still credited;
 //       mutant (the Q149 flip off) -> X gains, Y loses
 //   [2] ranked 3V3, three winners write, one loser writes, his two teammates made up (seats 4 / 5) -> unrated; mutant
-//       (team size 2 in the filter) -> rated
+//       (team size 2 in the check) -> rated
 //   [3] quick 2V2 as [1] -> no rating write; mutant -> rating writes
 //   [4] ranked team brawl (mode 1, the money sums decide) as [1] -> unrated; mutant -> rated
 //   [5] the floor feeder: X / Y win, Z writes the loss at 0 points, his teammate made up -> unrated; mutant -> X / Y gain
 //   [6] a named-only seat on the WINNING team (the losers both write) -> rated as before, no named-loser line; mutants (the
-//       filter on the winning team / on either team) -> unrated
+//       check on the winning team / on either team / the writers not counted) -> unrated
 //   [7] a 3V3 losing team with a writer, a player convicted on his start and a named-only seat -> unrated; control: the
 //       third loser wrote his start and left too -> rated, both leavers convicted; mutant (convicted leavers taken for
 //       named-only) -> the control unrated
 //   [8] nobody on the losing team counts (the Q136 case, the losers made up): the Q136 line, not the Q149 one; mutant
 //       (the Q149 filter run on an uncounted side) -> the Q149 line
 //   [9] ranked 4-player FFA with two named-only seats: rated as before, no named-loser line
+//   rework, a seat left blank on every roster ('0'):
+//   [10] ranked 2V2 floor feeder, seat 3 blank, three accounts write starts and results -> unrated, the line names seat 3
+//       as no account on the roster, nobody's points move, XP still credited; mutant (only named-only seats count) -> X / Y
+//       gain
+//   [11] as [10], results only (no start, so no Q130 blank-start flag either) -> unrated; mutant -> X / Y gain
+//   [12] ranked 3V3 floor feeder, seats 4 / 5 blank -> unrated; mutants (only named-only seats / team size 2) -> rated
+//   [13] ranked team brawl (the money sums decide), seat 3 blank -> unrated; mutant -> X / Y gain
+//   [14] control: a seat blank on the WINNING team, both losers write -> rated as before; mutant (the check on the winning
+//       team) -> unrated
+//   [15] a loser whose result was seen agreeing while the group waited and is gone at the settle (shard rotation), his
+//       teammate writes -> rated as before (the agreement accounts for him); mutant (agreed seats not recorded) -> unrated
 // State isolation is structural (every *_FILE var scanned and redirected, cwd = temp dir), like test/team-loss-side.js.
 const { spawnSync } = require('child_process');
 const fs = require('fs'), path = require('path'), os = require('os');
@@ -203,11 +221,17 @@ const flags = (r, sids) => JSON.stringify(sids.map(s => fOf(r, s)));
 const NOLOSER_LINE = (key) => new RegExp('no-loser ' + key + ': nobody on the losing team[^\n]*\\(Q136\\)');
 const ROW = (r, n) => new RegExp('\\| team matches with nobody on the losing team, settled without a rating move \\(Q136\\) \\| ' + n + ' \\|').test(r.summary);
 const NAMED_LINE = (key) => new RegExp('named-loser ' + key + ': seat [^\n]*named by the others only[^\n]*\\(Q149\\)');
-const NROW = (r, n) => new RegExp('\\| team matches with a losing seat named by the others only, settled without a rating move \\(Q149\\) \\| ' + n + ' \\|').test(r.summary);
+const BLANK_LINE = (key, seats) => new RegExp('named-loser ' + key + ': ' + seats.map((n) => 'seat ' + n + ' \\(no account on the roster\\)').join(', ')
+  + ' of the losing team \\(team [01]\\) -- no record, leave or agreement of his own for this match, settled without a rating move \\(Q149\\)');
+const NROW = (r, n) => new RegExp('\\| team matches with a losing seat nobody accounts for \\(named by the others only or left blank\\), settled without a rating move \\(Q149\\) \\| ' + n + ' \\|').test(r.summary);
 const firstProcessed = (rs, key) => rs.findIndex(r => processedOf(r).has(key));
 const FLIP = '    if (namedLose.length) lossSide.counted = false;\n';
-const FILTER = 'namedOnly.filter((x) => teamOfSeat(x.seat, teamSizeOfMt(matchType)) === lossSide.lose)';
-const GATE = '(lossSide && lossSide.counted) ? ' + FILTER;
+const TSZ = '      const tsz = teamSizeOfMt(matchType);\n';
+const ACC = 'const accSeats = new Set(parts.map((p) => p.seat).concat(leavers0.map((x) => x.seat), agreedSeats));';
+const LOOP = 'for (let s = 0; s < 2 * tsz; s++) if (teamOfSeat(s, tsz) === lossSide.lose && !accSeats.has(s)) namedLose.push({ seat: s, blank: !nmd.has(s) });';
+const GATE = '    if (lossSide && lossSide.counted) {\n' + TSZ;
+const AGREED = '      agreedSeats.push(x.seat);\n';
+const BLANK_OFF = LOOP.replace('!accSeats.has(s))', 'nmd.has(s) && !accSeats.has(s))');   // the first draft: named-only seats only
 function mutant(tag, from, to) {
   if (SRC.split(from).length !== 2) { bad(tag + ' mutant anchor not found exactly once'); return null; }
   const script = path.join(__dirname, '..', '.mutant-team-loss-named-' + tag + '-' + process.pid + '.js');
@@ -230,8 +254,13 @@ function keyCase(mt, h, ros, writers, winTeam, sc) {
 console.log('=== a losing seat named by the others only leaves a team match unrated (Q149) ===');
 
 // ---- [0] wiring ----
-T('[0] the Q149 filter takes the named-only seats of the losing team, by the team size of the match type', SRC.split(GATE + ' : [];').length === 2 && SRC.split(FLIP).length === 2);
-T('[0] the Q149 summary row', /team matches with a losing seat named by the others only, settled without a rating move \(Q149\) \| ' \+ s\('namedLoser', 0\)/.test(SRC));
+T('[0] the Q149 check walks every seat of the losing team, by the team size of the match type, and flips the side uncounted', SRC.split(GATE).length === 2 && SRC.split(LOOP).length === 2
+  && SRC.split(FLIP).length === 2);
+T('[0] accounted for: a writer, a leaver / excused dissenter (leavers0), an agreement seen earlier (agreedSeats)', SRC.split(ACC).length === 2 && SRC.split(AGREED).length === 2
+  && SRC.indexOf(AGREED) < SRC.indexOf(ACC) && /const agreedSeats = \[\];[^\n]*\n    const leavers0 = detectLeavers\(g\)\.filter/.test(SRC));
+T('[0] the two log forms (named by the others only / no account on the roster)', SRC.indexOf("(x.blank ? ' (no account on the roster)' : ' (named by the others only)')") > 0
+  && SRC.indexOf('-- no record, leave or agreement of his own for this match, settled without a rating move (Q149)') > 0);
+T('[0] the Q149 summary row', /team matches with a losing seat nobody accounts for \(named by the others only or left blank\), settled without a rating move \(Q149\) \| ' \+ s\('namedLoser', 0\)/.test(SRC));
 
 // ---- [1]-[4] two accounts on opposite teams, each with made-up teammates ----
 const trade = [
@@ -269,9 +298,9 @@ for (const [tag, mt, h, ros, wr, winTeam, sc, ranked] of trade) {
   const rs = timeline(c.steps);
   T('[2] ranked 3V3, one loser writes, seats 4 / 5 made up: unrated, named-loser line', allOk(rs, 5) && NAMED_LINE(c.key).test(outOf(rs)) && [P1, P2, P3, Y].every((s) => none(rs, s)),
     pts(rs, [P1, P2, P3, Y]) + ' ' + last(rs).out.slice(-600));
-  withMutant('ts2', FILTER, 'namedOnly.filter((x) => teamOfSeat(x.seat, 2) === lossSide.lose)', (script) => {
+  withMutant('ts2', TSZ, '      const tsz = 2;\n', (script) => {
     const m = timeline(c.steps, script);
-    T('[2] mutant: team size 2 in the filter (seats 4 / 5 read as team A) -> rated', allOk(m, 5) && up(m, P1) && down(m, Y), pts(m, [P1, Y]));
+    T('[2] mutant: team size 2 in the check (only seats 2 / 3 looked at, both writers) -> rated', allOk(m, 5) && up(m, P1) && down(m, Y), pts(m, [P1, Y]));
   });
 }
 
@@ -297,13 +326,17 @@ for (const [tag, mt, h, ros, wr, winTeam, sc, ranked] of trade) {
   const rs = timeline(c.steps);
   T('[6] named-only seat on the winning team, both losers write: rated as before, no named-loser / no-loser line', allOk(rs, 5) && up(rs, P1) && down(rs, P3) && down(rs, P4)
     && !/named-loser |no-loser /.test(outOf(rs)) && NROW(rs[1], 0), pts(rs, [P1, P3, P4]));
-  withMutant('winside', FILTER, 'namedOnly.filter((x) => teamOfSeat(x.seat, teamSizeOfMt(matchType)) === lossSide.win)', (script) => {
+  withMutant('winside', LOOP, LOOP.replace('=== lossSide.lose', '=== lossSide.win'), (script) => {
     const m = timeline(c.steps, script);
-    T('[6] mutant: the filter on the winning team -> unrated', allOk(m, 5) && none(m, P1) && none(m, P3), pts(m, [P1, P3, P4]));
+    T('[6] mutant: the check on the winning team -> unrated', allOk(m, 5) && none(m, P1) && none(m, P3), pts(m, [P1, P3, P4]));
   });
-  withMutant('anyside', FILTER, 'namedOnly.slice()', (script) => {
+  withMutant('anyside', LOOP, LOOP.replace('if (teamOfSeat(s, tsz) === lossSide.lose && ', 'if ('), (script) => {
     const m = timeline(c.steps, script);
-    T('[6] mutant: the filter on either team -> unrated', allOk(m, 5) && none(m, P1) && none(m, P3), pts(m, [P1, P3, P4]));
+    T('[6] mutant: the check on either team -> unrated', allOk(m, 5) && none(m, P1) && none(m, P3), pts(m, [P1, P3, P4]));
+  });
+  withMutant('writers', ACC, ACC.replace('parts.map((p) => p.seat).concat(', '[].concat('), (script) => {
+    const m = timeline(c.steps, script);
+    T('[6] mutant: the writers not counted as accounted for -> unrated', allOk(m, 5) && none(m, P1) && none(m, P3), pts(m, [P1, P3, P4]));
   });
 }
 
@@ -319,9 +352,9 @@ for (const [tag, mt, h, ros, wr, winTeam, sc, ranked] of trade) {
   const rs2 = timeline(c2.steps);
   T('[7] control: P5 and P6 both left after their start -> rated, both convicted, no named-loser line', allOk(rs2, 5) && up(rs2, P1) && down(rs2, P4)
     && leavesOf(last(rs2), P5) === 1 && leavesOf(last(rs2), P6) === 1 && !/named-loser |no-loser /.test(outOf(rs2)), pts(rs2, [P1, P4]));
-  withMutant('leavers', FILTER, 'leavers0.filter((x) => teamOfSeat(x.seat, teamSizeOfMt(matchType)) === lossSide.lose)', (script) => {
+  withMutant('leavers', ACC, ACC.replace('leavers0.map((x) => x.seat), ', ''), (script) => {
     const m = timeline(c2.steps, script);
-    T('[7] mutant: convicted leavers taken for named-only -> the control unrated', allOk(m, 5) && none(m, P1) && none(m, P4), pts(m, [P1, P4]));
+    T('[7] mutant: convicted leavers not counted as accounted for -> the control unrated', allOk(m, 5) && none(m, P1) && none(m, P4), pts(m, [P1, P4]));
   });
 }
 
@@ -332,9 +365,9 @@ for (const [tag, mt, h, ros, wr, winTeam, sc, ranked] of trade) {
   const rs = timeline(c.steps);
   T('[8] the Q136 case (both losers made up): the Q136 line and row, no Q149 line', allOk(rs, 5) && NOLOSER_LINE(c.key).test(outOf(rs)) && !/named-loser /.test(outOf(rs))
     && rs.some((r) => ROW(r, 1)) && rs.every((r) => !NROW(r, 1)) && none(rs, X) && none(rs, Y), last(rs).out.slice(-600));
-  withMutant('gate', GATE, 'lossSide ? ' + FILTER, (script) => {
+  withMutant('gate', GATE, '    if (lossSide) {\n' + TSZ, (script) => {
     const m = timeline(c.steps, script);
-    T('[8] mutant: the Q149 filter run on an uncounted side -> the Q149 line instead', allOk(m, 5) && NAMED_LINE(c.key).test(outOf(m)) && !/no-loser /.test(outOf(m)), last(m).out.slice(-600));
+    T('[8] mutant: the Q149 check run on an uncounted side -> the Q149 line instead', allOk(m, 5) && NAMED_LINE(c.key).test(outOf(m)) && !/no-loser /.test(outOf(m)), last(m).out.slice(-600));
   });
 }
 
@@ -344,6 +377,109 @@ for (const [tag, mt, h, ros, wr, winTeam, sc, ranked] of trade) {
   const S = [0, 1].map((i) => ({ sid: ros[i], d: ffaStart(h, i, ros) })), R = [0, 1].map((i) => ({ sid: ros[i], d: ffaSettle(h, i, ros) }));
   const rs = timeline([[0, S], [5 * MIN, S.concat(R)], [GRACE, S.concat(R)], [3 * HOUR, S.concat(R)]]);
   T('[9] ranked 4-player FFA with two named-only seats: one up, one down, no named-loser line', allOk(rs, 4) && up(rs, X) && down(rs, Y) && !/named-loser |no-loser /.test(outOf(rs)), pts(rs, [X, Y]));
+}
+
+// ---- rework: a seat left blank on every roster ('0', the bot-seat form) ----
+// keyBlank: as keyCase; ros carries '0' at the blank seats; startsToo = false -> results only (synthetic first sighting)
+function keyBlank(mt, h, ros, writers, winTeam, sc, startsToo) {
+  const S = startsToo === false ? [] : writers.map(([i, s]) => ({ sid: s, d: start(mt, h, i, ros) }));
+  const R = writers.map(([i, s]) => ({ sid: s, d: settle(mt, h, i, ros, winTeam, sc) }));
+  const all = S.concat(R);
+  return { key: keyOf(R[0].d), steps: [[0, S.length ? S : R], [5 * MIN, all], [GRACE, all], [LEAVE, all], [3 * HOUR, all]] };
+}
+function blankCase(tag, c, winners, loser, seats, nRuns) {
+  const rs = timeline(c.steps);
+  const at = firstProcessed(rs, c.key);
+  T(tag + ' runs exit 0', allOk(rs, nRuns || 5), last(rs).out.slice(-800));
+  T(tag + ': settled unrated, the line names the blank seat(s) as no account on the roster, counted in that run\'s summary, no Q136 line', at >= 0 && BLANK_LINE(c.key, seats).test(rs[at].out)
+    && NROW(rs[at], 1) && (outOf(rs).match(new RegExp('named-loser ' + c.key, 'g')) || []).length === 1 && !/no-loser /.test(outOf(rs)), 'processed at run ' + at + ' ' + outOf(rs).slice(-1200));
+  T(tag + ': no points and no rating write for anybody', winners.concat([loser]).every((s) => none(rs, s) && ratingOf(rs, s).length === 0), pts(rs, winners.concat([loser])));
+  T(tag + ': nobody convicted, no repeat-group memory, XP still credited', winners.concat([loser]).every((s) => leavesOf(last(rs), s) === 0 && !(last(rs).state.GROUPS_FILE || {})[v.pid(s)])
+    && winners.every((s) => xpOf(rs, s) > 0), JSON.stringify(winners.map((s) => xpOf(rs, s))));
+  return rs;
+}
+
+// ---- [10] ranked 2V2 floor feeder, seat 3 blank, starts and results ----
+LP_AT[Z] = 0;
+{
+  const c = keyBlank(6, 0xB153, [X, Y, Z, '0'], [[0, X], [1, Y], [2, Z]], 0, null);
+  blankCase('[10] ranked 2V2 floor feeder, seat 3 blank', c, [X, Y], Z, [3]);
+  withMutant('blank', LOOP, BLANK_OFF, (script) => {
+    const m = timeline(c.steps, script);
+    T('[10] mutant: only named-only seats unaccounted (the first draft) -> X / Y take the win, Z stays at the floor', allOk(m, 5) && up(m, X) && up(m, Y) && ptsIn(m, Z).every((p) => p === 0)
+      && !/named-loser /.test(outOf(m)), pts(m, [X, Y, Z]));
+  });
+}
+
+// ---- [11] as [10], results only ----
+{
+  const c = keyBlank(6, 0xB154, [X, Y, Z, '0'], [[0, X], [1, Y], [2, Z]], 0, null, false);
+  const rs = blankCase('[11] results only, seat 3 blank', c, [X, Y], Z, [3]);
+  T('[11] no start was written, so no Q130 blank-start flag', !/start-blank /.test(outOf(rs)) && [X, Y, Z].every((s) => fOf(last(rs), s) === 0), flags(last(rs), [X, Y, Z]));
+  withMutant('blank11', LOOP, BLANK_OFF, (script) => {
+    const m = timeline(c.steps, script);
+    T('[11] mutant: only named-only seats unaccounted -> X / Y take the win', allOk(m, 5) && up(m, X) && up(m, Y) && ptsIn(m, Z).every((p) => p === 0), pts(m, [X, Y, Z]));
+  });
+}
+
+// ---- [12] ranked 3V3 floor feeder, seats 4 / 5 blank ----
+{
+  const c = keyBlank(9, 0xB155, [P1, P2, P3, Z, '0', '0'], [[0, P1], [1, P2], [2, P3], [3, Z]], 0, null);
+  blankCase('[12] ranked 3V3 floor feeder, seats 4 / 5 blank', c, [P1, P2, P3], Z, [4, 5]);
+  withMutant('blank12', LOOP, BLANK_OFF, (script) => {
+    const m = timeline(c.steps, script);
+    T('[12] mutant: only named-only seats unaccounted -> the three winners take the win', allOk(m, 5) && up(m, P1) && up(m, P2) && up(m, P3), pts(m, [P1, P2, P3, Z]));
+  });
+  withMutant('ts2b', TSZ, '      const tsz = 2;\n', (script) => {
+    const m = timeline(c.steps, script);
+    T('[12] mutant: team size 2 in the check (seats 4 / 5 never looked at) -> rated', allOk(m, 5) && up(m, P1), pts(m, [P1, P2, P3, Z]));
+  });
+}
+
+// ---- [13] ranked team brawl (mode 1: the money sums decide), seat 3 blank ----
+{
+  const c = keyBlank(4, 0xB156, [X, Y, Z, '0'], [[0, X], [1, Y], [2, Z]], 0, [6100, 5200, 3100, 0]);
+  blankCase('[13] ranked team brawl, seat 3 blank', c, [X, Y], Z, [3]);
+  withMutant('blank13', LOOP, BLANK_OFF, (script) => {
+    const m = timeline(c.steps, script);
+    T('[13] mutant: only named-only seats unaccounted -> X / Y take the win', allOk(m, 5) && up(m, X) && up(m, Y), pts(m, [X, Y, Z]));
+  });
+}
+delete LP_AT[Z];
+
+// ---- [14] control: a seat blank on the WINNING team, both losers write ----
+{
+  const c = keyBlank(6, 0xB157, [P1, '0', P3, P4], [[0, P1], [2, P3], [3, P4]], 0, null);
+  const rs = timeline(c.steps);
+  const at = firstProcessed(rs, c.key);
+  T('[14] control: seat 1 blank on the winning team, both losers write: rated as before, no named-loser / no-loser line', allOk(rs, 5) && at >= 0 && up(rs, P1) && down(rs, P3) && down(rs, P4)
+    && !/named-loser |no-loser /.test(outOf(rs)) && NROW(rs[at], 0), pts(rs, [P1, P3, P4]) + ' ' + outOf(rs).slice(-900));
+  withMutant('winside14', LOOP, LOOP.replace('=== lossSide.lose', '=== lossSide.win'), (script) => {
+    const m = timeline(c.steps, script);
+    T('[14] mutant: the check on the winning team -> unrated', allOk(m, 5) && none(m, P1) && none(m, P3) && none(m, P4), pts(m, [P1, P3, P4]));
+  });
+}
+
+// ---- [15] a loser seen agreeing while the group waited, his record gone at the settle ----
+{
+  const mt = 6, RR = [P1, P2, P3, P4], h = 0xB158;
+  const S = RR.map((s, i) => ({ sid: s, d: start(mt, h, i, RR) })), R = RR.map((s, i) => ({ sid: s, d: settle(mt, h, i, RR, 0) }));
+  // P2's result is late, so the first settle look waits; P4's start and result, seen agreeing then, are gone by the next
+  //   look (his next match overwrote his shard rows); P3 (his teammate) keeps his
+  const after = S.slice(0, 3).concat(R.slice(0, 3));
+  const steps = [[0, S], [5 * MIN, S.concat([R[0], R[2], R[3]])], [GRACE - 2 * MIN, after], [GRACE, after], [3 * HOUR, after]];
+  const key = keyOf(S[0].d);
+  const rs = timeline(steps);
+  T('[15] runs exit 0', allOk(rs, 5), last(rs).out.slice(-800));
+  T('[15] the first look waits (P2\'s result missing), P4 seen agreeing then', /absent-hold /.test(rs[1].out) && !processedOf(rs[1]).has(key), rs[1].out.slice(-600));
+  T('[15] P4 gone at the settle, accounted for by the agreement: rated as before (P1 / P2 up, P3 down), P4 not convicted, no named-loser / no-loser line',
+    firstProcessed(rs, key) >= 0 && /record gone but seen agreeing earlier/.test(outOf(rs)) && up(rs, P1) && up(rs, P2) && down(rs, P3) && leavesOf(last(rs), P4) === 0
+    && !/named-loser |no-loser /.test(outOf(rs)), pts(rs, RR) + ' ' + outOf(rs).slice(-900));
+  withMutant('agreed', AGREED, '', (script) => {
+    const m = timeline(steps, script);
+    T('[15] mutant: agreed seats not recorded -> unrated (seat 3 unaccounted)', allOk(m, 5) && none(m, P1) && none(m, P2) && none(m, P3) && /named-loser [^\n]*seat 3 [^\n]*\(Q149\)/.test(outOf(m)),
+      pts(m, RR));
+  });
 }
 
 console.log(failN ? '=== FAIL -- ' + failN + ' fail (team-loss-named) ===' : '=== PASS -- 0 fail (team-loss-named) ===');
