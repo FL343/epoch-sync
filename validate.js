@@ -1669,6 +1669,7 @@ function writeRunSummary() {
       '| one-match-at-a-time deferrals | ' + s('writerPaced', 0) + ' |',
       '| absent seats named by others only, not convicted (Q69) | ' + s('unattested', 0) + ' |',
       '| team matches with nobody on the losing team, settled without a rating move (Q136) | ' + s('noLoser', 0) + ' |',
+      '| team matches with a losing seat named by the others only, settled without a rating move (Q149) | ' + s('namedLoser', 0) + ' |',
       '| match keys with two accounts on one seat or two seat layouts, not settled (Q75) | ' + s('contested', 0) + ' |',
       '| records off their start-roster seat, not counted / start keys with a seat claimed twice / start rosters the voters split, no seat gate (Q80) | ' + s('offSeat', 0) + ' / ' + s('disputed', 0) + ' / ' + s('split', 0) + ' |',
       '| endless co-op groups held (records disagree on the roster, Q113) | ' + s('endlessHeld', 0) + ' |',
@@ -5928,8 +5929,28 @@ async function main() {
     //   landed, no confession; or every loser's record seen agreeing and rotated off while the group waited) settles unrated
     //   for the winners.
     const lossSide = (!PT_MODE && isTeamMt(matchType)) ? teamLossCounted(matchType, scores, t2Win, parts.map((p) => p.seat), leavers0.filter((x) => !t2ex.has(pid(String(x.steamID)))).map((x) => x.seat)) : null;
+    // Q149 (cloud audit, review of Q136): a losing seat named by the others only (Q69 namedOnly: no start, result or
+    //   confession of his own for the key) leaves the losing team uncounted too, even when a teammate of his wrote the loss.
+    //   Two accounts on opposite teams (no game launched), each with a made-up teammate, traded wins: the winner took the
+    //   full team win, the loser lost only the shielded share (his named-only teammate counts as a teammate who left, §7),
+    //   so both climbed every two matches, without end at the zero-sum top (grandmaster: +10 / -0); a third account on the
+    //   losing team, his teammate made up, paid nothing at the points floor while the two winners took a win each match.
+    //   The match settles as Q136 does: no TrueSkill update, no points, no writer seed, no group-decay step, nobody
+    //   flagged; XP / CP / career as above. The §7 shield of a named-only seat (teamLpPlan below) can no longer act: a
+    //   shield only softens a loss, and a named-only seat on the losing team leaves nobody rated. A named-only seat on the
+    //   winning team changes nothing.
+    //   Cost: an honest team match where a losing player dropped before the level-1 start landed and wrote no confession
+    //   settles unrated for everybody (the winners do not gain, his teammates do not lose -- a remake); a loser running a
+    //   modified client that writes nothing can unrate a lost match for the winners (it spares his teammates the shielded
+    //   loss, at most a couple of points, and he is never rated himself).
+    const namedLose = (lossSide && lossSide.counted) ? namedOnly.filter((x) => teamOfSeat(x.seat, teamSizeOfMt(matchType)) === lossSide.lose) : [];
+    if (namedLose.length) lossSide.counted = false;
     const noRating = !!(lossSide && !lossSide.counted);
-    if (noRating) {
+    if (noRating && namedLose.length) {
+      RUN.namedLoser = (RUN.namedLoser | 0) + 1;
+      console.log('  named-loser ' + c.m + ': seat ' + namedLose.map((x) => x.seat).join(' / ') + ' of the losing team (team ' + lossSide.lose
+        + ') named by the others only, never wrote his own record for this match -- settled without a rating move (Q149)');
+    } else if (noRating) {
       RUN.noLoser = (RUN.noLoser | 0) + 1;
       console.log('  no-loser ' + c.m + ': nobody on the losing team (team ' + lossSide.lose + ') wrote a record of his own or was convicted, '
         + parts.length + ' writers all on team ' + lossSide.win + ' -- settled without a rating move (Q136)');

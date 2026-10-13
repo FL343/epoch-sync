@@ -16,12 +16,15 @@
 //   [2] ranked 3V3: three writers on one team, three named-only seats -> the same; mutant -> all three take the win
 //   [3] quick 2V2: the same, no rating write; mutant -> rating writes
 //   [4] ranked team brawl (mode 1): the writers on the team the money sums make the winner -> the same; mutant -> the win
-//   [5] counted: (a) honest 2V2 all four write; (b) one writer per team, the teammates named-only; (c) one loser writes, the
-//       other named-only; (d) both losers wrote their start and left (no result, no confession) -> convicted once the match
-//       must be over, the winners rated; (e) one loser confessed, the other named-only -> the winners rated
+//   [5] counted: (a) honest 2V2 all four write; (b) one writer per team, the teammates wrote their start and left; (c) one
+//       loser writes, the other wrote his start and left; (d) both losers wrote their start and left (no result, no
+//       confession) -> convicted once the match must be over, the winners rated; (e) one loser confessed, the other wrote
+//       his start and left -> the winners rated. (Before Q149 (b) / (c) / (e) had the other seat named-only; a named-only
+//       losing seat now leaves the match unrated -- test/team-loss-named.js.)
 //   [6] not counted: (a) every loser's result seen agreeing while the group waited, then gone (the cost case) -> unrated;
 //       (b) a third account writes the loss while the group waits for a named-only seat, then withdraws it -> unrated;
-//       mutant (agreed seats counted) -> the winners take the win in both
+//       mutant (agreed seats counted) -> the winners take the win in (a); (b) is held by Q149 instead (its seat 3 is
+//       named-only on the losing team), logged as such
 //   [7] ranked 4-player FFA with two named-only seats: rated as before (one up, one down), no Q136 line
 //   [8] writers with no points row yet (first settle this season): the made-up key seeds nobody; control: an honest
 //       2V2 of four such accounts seeds and rates all four
@@ -283,21 +286,22 @@ for (const [tag, mt, h, wr, ros, winTeam, sc] of madeUp) {
     T('[5a] honest 2V2: the winners gain, the losers lose, no Q136 line', allOk(rs, 4) && up(rs, P1) && up(rs, P2) && down(rs, P3) && down(rs, P4) && !/no-loser /.test(outOf(rs)) && ROW(rs[1], 0),
       pts(rs, RR));
   }
-  // (b) one writer per team, the teammates named-only
+  // (b) one writer per team, the teammates wrote their start and left
   {
-    const h = 0xC137, ros = [X, G[0], Y, G[1]];
-    const S = [{ sid: X, d: start(mt, h, 0, ros) }, { sid: Y, d: start(mt, h, 2, ros) }];
+    const h = 0xC137, ros = [X, P5, Y, P6];
+    const S = [0, 1, 2, 3].map((i) => ({ sid: ros[i], d: start(mt, h, i, ros) }));
     const R = [{ sid: X, d: settle(mt, h, 0, ros, 0) }, { sid: Y, d: settle(mt, h, 2, ros, 0) }];
-    const rs = timeline([[0, S], [5 * MIN, S.concat(R)], [GRACE, S.concat(R)], [3 * HOUR, S.concat(R)]]);
-    T('[5b] one writer per team: the winner gains, the loser loses (shielded), no Q136 line', allOk(rs, 4) && up(rs, X) && down(rs, Y) && !/no-loser /.test(outOf(rs)), pts(rs, [X, Y]));
+    const rs = timeline([[0, S], [5 * MIN, S.concat(R)], [GRACE, S.concat(R)], [LEAVE, S.concat(R)], [3 * HOUR, S.concat(R)]]);
+    T('[5b] one writer per team, the teammates left after their start: the winner gains, the loser loses (shielded), no Q136 line', allOk(rs, 5) && up(rs, X) && down(rs, Y)
+      && !/no-loser /.test(outOf(rs)) && leavesOf(last(rs), P6) === 1, pts(rs, [X, Y]));
   }
-  // (c) one loser writes, the other is named-only
+  // (c) one loser writes, the other wrote his start and left
   {
-    const h = 0xC138, ros = [P1, P2, P3, G[0]];
-    const S = [0, 1, 2].map((i) => ({ sid: ros[i], d: start(mt, h, i, ros) })), R = [0, 1, 2].map((i) => ({ sid: ros[i], d: settle(mt, h, i, ros, 0) }));
-    const rs = timeline([[0, S], [5 * MIN, S.concat(R)], [GRACE, S.concat(R)], [3 * HOUR, S.concat(R)]]);
-    T('[5c] one loser writes: the winners gain, he loses, no Q136 line', allOk(rs, 4) && up(rs, P1) && up(rs, P2) && down(rs, P3) && none(rs, G[0]) && !/no-loser /.test(outOf(rs)),
-      pts(rs, ros));
+    const h = 0xC138, ros = [P1, P2, P3, P4];
+    const S = [0, 1, 2, 3].map((i) => ({ sid: ros[i], d: start(mt, h, i, ros) })), R = [0, 1, 2].map((i) => ({ sid: ros[i], d: settle(mt, h, i, ros, 0) }));
+    const rs = timeline([[0, S], [5 * MIN, S.concat(R)], [GRACE, S.concat(R)], [LEAVE, S.concat(R)], [3 * HOUR, S.concat(R)]]);
+    T('[5c] one loser writes, the other left after his start: the winners gain, he loses, no Q136 line', allOk(rs, 5) && up(rs, P1) && up(rs, P2) && down(rs, P3)
+      && leavesOf(last(rs), P4) === 1 && !/no-loser /.test(outOf(rs)), pts(rs, ros));
   }
   // (d) both losers wrote their start and left (no result, no confession)
   {
@@ -307,14 +311,14 @@ for (const [tag, mt, h, wr, ros, winTeam, sc] of madeUp) {
       allOk(rs, 5) && up(rs, P1) && up(rs, P2) && leavesOf(last(rs), P3) === 1 && leavesOf(last(rs), P4) === 1 && !/no-loser /.test(outOf(rs)),
       pts(rs, RR) + ' leaves ' + JSON.stringify([P3, P4].map((s) => leavesOf(last(rs), s))));
   }
-  // (e) one loser confessed (his own word that he left), the other is named-only
+  // (e) one loser confessed (his own word that he left), the other wrote his start and left
   {
-    const h = 0xC13A, ros = [P1, P2, P3, G[0]];
-    const S = [0, 1, 2].map((i) => ({ sid: ros[i], d: start(mt, h, i, ros) })), R = [0, 1].map((i) => ({ sid: ros[i], d: settle(mt, h, i, ros, 0) }));
+    const h = 0xC13A, ros = [P1, P2, P3, P4];
+    const S = [0, 1, 2, 3].map((i) => ({ sid: ros[i], d: start(mt, h, i, ros) })), R = [0, 1].map((i) => ({ sid: ros[i], d: settle(mt, h, i, ros, 0) }));
     const C = [{ sid: P3, d: confess(mt, h, 2, ros) }];
     const all = S.concat(R, C);
-    const rs = timeline([[0, S], [5 * MIN, all], [GRACE, all], [3 * HOUR, all]]);
-    T('[5e] one loser confessed: the winners gain, no Q136 line', allOk(rs, 4) && up(rs, P1) && up(rs, P2) && !/no-loser /.test(outOf(rs)), pts(rs, ros));
+    const rs = timeline([[0, S], [5 * MIN, all], [GRACE, all], [LEAVE, all], [3 * HOUR, all]]);
+    T('[5e] one loser confessed, the other left after his start: the winners gain, no Q136 line', allOk(rs, 5) && up(rs, P1) && up(rs, P2) && !/no-loser /.test(outOf(rs)), pts(rs, ros));
   }
 }
 
@@ -343,7 +347,8 @@ for (const [tag, mt, h, wr, ros, winTeam, sc] of madeUp) {
     && leavesOf(last(rsB), Z) === 0 && [X, Y, Z].every((s) => fOf(last(rsB), s) === 0), pts(rsB, [X, Y, Z]) + ' ' + flags(last(rsB), [X, Y, Z]));
   withMutant('agreed', CALL_AT, AGREED_IN, (script) => {
     const mA = timeline(stepsA, script), mB = timeline(stepsB, script);
-    T('[6] mutant: seats seen agreeing counted -> the winners take the win in both', allOk(mA, 5) && allOk(mB, 4) && up(mA, P1) && up(mA, P2) && up(mB, X) && up(mB, Y),
+    T('[6] mutant: seats seen agreeing counted -> the winners take the win in (a); (b) held by Q149 (named-loser line, no Q136 line)',
+      allOk(mA, 5) && allOk(mB, 4) && up(mA, P1) && up(mA, P2) && none(mB, X) && none(mB, Y) && /named-loser [^\n]*\(Q149\)/.test(outOf(mB)) && !/no-loser /.test(outOf(mB)),
       pts(mA, [P1, P2]) + ' ' + pts(mB, [X, Y]));
   });
 }
@@ -390,7 +395,7 @@ for (const [tag, mt, h, wr, ros, winTeam, sc] of madeUp) {
 //   excused. (a) P5 wrote no start and his refusal is gone by the settle (withdrawn): named by the others only (Q69, not
 //   convicted), P6 excused (never convicted) -- nobody on the losing team pays -> settled unrated. (b) control: P5's
 //   refusal still up at the settle -> he is convicted, the winners are rated against the losers' pre-match ratings (Q56).
-//   mutant: excused dissenters counted -> (a) rates the winners
+//   mutant: excused dissenters counted -> (a) is held by Q149 instead (P5 is named-only on the losing team), logged as such
 if (HAS_Q56) {
   const mt = 6, RR = [X, Y, P5, P6];
   const prior = { SIGNALS_FILE: { players: {}, flagged: {}, t2ld: { [v.pid(P5)]: [{ m: 'earlier', t: Date.now() - 86400000, h: v.pid(G[4]), o: 1, x: [v.pid(G[4]), v.pid(G[5])] }] } } };
@@ -418,7 +423,8 @@ if (HAS_Q56) {
     && /whole team 1 absent -> rated against its 2 pre-match rating/.test(outOf(rb)), pts(rb, RR) + ' ' + outOf(rb).slice(-900));
   withMutant('excused', CALL_AT, EXCUSED_IN, (script) => {
     const m = timeline(a.steps, script, prior);
-    T('[10] mutant: excused dissenters counted -> the winners take the win in (a)', allOk(m, 4) && up(m, X) && up(m, Y), pts(m, [X, Y]));
+    T('[10] mutant: excused dissenters counted -> (a) held by Q149 (named-loser line, no Q136 line), the winners still unrated',
+      allOk(m, 4) && none(m, X) && none(m, Y) && /named-loser [^\n]*\(Q149\)/.test(outOf(m)) && !/no-loser /.test(outOf(m)), pts(m, [X, Y]) + ' ' + outOf(m).slice(-600));
   });
 } else console.log('  skip  [10] this tree has no Q56 team dissent');
 
