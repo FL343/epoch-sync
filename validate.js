@@ -6056,19 +6056,30 @@ async function main() {
       RUN.namedLoser = (RUN.namedLoser | 0) + 1;
       console.log('  named-loser ' + c.m + ': ' + namedLose.map((x) => 'seat ' + x.seat + (x.blank ? ' (no account on the roster)' : ' (named by the others only)')).join(', ')
         + ' of the losing team (team ' + lossSide.lose + ') -- no record, leave or agreement of his own for this match, settled without a rating move (Q149)');
-      // Q161 (cloud audit, found doing Q149): cron cannot tell a loser who dropped before the level-1 start (an honest remake)
-      //   from a modified client that writes nothing for the key on purpose -- each of its losses unrates the match: the
-      //   winners gain nothing, its teammates lose nothing. And "he is never rated himself" (Q149 above) holds for the lost
-      //   match only: the same client can write its wins (rated as any win) and nothing for its losses, so it counts only
-      //   its wins. Counted only, on the seat's account: `nl` = such matches, `nlo` = the different accounts that wrote the
-      //   win against him (up to NL_OPP_CAP), next to `tw` / `tl` = the team results he wrote himself (counted above).
-      //   Only an account that already has signals of its own is counted (he wrote records this cron kept): any account can
-      //   name anybody on a made-up losing team, and a new entry per made-up name would grow the signals file without end;
-      //   the count does not refresh the entry (it ages out SIG_PLAYER_WINDOW_MS after his own last record). `nl` alone can
-      //   be pumped onto an account that has signals; `nlo` cannot without as many accounts that own the game. A count with
-      //   NL_REPEAT or more of both is logged `repeated`; with more of his team losses unwritten than written (nl > tl: a
-      //   client that writes its wins only) also `more losses unwritten than written`; both counted in the summary.
-      //   Nobody is flagged, the settle is as above.
+    } else if (noRating) {
+      RUN.noLoser = (RUN.noLoser | 0) + 1;
+      console.log('  no-loser ' + c.m + ': nobody on the losing team (team ' + lossSide.lose + ') wrote a record of his own or was convicted, '
+        + parts.length + ' writers all on team ' + lossSide.win + ' -- settled without a rating move (Q136)');
+    }
+    // Q161 (cloud audit, found doing Q149; rework after its review: the Q136 path too): cron cannot tell a loser who
+    //   dropped before the level-1 start (an honest remake) from a modified client that writes nothing for the key on
+    //   purpose -- each of its losses unrates the match: the winners gain nothing, its teammates lose nothing. And "he is
+    //   never rated himself" (Q149 above) holds for the lost match only: the same client can write its wins (rated as any
+    //   win) and nothing for its losses, so it counts only its wins. Two such clients on one team (or one player on two
+    //   accounts) leave nobody writing on the losing team: that match takes the Q136 branch (no-loser) instead of the
+    //   Q149 one, and is counted the same way (the first draft counted the Q149 branch only; review D: two accounts, +63
+    //   each over six matches, nothing counted). Counted only, on each named-only losing seat's account: `nl` = such
+    //   matches, `nlo` = the different accounts that wrote the win against him (up to NL_OPP_CAP), next to `tw` / `tl` =
+    //   the team results he wrote himself (counted above). Only an account that already has signals of its own is
+    //   counted (he wrote records this cron kept): any account can name anybody on a made-up losing team, and a new entry
+    //   per made-up name would grow the signals file without end; the count does not refresh the entry (it ages out
+    //   SIG_PLAYER_WINDOW_MS after his own last record). `nl` alone can be pumped onto an account that has signals; `nlo`
+    //   cannot without as many accounts that own the game (three are enough on either branch: on the Q136 one every
+    //   winning writer is an opponent, but a repeated count still needs NL_REPEAT different ones). A count with NL_REPEAT
+    //   or more of both is logged `repeated`; with more of his team losses unwritten than written (nl > tl: a client that
+    //   writes its wins only) also `more losses unwritten than written`; both counted in the summary. Nobody is flagged,
+    //   the settle is as above (Q149 / Q136).
+    if (noRating) {
       const tszL = teamSizeOfMt(matchType);
       const nlOpp = parts.filter((p) => teamOfSeat(p.seat, tszL) === lossSide.win).map((p) => pid(String(p.steamID)));
       for (const x of namedOnly) {
@@ -6089,10 +6100,6 @@ async function main() {
           + o.length + (o.length >= NL_OPP_CAP ? '+' : '') + ' different opponent(s), team results he wrote ' + (h.tw | 0) + ' won / ' + (h.tl | 0) + ' lost'
           + (rep ? ', repeated' : '') + (unw ? ', more losses unwritten than written' : '') + '; counted, nobody flagged (Q161)');
       }
-    } else if (noRating) {
-      RUN.noLoser = (RUN.noLoser | 0) + 1;
-      console.log('  no-loser ' + c.m + ': nobody on the losing team (team ' + lossSide.lose + ') wrote a record of his own or was convicted, '
-        + parts.length + ' writers all on team ' + lossSide.win + ' -- settled without a rating move (Q136)');
     }
     // ===== playtest channel: no rating/points surface (lock layer 3) -- the TrueSkill update,
     // placement seeding, group-decay memory and every points write are skipped wholesale, so

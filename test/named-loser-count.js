@@ -13,8 +13,8 @@
 //   settle itself is Q149's.
 // End-to-end over the REAL validate.js main() against an offline board stub (the harness of test/team-loss-named.js).
 //   Every case starts from one carried state (the prior): M and V wrote a won 2V2, H wrote three lost ones.
-//   [0] wiring pins: the written-results count before the Q149 branch; the count in it after its line, the no-signals
-//       lookup; the constants; the summary row
+//   [0] wiring pins: the written-results count before the Q149 branch; the count after both unrated branches (Q149 and
+//       Q136), the no-signals lookup; the constants; the summary row
 //   [p] the prior: tw / tl counted for the writers of rated team matches; mutant (tl not counted) -> H tl 0
 //   [1] ranked 2V2, M (seat 3) named by the others only, his teammate P writes the loss, O1 / O2 write the win -> unrated
 //       (Q149), M's nl 1 and nlo [O1, O2], his entry not refreshed, the account line, nobody flagged, the writers' tw / tl;
@@ -32,6 +32,13 @@
 //       nothing, no tw / tl either
 //   [7] H, who wrote three lost team matches, named-only in three more against three pairs -> `repeated` but nl 3 not over
 //       tl 3: no `more losses unwritten than written`, the row 3 / 1 / 0 / 0; mutant (tl ignored) -> marked
+//   [8] rework (review D): M and V, both with signals, on the losing team of three matches, both named by the others
+//       only, nobody on their team writing -> the Q136 branch (no-loser), not the Q149 one; both counted: nl 3, nlo 6,
+//       the third line repeated and more losses unwritten than written, the row 6 / 2 / 2 / 0, unrated, nobody flagged;
+//       mutant (the count on the Q149 branch only, the first draft) -> nothing counted
+//   [9] rework: the Q136 branch in a ranked 3V3 -- three accounts writing the win, V and two made-up names on the
+//       losing team, three matches: V nl 3, nlo 3 (three accounts are enough, the same as on the Q149 branch), the
+//       made-up names not counted and given no entry (the row 3 / 1 / 1 / 6)
 // State isolation is structural (every *_FILE var scanned and redirected, cwd = temp dir), like test/team-loss-side.js.
 const { spawnSync } = require('child_process');
 const fs = require('fs'), path = require('path'), os = require('os');
@@ -244,6 +251,7 @@ const LOOKUP = "        const h = signals.players[pid(String(x.steamID))];\n    
 const TWTL = "        if (t === lossSide.win) h.tw = (h.tw | 0) + 1; else if (t === lossSide.lose) h.tl = (h.tl | 0) + 1;\n";
 const Q149_IF = "    if (noRating && namedLose.length) {\n";
 const Q149_LOG = "        + ' of the losing team (team ' + lossSide.lose + ') -- no record, leave or agreement of his own for this match, settled without a rating move (Q149)');\n";
+const BOTH = "    if (noRating) {\n      const tszL = teamSizeOfMt(matchType);\n";   // rework: the count runs on both unrated branches
 function keysCase(cases) {
   const S = [], A = [], keys = [];
   for (const [mt, h, ros, writers, winTeam] of cases) {
@@ -261,8 +269,9 @@ console.log('=== a named-only seat on the losing team is counted on its account 
 // ---- [0] wiring ----
 {
   const iTw = SRC.indexOf(TWTL), iIf = SRC.indexOf(Q149_IF), iLog = SRC.indexOf(Q149_LOG), iLook = SRC.indexOf(LOOKUP), iCount = SRC.indexOf(COUNT), iElse = SRC.indexOf('    } else if (noRating) {\n      RUN.noLoser');
-  T('[0] the written team results counted before the Q149 branch; in it, after its line: the lookup, then the count, before the Q136 branch',
-    [TWTL, Q149_IF, LOOKUP, COUNT].every((a) => SRC.split(a).length === 2) && iTw > 0 && iTw < iIf && iIf < iLog && iLog < iLook && iLook < iCount && iCount < iElse);
+  const iBoth = SRC.indexOf(BOTH);
+  T('[0] the written team results counted before the Q149 branch; after both unrated branches (Q149, then Q136): the lookup, then the count',
+    [TWTL, Q149_IF, LOOKUP, COUNT, BOTH].every((a) => SRC.split(a).length === 2) && iTw > 0 && iTw < iIf && iIf < iLog && iLog < iElse && iElse < iBoth && iBoth < iLook && iLook < iCount);
   T('[0] only the losing team\'s named-only seats, the opponents kept up to the cap, repeated on both, the unwritten mark on tl',
     [LOSE, OPP, REP, UNW].every((a) => SRC.split(a).length === 2) && v.NL_OPP_CAP === 8 && v.NL_REPEAT === 3);
   T('[0] the Q161 summary row', /named-only losing seats counted on their account \/ of them repeated: ' \+ NL_REPEAT \+ ' or more such matches and different opponents \/ of those more losses unwritten than written \/ not counted, no signals of his own \(Q161, nobody flagged\) \| ' \+ s\('nlSeat', 0\) \+ ' \/ ' \+ s\('nlRepeat', 0\) \+ ' \/ ' \+ s\('nlUnwritten', 0\) \+ ' \/ ' \+ s\('nlNone', 0\)/.test(SRC));
@@ -401,6 +410,40 @@ const atOf = (sid) => F0.SIGNALS_FILE.players[v.pid(sid)].at;
     const m = from(c, script);
     T('[7] mutant: tl ignored -> marked', allOk(m, 5) && /more losses unwritten than written/.test(q161Lines(m)) && ROWS(m, [3, 1, 1, 0]), q161Lines(m));
   });
+}
+
+// ---- [8] rework (review D): two named-only losers with signals, nobody on their team writing: the Q136 branch counts too ----
+{
+  const c = keysCase([0, 1, 2].map((k) => [6, 0xB180 + k, [O[2 * k], O[2 * k + 1], M, V], [[0, O[2 * k]], [1, O[2 * k + 1]]], 0]));
+  const rs = from(c), r = last(rs);
+  T('[8] runs exit 0, all three unrated by the Q136 branch (no-loser), not the Q149 one', allOk(rs, 5) && c.keys.every((k) => processedOf(r).has(k))
+    && (outOf(rs).match(/no-loser [^\n]*\(Q136\)/g) || []).length === 3 && !/named-loser [0-9]/.test(outOf(rs))
+    && [M, V].concat(O.slice(0, 6)).every((s) => none(rs, s)), r.out.slice(-800));
+  const m = nlOf(r, M), vv = nlOf(r, V);
+  T('[8] M and V: nl 3, nlo the six winners, tw / tl 1 / 0, entries not refreshed', [[m, M], [vv, V]].every(([n, sid]) => n.nl === 3 && (n.nlo || []).length === 6
+    && n.tw === 1 && !n.tl && n.at === atOf(sid)), JSON.stringify([m, vv]));
+  T('[8] the third line of each repeated and more losses unwritten than written; the row 6 / 2 / 2 / 0',
+    [M, V].every((sid) => COUNT_LINE('[0-9_]+', sid, 3, 6, 1, 0, true, true).test(outOf(rs))) && ROWS(rs, [6, 2, 2, 0]), q161Lines(rs) + ' ' + JSON.stringify(rowSum(rs)));
+  T('[8] nobody flagged, nobody convicted; the winners tw 1', [M, V].concat(O.slice(0, 6)).every((s) => fOf(r, s) === 0) && leavesOf(r, M) === 0 && leavesOf(r, V) === 0
+    && O.slice(0, 6).every((s) => nlOf(r, s).tw === 1 && !nlOf(r, s).nl), flags(r, [M, V]));
+  withMutant('q149only', BOTH, "    if (noRating && namedLose.length) {\n      const tszL = teamSizeOfMt(matchType);\n", (script) => {
+    const mm = from(c, script);
+    T('[8] mutant: counted on the Q149 branch only (the first draft) -> nothing counted', allOk(mm, 5) && !nlOf(last(mm), M).nl && !nlOf(last(mm), V).nl && ROWS(mm, [0, 0, 0, 0]),
+      JSON.stringify([nlOf(last(mm), M), nlOf(last(mm), V)]));
+  });
+}
+
+// ---- [9] rework: the Q136 branch in a ranked 3V3, three writing accounts frame V; made-up names get nothing ----
+{
+  const c = keysCase([0, 1, 2].map((k) => [9, 0xB184 + k, [X, Y, Z, V, G[2 * k], G[2 * k + 1]], [[0, X], [1, Y], [2, Z]], 0]));
+  const rs = from(c), r = last(rs);
+  const n = nlOf(r, V);
+  T('[9] runs exit 0, all three unrated by the Q136 branch', allOk(rs, 5) && c.keys.every((k) => processedOf(r).has(k))
+    && (outOf(rs).match(/no-loser [^\n]*\(Q136\)/g) || []).length === 3 && [X, Y, Z, V].every((s) => none(rs, s)), r.out.slice(-800));
+  T('[9] V: nl 3, nlo 3 (X, Y, Z), repeated and more losses unwritten than written on the third', n.nl === 3 && (n.nlo || []).length === 3
+    && COUNT_LINE('[0-9_]+', V, 3, 3, 1, 0, true, true).test(outOf(rs)), JSON.stringify(n) + ' ' + q161Lines(rs));
+  T('[9] the six made-up names: not counted, no entry; the row 3 / 1 / 1 / 6', G.every((s) => !hasEntry(r, s)) && ROWS(rs, [3, 1, 1, 6]), JSON.stringify(rowSum(rs)));
+  T('[9] nobody flagged', [X, Y, Z, V].every((s) => fOf(r, s) === 0));
 }
 
 console.log(failN ? '=== FAIL -- ' + failN + ' fail (named-loser-count) ===' : '=== PASS -- 0 fail (named-loser-count) ===');
