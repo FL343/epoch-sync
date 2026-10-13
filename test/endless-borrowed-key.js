@@ -38,6 +38,9 @@
 //   [6] mutation self-checks (gate excludes endless again / no endless split check / a tied key registers nothing /
 //       hold removed / remembered word not checked / this run's starts not checked / own word not required / testimony not
 //       remembered / endless keys register on a partial read / endless keys flagged by the seat gate again)
+//   [7] Q128 (REVIEW-2 of Q113, A5 / A5b): an outside settle that disagrees on an endless key without a seat gate (split at
+//       registration, split by a later start inside the provisional window, never registered) flags nobody; control: a gated
+//       key whose own players disagree still flags both; wiring; mutant (the endless skip removed -> V and W flagged again)
 // State isolation is structural (every *_FILE var scanned and redirected, cwd = temp dir), like test/endless-own-record.js.
 const { spawnSync } = require('child_process');
 const fs = require('fs'), path = require('path'), os = require('os');
@@ -649,6 +652,65 @@ console.log('-- [6] mutation self-checks --');
     try {
       fs.writeFileSync(script, SRC.replace(from, to));
       T('[6] ' + label + ' -> the scenario goes red', check(script));
+    } finally { try { fs.unlinkSync(script); } catch (e) {} }
+  }
+}
+
+// ---- [7] Q128: an endless key without a seat gate -- records that disagree flag nobody ----
+// REVIEW-2 of Q113, A5 / A5b: an outside account X copies the key of V and W's two-player run into a start naming [V, X]
+//   (the roster splits: no seat gate), then writes a settle of his own whose scores do not match theirs. The group turned
+//   inconsistent and V and W were flagged once each (the run does not settle while his record stays). Now nobody is
+//   flagged on an endless key the gate does not cover; on a gated key a player's own disagreeing result still flags both.
+const xSettle = (h, ros, seat, sc) => { const d = settle7(h, seat, ros, 0, { endDepth: 3 }); d[10 + seat] = sc; return d; };
+function ungatedA5(script, late) {
+  const [V, W, X] = R4(700), h = late ? 0x1702 : 0x1701, S = starts(h, [V, W]);
+  const PX = [{ sid: X, d: start7(h, 1, [V, X]) }];
+  const F = settles(h, [V, W], 0, null, { endDepth: 3 }).concat([{ sid: X, d: xSettle(h, [V, X], 1, 999) }]);
+  // A5: X's start is read with theirs (split at registration); A5b: a run later, inside the provisional window (Q118)
+  const steps = late ? [S, S.concat(PX), S.concat(PX, F), S.concat(PX, F), S.concat(PX, F)] : [S.concat(PX), S.concat(PX, F), S.concat(PX, F), S.concat(PX, F)];
+  const p = timeline(steps, [V, W], { script, gaps: late ? [0, 4 * 60000] : null });
+  return { p, V, W, X, h };
+}
+const seatGateRosterOf = (p, h) => v.seatGateRoster(pendOf(p.last, h));
+const ungatedN = (p) => sumOf(p, /\| endless keys without a seat gate whose records disagree, nobody flagged \(Q128\) \| ([0-9]+) \|/);
+for (const late of [false, true]) {
+  const tag = late ? '[7] A5b' : '[7] A5';
+  const { p, V, W, X, h } = ungatedA5(null, late);
+  T(tag + ' all runs exit 0; the roster split ' + (late ? 'by X\'s later start (Q118)' : 'at registration'), allZero(p)
+    && (late ? /start-split [^\n]*names another roster[^\n]*\(Q118\)/.test(p.runs[1].out) : /start-split [^\n]*the endless settle checks decide \(Q113\)/.test(p.runs[0].out))
+    && (pendOf(p.last, h) || {}).split === 1, p.runs[late ? 1 : 0].out.slice(-600));
+  T(tag + ' the disagreeing group is logged and counted, nobody flagged (V, W, X)', /ungated-mismatch [^\n]*nobody flagged \(Q128\)/.test(p.all) && ungatedN(p) > 0
+    && [V, W, X].every(s => flagsOf(p, s) === 0), JSON.stringify([V, W, X].map(s => flagsOf(p, s))));
+  T(tag + ' nothing settles while X\'s record stays, nobody charged', !processedOf(p.last).has(keyOf(h)) && [V, W, X].every(s => cpWrites(p, s).length === 0));
+}
+{
+  // [7c] no start read at all (the key never registered): the same outside settle, the same answer
+  const [V, W, X] = R4(710), h = 0x1711;
+  const F = settles(h, [V, W], 0, null, { endDepth: 3 }).concat([{ sid: X, d: xSettle(h, [V, X], 1, 999) }]);
+  const p = timeline([F, F, F], [V, W]);
+  T('[7c] no roster registered: the disagreeing group flags nobody', allZero(p) && !seatGateRosterOf(p, h) && [V, W, X].every(s => flagsOf(p, s) === 0) && ungatedN(p) > 0,
+    JSON.stringify([V, W, X].map(s => flagsOf(p, s))) + ' ' + JSON.stringify(pendOf(p.last, h)));
+}
+{
+  // [7d] control: a gated key (V and W's starts agree) where W writes a result of his own that disagrees: both flagged once
+  const [V, W] = R4(720), h = 0x1721, S = starts(h, [V, W]);
+  const F = [{ sid: V, d: settle7(h, 0, [V, W], 0, { endDepth: 3 }) }, { sid: W, d: xSettle(h, [V, W], 1, 999) }];
+  const p = timeline([S, S.concat(F), S.concat(F)], [V, W]);
+  T('[7d] control: a gated key whose players disagree still flags both once, nothing settles', allZero(p) && !!seatGateRosterOf(p, h)
+    && flagsOf(p, V) === 1 && flagsOf(p, W) === 1 && ungatedN(p) === 0 && !processedOf(p.last).has(keyOf(h)),
+    JSON.stringify([flagsOf(p, V), flagsOf(p, W)]) + ' ' + JSON.stringify(pendOf(p.last, h)));
+}
+{
+  T('[7] wiring: after the settled-key skip, before recordFlag; summary row', /RUN\.lateMismatch = [\s\S]{0,300}?continue;\n\s+\}\n[\s\S]{0,900}?if \(isEndlessMt\(g\[0\]\.d\[2\] \| 0\) && !seatGateRoster\(startsPending\[m\]\)\) \{[\s\S]{0,300}?continue;\n\s+\}\n\s+if \(recordFlag\(signals, g, m, nowMs\)\)/.test(SRC)
+    && /'\| endless keys without a seat gate whose records disagree, nobody flagged \(Q128\) \| ' \+ s\('endlessUngated', 0\)/.test(SRC));
+  const from = 'if (isEndlessMt(g[0].d[2] | 0) && !seatGateRoster(startsPending[m])) {';
+  if (SRC.split(from).length !== 2) bad('[7] mutant: anchor not found exactly once');
+  else {
+    const script = path.join(__dirname, '..', '.mutant-endless-borrowed-q128-' + process.pid + '.js');
+    try {
+      fs.writeFileSync(script, SRC.replace(from, 'if (false) {'));
+      const x = ungatedA5(script, false);
+      T('[7] mutant: the endless skip removed -> V and W flagged again', flagsOf(x.p, x.V) === 1 && flagsOf(x.p, x.W) === 1, JSON.stringify([flagsOf(x.p, x.V), flagsOf(x.p, x.W)]));
     } finally { try { fs.unlinkSync(script); } catch (e) {} }
   }
 }

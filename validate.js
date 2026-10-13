@@ -1399,6 +1399,7 @@ function writeRunSummary() {
       '| match keys with two accounts on one seat or two seat layouts, not settled (Q75) | ' + s('contested', 0) + ' |',
       '| records off their start-roster seat, not counted / start keys with a seat claimed twice / start rosters the voters split, no seat gate (Q80) | ' + s('offSeat', 0) + ' / ' + s('disputed', 0) + ' / ' + s('split', 0) + ' |',
       '| endless co-op groups held (records disagree on the roster, Q113) | ' + s('endlessHeld', 0) + ' |',
+      '| endless keys without a seat gate whose records disagree, nobody flagged (Q128) | ' + s('endlessUngated', 0) + ' |',
       '| start rosters split by a later start / confirmed (Q118) | ' + s('lateSplit', 0) + ' / ' + s('confirmed', 0) + ' |',
       '| settled keys with records that disagree, nobody flagged (Q114) | ' + s('lateMismatch', 0) + ' |',
       "| friends' room records whose writer is not on his own roster seat, not counted (Q123) | " + s('seatless', 0) + ' |',
@@ -3846,6 +3847,18 @@ async function main() {
     if (processed.has(m)) {
       RUN.lateMismatch = (RUN.lateMismatch | 0) + 1;
       console.log('  late-mismatch ' + m + ': ' + g.length + ' records disagree after the key settled -- nobody flagged (Q114)');
+      continue;
+    }
+    // Q128: an endless key the seat gate does not cover -- no roster registered for it (none read yet, the job waiting for
+    //   a full read, a synthetic anchor) or a roster its starts split -- keeps every record written for it, an outside
+    //   account's included: the key is in every public start record. One settle record of his that does not match the
+    //   run's turned the group inconsistent and flagged every teammate once (REVIEW-2 of Q113, A5 / A5b; with Q118 any
+    //   time in the provisional window, a split start of his own first). Nobody is flagged there; the group stays
+    //   unsettled while the records disagree, as a matchmade key the roster contest holds (Q114 review). On a gated key the
+    //   records are the players' own: one who writes a result that disagrees is still flagged with the others.
+    if (isEndlessMt(g[0].d[2] | 0) && !seatGateRoster(startsPending[m])) {
+      RUN.endlessUngated = (RUN.endlessUngated | 0) + 1;
+      console.log('  ungated-mismatch ' + m + ': ' + g.length + ' records disagree on an endless key without a seat gate -- nobody flagged (Q128)');
       continue;
     }
     if (recordFlag(signals, g, m, nowMs)) sigDirty = true;
