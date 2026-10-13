@@ -30,9 +30,10 @@
 //   [5] Q114: review-q80.js T9 -- an outside result on a settled 2V2: nobody flagged, also after the flag-memory prune;
 //       control: an inconsistent group on an unsettled key still flags its writers; mutant (settled keys flagged again)
 //   [6] wiring pins
-//   [7] Q127: the window is five minutes after registration -- a losing player's alt writing a start late in the match
-//       is dropped by the gate and the real result settles (REVIEW-2 of Q114 + Q118, D1); mutant (ten minutes again -> the
-//       loss is undone); D1e (pinned residual): inside the five minutes the start still splits the key, voided, nobody flagged
+//   [7] Q127 / Q130: the window is four minutes after registration (five with Q127, four since Q130) -- a losing
+//       player's alt writing a start late in the match is dropped by the gate and the real result settles (REVIEW-2 of
+//       Q114 + Q118, D1); mutant (ten minutes again -> the loss is undone); D1e (pinned residual): read by the run that
+//       would confirm, the start still splits the key, voided, nobody flagged
 //   [8] Q124 first step (REVIEW-2 of Q113, D1): the player who picks a 1V1's key and his alt register a roster of their own
 //       twenty minutes ahead; the opponent's honest start and result are dropped by the gate and he is flagged by nobody;
 //       pinned residual (the rest of Q124): the pair's own result settles; mutant (the seat gate flags again -> he is flagged)
@@ -210,7 +211,7 @@ console.log('=== a start roster stays provisional for a while; a settled key fla
 {
   const once = (env) => spawnSync(process.execPath, ['-e', "process.stdout.write(String(require(process.argv[1]).START_CONFIRM_MS))", VALIDATE],
     { env: Object.assign({}, process.env, env), encoding: 'utf8' }).stdout;
-  T('[1] START_CONFIRM_MS: five minutes by default (Q127), three at least', W === 300000 && v.START_CONFIRM_MIN_MS === 180000 && once({ START_CONFIRM_MS: '1000' }) === '180000'
+  T('[1] START_CONFIRM_MS: four minutes by default (Q130; five since Q127 before), three at least', W === 240000 && v.START_CONFIRM_MIN_MS === 180000 && once({ START_CONFIRM_MS: '1000' }) === '180000'
     && once({ START_CONFIRM_MS: '900000' }) === '900000', W + ' ' + once({ START_CONFIRM_MS: '1000' }));
   const S = (sid, seat, ros, o) => { o = o || {}; return { steamID: sid, shard: 'shard_1', d: [0xB2, 3, o.mt || 6, o.h || 77, 1, seat, 0, 0, o.pc == null ? 4 : o.pc], roster: Object.assign({}, ros) }; };
   const RO = { 0: P1, 1: P2, 2: P3, 3: P4 }, FO = { 0: Q[0], 1: Q[1], 2: P3, 3: P4 };
@@ -364,12 +365,13 @@ const settledHonest = (tag, rs, key, settleRun) => {
     && ptsIn(rs, P3).length === 1 && ptsIn(rs, P3)[0] < 2500 && RR.every(s => leavesOf(last(rs), s) === 0), JSON.stringify(RR.map(s => ptsIn(rs, s))));
 };
 {
-  // [4a] P2 cold-reconnects four minutes after the first look and writes his start again (the same roster, the same seat)
+  // [4a] P2 cold-reconnects three minutes after the first look (inside the four-minute window) and writes his start again
+  //   (the same roster, the same seat)
   const h = 0x9020, S = realStarts(h), copy = { sid: P2, d: t2start(h, 1, RR) }, key = keyOf(S[0].d);
   const S2 = S.concat([copy]), F = S2.concat(realSettles(h));
-  const rs = timeline([[0, S], [4 * MIN, S2], [6 * MIN, S2], [3 * MIN, F], [6 * MIN, F], [6 * MIN, F], [3 * HOUR, F]]);
+  const rs = timeline([[0, S], [3 * MIN, S2], [7 * MIN, S2], [3 * MIN, F], [6 * MIN, F], [6 * MIN, F], [3 * HOUR, F]]);
   T('[4a] cold-reconnect copy: seven runs exit 0', allOk(rs, 7), last(rs).out.slice(-800));
-  T('[4a] provisional at four minutes, confirmed at ten (counted once)', (pendOf(rs[1], key) || {}).prov && !(pendOf(rs[2], key) || {}).prov && confirmedN(rs) === 1,
+  T('[4a] provisional at three minutes, confirmed at ten (counted once)', (pendOf(rs[1], key) || {}).prov && !(pendOf(rs[2], key) || {}).prov && confirmedN(rs) === 1,
     JSON.stringify([pendOf(rs[1], key), pendOf(rs[2], key)]));
   settledHonest('[4a]', rs, key, 3);
   T('[4a] nobody flagged, nothing dropped', RR.every(s => fOf(last(rs), s) === 0) && offSeatN(rs) === 0 && !Q80LINE.test(outOf(rs)));
@@ -432,11 +434,12 @@ const settledHonest = (tag, rs, key, settleRun) => {
 {
   const reg = SRC.slice(SRC.indexOf('function registerStartRosters('), SRC.indexOf('// ---- seat gate (cloud audit Q80) ----'));
   T('[6] registerStartRosters: a registered key is compared (lateStartSplit) before it is skipped, processed keys first',
-    /if \(processed\.has\(m\)\) continue;\n\s+if \(pending\[m\]\) \{ if \(lateStartSplit\(pending\[m\], sg\[m\], m\)\)/.test(reg));
+    /if \(processed\.has\(m\)\) continue;\n\s+if \(pending\[m\]\) \{\n\s+if \(isMatchmadeMt\(sg\[m\]\[0\]\.d\[2\] \| 0\)\) noteBlankStarts\(m, sg\[m\]\);[^\n]*\n\s+if \(lateStartSplit\(pending\[m\], sg\[m\], m\)\) \{[^\n]*\}\n\s+continue;\n\s+\}/.test(reg));
   T('[6] registerStartRosters: prov only on an unsplit roster, the signature startRosterDisagrees compares', /\} else pending\[m\]\.prov = startSig\(all\[0\]\);/.test(reg));
   T('[6] registerStartRosters: confirmation after the registration loop, complete reads only, START_CONFIRM_MS from t0',
     reg.indexOf('if (readComplete !== false) for (const m of Object.keys(pending))') > reg.indexOf('lateStartSplit(') && /now - \(p\.t0 \|\| 0\) >= START_CONFIRM_MS\) \{ delete p\.prov;/.test(reg));
-  T('[6] startSig hashes pc + rosterCanon (the same pair startRosterDisagrees compares)', /function startSig\(r\) \{\n\s+return crypto\.createHash\('sha256'\)\.update\(\(r\.d\[8\] \| 0\) \+ '\|' \+ rosterCanon\(r\.roster\)\)/.test(SRC)
+  T('[6] startSig hashes pc + rosterCanon (the same pair startRosterDisagrees compares)', /function startSigOf\(pc, ro\) \{\n\s+return crypto\.createHash\('sha256'\)\.update\(\(pc \| 0\) \+ '\|' \+ rosterCanon\(ro\)\)/.test(SRC)
+    && /function startSig\(r\) \{ return startSigOf\(r\.d\[8\], r\.roster\); \}/.test(SRC)
     && /const sig = \(r\) => \(r\.d\[8\] \| 0\) \+ '\|' \+ rosterCanon\(r\.roster\);/.test(SRC));
   const main = SRC.slice(SRC.indexOf('const registeredEarly = registerStartRosters('));
   T('[6] main: registration (and the later-start check) runs before the seat gate', main.indexOf('registerStartRosters(') < main.indexOf('applySeatGate('));
@@ -445,12 +448,13 @@ const settledHonest = (tag, rs, key, settleRun) => {
   T('[6] summary rows', /start rosters split by a later start \/ confirmed \(Q118\)/.test(SRC) && /settled keys with records that disagree, nobody flagged \(Q114\)/.test(SRC));
 }
 
-// ---- [7] Q127: the provisional window closes five minutes after registration ----
+// ---- [7] Q127 / Q130: the provisional window closes four minutes after registration ----
 // REVIEW-2 of Q114 + Q118, D1: a 1V1 ranked [P1, P2], P2 losing; his alt Q3 copies the key into a start naming [P1, P2, Q3]
 //   (another seat count) from seat 2 late in the match. With the old ten minutes the roster was still provisional when the
 //   job read it: the key split, the Q75 contest held the match until it voided, nobody rated or flagged -- the loss undone
-//   for free, as often as he liked. Five minutes after registration the roster is final: the start is one more record off
-//   its seat and the real result settles. D1e (pinned residual): the same start inside the five minutes still splits it.
+//   for free, as often as he liked. Four minutes after registration (five with Q127) the roster is final: the start is one
+//   more record off its seat and the real result settles. D1e (pinned residual): the same start read by the run that would
+//   confirm (five minutes in) is compared first and still splits it.
 {
   const R = [P1, P2], A3 = [P1, P2, Q[3]];
   const startsOf = (h) => [{ sid: P1, d: v1start(h, 0, R) }, { sid: P2, d: v1start(h, 1, R) }];
@@ -461,23 +465,23 @@ const settledHonest = (tag, rs, key, settleRun) => {
   const h = 0x9040, key = keyOf(v1start(h, 0, R));
   const rs = timeline(d1(h));
   T('[7] D1: six runs exit 0', allOk(rs, 6), last(rs).out.slice(-800));
-  T('[7] D1: provisional at registration, final at the run five minutes later', (pendOf(rs[0], key) || {}).prov && pendOf(rs[1], key) && !('prov' in pendOf(rs[1], key))
+  T('[7] D1: provisional at registration, final at the run five minutes later (four-minute window)', (pendOf(rs[0], key) || {}).prov && pendOf(rs[1], key) && !('prov' in pendOf(rs[1], key))
     && !pendOf(rs[1], key).split && confirmedN(rs) === 1, JSON.stringify([pendOf(rs[0], key), pendOf(rs[1], key)]));
   T('[7] D1: the alt\'s start ten minutes in is dropped by the gate, no split, no contest', Q80LINE.test(rs[2].out) && !/start-split /.test(outOf(rs)) && !Q75.test(outOf(rs)),
     rs[2].out.slice(-600));
   T('[7] D1: the real result settles -- P1 wins, P2 loses, nobody convicted', processedOf(rs[3]).has(key) && up(rs, P1) && ptsIn(rs, P2).length === 1 && ptsIn(rs, P2)[0] < 2500
     && none(rs, Q[3]) && [P1, P2].every(s => leavesOf(last(rs), s) === 0), JSON.stringify([P1, P2, Q[3]].map(s => ptsIn(rs, s))));
   T('[7] D1: the players are not flagged', [P1, P2].every(s => fOf(last(rs), s) === 0), JSON.stringify([P1, P2].map(s => fOf(last(rs), s))));
-  const script = mutant('Number(process.env.START_CONFIRM_MS || 300000)', 'Number(process.env.START_CONFIRM_MS || 600000)', '[7] D1');
+  const script = mutant('Number(process.env.START_CONFIRM_MS || 240000)', 'Number(process.env.START_CONFIRM_MS || 600000)', '[7] D1');
   if (script) try {
     const m = timeline(d1(0x9041), script);
     T('[7] D1 mutant: ten minutes again -> the alt\'s start splits the key and P2\'s loss is undone', allOk(m, 6) && LATE.test(m[2].out) && none(m, P1) && none(m, P2),
       JSON.stringify([P1, P2].map(s => ptsIn(m, s))));
   } finally { try { fs.unlinkSync(script); } catch (e) {} }
-  // D1e: the alt writes four minutes in (read by the run that would confirm): compared first, split, held until it voids
+  // D1e: the alt writes before the run five minutes in (the run that would confirm) reads it: compared first, split, held until it voids
   const he = 0x9042, keye = keyOf(v1start(he, 0, R)), Se = startsOf(he), SAe = Se.concat([altOf(he)]), Fe = SAe.concat(resultsOf(he));
   const re = timeline([[0, Se], [5 * MIN, SAe], [5 * MIN, SAe], [5 * MIN, Fe], [5 * MIN, Fe], [3 * HOUR, Fe]]);
-  T('[7] D1e (pinned residual): an alt\'s start inside the five minutes still splits the key -- held, voided, nobody rated, flagged or convicted',
+  T('[7] D1e (pinned residual): an alt\'s start read by the run that would confirm still splits the key -- held, voided, nobody rated, flagged or convicted',
     allOk(re, 6) && LATE.test(re[1].out) && Q75.test(outOf(re)) && processedOf(last(re)).has(keye) && [P1, P2, Q[3]].every(s => none(re, s) && fOf(last(re), s) === 0)
     && [P1, P2].every(s => leavesOf(last(re), s) === 0), JSON.stringify([P1, P2, Q[3]].map(s => [ptsIn(re, s), fOf(last(re), s)])));
 }

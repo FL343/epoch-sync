@@ -17,41 +17,44 @@
 //       real players are not convicted while they play, the real result settles twelve minutes in, nobody convicted at
 //       maturity
 //   [3] R1b: the outside accounts also copy the key into start records of their own a minute after the first look,
-//       naming their own roster: the roster is still provisional (Q118), so the key is split, the Q75 contest holds it
-//       while their rows are up and the real result settles once they are gone; R1d: the same once the roster is
-//       confirmed (START_CONFIRM_MS after the first look): dropped, not in the started list, the real result settles;
-//       R1c: before the first look: seats 2 / 3 disputed, the roster still registers from the other two players, the
-//       real result settles
+//       naming their own roster: the roster is still provisional (Q118), so the key is split, and a split matchmade key
+//       stays held for good (Q127): the real result does not settle once their rows are gone, nobody rated, flagged or
+//       convicted, the key voids at maturity; R1d: the same pair once the roster is confirmed (START_CONFIRM_MS, four
+//       minutes, after the first look): their starts are first read with their own result, so they count nowhere
+//       (Q127 / Q138: left out, not in the started list), their result is dropped by the gate, the real result settles;
+//       R1c: before the first look: seats 2 / 3 disputed, the roster still registers from the other two players (split),
+//       and the key stays held for good (Q127), voided at maturity
 //   [4] five outside accounts start at the winners' seats before the first look and write the winning result for two of
-//       them (no dispute rule: they outvote the players 5 to 4 and take the win): the players' roster registers, the
-//       real result settles, the outside accounts gain nothing
+//       them (no dispute rule: they outvote the players 5 to 4 and take the win): the players' roster registers (split),
+//       the dispute holds the key for good (Q127): nobody rated, the outside accounts gain nothing, voided at maturity
 //   [5] R2: nobody writes a result, two outside accounts write a fake one twenty minutes in: dropped; at maturity the
 //       four players each get the exit their own starts earn, no -100
 //   [6] part 6 of review4-q43.js with starts (two losers move onto the winners' seats, one outside account): the three
 //       forged records are dropped, the winners win, the two forgers are leavers (their own starts), nobody flagged (Q124)
 //   [7] a real quitter shielded by an outside account at his empty seat, with starts: the quitter is convicted
 //   [8] P2 of review-q69.js: sixteen outside accounts copy the quitter's start before the first look to crowd him out of
-//       the started list: their starts are dropped, the quitter is still convicted
+//       the started list: their starts are dropped, the quitter is still convicted (at maturity: the dispute at his seat
+//       holds the key for good, Q127, so the match voids and he takes the exit his own start earns)
 //   [9] a player who doctors his own roster on a registered key: the key settles by the per-seat majority as before
 //       (holding it would let him void his match)
 //   [10] pinned residual: a 1V1 where a second account starts at the opponent's seat before the first look: no roster
-//        can register, the key is held (nobody rated, nobody convicted) -- the same as the loser not writing his records
+//        can register, the key is held (nobody rated, nobody convicted) -- the same as the loser not writing his records;
+//        since Q127 it voids at maturity from its note (contest-void), still nobody rated or convicted
 //   [11] wiring pins + mutation self-checks (gate removed / dispute rule removed / registered keys contested again /
 //        start records not gated / off-seat writers flagged again, Q124)
 //   [12] with the team-gamble accusation pass (Q43) in the tree: five outside accounts no longer charge an honest host
 //        (review4-q43.js part 3, real starts registered); mutant (gate removed -> judged again). Skipped without Q43.
 //   [13] two colluding losers name other accounts at the winners' seats in their starts (a 2-2 split there): the roster is
 //        marked split, gates nothing, the Q75 contest holds the key (the gate would have dropped the winners' records);
-//        mutant (a split roster gates -> the losers take the win)
+//        mutant (a split roster gates, and the sticky contest note of Q127 is ignored -> the losers take the win)
 //   [14] a colluding majority of voters (an opponent dropped before level 1, an outside account starting from his seat)
 //        seats an alt where an honest player started: split too, held; same mutant
 //   [15] review-q80.js T1 / T2: before the first look, outside accounts vote from seat numbers past the players' seat
 //        count (five in a 2V2: two at the winners' seats, three at seats 4..6 of a seven-seat roster; three in a 1V1),
 //        then copy the real result at the winners' seats: the roster is split (the start records disagree on the seat
 //        count and the voters left on the roster), the Q75 contest holds the key, the outside accounts gain nothing,
-//        nobody is convicted; mutant (the agreement check removed, and the later-start check of Q118 with it -> the
-//        outside pair takes the win; with only the agreement check removed the Q118 check splits the key on the next run,
-//        test/late-start-roster.js)
+//        nobody is convicted; mutant (the agreement check removed, and the later-start check of Q118 and the sticky
+//        contest note of Q127 with it -> the outside pair takes the win)
 //   [17] REVIEW-3 B1 / B5 and two more ways in: a key without a seat gate settled records written only from seats nobody
 //        plays. B1: one outside start from a seat the match does not have splits the roster before the first look, a
 //        minute in two outside accounts write a matching result from two such seats (the seat count raised to make
@@ -62,8 +65,9 @@
 //        (the seat count unchanged); B9: the same with one outside account alone (the bot lane takes a single writer).
 //        No seat is named twice, so the contest did not hold them: it settled, every real player was convicted
 //        (B1 / B5 / B7) or lost his match XP (B8 / B9). Records that disagree on the seat layout now hold the key; units
-//        for seatLayout; mutants (the layout check removed / seat count only); the cost (one outside start alone pauses
-//        an honest match while it is there, nobody rated or convicted, then the key settles)
+//        for seatLayout; mutants (the layout check removed / seat count only; the sticky contest note of Q127 ignored in
+//        each, or the split it records would hold B1 / B5 anyway); the cost (one outside start alone, written before
+//        the first look, splits the key and so holds it for good, Q127: nobody rated or convicted, voided at maturity)
 // State isolation is structural (every *_FILE var scanned and redirected, cwd = temp dir), like test/strict-gate.js.
 const { spawnSync } = require('child_process');
 const fs = require('fs'), path = require('path'), os = require('os');
@@ -210,6 +214,12 @@ const LEAVE = v.LEAVE_CONFIRM_MS + MIN;
 const LEAVE_WAIT = /leave-wait [^\n]*until the match must be over, deferred \(Q121\)/;
 // a mutant also needs the Q121 hold switched off when the scenario it checks is a conviction the hold now also stops
 const NOQ121 = (src) => src.replace('    if (lcHold.hold) {', '    if (false && lcHold.hold) {');
+// Q127: a matchmade key that was split, disputed or contested once stays held until it voids (the key's note in the starts
+//   state, c = 1). A mutant that takes away an earlier layer (the split check, the agreement check, the layout check) also
+//   needs this second layer switched off, or the note holds the key anyway and the mutant shows nothing
+const STICKY = '    if (seen && seen.c) { res.contested.set(m, []); (res.sticky = res.sticky || new Set()).add(m); continue; }   // Q127: contested once, held until it voids\n';
+const NOSTICKY = (src) => src.replace(STICKY, '');   // its anchor is pinned in [11]
+const noteOf = (r, key) => (r.state.STARTS_FILE || {})['~' + key];
 SC[2] = [7000, 4000];   // 1V1 scores (rec() picks the row by player count)
 const Q80LINE = /record\(s\) from accounts the start roster does not seat there -- not counted \(Q80\)/;
 const Q80ROW = (r, off, dis, split) => new RegExp('\\| records off their start-roster seat, not counted / start keys with a seat claimed twice / start rosters the voters split, no seat gate \\(Q80\\) \\| ' + off + ' / ' + dis + ' / ' + (split | 0) + ' \\|').test(r.summary);
@@ -253,10 +263,12 @@ const swingSteps = (h) => {
   return [[0, S], [6 * MIN, S.concat(swingSettles(h), realSettles(h))]];
 };
 // [8]: P4 quits after his start; sixteen outside accounts copy the key into starts at his seat, ahead of his own row
+//   (Q127: the dispute at seat 3 holds the key for good, so the quitter's exit comes from the maturity verdict -- the
+//   last run is past STARTS_MATURITY_MS)
 const p2Steps = (h) => {
   const S = realStarts(h).slice(0, 3).concat(Q.slice(0, 16).map(sid => ({ sid, d: t2start(h, 3, RR) })), realStarts(h).slice(3));
   const R = realSettles(h).slice(0, 3);
-  return [[0, S], [6 * MIN, S.concat(R)], [GRACE, S.concat(R)], [LEAVE, S.concat(R)]];
+  return [[0, S], [6 * MIN, S.concat(R)], [GRACE, S.concat(R)], [LEAVE, S.concat(R)], [MATURE, S.concat(R)]];
 };
 // [9]: the loser P3 doctors his own roster (an outside account at seat 3); everyone else honest
 const doctorSteps = (h) => {
@@ -285,7 +297,9 @@ console.log('=== a record counts only from the seat its start roster gives its w
   pend = {};
   T('[1] every seat claimed twice: nothing registers', v.registerStartRosters(honest.concat([0, 1, 2, 3].map(s => S(Q[s], s, { 0: Q[0], 1: Q[1], 2: Q[2], 3: Q[3] }))), new Set(), pend, 5) === 0 && !pend['77_1_6']);
   pend = {};
-  T('[1] a 1V1 with a second account at seat 1: one vote left, nothing registers', v.registerStartRosters([S(P1, 0, { 0: P1, 1: P2 }, 2), S(P2, 1, { 0: P1, 1: P2 }, 2), S(Q[0], 1, { 0: P1, 1: Q[0] }, 2)], new Set(), pend, 5) === 0 && Object.keys(pend).length === 0);
+  T('[1] a 1V1 with a second account at seat 1: one vote left, nothing registers (only the key\'s note, marked contested: Q127)',
+    v.registerStartRosters([S(P1, 0, { 0: P1, 1: P2 }, 2), S(P2, 1, { 0: P1, 1: P2 }, 2), S(Q[0], 1, { 0: P1, 1: Q[0] }, 2)], new Set(), pend, 5) === 0
+    && Object.keys(pend).filter(k => k.charAt(0) !== '~').length === 0 && (pend['~77_1_2'] || {}).c === 1, JSON.stringify(pend));
   pend = {};
   T('[1] a cold-reconnect duplicate is one claimant, not a dispute', v.registerStartRosters(honest.concat([S(P3, 2, RO)]), new Set(), pend, 5) === 1 && JSON.stringify(pend['77_1_6'].roster) === JSON.stringify(PR));
   pend = {};
@@ -311,8 +325,9 @@ console.log('=== a record counts only from the seat its start roster gives its w
     v.registerStartRosters([S(P1, 0, RO), S(X1, 1, { 0: Q[0], 1: X1, 2: P3, 3: P4 }), S(P3, 2, { 0: Q[0], 1: X1, 2: P3, 3: P4 }), S(P4, 3, { 0: Q[0], 1: X1, 2: P3, 3: P4 })], new Set(), pend, 5) === 1
     && pend['77_1_6'].split === 1 && pend['77_1_6'].roster[0] === v.pid(Q[0]), JSON.stringify(pend));
   pend = {};
-  T('[1] one voter names a seat nobody else names: split (his roster is not the others\' -- Q80 review)',
-    v.registerStartRosters(honest.slice(0, 3).concat([S(P4, 3, { 0: P1, 1: P2, 2: P3, 3: P4, 4: Q[0] })]), new Set(), pend, 5) === 1 && pend['77_1_6'].split === 1, JSON.stringify(pend));
+  T('[1] one voter names a seat nobody else names: outvoted (Q130) -- the other three name the majority roster word for word, it registers unsplit, provisional on it, nobody contested',
+    v.registerStartRosters(honest.slice(0, 3).concat([S(P4, 3, { 0: P1, 1: P2, 2: P3, 3: P4, 4: Q[0] })]), new Set(), pend, 5) === 1 && !('split' in pend['77_1_6'])
+    && pend['77_1_6'].prov === v.startSig(honest[0]) && JSON.stringify(pend['77_1_6'].roster) === JSON.stringify(PR) && !(pend['~77_1_6'] || {}).c, JSON.stringify(pend));
   // Q80 review (review-q80.js T1 / T2): the start records must agree on the seat count and the seats, the voters left on
   //   the accounts; S8 carries the seat count (d[8])
   const S8 = (sid, seat, ros, pc, mt) => ({ steamID: sid, d: [0xB2, 3, mt || 6, 77, 1, seat, 0, 0, pc], roster: Object.assign({}, ros) });
@@ -397,44 +412,56 @@ console.log('=== a record counts only from the seat its start roster gives its w
   T('[3] R1b: seven runs exit 0', allOk(rs, 7), last(rs).out.slice(-800));
   T('[3] R1b: their starts name another roster while it is provisional: split (Q118), nothing dropped', /start-split [^\n]*names another roster[^\n]*\(Q118\)/.test(rs[1].out)
     && (pendOf(rs[1], key) || {}).split === 1 && Q80ROW(rs[1], 0, 0, 0) && !Q80LINE.test(outOf(rs)), rowOf(rs[1]) + ' ' + JSON.stringify(pendOf(rs[1], key)));
-  T('[3] R1b: the Q75 contest holds the key while the pair\'s rows are up; the real result settles once they are gone', Q75.test(rs[4].out) && !processedOf(rs[4]).has(key)
-    && processedOf(rs[5]).has(key) && up(rs, P1) && up(rs, P2) && none(rs, X1) && none(rs, Y1) && RR.every(s => leavesOf(last(rs), s) === 0),
-    JSON.stringify(RR.concat([X1, Y1]).map(s => ptsIn(rs, s))) + ' ' + rs[5].out.slice(-400));
-  // R1d: the same pair after the roster is confirmed (eight minutes in): their starts are dropped, not in the started list
+  // Q127: the split marks the key contested for good -- the pair cannot withdraw it to let a result they like settle
+  T('[3] R1b: the split marks the key contested (Q127); the Q75 contest holds it while the pair\'s rows are up and still once they are gone: the real result does not settle',
+    (noteOf(rs[1], key) || {}).c === 1 && Q75.test(rs[4].out) && !processedOf(rs[4]).has(key) && Q75.test(rs[5].out) && !processedOf(rs[5]).has(key) && (noteOf(rs[5], key) || {}).c === 1,
+    JSON.stringify(noteOf(rs[5], key)) + ' ' + rs[5].out.slice(-400));
+  T('[3] R1b: voided at maturity -- nobody rated, flagged or convicted, the pair gains nothing', processedOf(rs[6]).has(key) && /start-orphan [^\n]*-> 0 exit-rate hits/.test(rs[6].out)
+    && RR.concat([X1, Y1]).every(s => none(rs, s) && fOf(last(rs), s) === 0 && leavesOf(last(rs), s) === 0),
+    JSON.stringify(RR.concat([X1, Y1]).map(s => [ptsIn(rs, s), fOf(last(rs), s), leavesOf(last(rs), s)])));
+  // R1d: the same pair after the roster is confirmed (eight minutes in): their starts are first read together with their
+  //   own result (Q127 / Q138: left out of the run entirely), their result is dropped by the gate, not in the started list
   const hd = 0x8012, keyd = keyOf(t2start(hd, 0, RR));
   const Sd = realStarts(hd), FSd = fakeSettles(hd).concat(fakeStarts(hd)), Rd = realSettles(hd);
-  const rd = timeline([[0, Sd], [4 * MIN, Sd], [4 * MIN, Sd], [1 * MIN, Sd.concat(FSd)], [5 * MIN, Sd.concat(FSd)], [1 * MIN, Sd.concat(FSd, Rd)], [3 * HOUR, Sd.concat(FSd, Rd)]]);
+  const rd = timeline([[0, Sd], [3 * MIN, Sd], [5 * MIN, Sd], [1 * MIN, Sd.concat(FSd)], [5 * MIN, Sd.concat(FSd)], [1 * MIN, Sd.concat(FSd, Rd)], [3 * HOUR, Sd.concat(FSd, Rd)]]);
   T('[3] R1d: seven runs exit 0', allOk(rd, 7), last(rd).out.slice(-800));
-  T('[3] R1d: provisional at four minutes, confirmed at eight (Q127: five-minute window)', (pendOf(rd[1], keyd) || {}).prov && !(pendOf(rd[2], keyd) || {}).prov && !(pendOf(rd[2], keyd) || {}).split,
+  T('[3] R1d: provisional at three minutes, confirmed at eight (Q130: four-minute window)', (pendOf(rd[1], keyd) || {}).prov && !(pendOf(rd[2], keyd) || {}).prov && !(pendOf(rd[2], keyd) || {}).split,
     JSON.stringify([pendOf(rd[1], keyd), pendOf(rd[2], keyd)]));
   const st = (pendOf(rd[3], keyd) || {}).started || [];
-  T('[3] R1d: their starts are dropped too, not in the started list', Q80ROW(rd[3], 4, 0) && st.length === 4 && [X1, Y1].every(s => st.indexOf(v.pid(s)) < 0) && RR.every(s => st.indexOf(v.pid(s)) >= 0)
-    && !/start-split /.test(outOf(rd)), rowOf(rd[3]) + ' started=' + JSON.stringify(st));
+  T('[3] R1d: their starts are left out (first read after a result of the key, Q127 / Q138), their two results dropped by the gate, not in the started list',
+    /start-late: 2 start\(s\) first read after their match's result/.test(rd[3].out) && Q80ROW(rd[3], 2, 0) && st.length === 4 && [X1, Y1].every(s => st.indexOf(v.pid(s)) < 0)
+    && RR.every(s => st.indexOf(v.pid(s)) >= 0) && !/start-split /.test(outOf(rd)) && !(noteOf(rd[3], keyd) || {}).c, rowOf(rd[3]) + ' started=' + JSON.stringify(st));
   T('[3] R1d: the real result settles, nobody convicted, the pair gains nothing', processedOf(rd[5]).has(keyd) && up(rd, P1) && up(rd, P2) && none(rd, X1) && none(rd, Y1)
     && RR.every(s => leavesOf(last(rd), s) === 0), JSON.stringify(RR.concat([X1, Y1]).map(s => ptsIn(rd, s))));
   const h2 = 0x8003, key2 = keyOf(t2start(h2, 0, RR));
   const S = realStarts(h2).concat(fakeStarts(h2)), F = fakeSettles(h2), R = realSettles(h2);
-  // R1c: before the first look; the pair's rows rotate off in the last run
-  const rc = timeline([[0, S], [6 * MIN, S.concat(F)], [6 * MIN, S.concat(F, R)], [6 * MIN, realStarts(h2).concat(R)]]);
-  T('[3] R1c: four runs exit 0', allOk(rc, 4), last(rc).out.slice(-800));
+  // R1c: before the first look; the pair's rows rotate off in the fourth run, the fifth is past maturity
+  const rc = timeline([[0, S], [6 * MIN, S.concat(F)], [6 * MIN, S.concat(F, R)], [6 * MIN, realStarts(h2).concat(R)], [3 * HOUR, realStarts(h2).concat(R)]]);
+  T('[3] R1c: five runs exit 0', allOk(rc, 5), last(rc).out.slice(-800));
   // REVIEW-2: their starts name another roster, so it registers split (no gate): the votes left are the players' here, but
   //   the job cannot tell them from colluders' (A1)
   T('[3] R1c: seats 2 / 3 disputed, the roster registers from P1 / P2, split', /start-dispute [^\n]*: seat\(s\) 2,3 claimed by two or more accounts/.test(rc[0].out)
     && pendOf(rc[0], key2) && pendOf(rc[0], key2).roster[2] === v.pid(P3) && pendOf(rc[0], key2).roster[3] === v.pid(P4) && pendOf(rc[0], key2).split === 1 && Q80ROW(rc[0], 0, 1, 1), rowOf(rc[0]));
-  T('[3] R1c: nothing settles while the pair\'s rows are up (Q75 contest); the real result settles once they are gone', !processedOf(rc[1]).has(key2) && !processedOf(rc[2]).has(key2)
-    && Q75.test(rc[2].out) && processedOf(rc[3]).has(key2) && up(rc, P1) && up(rc, P2) && none(rc, X1) && none(rc, Y1) && RR.every(s => leavesOf(rc[3], s) === 0), rc[3].out.slice(-600));
+  T('[3] R1c: the dispute and the split mark the key contested (Q127): nothing settles while the pair\'s rows are up, nor once they are gone',
+    (noteOf(rc[0], key2) || {}).c === 1 && !processedOf(rc[1]).has(key2) && !processedOf(rc[2]).has(key2) && Q75.test(rc[2].out) && Q75.test(rc[3].out) && !processedOf(rc[3]).has(key2),
+    rc[3].out.slice(-600));
+  T('[3] R1c: voided at maturity -- nobody rated, flagged or convicted', processedOf(rc[4]).has(key2) && RR.concat([X1, Y1]).every(s => none(rc, s) && fOf(last(rc), s) === 0 && leavesOf(last(rc), s) === 0),
+    JSON.stringify(RR.concat([X1, Y1]).map(s => [ptsIn(rc, s), fOf(last(rc), s), leavesOf(last(rc), s)])));
 }
 
 // ---- [4] five outside starts at the winners' seats before the first look ----
 {
   const h = 0x8004, key = keyOf(t2start(h, 0, RR));
-  const rs = timeline(swingSteps(h).concat([[6 * MIN, realStarts(h).concat(realSettles(h))]]));   // the outside rows rotate off in the last run
-  T('[4] three runs exit 0', allOk(rs, 3), last(rs).out.slice(-800));
+  // the outside rows rotate off in the third run, the fourth is past maturity
+  const rs = timeline(swingSteps(h).concat([[6 * MIN, realStarts(h).concat(realSettles(h))], [3 * HOUR, realStarts(h).concat(realSettles(h))]]));
+  T('[4] four runs exit 0', allOk(rs, 4), last(rs).out.slice(-800));
   T('[4] seats 0 / 1 disputed, the players\' roster registers from P3 / P4, split (REVIEW-2)', pendOf(rs[0], key) && pendOf(rs[0], key).roster[0] === v.pid(P1) && pendOf(rs[0], key).roster[1] === v.pid(P2)
     && pendOf(rs[0], key).split === 1 && Q80ROW(rs[0], 0, 1, 1), rowOf(rs[0]) + ' ' + JSON.stringify(pendOf(rs[0], key)));
-  T('[4] held while the outside rows are up; then the real result settles, the outside accounts gain nothing', !processedOf(rs[1]).has(key) && Q75.test(rs[1].out)
-    && processedOf(rs[2]).has(key) && up(rs, P1) && up(rs, P2) && none(rs, Q[0]) && none(rs, Q[1]),
-    JSON.stringify([P1, P2, Q[0], Q[1]].map(s => ptsIn(rs, s))));
+  T('[4] held while the outside rows are up, and still once they are gone (the dispute and the split mark the key contested for good, Q127)',
+    (noteOf(rs[0], key) || {}).c === 1 && !processedOf(rs[1]).has(key) && Q75.test(rs[1].out) && !processedOf(rs[2]).has(key) && Q75.test(rs[2].out), rs[2].out.slice(-600));
+  T('[4] voided at maturity: nobody rated, flagged or convicted, the outside accounts gain nothing', processedOf(rs[3]).has(key)
+    && RR.concat(Q.slice(0, 5)).every(s => none(rs, s) && fOf(last(rs), s) === 0 && leavesOf(last(rs), s) === 0),
+    JSON.stringify(RR.concat(Q.slice(0, 5)).map(s => [ptsIn(rs, s), fOf(last(rs), s), leavesOf(last(rs), s)])));
 }
 
 // ---- [5] R2: nobody writes a result, an outside pair writes a fake one twenty minutes in ----
@@ -482,14 +509,15 @@ console.log('=== a record counts only from the seat its start roster gives its w
 {
   const h = 0x8008, key = keyOf(t2start(h, 0, RR));
   const rs = timeline(p2Steps(h));
-  T('[8] four runs exit 0', allOk(rs, 4), last(rs).out.slice(-800));
+  T('[8] five runs exit 0', allOk(rs, 5), last(rs).out.slice(-800));
   const st = (pendOf(rs[0], key) || {}).started || [];
   T('[8] seat 3 disputed, the roster registers from the other three; the sixteen starts dropped', Q80ROW(rs[0], 16, 1) && pendOf(rs[0], key).roster[3] === v.pid(P4)
     && st.length === 4 && st.indexOf(v.pid(P4)) >= 0, rowOf(rs[0]) + ' started=' + st.length);
-  T('[8] past the absence grace the key waits for the match to be over (P4 started, no result; Q121)', LEAVE_WAIT.test(rs[2].out) && leavesOf(rs[2], P4) === 0,
-    rs[2].out.slice(-600));
-  T('[8] the quitter P4 is still convicted (-100, an exit)', processedOf(rs[3]).has(key) && leavesOf(rs[3], P4) === 1 && down(rs, P4) && Q.slice(0, 16).every(s => none(rs, s)),
-    'P4 leaves ' + leavesOf(rs[3], P4) + ' ' + JSON.stringify(ptsIn(rs, P4)));
+  T('[8] the dispute marks the key contested for good (Q127): held past the absence grace and the leave hold, P4 not convicted while it is held',
+    (noteOf(rs[0], key) || {}).c === 1 && [1, 2, 3].every(i => Q75.test(rs[i].out) && !processedOf(rs[i]).has(key) && leavesOf(rs[i], P4) === 0), rs[3].out.slice(-600));
+  T('[8] the quitter P4 is still convicted at maturity (an exit on his own start; the voided match moves nobody\'s points, so no -100)', processedOf(rs[4]).has(key)
+    && leavesOf(rs[4], P4) === 1 && [P1, P2, P3].every(s => leavesOf(rs[4], s) === 0) && RR.concat(Q.slice(0, 16)).every(s => none(rs, s)),
+    'P4 leaves ' + leavesOf(rs[4], P4) + ' ' + JSON.stringify(RR.map(s => ptsIn(rs, s))));
 }
 
 // ---- [9] a player doctors his own roster on a registered key ----
@@ -509,7 +537,9 @@ console.log('=== a record counts only from the seat its start roster gives its w
   const key = keyOf(recs[0].d);
   const rs = timeline([[0, recs], [FLOOR + 1000, recs], [MATURE, recs]]);
   T('[10] three runs exit 0', allOk(rs, 3), last(rs).out.slice(-800));
-  T('[10] no roster registers; the key is held by the Q75 contest: nobody rated, nobody convicted', !pendOf(rs[2], key) && Q75.test(rs[0].out) && !processedOf(rs[2]).has(key)
+  T('[10] no roster registers; the key is held by the Q75 contest, then voids at maturity from its note (contest-void, Q127): nobody rated, nobody convicted',
+    !pendOf(rs[2], key) && Q75.test(rs[0].out) && Q75.test(rs[1].out) && !processedOf(rs[1]).has(key) && processedOf(rs[2]).has(key)
+    && new RegExp('contest-void ' + key + ': [^\\n]*no start roster -- void, nobody rated \\(Q127\\)').test(rs[2].out)
     && rs.every(r => anyPoints(r) === 0) && [P1, P2, Q[0]].every(s => leavesOf(rs[2], s) === 0), rs[2].out.slice(-600));
 }
 
@@ -524,6 +554,7 @@ console.log('=== a record counts only from the seat its start roster gives its w
   T('[11] dropped writers are flagged on no key (Q124; endless since Q113)', !/recordFlag\(signals, rs, m \+ '\|seat'/.test(SRC) && !/of seatGate\.out\)/.test(SRC));
   T('[11] run summary row', /s\('offSeat', 0\) \+ ' \/ ' \+ s\('disputed', 0\)/.test(SRC) && /RUN\.offSeat = seatGate\.n;/.test(SRC));
   T('[11] exports', ['registerStartRosters', 'seatGateRoster', 'seatedOnRoster', 'applySeatGate'].every(f => typeof v[f] === 'function'));
+  T('[11] the sticky contest hold (Q127) the mutants below switch off is found exactly once', SRC.split(STICKY).length === 2);
   const mutants = [
     ['seat gate removed', 'const seatGate = applySeatGate(recs, starts, startsPending, processed);', 'const seatGate = { out: new Map(), n: 0 };', (script) => {
         const rs = timeline(r1Steps(0x8011), script);   // [2] the outside pair's result settles first, P1 / P2 convicted
@@ -539,7 +570,7 @@ console.log('=== a record counts only from the seat its start roster gives its w
         return !processedOf(last(rs)).has(keyOf(t2start(0x8019, 0, RR)));
       }],
     ['start records not gated', '  for (const list of [recs, starts]) {', '  for (const list of [recs]) {', (script) => {
-        const rs = timeline(p2Steps(0x8018), script);   // [8] the sixteen copies crowd P4 out of the started list
+        const rs = timeline(p2Steps(0x8018), script);   // [8] the sixteen copies crowd P4 out of the started list: no exit at maturity
         return leavesOf(last(rs), P4) === 0;
       }],
     ['off-seat writers flagged by the seat gate again (the Q113 loop)', '  //   clean) and gains nothing by the records (dropped).\n',
@@ -661,9 +692,9 @@ else {
     if (SRC.split(SPLIT_FROM).length !== 2) { bad(tag + ' mutant: anchor not found exactly once'); continue; }
     const script = path.join(__dirname, '..', '.mutant-seat-gate-split-' + process.pid + '.js');
     try {
-      fs.writeFileSync(script, SRC.replace(SPLIT_FROM, SPLIT_TO));
+      fs.writeFileSync(script, NOSTICKY(SRC.replace(SPLIT_FROM, SPLIT_TO)));
       const m = timeline(steps, script);
-      T(tag + ' mutant: a split roster gates -> the colluders take the win', cheats.every(s => up(m, s)) && honest.every(s => !up(m, s)),
+      T(tag + ' mutant: a split roster gates (and the sticky contest note of Q127 is ignored) -> the colluders take the win', cheats.every(s => up(m, s)) && honest.every(s => !up(m, s)),
         JSON.stringify(honest.concat(cheats).map(s => ptsIn(m, s))));
     } finally { try { fs.unlinkSync(script); } catch (e) {} }
   }
@@ -675,8 +706,8 @@ else {
 //   seats. Without the agreement check their roster registered unsplit, the gate dropped the winners' records and the
 //   outside pair took the win.
 {
-  const FROM = '    if (!n || startRosterSplit(att, votes, roster) || startRosterDisagrees(all)) {';
-  const TO = '    if (!n || startRosterSplit(att, votes, roster)) {';
+  const FROM = '    } else if (seatsSplit || startRosterDisagrees(all)) {';   // seatsSplit = !n || startRosterSplit(att, votes, roster)
+  const TO = '    } else if (seatsSplit) {';
   const LFROM = '  if (!p || !p.prov || p.split) return false;', LTO = '  return false;';   // Q118: the later-start check goes too
   const cases = [
     ['[15] T1 2V2', 0x8040, () => {
@@ -706,9 +737,9 @@ else {
     if (SRC.split(FROM).length !== 2 || SRC.split(LFROM).length !== 2) { bad(tag + ' mutant: anchor not found exactly once'); continue; }
     const script = path.join(__dirname, '..', '.mutant-seat-gate-agree-' + process.pid + '.js');
     try {
-      fs.writeFileSync(script, SRC.replace(FROM, TO).replace(LFROM, LTO));
+      fs.writeFileSync(script, NOSTICKY(SRC.replace(FROM, TO).replace(LFROM, LTO)));
       const m = timeline(steps, script);
-      T(tag + ' mutant: the agreement check and the later-start check (Q118) removed -> the outside accounts take the win', takers.every(s => up(m, s)) && winners.every(s => !up(m, s)),
+      T(tag + ' mutant: the agreement check, the later-start check (Q118) and the sticky contest note (Q127) removed -> the outside accounts take the win', takers.every(s => up(m, s)) && winners.every(s => !up(m, s)),
         JSON.stringify(winners.concat(losers, takers).map(s => ptsIn(m, s))));
     } finally { try { fs.unlinkSync(script); } catch (e) {} }
   }
@@ -737,9 +768,9 @@ else {
   else {
     const script = path.join(__dirname, '..', '.mutant-seat-gate-allstarts-' + process.pid + '.js');
     try {
-      fs.writeFileSync(script, SRC.replace(MFROM, MTO).replace(LFROM, LTO));
+      fs.writeFileSync(script, NOSTICKY(SRC.replace(MFROM, MTO).replace(LFROM, LTO)));
       const m = timeline(steps, script);
-      T('[16] mutant: comparing the voters only, no later-start check (Q118) -> P3 / P4 take the win, P1 / P2 get nothing', up(m, P3) && up(m, P4) && none(m, P1) && none(m, P2),
+      T('[16] mutant: comparing the voters only, no later-start check (Q118), the sticky contest note (Q127) ignored -> P3 / P4 take the win, P1 / P2 get nothing', up(m, P3) && up(m, P4) && none(m, P1) && none(m, P2),
         JSON.stringify(all6.map(s => ptsIn(m, s))));
     } finally { try { fs.unlinkSync(script); } catch (e) {} }
   }
@@ -813,14 +844,16 @@ else {
         honest: [P1, P2], takers: [Q[6]], lane: 'xp' };
     }],
   ];
-  const LFROM = '    if (seats.length || seatLayoutsDisagree(recsM)) res.contested.set(m, seats);';
-  const LTO = '    if (seats.length) res.contested.set(m, seats);';
+  const LFROM = '    if (seats.length || seatLayoutsDisagree(recsM)) { res.contested.set(m, seats); markContest(pending, m, now); }';
+  const LTO = '    if (seats.length) { res.contested.set(m, seats); markContest(pending, m, now); }';
   const PFROM = "  return (r.d[8] | 0) + '|' + Object.keys(r.roster || {}).map(Number).sort((a, b) => a - b).join(',');";
   const PTO = "  return String(r.d[8] | 0);";
+  // every mutant here also ignores the sticky contest note (Q127): B1 / B5 split their roster before the first look, and the
+  //   note that split leaves would hold them whatever the layout check does (B7 is not split, B8 / B9 are bot matches)
   const mut = (from, to, tag, keepQ121) => {
     if (SRC.split(from).length !== 2) { bad(tag + ': anchor not found exactly once'); return null; }
     const script = path.join(__dirname, '..', '.mutant-seat-gate-layout-' + process.pid + '.js');
-    fs.writeFileSync(script, (keepQ121 ? (x) => x : NOQ121)(SRC.replace(from, to)));
+    fs.writeFileSync(script, (keepQ121 ? (x) => x : NOQ121)(NOSTICKY(SRC.replace(from, to))));
     return script;
   };
   const gained = (rs, c) => c.lane === 'points' ? c.takers.some(s => up(rs, s)) : c.takers.some(s => xpPosts(rs, s).length > 0);
@@ -831,36 +864,42 @@ else {
     if (c.split) T(tag + ': the roster registers split', (pendOf(rs[0], key) || {}).split === 1 && /start-split /.test(rs[0].out), JSON.stringify(pendOf(rs[0], key)));
     if (c.synth) T(tag + ': the job sees the result first (synthetic entry, no start roster ever registers)', (pendOf(rs[0], key) || {}).synth === true && !/start-pending /.test(outOf(rs.filter(r => r.out.indexOf(key) >= 0))),
       JSON.stringify(pendOf(rs[1], key)));
+    // a key split before the first look (B1 / B5) is held by its note (Q127) from then on; the others are first held here,
+    //   by the layout check, and the log must say so
     T(tag + ': two seat layouts -> held (Q75 contest) from the run the real records show up, nobody rated, no XP',
-      /records that disagree on the seat count or the seat map -- roster contest, not settled \(Q75\)/.test(rs[1].out)
+      (c.split && c.lane === 'points' ? /contested once before \(Q127 note\), held until it voids -- roster contest, not settled \(Q75\)/
+        : /records that disagree on the seat count or the seat map -- roster contest, not settled \(Q75\)/).test(rs[1].out)
       && every.every(s => none(rs, s)) && every.every(s => xpPosts(rs.slice(0, 5), s).length === 0), JSON.stringify(every.map(s => [ptsIn(rs, s), xpPosts(rs, s).length])));
     T(tag + ': no real player convicted while he plays nor at maturity', c.honest.every(s => rs.every(r => leavesOf(r, s) === 0)), JSON.stringify(c.honest.map(s => leavesOf(last(rs), s))));
     let script = mut(LFROM, LTO, tag + ' mutant (layout check removed)');
     if (script) try {
       const m = timeline(c.steps, script);
-      T(tag + ' mutant: the layout check and the Q121 leave hold removed -> the real players are convicted / lose their XP, the cheaters gain', framed(m, c) && gained(m, c),
+      T(tag + ' mutant: the layout check, the Q121 leave hold and the sticky contest note (Q127) removed -> the real players are convicted / lose their XP, the cheaters gain', framed(m, c) && gained(m, c),
         JSON.stringify(every.map(s => [ptsIn(m, s), leavesOf(last(m), s), xpPosts(m, s).length])));
     } finally { try { fs.unlinkSync(script); } catch (e) {} }
     script = mut(LFROM, LTO, tag + ' mutant (layout check removed, Q121 on)', true);
     if (script) try {
       const m = timeline(c.steps, script);
-      T(tag + ' mutant: the layout check removed, the Q121 leave hold on -> no real player convicted or left without XP', allOk(m, 6) && !framed(m, c)
+      T(tag + ' mutant: the layout check removed (the sticky note too), the Q121 leave hold on -> no real player convicted or left without XP', allOk(m, 6) && !framed(m, c)
         && c.honest.every(s => m.every(r => leavesOf(r, s) === 0)), JSON.stringify(every.map(s => [ptsIn(m, s), leavesOf(last(m), s), xpPosts(m, s).length])));
     } finally { try { fs.unlinkSync(script); } catch (e) {} }
   }
   // the cost (README: one outside start record alone): from a seat the match does not have, written before the first look,
-  //   it pauses the honest match while it is there -- nobody rated, nobody convicted; once it is gone the key settles
+  //   it splits the roster and so pauses the honest match -- nobody rated, nobody convicted; since Q127 the split holds the
+  //   key for good: once the record is gone the key stays held and voids at maturity
   {
-    const h = 0x8065, R4 = ros3.concat([Q[7]]);
+    const h = 0x8065, R4 = ros3.concat([Q[7]]), key = keyOf(ffaStart(h, 0, ros3));
     const S = [0, 1, 2].map(s => ({ sid: ros3[s], d: ffaStart(h, s, ros3) })), XS = [{ sid: Q[7], d: ffaStart(h, 3, R4) }];
     const Rl = [0, 1, 2].map(s => ({ sid: ros3[s], d: ffaSettle(h, s, ros3) }));
-    const rs = timeline([[0, S.concat(XS)], [12 * MIN, S.concat(XS, Rl)], [5 * MIN, S.concat(XS, Rl)], [5 * MIN, S.concat(Rl)]]);
+    const rs = timeline([[0, S.concat(XS)], [12 * MIN, S.concat(XS, Rl)], [5 * MIN, S.concat(XS, Rl)], [5 * MIN, S.concat(Rl)], [3 * HOUR, S.concat(Rl)]]);
     T('[17] cost: one outside start alone pauses an honest match while it is there, nobody rated or convicted',
-      allOk(rs, 4) && (pendOf(rs[0], keyOf(S[0].d)) || {}).split === 1
-      && /records that disagree on the seat count or the seat map -- roster contest, not settled \(Q75\)/.test(rs[1].out)
+      allOk(rs, 5) && (pendOf(rs[0], key) || {}).split === 1
+      && /contested once before \(Q127 note\), held until it voids -- roster contest, not settled \(Q75\)/.test(rs[1].out)
       && ros3.every(sid => none(rs.slice(0, 3), sid)) && ros3.every(sid => rs.every(r => leavesOf(r, sid) === 0)), last(rs).out.slice(-600));
-    T('[17] cost: once that record is gone the key settles from the honest records', up(rs, P1) && ros3.every(sid => leavesOf(last(rs), sid) === 0),
-      JSON.stringify(ros3.map(sid => ptsIn(rs, sid))));
+    T('[17] cost (Q127): once that record is gone the key stays held (split once = contested for good); it voids at maturity, nobody rated, flagged or convicted',
+      (noteOf(rs[0], key) || {}).c === 1 && Q75.test(rs[3].out) && !processedOf(rs[3]).has(key) && processedOf(rs[4]).has(key)
+      && ros3.concat([Q[7]]).every(sid => none(rs, sid) && fOf(last(rs), sid) === 0 && leavesOf(last(rs), sid) === 0),
+      JSON.stringify(ros3.concat([Q[7]]).map(sid => [ptsIn(rs, sid), fOf(last(rs), sid), leavesOf(last(rs), sid)])));
   }
   // the seat count alone (the REVIEW-3 sample) misses the bot matches: the outside accounts keep the count and only name
   //   themselves at bot seats

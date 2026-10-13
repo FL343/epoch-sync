@@ -582,9 +582,15 @@ function rotatedLeaver(script) {
   T('[5] a held group is counted, warned and skipped (not processed)', /if \(holdWhy\) \{\s*RUN\.endlessHeld = \(RUN\.endlessHeld \| 0\) \+ 1;\s*ghWarn\([^;]+;\s*continue;\s*\}/.test(SRC));
   T('[5] the own set keeps only seats that said so themselves', /const saidSo = endlessTestified\(startsPending\[c\.m\], keyStarts, roster0, g\[0\]\.d\[8\] \| 0, writerSids\);\s*for \(const h of Array\.from\(ownE\)\) if \(!saidSo\.has\(h\)\) ownE\.delete\(h\);\s*const isOwnE = /.test(SRC));
   T('[5] the seat gate no longer skips endless keys', /function seatGateRoster\(p\) \{\s*if \(!p \|\| p\.synth \|\| p\.split \|\| !p\.roster\) return null;/.test(SRC));
-  T('[5] endless registration splits on any disagreement, a tie included', SRC.indexOf('    if (!n || startRosterSplit(att, votes, roster) || startRosterDisagrees(all)) {') > 0
+  // Q130: the outvoted exemption (a majority roster registering unsplit over a dissent) is for matchmade keys only, so an
+  //   endless key still splits on any disagreement
+  T('[5] endless registration splits on any disagreement, a tie included', SRC.indexOf('    const seatsSplit = !n || startRosterSplit(att, votes, roster);') > 0
+    && SRC.indexOf('    const outvoted = mm && !seatsSplit && startRosterDisagrees(all) ? outvotedStarts(att, t, disputedN) : null;') > 0
+    && SRC.indexOf('    } else if (seatsSplit || startRosterDisagrees(all)) {') > 0 && SRC.indexOf('    const mm = isMatchmadeMt(sg[m][0].d[2] | 0);') > 0
+    && SRC.indexOf('function isMatchmadeMt(mt) { const b = baseMt(mt); return b === 1 || b === 2 || isTeamMt(mt); }') > 0 && !v.isTeamMt(7) && v.baseMt(7) === 7
     && SRC.indexOf('if (!n && !isEndlessMt(sg[m][0].d[2] | 0)) continue;') > 0);
-  T('[5] endless keys skip the dispute filter (every writer votes)', /const all = att;[^\n]*\n\s*if \(!isEndlessMt\(sg\[m\]\[0\]\.d\[2\] \| 0\)\) \{\s*const claim = \{\};/.test(SRC));
+  T('[5] endless keys skip the dispute filter (every writer votes) and the blank-seat rule (Q130, matchmade only)',
+    /let all = att;[^\n]*\n\s*const mm = isMatchmadeMt\(sg\[m\]\[0\]\.d\[2\] \| 0\);\n\s*const blank = mm \? all\.filter\(blankSeatStart\) : \[\];[^\n]*\n\s*if \(blank\.length\) \{[^\n]*\}\n\s*let disputedN = 0;\n\s*if \(!isEndlessMt\(sg\[m\]\[0\]\.d\[2\] \| 0\)\) \{\s*const claim = \{\};/.test(SRC));
   T('[5] testimony remembered for endless keys in the start upkeep', /if \(isEndlessMt\(p\.mt\)\) noteTestimony\(p, \(sg\[m\] \|\| \[\]\)\.concat\(groups\[m\] \|\| \[\]\)\);/.test(SRC));
   T('[5] no fallback to every writer for the casual pair', !/ownRosterSids\.length \? ownRosterSids : writerSids/.test(SRC));
   T('[5] run summary row', /s\('endlessHeld', 0\)/.test(SRC));
@@ -609,7 +615,7 @@ console.log('-- [6] mutation self-checks --');
       const x = h1(); const p = timeline(x.steps, [x.V, x.W], { script });
       return !settledLine(p, x.h, 2, 0, 3);
     }],
-    ['no endless split check', 'if (!n || startRosterSplit(att, votes, roster) || startRosterDisagrees(all)) {', 'if (!isEndlessMt(pending[m].mt) && (startRosterSplit(att, votes, roster) || startRosterDisagrees(all))) {', (script) => {
+    ['no endless split check', '    } else if (seatsSplit || startRosterDisagrees(all)) {', '    } else if (!isEndlessMt(pending[m].mt) && (seatsSplit || startRosterDisagrees(all))) {', (script) => {
       const x = outvoted(script);
       return !settledLine(x.p, x.h, 2, 0, 3) || offSeatN(x.p) > 0;
     }],

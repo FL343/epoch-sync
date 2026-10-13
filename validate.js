@@ -62,7 +62,7 @@ const ABSENT_GRACE_MS = Math.max(ABSENT_GRACE_MIN_MS, Number(process.env.ABSENT_
 // (the match runs 10 to 12 minutes from level 1). With the job about every 5 minutes the roster is final at the first
 // complete read 5 minutes after registration, about halfway through the match; the root fix is a real start time.
 const START_CONFIRM_MIN_MS = 180000;
-const START_CONFIRM_MS = Math.max(START_CONFIRM_MIN_MS, Number(process.env.START_CONFIRM_MS || 300000));
+const START_CONFIRM_MS = Math.max(START_CONFIRM_MIN_MS, Number(process.env.START_CONFIRM_MS || 240000));
 // Q121: a group that would settle without a seat whose player wrote his OWN start for the match, and no result or
 // confession yet, first waits until the match must be over: LEAVE_CONFIRM_MS after this job first read that player's
 // start (see leaveConfirmHold). Default 60 min, floor 45 min (the longest match stays under it, see the note there).
@@ -362,7 +362,7 @@ function seatLayoutsDisagree(recs) {
 }
 // A contested key is held like an inconsistent one: pulled out of both group lists before any pass reads them (the
 // team-gamble dissent pass, the start cross-check, the settle loop), nobody rated, nobody convicted from it, nobody flagged
-// (cloud audit Q114 review; the loop below says why). Nothing sticky: when the contesting records are gone the key settles from what is left. Endless keys
+// (cloud audit Q114 review; the loop below says why). Sticky since Q127: a matchmade key contested once (its starts-state note) stays held until it voids, whatever is withdrawn later. Endless keys
 // stay out here (their settle is a separate path, cloud audit Q78); a processed key is history. A key with a registered
 // start roster its voters agree on is left to the seat gate (Q80: applySeatGate drops the off-seat records before
 // grouping). There the roster is the players' own, so a record that names someone else at a seat is one player's word
@@ -375,10 +375,12 @@ function applyRosterContest(gr, starts, pending, signals, processed, now) {
   for (const m of Object.keys(gr.groups || {})) {
     const g = gr.groups[m];
     if (!g || !g.length || processed.has(m) || isEndlessMt(g[0].d[2] | 0)) continue;
+    const seen = pending && pending['~' + m];
+    if (seen && seen.c) { res.contested.set(m, []); (res.sticky = res.sticky || new Set()).add(m); continue; }   // Q127: contested once, held until it voids
     if (seatGateRoster(pending && pending[m])) continue;   // Q80: a registered start roster already decides who counts (applySeatGate)
     const recsM = g.concat(byKey[m] || []);
     const seats = rosterContestSeats(recsM);
-    if (seats.length || seatLayoutsDisagree(recsM)) res.contested.set(m, seats);   // Q80 third review: or two seat layouts
+    if (seats.length || seatLayoutsDisagree(recsM)) { res.contested.set(m, seats); markContest(pending, m, now); }   // Q80 third review: or two seat layouts; Q127: for good
   }
   if (!res.contested.size) return res;
   for (const list of [gr.consistentMatches, gr.inconsistentGroups]) {
@@ -391,7 +393,8 @@ function applyRosterContest(gr, starts, pending, signals, processed, now) {
   //   result), once per match -- the per-match flag Q114 takes away after the settle. Counted (contested) and logged, no flag.
   for (const [m, seats] of res.contested) {
     const g = gr.groups[m];
-    ghWarn('match=' + m + ': ' + (seats.length ? 'two accounts named for seat(s) ' + seats.join(',') : 'records that disagree on the seat count or the seat map')
+    const sticky = !!res.sticky && res.sticky.has(m);   // held by an earlier run's note, not by what this run read
+    ghWarn('match=' + m + ': ' + (seats.length ? 'two accounts named for seat(s) ' + seats.join(',') : sticky ? 'contested once before (Q127 note), held until it voids' : 'records that disagree on the seat count or the seat map')
       + ' -- roster contest, not settled (Q75), nobody flagged (Q114 review): '
       + g.map(r => plog(r.steamID) + '@' + r.shard + '=' + (r.d[5] | 0)).join(' '));
   }
@@ -462,12 +465,25 @@ function recTestimony(r) { return testimonyOf(r.d[8], r.d[5], r.roster); }
 // pc, a cold-reconnect copy included, so an honest key never splits here. The cost: an outside start naming another
 // roster pauses the match until START_CONFIRM_MS after the job's first look, not only before it (Q80 review T6).
 // An entry registered before this change has no prov: it counts as confirmed.
-function startSig(r) {
-  return crypto.createHash('sha256').update((r.d[8] | 0) + '|' + rosterCanon(r.roster)).digest('hex').slice(0, 12);
+function startSigOf(pc, ro) {
+  return crypto.createHash('sha256').update((pc | 0) + '|' + rosterCanon(ro)).digest('hex').slice(0, 12);
 }
+function startSig(r) { return startSigOf(r.d[8], r.roster); }
+// Q130: on a matchmade key a later start does not split a provisional roster when it cannot be the alts' roster Q118 is
+//   about: its writer is seated by the registered roster at the seat he writes from (one of the players naming another
+//   table: his own lie, outvoted -- an honest player the registered roster leaves out is never seated by it, so his start
+//   still splits), or it leaves a seat empty (blankSeatStart: never an honest matchmade start).
 function lateStartSplit(p, recs, m) {
   if (!p || !p.prov || p.split) return false;
-  const other = (recs || []).find((r) => startSig(r) !== p.prov);
+  const mm = isMatchmadeMt(p.mt);
+  const ownSeat = (r) => !!p.roster && p.roster[r.d[5] | 0] === pid(String(r.steamID));
+  let kept = 0;
+  const other = (recs || []).find((r) => {
+    if (startSig(r) === p.prov) return false;
+    if (mm && (blankSeatStart(r) || ownSeat(r))) { kept++; return false; }
+    return true;
+  });
+  if (kept) RUN.lateOwnSeat = (RUN.lateOwnSeat | 0) + 1;
   if (!other) return false;
   p.split = 1;
   delete p.prov;
@@ -501,24 +517,143 @@ function lateStartSplit(p, recs, m) {
 // registers. One start is enough for a solo key (soloStartAttested), so an outside solo start read while the player's own
 // sat on the unread shard would register the outsider at seat 0, unsplit, and the gate would drop the player's records
 // for good (registration is first-seen). A matchmade key needs two votes and keeps registering as before.
+// ---- a matchmade start that leaves a seat empty, a player outvoted on his roster (cloud audit Q130) ----
+// A matchmade match (quick, ranked, their team codes) seats a Steam account at every seat below its seat count: the host
+// builds the seat map from the lobby members, and every start record carries it whole. So a matchmade start record that
+// leaves a seat below its seat count empty is never a player's own -- it is its writer's own lie (a modded client, or an
+// outside account). Before, one such start was enough to split the key (startRosterDisagrees): no seat gate, the roster
+// contest held it, nobody was flagged -- a loser kept the match unsettled and lost nothing (1V1: he alone took the
+// consolation XP), a winner overwrote his lie with an honest start before the end and the match counted (REVIEW of Q121,
+// S1a / S1b / S2). Now such a start keeps its seat claim (a seat two accounts claim is still disputed, Q80) but does not
+// vote and is compared with nothing; its writer is flagged once per key (noteBlankStarts, flagged in main). The other
+// players' starts register the roster when it seats every such writer at the seat he wrote from -- one such start is then
+// enough (the liar's own writing is the second account on the key); otherwise (an outside account at a seat the roster
+// gives somebody else) the key goes on as before. A friends' room, a bot match and an endless run seat bots or nobody at
+// some seats ('0' in the roster) and are not judged here.
+function isMatchmadeMt(mt) { const b = baseMt(mt); return b === 1 || b === 2 || isTeamMt(mt); }
+function blankSeatStart(r) {
+  if (r.d.length < 9) return false;   // no seat count (the job reads a start only with d.length >= 10; old unit fixtures)
+  const pc = r.d[8] | 0, ro = r.roster || {};
+  if (pc < 1) return true;
+  for (let s = 0; s < pc; s++) if (!ro[s]) return true;
+  return false;
+}
+const BLANK_STARTS = [];   // [key, record] -- flagged in main once signals are loaded
+function noteBlankStarts(m, recs) {
+  for (const r of recs || []) if (blankSeatStart(r)) BLANK_STARTS.push([m, r]);
+}
+// The plain tally below: one vote per voter per seat, strict majority per seat (raw = the winning account, unhashed).
+function tallyStartVotes(att) {
+  const votes = {};
+  for (const r of att) for (const seatKey of Object.keys(r.roster || {})) {
+    const seat = seatKey | 0, sid = r.roster[seatKey];
+    (votes[seat] = votes[seat] || {})[sid] = (votes[seat][sid] || 0) + 1;
+  }
+  const roster = {}, raw = {}; let n = 0;
+  for (const seatKey of Object.keys(votes)) {
+    let best = null, bestN = 0;
+    for (const sid of Object.keys(votes[seatKey])) if (votes[seatKey][sid] > bestN) { bestN = votes[seatKey][sid]; best = sid; }
+    if (best && bestN * 2 > att.length) { roster[seatKey | 0] = pid(best); raw[seatKey | 0] = best; n++; }   // strict majority per seat
+  }
+  return { votes, roster, raw, n };
+}
+// Q130: a matchmade key whose voters do not all name the same table (startRosterDisagrees) still registers unsplit when
+//   one table is plainly theirs: no seat is claimed by two accounts, every voter has the same seat count, the majority
+//   roster seats every voter at the seat he wrote from (startRosterSplit is false), and at least two voters name that
+//   roster word for word, more than name anything else. Each honest player names the same table, so one or a few modded
+//   players naming alts at other players' seats are outvoted instead of pausing the match (REVIEW of Q121, S1 alt
+//   variants). The outvoted are not flagged: in the rare match where players who dropped before level 1 outnumber those
+//   who stayed and outside accounts started from the empty seats, the honest players are the outvoted ones. Ties, a
+//   lone voter and every disputed seat stay split, as before (Q80 review A1 / A2, Q127).
+function outvotedStarts(att, t, disputed) {
+  if (disputed || !t.n || att.length < 2) return null;
+  const pcs = new Set(att.map((r) => r.d[8] | 0));
+  if (pcs.size !== 1) return null;
+  const sig = startSigOf(att[0].d[8], t.raw);
+  const agree = att.filter((r) => startSig(r) === sig).length;
+  return agree >= 2 && agree * 2 > att.length ? sig : null;
+}
+// ---- a matchmade key remembers its contest, and what came after its result does not count (cloud audit Q127 / Q138) ----
+// A split or contested matchmade key is held (the roster contest, nobody rated or flagged) and voids after STARTS_MATURITY_MS.
+// Before, it was held only while the start that split it stayed on its shard: a loser's alt wrote a start of its own (an
+// extra seat, a winner's seat, after registration or ahead of the job's first look), left it there when he lost (the match
+// voided, nobody flagged) and overwrote that row when he won (the match settled as if it had never been written) -- the
+// decision taken after the result, free, any number of matches (REVIEW of Q127, S1-S4). And a start first written after
+// the result could still split or contest the key: a 1V1 loser who wrote no start of his own (only the winner's start, one
+// vote, no roster ever registered) had an alt write one once he saw he had lost (S5, Q138), or the alt wrote in the job
+// run that first read the result (S6). Now, per matchmade key, the job keeps a small note in the starts state
+// (pending['~' + key], no roster: no loop that reads rosters sees it):
+//   s: the starts it read before the result (writer, seat and roster signature); r: when it first read a result of the key
+//      in a run after one where it had read a start -- from then on a start not in s is left out of this run entirely (no
+//      vote, no split, no contest, nobody's own start): every honest start is written at level 1, minutes before the
+//      result; a cold-reconnect copy carries the same roster and seat, so it is the same entry. A key whose first run
+//      already shows a result (the job stalled for a whole match) keeps every start, as before.
+//   c: the key was split or contested once (a seat claimed twice, a roster its voters split, a later start naming another
+//      roster, the roster contest) -- it stays held until it voids, whatever is withdrawn later.
+// So an alt's start counts only if it was there before the result, and then for good: the loser has to choose before the
+// match is decided, and a held match he would have won is lost to him too. Friends' rooms, bot matches and endless runs
+// keep their own rules.
+const SEEN_KEEP_MS = 24 * 3600 * 1000;
+function seenNote(pending, m, now) { const k = '~' + m; return pending[k] || (pending[k] = { t0: now, s: [], r: 0, c: 0 }); }
+function markContest(pending, m, now) { if (pending && isMatchmadeMt(String(m).split('_')[2] | 0)) seenNote(pending, m, now).c = 1; }
+function startSeenId(r) { return pid(String(r.steamID)) + '@' + (r.d[5] | 0) + '#' + startSig(r); }
+function screenLateStarts(starts, recs, pending, processed, now, readComplete) {
+  const keyOf = (r) => r.d[3] + '_' + r.d[4] + '_' + r.d[2];
+  const sg = {}, settled = new Set();
+  for (const r of starts || []) if (isMatchmadeMt(r.d[2] | 0)) { const m = keyOf(r); (sg[m] = sg[m] || []).push(r); }
+  for (const r of recs || []) if (isMatchmadeMt(r.d[2] | 0)) settled.add(keyOf(r));
+  const late = new Set();
+  for (const m of new Set(Object.keys(sg).concat([...settled]))) {
+    if (processed.has(m)) continue;
+    const e = (sg[m] || pending['~' + m]) ? seenNote(pending, m, now) : null;
+    if (!e) continue;
+    // the result, read (on a complete read) in a run after a start was -- not while a registered roster is provisional: the
+    //   Q118 alts register first and write a result of their own at once, and the honest starts read after it must split
+    if (!e.r && readComplete !== false && settled.has(m) && e.s.length && !(pending[m] && pending[m].prov)) e.r = now;
+    for (const r of sg[m] || []) {
+      const id = startSeenId(r);
+      if (e.s.indexOf(id) >= 0) continue;
+      if (!e.r) e.s.push(id); else late.add(r);
+    }
+  }
+  if (late.size) {
+    let w = 0;
+    for (const r of starts) if (!late.has(r)) starts[w++] = r;
+    starts.length = w;
+    console.log('  start-late: ' + late.size + ' start(s) first read after their match\'s result -- left out (Q127 / Q138): '
+      + [...late].map((r) => keyOf(r) + ':' + plog(r.steamID) + '@' + (r.d[5] | 0)).join(' '));
+  }
+  RUN.lateStarts = late.size;
+  return late.size;
+}
 function registerStartRosters(starts, processed, pending, now, readComplete) {
   const sg = {};
   for (const r of starts || []) { const m = r.d[3] + '_' + r.d[4] + '_' + r.d[2]; (sg[m] = sg[m] || []).push(r); }
   let registered = 0, waiting = 0;
   for (const m of Object.keys(sg)) {
     if (processed.has(m)) continue;
-    if (pending[m]) { if (lateStartSplit(pending[m], sg[m], m)) RUN.lateSplit = (RUN.lateSplit | 0) + 1; continue; }   // Q118
+    if (pending[m]) {
+      if (isMatchmadeMt(sg[m][0].d[2] | 0)) noteBlankStarts(m, sg[m]);   // Q130
+      if (lateStartSplit(pending[m], sg[m], m)) { RUN.lateSplit = (RUN.lateSplit | 0) + 1; markContest(pending, m, now); }
+      continue;
+    }   // Q118
     if (readComplete === false && isEndlessMt(sg[m][0].d[2] | 0)) { waiting++; continue; }   // Q113: next full read
     const bySid = {};   // one vote per distinct writer (a cold-reconnect duplicate collapses)
     for (const r of sg[m]) bySid[String(r.steamID)] = r;
     let att = Object.values(bySid);
-    const all = att;   // every distinct writer, the disputed claimants included (startRosterDisagrees)
+    let all = att;   // every distinct writer, the disputed claimants included (startRosterDisagrees)
+    const mm = isMatchmadeMt(sg[m][0].d[2] | 0);
+    const blank = mm ? all.filter(blankSeatStart) : [];   // Q130
+    if (blank.length) { noteBlankStarts(m, blank); RUN.blankStarts = (RUN.blankStarts | 0) + blank.length; }
+    let disputedN = 0;
     if (!isEndlessMt(sg[m][0].d[2] | 0)) {
       const claim = {};
       for (const r of att) { const s = r.d[5] | 0; claim[s] = (claim[s] | 0) + 1; }
       const disputed = Object.keys(claim).filter((s) => claim[s] > 1);
       if (disputed.length) {
         att = att.filter((r) => claim[r.d[5] | 0] === 1);
+        disputedN = disputed.length;
+        markContest(pending, m, now);   // Q127
         RUN.disputed = (RUN.disputed | 0) + 1;
         console.log('  start-dispute ' + m + ': seat(s) ' + disputed.join(',') + ' claimed by two or more accounts -- those claimants do not vote (Q80)');
       }
@@ -526,24 +661,37 @@ function registerStartRosters(starts, processed, pending, now, readComplete) {
     // a single attestation convicts nobody (mirrors settle consensus) -- except an O93 solo competitive
     //   segment start (pc=1 endless, 2026-09-06): its ONE guard-written attestation is the segment's
     //   pacing anchor (endless keys are never convicted below), and its roster must name the writer at seat 0.
-    if (att.length < 2 && !soloStartAttested(att)) continue;
-    const votes = {};
-    for (const r of att) for (const seatKey of Object.keys(r.roster || {})) {
-      const seat = seatKey | 0, sid = r.roster[seatKey];
-      (votes[seat] = votes[seat] || {})[sid] = (votes[seat][sid] || 0) + 1;
+    // Q130: the blank starts vote nowhere when the other voters' roster seats each of their writers at his own seat
+    let t = null;
+    if (blank.length) {
+      const bad = new Set(blank), v = att.filter((r) => !bad.has(r));
+      if (v.length >= 1 && v.length + blank.length >= 2) {
+        const tv = tallyStartVotes(v);
+        if (blank.every((r) => tv.roster[r.d[5] | 0] === pid(String(r.steamID)))) {
+          t = tv; att = v; all = all.filter((r) => !bad.has(r));
+          console.log('  start-blank ' + m + ': ' + blank.length + ' start(s) leave a seat empty, their writers seated by the other starts -- they do not vote (Q130)');
+        }
+      }
     }
-    const roster = {}; let n = 0;
-    for (const seatKey of Object.keys(votes)) {
-      let best = null, bestN = 0;
-      for (const sid of Object.keys(votes[seatKey])) if (votes[seatKey][sid] > bestN) { bestN = votes[seatKey][sid]; best = sid; }
-      if (best && bestN * 2 > att.length) { roster[seatKey | 0] = pid(best); n++; }   // strict majority per seat
+    if (!t) {
+      if (att.length < 2 && !soloStartAttested(att)) continue;
+      t = tallyStartVotes(att);
     }
+    const votes = t.votes, roster = t.roster, n = t.n;
     // Q113: an endless key whose starts leave no seat with a majority (outside starts tying the players') still gets its
     //   entry, empty and split: it is where the players' word is remembered (noteTestimony) once their starts rotate off
     if (!n && !isEndlessMt(sg[m][0].d[2] | 0)) continue;
     pending[m] = { t0: now, mt: sg[m][0].d[2] | 0, roster, settled: [] };
-    if (!n || startRosterSplit(att, votes, roster) || startRosterDisagrees(all)) {
+    const seatsSplit = !n || startRosterSplit(att, votes, roster);
+    const outvoted = mm && !seatsSplit && startRosterDisagrees(all) ? outvotedStarts(att, t, disputedN) : null;   // Q130
+    if (outvoted) {
+      pending[m].prov = outvoted;
+      RUN.outvoted = (RUN.outvoted | 0) + 1;
+      console.log('  start-outvoted ' + m + ': ' + att.filter((r) => startSig(r) !== outvoted).length + ' of ' + att.length
+        + ' voters name another roster -- the majority registers it, nobody flagged (Q130)');
+    } else if (seatsSplit || startRosterDisagrees(all)) {
       pending[m].split = 1;
+      markContest(pending, m, now);   // Q127
       RUN.split = (RUN.split | 0) + 1;
       console.log('  start-split ' + m + ': the voters do not agree on the roster -- no seat gate, '
         + (isEndlessMt(pending[m].mt) ? 'the endless settle checks decide (Q113)' : 'the roster contest decides (Q80)'));
@@ -662,6 +810,19 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
   const registered = preRegistered == null ? registerStartRosters(starts, processed, pending, now, readComplete) : preRegistered;
   // 2) upkeep + maturity verdicts for pending entries
   for (const m of Object.keys(pending)) {
+    if (m.charAt(0) === '~') {   // Q127: a key's note, kept until the key is processed or a day old
+      const key = m.slice(1), e = pending[m];
+      // a contested key no start roster registered for (a seat claimed twice from the first look) has no entry that voids
+      //   it at maturity: it voids here, at the same age (processed, nobody rated, convicted or consoled) -- else, held
+      //   only while the row stays up, the row could still be withdrawn once the note is gone and the match would count
+      if (e.c && !pending[key] && !processed.has(key) && now - (e.t0 || 0) >= maturityMs) {
+        processed.add(key);
+        RUN.contestVoid = (RUN.contestVoid | 0) + 1;
+        console.log('  contest-void ' + key + ': contested since ' + new Date(e.t0 || 0).toISOString() + ', no start roster -- void, nobody rated (Q127)');
+      }
+      if (processed.has(key) || now - (e.t0 || 0) > SEEN_KEEP_MS) delete pending[m];
+      continue;
+    }
     if (processed.has(m)) { delete pending[m]; cleaned++; continue; }   // settled (or convicted) since
     const p = pending[m];
     // anyone who wrote ANY settle record was present at the end -> exempt. Tracked cumulatively:
@@ -3708,6 +3869,7 @@ async function main() {
   // Q123: a friends'-room record whose writer is not on his own roster seat counts nowhere -- dropped ahead of registration
   //   (its start votes on no roster, splits nothing) and of grouping; nobody flagged
   RUN.seatless = dropSeatlessPrivate(recs, starts, processed).n;
+  screenLateStarts(starts, recs, startsPending, processed, Date.now(), shardsComplete);   // Q127 / Q138: a start first read after the result counts nowhere
   const registeredEarly = registerStartRosters(starts, processed, startsPending, Date.now(), shardsComplete);   // Q113: endless keys wait for a full read
   const seatGate = applySeatGate(recs, starts, startsPending, processed);
   RUN.offSeat = seatGate.n;
@@ -3744,6 +3906,13 @@ async function main() {
   //   clean) and gains nothing by the records (dropped).
   // Q75: a key whose records name two different accounts for one seat is held out of every pass below (nobody rated,
   //   nobody convicted, nobody flagged: Q114 review) -- an outside account's record no longer counts as a vote
+  // Q130: a matchmade start that leaves a seat empty is its writer's own lie -- flagged once per key and writer
+  for (const [m, r] of BLANK_STARTS) {
+    if (processed.has(m)) continue;
+    if (recordFlag(signals, [r], m + '|blank|' + pid(String(r.steamID)), Date.now())) sigDirty = true;
+    trustTouched.add(String(r.steamID));
+  }
+  BLANK_STARTS.length = 0;
   const rcRes = applyRosterContest(gr, starts, startsPending, signals, processed, Date.now());
   if (rcRes.dirty) sigDirty = true;
   for (const sid of rcRes.touched) trustTouched.add(sid);
@@ -3762,7 +3931,7 @@ async function main() {
   const startsRes = reconcileStarts(starts, groups, consistentKeys, processed, startsPending, leavers, nowMs, STARTS_MATURITY_MS, confState, shardsComplete, registeredEarly);
   if (startsRes.registered || startsRes.convicted || startsRes.cleaned || Object.keys(startsPending).length)
     console.log('starts: ' + Object.keys(startsPending).length + ' pending (+' + startsRes.registered + ' new), ' + startsRes.convicted + ' exit-rate hits, ' + startsRes.cleaned + ' cleaned' + (startsRes.held ? ', ' + startsRes.held + ' matured verdict(s) held (incomplete shard read)' : ''));
-  RUN.pending = Object.keys(startsPending).length; RUN.convicted = startsRes.convicted;
+  RUN.pending = Object.keys(startsPending).filter((m) => m.charAt(0) !== '~').length; RUN.convicted = startsRes.convicted;
   // R1-B2-03: the consolation XP and confession points writes below are relative ("board value now + delta") and
   // land long before this run's normal state save (early-return persistStartsSide / the main-path tail). Any exit
   // in between (a STRICT_BOARDS listing wobble, an aborted base read, a crash, the step timeout) used to drop the

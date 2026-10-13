@@ -13,11 +13,14 @@
 //       summary rows (Q75 / Q80) read 0
 //   [3] no start seen: two losers and one outside account turn a 2V2 around (review4-q43.js part 6): not settled, no
 //       points move, the true winner is no leaver, nobody flagged over two runs (Q114 review), run summary row; no
-//       synthetic start entry, so nothing matures into a verdict later either
+//       synthetic start entry, so nothing matures into a verdict later; at maturity the key voids from its note
+//       (contest-void, Q127): processed, nothing moves, nobody convicted
 //   [4] no start seen: five outside accounts take a 2V2 over (review4-q43.js part 5): not settled, the outsiders gain nothing
 //   [5] outside accounts write a start at every seat (no start roster can register): the key is held, nobody rated or
-//       convicted; once those rows are gone the roster registers and the key settles
-//   [6] nothing sticky: once the contesting rows are gone the honest records settle the key
+//       convicted; once those rows are gone the roster registers, but the key stays held (a matchmade key contested once
+//       stays held, Q127) and voids at maturity, nobody rated, flagged or convicted
+//   [6] sticky (Q127, was "nothing sticky"): once the contesting rows are gone the key stays held, the honest records do
+//       not settle it
 //   [7] no start seen: a real quitter shielded by an outside account at his empty seat (that account's roster leaves the
 //       seat empty so the self-seat sanity check passes): not settled
 //   [8] a key with a registered start roster is left to the seat gate (part 6 with starts): no contest line, Q75 row 0
@@ -235,7 +238,9 @@ console.log('=== one account per seat per match key without a start roster (Q75)
   T('[3] run summary row reads 1', /\| match keys with two accounts on one seat or two seat layouts, not settled \(Q75\) \| 1 \|/.test(r1.summary));
   T('[3] no synthetic start entry for the held key', !pendOf(r2, key), JSON.stringify(pendOf(r2, key)));
   const r3 = runCron(boardsWith(recs), advance(r2.state, MATURE));
-  T('[3] much later: still held, nobody convicted, nothing moves', r3.code === 0 && !processedOf(r3).has(key) && [H, V, X, Y, O].every(s => leavesOf(r3, s) === 0) && anyPoints(r3) === 0, r3.out.slice(-600));
+  T('[3] at maturity: voided from its note (contest-void, Q127), nobody convicted, nothing moves', r3.code === 0 && processedOf(r3).has(key)
+    && new RegExp('contest-void ' + key + ': [^\\n]*no start roster -- void, nobody rated \\(Q127\\)').test(r3.out)
+    && [H, V, X, Y, O].every(s => leavesOf(r3, s) === 0) && anyPoints(r3) === 0, r3.out.slice(-600));
 }
 
 // ---- [4] no start seen: five outside accounts take the 2V2 over ----
@@ -259,24 +264,32 @@ console.log('=== one account per seat per match key without a start roster (Q75)
   T('[5] every start seat claimed twice: logged, no roster registered', /start-dispute [^\n]*: seat\(s\) 0,1,2,3 claimed by two or more accounts -- those claimants do not vote \(Q80\)/.test(r1.out) && !pendOf(r2, key), (r1.out.match(/[^\n]*start-dispute[^\n]*/) || [''])[0]);
   T('[5] held as a contest: not settled, no points move, nobody convicted', !processedOf(r2).has(key) && anyPoints(r1) + anyPoints(r2) === 0 && Q75.test(r1.out) && [H, V, X, Y].every(s => leavesOf(r2, s) === 0), r2.out.slice(-600));
   T('[5] summary rows: one contested key, one disputed start key', /\| match keys with two accounts on one seat or two seat layouts, not settled \(Q75\) \| 1 \|/.test(r1.summary) && Q80ROW(r1, 0, 1), (r1.summary.match(/[^\n]*\(Q7[5]\)[^\n]*|[^\n]*\(Q80\)[^\n]*/g) || []).join(" ; "));
-  // the outside rows rotate off: the players' starts register now, and the key settles one floor later
+  // the outside rows rotate off: the players' starts register now, but the dispute marked the key contested (Q127, the
+  //   key's note in the starts state): it stays held one floor later too, and voids at maturity
   const clean = honest4(h).concat(starts4(h));
   const r3 = runCron(boardsWith(clean), advance(r2.state, FLOOR + 1000));
-  T('[5] the outside rows gone: the players\' roster registers', r3.code === 0 && pendOf(r3, key) && (pendOf(r3, key).roster || {})[0] === v.pid(H) && !Q75.test(r3.out), r3.out.slice(-600));
+  T('[5] the outside rows gone: the players\' roster registers, the key stays held (contested once, Q127)', r3.code === 0 && pendOf(r3, key) && (pendOf(r3, key).roster || {})[0] === v.pid(H)
+    && (pendOf(r3, '~' + key) || {}).c === 1 && Q75.test(r3.out) && !processedOf(r3).has(key), r3.out.slice(-600));
   const r4 = runCron(boardsWith(clean), advance(r3.state, FLOOR + 1000));
-  T('[5] ... and the key settles: H and V win', r4.code === 0 && processedOf(r4).has(key) && pointsOf(r4, H)[0] > 2500 && pointsOf(r4, V)[0] > 2500, r4.out.slice(-600));
+  T('[5] ... and one floor later: still held, the key does not settle, nobody rated', r4.code === 0 && Q75.test(r4.out) && !processedOf(r4).has(key) && anyPoints(r3) + anyPoints(r4) === 0, r4.out.slice(-600));
+  const r5 = runCron(boardsWith(clean), advance(r4.state, MATURE));
+  T('[5] ... voided at maturity: nobody rated, flagged or convicted', r5.code === 0 && processedOf(r5).has(key) && anyPoints(r5) === 0
+    && [H, V, X, Y].concat(OUTS4).every(s => leavesOf(r5, s) === 0 && fOf(r5, s) === 0), r5.out.slice(-600));
 }
 
-// ---- [6] nothing sticky ----
+// ---- [6] sticky (Q127; this was "nothing sticky") ----
+// A matchmade key contested once stays held: X and Y can no longer keep the forged rows up while they would lose and take
+//   them down to let a result they like settle (REVIEW of Q127, S1-S4)
 {
   const h = 0x7505, key = keyOf(t2start(h, 0, ROS));
   const r1 = runCron(boardsWith(part6(h)));
-  T('[6] run 1: contested', r1.code === 0 && Q75.test(r1.out));
+  T('[6] run 1: contested, the key\'s note marked (Q127)', r1.code === 0 && Q75.test(r1.out) && (pendOf(r1, '~' + key) || {}).c === 1, JSON.stringify(pendOf(r1, '~' + key)));
   // X and Y overwrite their rows with what really happened, O's row rotates off
   const r2 = runCron(boardsWith(honest4(h)), advance(r1.state, FLOOR + 1000));
   const r3 = runCron(boardsWith(honest4(h)), advance(r2.state, FLOOR + 1000));
-  T('[6] the honest records settle the key (one floor after their first sighting)', r2.code === 0 && r3.code === 0 && !Q75.test(r2.out + r3.out) && processedOf(r3).has(key), r3.out.slice(-600));
-  T('[6] H and V win points', pointsOf(r3, H)[0] > 2500 && pointsOf(r3, V)[0] > 2500, JSON.stringify([pointsOf(r3, H), pointsOf(r3, V)]));
+  T('[6] the honest records no longer settle the key: still held after the forged rows are gone', r2.code === 0 && r3.code === 0 && Q75.test(r2.out) && Q75.test(r3.out)
+    && !processedOf(r3).has(key) && (pendOf(r3, '~' + key) || {}).c === 1, r3.out.slice(-600));
+  T('[6] nobody rated or flagged', anyPoints(r2) + anyPoints(r3) === 0 && [H, V, X, Y, O].every(s => fOf(r3, s) === 0), JSON.stringify([H, V, X, Y, O].map(s => [pointsOf(r3, s), fOf(r3, s)])));
 }
 
 // ---- [7] no start seen: a real quitter shielded by an outside account at his empty seat ----
@@ -287,9 +300,11 @@ const part7 = (h) => {
 };
 {
   const h = 0x7506, recs = part7(h), key = keyOf(recs[0].d);
-  const { r2 } = twoRuns(recs);
+  const { r1, r2 } = twoRuns(recs);
   T('[7] not settled: O does not sit in for C', r2.code === 0 && !processedOf(r2).has(key) && anyPoints(r2) === 0, r2.out.slice(-600));
-  T('[7] contest at seat 2', /two accounts named for seat\(s\) 2 -- roster contest/.test(r2.out));
+  // the first run names the seat; from then on the key's note holds it (Q127), logged without the seat
+  T('[7] contest at seat 2 (first sighting), held by the key\'s note after', /two accounts named for seat\(s\) 2 -- roster contest/.test(r1.out) && Q75.test(r2.out)
+    && (pendOf(r2, '~' + key) || {}).c === 1, (r1.out.match(/[^\n]*Q75[^\n]*/) || [''])[0]);
 }
 
 // ---- [8] a registered start roster: the key is left to the seat gate ----
@@ -319,7 +334,7 @@ const part7 = (h) => {
         return processedOf(r2).has(keyOf(recs[0].d)) || anyPoints(r2) > 0;   // [3] the forged result settles again
       }],
     ["writer's own seat ignored and the seat-layout check removed", [['    add(r.d[5] | 0, pid(String(r.steamID)));\n', ''],
-      ['    if (seats.length || seatLayoutsDisagree(recsM)) res.contested.set(m, seats);', '    if (seats.length) res.contested.set(m, seats);']], null, (script) => {
+      ['    if (seats.length || seatLayoutsDisagree(recsM)) { res.contested.set(m, seats); markContest(pending, m, now); }', '    if (seats.length) { res.contested.set(m, seats); markContest(pending, m, now); }']], null, (script) => {
         const recs = part7(0x7513);
         const { r2 } = twoRuns(recs, null, script);
         return processedOf(r2).has(keyOf(recs[0].d));   // [7] O sits in for C again
@@ -328,7 +343,7 @@ const part7 = (h) => {
   // Q80 third review: O's roster leaves his own seat empty, so his record also disagrees on the seat layout -- either check
   //   alone holds [7]; only both removed lets O sit in for C
   const holdsAlone = [["writer's own seat ignored alone", [['    add(r.d[5] | 0, pid(String(r.steamID)));\n', '']]],
-    ['the seat-layout check removed alone', [['    if (seats.length || seatLayoutsDisagree(recsM)) res.contested.set(m, seats);', '    if (seats.length) res.contested.set(m, seats);']]]];
+    ['the seat-layout check removed alone', [['    if (seats.length || seatLayoutsDisagree(recsM)) { res.contested.set(m, seats); markContest(pending, m, now); }', '    if (seats.length) { res.contested.set(m, seats); markContest(pending, m, now); }']]]];
   const build = (label, from, to) => {
     const reps = Array.isArray(from) ? from : [[from, to]];
     let src = SRC;
