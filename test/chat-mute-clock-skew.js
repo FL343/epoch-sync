@@ -109,5 +109,22 @@ console.log('=== chat-mute-clock-skew [7] the row signature is keyed and carries
   ok('state has no raw sid and no text', !js.includes(T1) && !js.includes(R1) && !js.includes('private'));
 }
 
+console.log('=== chat-mute-clock-skew [8] the same words reported again the next day are a new report ===');
+{
+  // The same player says the same thing again the next day and the same reporter reports it again: the new row
+  // differs from the harvested one only in its stamp. The row signature has to keep the stamp, or the second
+  // report is taken for the one already harvested (never counted, never mailed).
+  const st = {};
+  const LATER = 24 * 60 + 90;           // next day, a little later
+  const a = cm.harvest(st, [{ reporterSid: R1, det: packReport('same words', T1, 1, TS) }], pidOf, NOW);
+  const row = [{ reporterSid: R1, det: packReport('same words', T1, 1, TS + LATER) }];
+  const b = cm.harvest(st, row, pidOf, NOW + LATER);
+  const c = cm.harvest(st, row, pidOf, NOW + LATER + 5);
+  ok('first report harvested', a.fresh.length === 1);
+  ok('next day, same reporter / target / words: harvested again (digest)', b.fresh.length === 1 && b.fresh[0].tsMin === TS + LATER, JSON.stringify(b.fresh.map(f => f.tsMin)));
+  ok('and counted again, from the new report', cm.reporterCount(st, pidOf(T1), NOW + LATER) === 1 && JSON.stringify(st.rep[pidOf(T1)]) === JSON.stringify([[pidOf(R1), NOW + LATER]]), JSON.stringify(st.rep[pidOf(T1)]));
+  ok('the run after that does not harvest it again', c.fresh.length === 0, c.fresh.length);
+}
+
 console.log(failN ? ('chat-mute-clock-skew: ' + failN + ' FAIL of ' + n) : ('chat-mute-clock-skew: all ' + n + ' passed'));
 process.exit(failN ? 1 : 0);
