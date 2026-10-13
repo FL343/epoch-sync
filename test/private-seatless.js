@@ -9,9 +9,9 @@
 // empty is now dropped ahead of start registration and grouping (validate.js dropSeatlessPrivate), and nobody is flagged.
 // End-to-end over the REAL validate.js main() against an offline stateful board stub (same harness as test/seat-gate.js),
 // plus the pure helpers.
-//   [1] units: seatlessPrivate (type 10 only -- the bot lane and the matchmade lanes keep their own checks, the
-//       matchmade cold-start tolerance of test/sanity-bounds.js stands), dropSeatlessPrivate (in place, starts and
-//       settles, a processed key left alone)
+//   [1] units: seatlessPrivate (type 10, and type 11 since Q148 [test/bot-seatless.js] -- the matchmade lanes keep their
+//       own checks, the matchmade cold-start tolerance of test/sanity-bounds.js stands), dropSeatlessPrivate (in place,
+//       starts and settles, a processed key left alone)
 //   [2] C2: two players and one bot; an outside account starts from the bot seat before the first look (copying the
 //       roster), then copies the real result there: the players settle as in an honest room, the outside account earns
 //       nothing, nobody is flagged; mutant (the drop removed) -> it takes the third seat's XP
@@ -165,8 +165,8 @@ console.log('=== Q123 friends\'-room record whose writer is not on his own seat 
   T('[1] seatlessPrivate: own seat naming someone else -> false (the self-seat sanity check owns it)', v.seatlessPrivate(mk(0, [P1, P1, '0'])) === false);
   T('[1] seatlessPrivate: a seat past the seat count (own seat absent) -> true', v.seatlessPrivate({ steamID: X, d: rec(0xB1, 77, 5, ros, [3000, 2000, 1000]), roster: v.decodeRoster(rec(0xB1, 77, 5, ros, [3000, 2000, 1000])) }) === true);
   T('[1] seatlessPrivate: type 10 with flag bits (base 10) -> still a friends\' room', v.seatlessPrivate(mk(2, ros, 0x1A)) === true);
-  T('[1] seatlessPrivate: bot match / quick / ranked / endless with the own seat empty -> false (their own checks)',
-    [11, 1, 2, 7].every((mt) => v.seatlessPrivate(mk(2, ros, mt)) === false));
+  T('[1] seatlessPrivate: quick / ranked / endless with the own seat empty -> false (their own checks; a bot match is dropped too since Q148, test/bot-seatless.js)',
+    [1, 2, 7].every((mt) => v.seatlessPrivate(mk(2, ros, mt)) === false));
   const sanity = require(path.join(__dirname, '..', 'validate.js')).sanityFlags;
   T('[1] the matchmade cold-start tolerance stands (sanityFlags, own seat empty, quick)',
     JSON.stringify(sanity([{ steamID: P0, d: (() => { const d = rec(0xB1, 77, 0, ['0', P1, P2], [3000, 2000, 1000]); d[2] = 1; return d; })(), roster: { 1: P1, 2: P2 } }, mk(1, [P0, P1, P2], 1)])) === '[]');

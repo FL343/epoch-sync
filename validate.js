@@ -852,24 +852,31 @@ function applySeatGate(recs, starts, pending, processed) {
 // every end writes that table, nothing re-seats inside a key (a team rematch re-seats only when every seat is named, and
 // it is a new key). So such a record counts nowhere: it is dropped before registration and grouping, like a record off
 // its registered seat, and nobody is flagged for it -- flagging its group (a sanity flag) would also mark every player
-// whose result it copied, and pause their room while it stays up. The bot-match lane and the matchmade lanes keep their
-// own checks: a bot match already requires each writer at a human seat naming himself, and a matchmade record from an
-// empty seat either collides with a player's seat or changes the seat layout (both held by the Q75 contest).
+// whose result it copied, and pause their room while it stays up. The matchmade lanes keep their own checks: a matchmade
+// record from an empty seat either collides with a player's seat or changes the seat layout (both held by the Q75 contest).
+// A bot match (type 11, cloud audit Q148) is the same as a friends' room: a bot seat is an empty roster entry, every honest
+// record names its writer at his own human seat (the host builds the seat table once at launch: humans first, then the
+// bots), and its own check -- each writer at a human seat naming himself (sanityFlags) -- flags the GROUP such a record
+// sits in. So an outside account copying a bot match's key and roster from a bot seat stalled it: a result of its own
+// left two disagreeing groups on the key while its rows stayed up (the players never earned the match's XP), and a copy
+// of the players' real result joined their group and had it flagged with them (each player flagged once, no XP; one
+// account did that to a one-player bot match too). It is dropped here as well, nobody flagged.
 function seatlessPrivate(r) {
-  return isPrivateMt(r.d[2] | 0) && !(r.roster && r.roster[r.d[5] | 0] != null);
+  return (isPrivateMt(r.d[2] | 0) || isBotMt(r.d[2] | 0)) && !(r.roster && r.roster[r.d[5] | 0] != null);
 }
-// Drops, in place, every friends'-room start and settle record whose roster leaves its writer's own seat empty (records of
-// a processed key are left alone, as the seat gate leaves them). Returns { out: Map(key -> dropped records), n }.
+// Drops, in place, every friends'-room and bot-match start and settle record whose roster leaves its writer's own seat
+// empty (records of a processed key are left alone, as the seat gate leaves them). Returns { out: Map(key -> dropped
+// records), n: friends'-room records dropped, nBot: bot-match records dropped (Q148, also added to RUN.seatlessBot) }.
 function dropSeatlessPrivate(recs, starts, processed) {
   const out = new Map();
-  let n = 0;
+  let n = 0, nBot = 0;
   const keep = (r) => {
     if (!seatlessPrivate(r)) return true;
     const m = r.d[3] + '_' + r.d[4] + '_' + r.d[2];
     if (processed && processed.has(m)) return true;
     if (!out.has(m)) out.set(m, []);
     out.get(m).push(r);
-    n++;
+    if (isBotMt(r.d[2] | 0)) nBot++; else n++;
     return false;
   };
   for (const list of [starts, recs]) {
@@ -878,9 +885,12 @@ function dropSeatlessPrivate(recs, starts, processed) {
     for (let i = 0; i < list.length; i++) if (keep(list[i])) list[w++] = list[i];
     list.length = w;
   }
-  for (const [m, rs] of out) ghWarn('match=' + m + ': ' + rs.length + " friends' room record(s) whose writer is not on his own roster seat -- not counted, nobody flagged (Q123): "
+  for (const [m, rs] of out) ghWarn('match=' + m + ': ' + rs.length
+    + (isBotMt(String(m).split('_')[2] | 0) ? ' bot match record(s) whose writer is not on his own roster seat -- not counted, nobody flagged (Q148): '
+      : " friends' room record(s) whose writer is not on his own roster seat -- not counted, nobody flagged (Q123): ")
     + rs.map((r) => plog(r.steamID) + '@' + r.shard + '=' + (r.d[5] | 0) + (r.start ? 's' : '')).join(' '));
-  return { out, n };
+  if (nBot) RUN.seatlessBot = (RUN.seatlessBot | 0) + nBot;   // Q148
+  return { out, n, nBot };
 }
 // readComplete === false (some record shard unread this run, R1-B2-04 / O348-7): registration (endless keys aside, Q113)
 //   and the cumulative settled exemptions still run, but no matured entry is judged -- a finisher whose only settle record sits on the unread shard
@@ -1668,6 +1678,7 @@ function writeRunSummary() {
       "| accounts noted in contested keys' disagreeing records, named by another record / by none -- counted, nobody flagged (Q143) | " + s('contestOn', 0) + ' / ' + s('contestOff', 0) + ' |',
       '| settled keys with records that disagree, nobody flagged (Q114) | ' + s('lateMismatch', 0) + ' |',
       "| friends' room records whose writer is not on his own roster seat, not counted (Q123) | " + s('seatless', 0) + ' |',
+      '| bot match records whose writer is not on his own roster seat, not counted (Q148) | ' + s('seatlessBot', 0) + ' |',
       '| campaign grants / campaign endless | ' + s('campaign', '-') + ' / ' + s('campaignEndless', '-') + ' |',
       '| page-cap hits | ' + RUN.cap + ' |',
       '| solo segments held by the key policy (other channel / retired key; new this run) | ' + s('keyHeld', 0) + ' (' + s('keyHeldNew', 0) + ') |',
@@ -4100,7 +4111,8 @@ async function main() {
   } else if (prunedP.armed) console.log('processed: ' + (processed.size) + ' keys > cap ' + PROCESSED_CAP + ' -- the oldest ' + prunedP.armed + ' off the shards go if they are still off in ' + Math.round(PROCESSED_PRUNE_WAIT_MS / 60000) + ' min (Q144)');
   RUN.processedN = processed.size;
   // Q123: a friends'-room record whose writer is not on his own roster seat counts nowhere -- dropped ahead of registration
-  //   (its start votes on no roster, splits nothing) and of grouping; nobody flagged
+  //   (its start votes on no roster, splits nothing) and of grouping; nobody flagged (Q148: a bot-match record too, counted
+  //   in RUN.seatlessBot)
   RUN.seatless = dropSeatlessPrivate(recs, starts, processed).n;
   screenLateStarts(starts, recs, startsPending, processed, Date.now(), shardsComplete);   // Q127 / Q138: a start first read after the result counts nowhere
   const registeredEarly = registerStartRosters(starts, processed, startsPending, Date.now(), shardsComplete);   // Q113: endless keys wait for a full read
