@@ -56,9 +56,13 @@ const ABSENT_GRACE_MIN_MS = 180000;
 const ABSENT_GRACE_MS = Math.max(ABSENT_GRACE_MIN_MS, Number(process.env.ABSENT_GRACE_MS || 300000));
 // Q118: a start roster stays provisional this long after the job first registered it (registerStartRosters). The floor
 // covers the client's longest gap from START_GAME (the match key known to every player) to level 1 (where the players
-// write their starts): character select 30 s + the loading wait 120 s + the intro.
+// write their starts): character select 30 s + the loading wait 120 s + the intro. Default 5 minutes (cloud audit Q127):
+// a start naming another roster read inside the window splits the key and the Q75 roster contest then holds the match
+// and flags nobody, so a losing player's alt could write one once the result was in sight and void the lost match
+// (the match runs 10 to 12 minutes from level 1). With the job about every 5 minutes the roster is final at the first
+// complete read 5 minutes after registration, about halfway through the match; the root fix is a real start time.
 const START_CONFIRM_MIN_MS = 180000;
-const START_CONFIRM_MS = Math.max(START_CONFIRM_MIN_MS, Number(process.env.START_CONFIRM_MS || 600000));
+const START_CONFIRM_MS = Math.max(START_CONFIRM_MIN_MS, Number(process.env.START_CONFIRM_MS || 300000));
 // Q121: a group that would settle without a seat whose player wrote his OWN start for the match, and no result or
 // confession yet, first waits until the match must be over: LEAVE_CONFIRM_MS after this job first read that player's
 // start (see leaveConfirmHold). Default 60 min, floor 45 min (the longest match stays under it, see the note there).

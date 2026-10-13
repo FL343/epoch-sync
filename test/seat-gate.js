@@ -399,12 +399,12 @@ console.log('=== a record counts only from the seat its start roster gives its w
   T('[3] R1b: the Q75 contest holds the key while the pair\'s rows are up; the real result settles once they are gone', Q75.test(rs[4].out) && !processedOf(rs[4]).has(key)
     && processedOf(rs[5]).has(key) && up(rs, P1) && up(rs, P2) && none(rs, X1) && none(rs, Y1) && RR.every(s => leavesOf(last(rs), s) === 0),
     JSON.stringify(RR.concat([X1, Y1]).map(s => ptsIn(rs, s))) + ' ' + rs[5].out.slice(-400));
-  // R1d: the same pair after the roster is confirmed (twelve minutes in): their starts are dropped, not in the started list
+  // R1d: the same pair after the roster is confirmed (eight minutes in): their starts are dropped, not in the started list
   const hd = 0x8012, keyd = keyOf(t2start(hd, 0, RR));
   const Sd = realStarts(hd), FSd = fakeSettles(hd).concat(fakeStarts(hd)), Rd = realSettles(hd);
-  const rd = timeline([[0, Sd], [6 * MIN, Sd], [6 * MIN, Sd], [1 * MIN, Sd.concat(FSd)], [5 * MIN, Sd.concat(FSd)], [1 * MIN, Sd.concat(FSd, Rd)], [3 * HOUR, Sd.concat(FSd, Rd)]]);
+  const rd = timeline([[0, Sd], [4 * MIN, Sd], [4 * MIN, Sd], [1 * MIN, Sd.concat(FSd)], [5 * MIN, Sd.concat(FSd)], [1 * MIN, Sd.concat(FSd, Rd)], [3 * HOUR, Sd.concat(FSd, Rd)]]);
   T('[3] R1d: seven runs exit 0', allOk(rd, 7), last(rd).out.slice(-800));
-  T('[3] R1d: provisional at six minutes, confirmed at twelve', (pendOf(rd[1], keyd) || {}).prov && !(pendOf(rd[2], keyd) || {}).prov && !(pendOf(rd[2], keyd) || {}).split,
+  T('[3] R1d: provisional at four minutes, confirmed at eight (Q127: five-minute window)', (pendOf(rd[1], keyd) || {}).prov && !(pendOf(rd[2], keyd) || {}).prov && !(pendOf(rd[2], keyd) || {}).split,
     JSON.stringify([pendOf(rd[1], keyd), pendOf(rd[2], keyd)]));
   const st = (pendOf(rd[3], keyd) || {}).started || [];
   T('[3] R1d: their starts are dropped too, not in the started list', Q80ROW(rd[3], 4, 0) && st.length === 4 && [X1, Y1].every(s => st.indexOf(v.pid(s)) < 0) && RR.every(s => st.indexOf(v.pid(s)) >= 0)
