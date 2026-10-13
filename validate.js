@@ -5987,18 +5987,20 @@ async function main() {
         const sides = [[], []];
         const _mts = teamSizeOfMt(matchType);
         for (let i = 0; i < parts.length; i++) sides[teamOfSeat(parts[i].seat, _mts)].push(tsIn[i]);
-        // Q56: a team-gamble dissent settle can leave a whole team absent (both 2v2 dissenters) -- rate the present
-        //   team against the absent team's PRE-match ratings (outputs kept for the present only; absent ratings never
-        //   move), instead of the degenerate ordinal fallback that moves rating between the winning teammates
+        // Q56 / Q62: a whole team can be absent -- both 2v2 dissenters of a team-gamble dissent settle (Q56), or every
+        //   member of a team who left mid-match without a record in ANY team match (Q62). Rate the present team against
+        //   the absent team's PRE-match ratings (outputs kept for the present only; absent ratings never move), instead
+        //   of the degenerate ordinal fallback that moved rating between the present teammates (rank 1 up, rank 2 down,
+        //   so one member of the winning team lost rating). Same binary outcome (winTeam) as the team LP plan below.
         const empty = !sides[0].length ? 0 : (!sides[1].length ? 1 : -1);
-        const ghost = (empty >= 0 && Array.isArray(c.t2ex))
+        const ghost = (empty >= 0)
           ? leavers0.filter(x => teamOfSeat(x.seat, _mts) === empty).map(x => { const sk = skill[pid(x.steamID)] || ts.DEFAULTS; return { id: x.steamID, mu: sk.mu, sigma: sk.sigma }; })
           : [];
         if (ghost.length) {
           sides[empty] = ghost;
           const here = new Set(parts.map(p => p.steamID));
           tsOut = ts.updateTeamMatch([{ players: sides[winTeam], rank: 1 }, { players: sides[1 - winTeam], rank: 2 }]).filter(r => here.has(r.id));
-          console.log('  team2 dissent ' + c.m + ': whole team ' + empty + ' absent -> rated against its ' + ghost.length + ' pre-match rating(s)');
+          console.log('  ' + (Array.isArray(c.t2ex) ? 'team2 dissent ' : 'team rating ') + c.m + ': whole team ' + empty + ' absent -> rated against its ' + ghost.length + ' pre-match rating(s)');
         } else tsOut = (sides[0].length && sides[1].length)
           ? ts.updateTeamMatch([{ players: sides[winTeam], rank: 1 }, { players: sides[1 - winTeam], rank: 2 }])
           : ts.updateMatch(tsIn);   // one side fully absent -> degenerate: ordinal fallback among the present

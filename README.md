@@ -37,7 +37,9 @@ seat convention — seats (0,1) vs (2,3), winning pair takes ranks {1,2} — ins
 score order, the rating update treats each side as one team (strength = summed mu,
 binary outcome, per-member updates), and ranked team points are the halved team result
 (win/loss component from the team-average tier, personal drip added at full value).
-A player whose teammate was convicted absent gets his loss compressed (protected).
+A player whose teammate was convicted absent gets his loss compressed (protected). When a
+whole team left without a record, the present team is rated against the absent team's
+pre-match ratings (the absent ratings never move), never against each other.
 **Premade pairs inside an FFA match** are declared as a seat-pair bitmask in the
 matchType's high bits (the match group key contains the full code, so a lone forged
 mask only orphans that record): the pair settles at its average placement and average

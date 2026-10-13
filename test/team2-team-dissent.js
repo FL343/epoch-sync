@@ -636,7 +636,7 @@ let r4;
   const loop = SRC.slice(SRC.indexOf('const leavers0 = detectLeavers(g)'), SRC.indexOf('processed.add(c.m); settled++;'));
   T('[11] the settle loop reads the excused set from the entry', /const t2ex = new Set\(Array\.isArray\(c\.t2ex\)/.test(loop));
   T('[11] excused: no placement seed, no conviction', /if \(t2ex\.has\(pid\(String\(x\.steamID\)\)\)\) continue;/.test(loop) && /team-gamble dissent not yet due -- excused/.test(loop));
-  T('[11] whole-team-absent rating only for a dissent settle', /Array\.isArray\(c\.t2ex\)\)\s*\n?\s*\? leavers0\.filter/.test(loop));
+  T('[11] whole-team-absent rating for any team match with an empty side (Q56 dissent settle; Q62 widened it)', /const ghost = \(empty >= 0\)\s*\n?\s*\? leavers0\.filter/.test(loop));
 }
 
 if (failN) { console.log('team2-team-dissent: ' + failN + ' FAILED'); process.exit(1); }
