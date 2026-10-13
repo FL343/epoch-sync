@@ -49,19 +49,21 @@ console.log('=== chat-mute [3] harvest: fresh vs already-seen vs forged ===');
   const st = {};
   const now = 30000000;   // unix minutes (~2027)
   const ts = now - Math.floor(CHAT_MUTE.EPOCH0 / 60000) - 10;   // client tsMin 10 min ago
+  // one row per reporter (ForceUpdate), as the board returns it
   const rows = [
     { reporterSid: R1, det: pack('spam spam', T1, 1, ts, 0) },
-    { reporterSid: R2, det: pack('spam spam', T1, 1, ts, 0) },
-    { reporterSid: R1, det: pack('again', T1, 1, ts - 5, 0) },        // older than R1's last seen -> skipped
+    { reporterSid: R2, det: pack('future', T1, 1, ts + 5000, 0) },    // reporter clock ~3 days fast -> kept, stamp clamped to now
     { reporterSid: T1, det: pack('self', T1, 1, ts, 0) },             // self-report -> skipped
-    { reporterSid: R2, det: pack('future', T1, 1, ts + 5000, 0) },    // far future clock -> skipped
     { reporterSid: 'nope', det: pack('x', T1, 1, ts, 0) },            // implausible reporter -> skipped
   ];
   const r = harvest(st, rows, pidOf, now);
-  eq('fresh = 2 (R1, R2), skipped = 4', [r.fresh.length, r.skipped], [2, 4]);
+  eq('fresh = 2 (R1, R2), skipped = 2, clamped = 1', [r.fresh.length, r.skipped, r.clamped], [2, 2, 1]);
   eq('distinct reporters for target', reporterCount(st, pidOf(T1), now), 2);
-  const r2 = harvest(st, rows.slice(0, 2), pidOf, now);
-  eq('re-harvest of the same rows = zero fresh (seen watermark)', r2.fresh.length, 0);
+  const r2 = harvest(st, rows, pidOf, now + 5);
+  eq('re-harvest of the same rows = zero fresh (row signature)', r2.fresh.length, 0);
+  // R1's row overwritten by an EARLIER stamp (clock set back) = a new report, not an old one
+  const r3 = harvest(st, [{ reporterSid: R1, det: pack('again', T1, 1, ts - 5, 0) }], pidOf, now + 10);
+  eq('earlier-stamped new row from the same reporter = fresh', r3.fresh.length, 1);
   assert('state carries pids only (no raw sid, no text)', !JSON.stringify(st).includes(T1) && !JSON.stringify(st).includes('spam'));
 }
 

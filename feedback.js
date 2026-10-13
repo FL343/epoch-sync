@@ -366,6 +366,9 @@ function governItems(items, votes, mod, nowMin) {
 }
 
 // Decode + validate one voice_box entry. Returns {itemId,cat,lang,ts,text} or null.
+// ts is the author's clock: a stamp ahead of ours (wrong time zone + hand-set clock) is clamped to
+// nowMin instead of dropped, so a fast clock neither loses the item nor dates it in the future (the
+// daily cap, the hot/new order and the digest all key on item.ts). itemId keeps the author's stamp.
 function decodeBoxEntry(sid, words, nowMin) {
   if (!words || words.length < 6 || words[0] !== FB_MAGIC) return null;
   const w1 = words[1] | 0;
@@ -373,13 +376,13 @@ function decodeBoxEntry(sid, words, nowMin) {
   if (ver !== FB_VER || cat >= FB_CATS.length || enc > 1) return null;
   if (len < 1 || len > FB_BODY_MAX || words.length < 5 + ((len + 3) >> 2)) return null;
   const lang = unpackLang(words[2] | 0), itemId = words[3] | 0, ts = words[4] | 0;
-  if (ts < 0 || ts > nowMin + 1440) return null;                    // future beyond +1d = bad clock/forgery
+  if (ts < 0) return null;                                          // before the epoch = not a real stamp
   if (fnv1a32(String(sid) + ':' + ts) !== itemId) return null;      // provenance check
   const text = sanitizeText(unpackText(words, 5, len, enc));
   if (!text) return null;
   // A tampered oversize body re-encodes past the cap -> fail closed.
   if (Buffer.byteLength(text, 'utf8') > FB_BODY_MAX * 3) return null;
-  return { itemId, cat, lang, ts, text };
+  return { itemId, cat, lang, ts: nowMin == null ? ts : Math.min(ts, nowMin | 0), text };
 }
 
 // Decode one voice_vote entry into [{itemId, dir, ts}] (window order kept).
@@ -531,6 +534,11 @@ const FB_DIGEST_GONE = '(text not available: filtered / capped / blocked text is
 // §5). The mail body carries player text -- the inbox is private; LOGS still
 // carry counts only (feedback-logsafe tripwire). A failed send keeps the
 // watermark -> retried next tick. Unconfigured env = silently off.
+// "Since the last digest" is decided by admission, not by the author's clock:
+// main() admits every new item with pd:1 and a sent digest clears it, so an
+// author whose clock runs hours slow (stamp below the watermark) is still
+// mailed. Items admitted before pd existed keep the ts > watermark rule; the
+// watermark (max ts mailed) is still kept for them and for a rollback.
 async function maybeSendDigest(st, nowMs) {
   const to = process.env.FB_DIGEST_TO, apiKey = process.env.RESEND_API_KEY;
   if (!to || !apiKey) return false;
@@ -540,7 +548,7 @@ async function maybeSendDigest(st, nowMs) {
   const since = dg.at | 0;
   const fresh = Object.keys(st.items)
     .map(k => ({ id: k, it: st.items[k] }))
-    .filter(x => (x.it.ts | 0) > since)
+    .filter(x => x.it.pd === 1 || (x.it.pd === undefined && (x.it.ts | 0) > since))
     .sort((a, b) => (a.it.ts | 0) - (b.it.ts | 0));
   let maxTs = since;
   for (const x of fresh) maxTs = Math.max(maxTs, x.it.ts | 0);
@@ -569,6 +577,7 @@ async function maybeSendDigest(st, nowMs) {
     });
     if (!res.ok) { v.ghWarn('feedback digest send failed HTTP ' + res.status); return false; }
   }
+  for (const x of fresh) delete x.it.pd;
   st.digest = { day, at: maxTs };
   return true;
 }
@@ -626,7 +635,7 @@ async function main() {
       let stt = 'live';
       if (filterReason(it.text, wl, process.env.STATE_SALT) && mod.allow.indexOf(it.itemId | 0) < 0) stt = 'filtered';
       else if (countAuthorDay(st.items, ap, it.ts) >= FB_DAILY_CAP) stt = 'capped';
-      st.items[key] = { ap, cat: it.cat, lang: it.lang, ts: it.ts, text: it.text, st: stt };
+      st.items[key] = { ap, cat: it.cat, lang: it.lang, ts: it.ts, text: it.text, st: stt, pd: 1 };
       if (stt === 'filtered') filteredN++; else if (stt === 'capped') cappedN++;
       newItems++; dirty = true;
     }

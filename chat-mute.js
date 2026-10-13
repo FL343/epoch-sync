@@ -13,8 +13,9 @@
 //      rule counts DISTINCT reporters per target inside a sliding window and never reads the text:
 //        >= AUTO_REPORTERS (10) distinct reporters within WINDOW_MIN (24h) -> mute for AUTO_MUTE_MIN (24h).
 //      A manual row with a later (or permanent) expiry is never shortened by the automatic rule.
-// State (chat-mute.json, HMAC pid keyed, no raw ids, no text): { seen: { reporterPid: lastTsMin }, rep: { targetPid: [[reporterPid, tsMin], ...] },
-//   auto: { targetPid: untilMin }, digest: { day, at } }. Report text reaches ONLY the private mail digest (same Resend channel as the
+// State (chat-mute.json, HMAC pid keyed, no raw ids, no text): { seen: { reporterPid: lastTsMin }, sig: { reporterPid: rowPid },
+//   rep: { targetPid: [[reporterPid, unixMin], ...] }, auto: { targetPid: untilMin }, digest: { day, at } }. sig = keyed digest of the
+//   last harvested row (see harvest). Report text reaches ONLY the private mail digest (same Resend channel as the
 //   feedback digest: FB_DIGEST_TO / RESEND_API_KEY); logs carry counts and pseudonyms only.
 const CHAT_MUTE = Object.freeze({
   MUTE_LB: 'chat_mute',               // lockstep: client mute-directory.js BOARD
@@ -50,27 +51,37 @@ function tsMinToUnixMin(tsMin) { return Math.floor(CHAT_MUTE.EPOCH0 / 60000) + (
 function sidPlausible(sid) { return /^\d{15,20}$/.test(String(sid || '')); }
 
 // Fold this run's report rows into state (pure; mutates `st`). rows = [{ reporterSid, det }] (det = decoded int32[]).
-// Returns { fresh: [{ reporterSid, target, scope, tsMin, text }], skipped }. A row is fresh when its tsMin is newer than
-// the reporter's last seen snapshot (ForceUpdate = one row per reporter; older/equal = already harvested).
+// Returns { fresh: [{ reporterSid, target, scope, tsMin, text }], skipped, clamped }.
+// ForceUpdate keeps ONE row per reporter, so a row is fresh when it differs from the row harvested last time for that
+// reporter. The reporter's clock orders nothing: a row stamped earlier than the previous one (clock set back after
+// running fast) is still a new report, and a stamp ahead of the cron's clock (wrong time zone + hand-set clock) is
+// clamped to now instead of dropped (a forged future stamp gains nothing: its window then runs from this harvest).
+//   st.sig  = keyed digest of the last harvested row (pidOf, so the public state cannot confirm a guessed report)
+//   st.seen = that row's tsMin, still written so the previous harvest (fresh only while tsMin > seen) reads the state
+//             correctly after a rollback; for reporters with no sig yet (state of the previous harvest) a row whose
+//             tsMin equals seen is the one already harvested, any other tsMin is new.
+function rowKey(rep) { return 'chat-row|' + rep.ver + '|' + rep.scope + '|' + rep.enc + '|' + rep.len + '|' + rep.target + '|' + rep.hash + '|' + rep.tsMin; }
 function harvest(st, rows, pidOf, nowUnixMin) {
-  st.seen = st.seen || {}; st.rep = st.rep || {}; st.auto = st.auto || {};
+  st.seen = st.seen || {}; st.sig = st.sig || {}; st.rep = st.rep || {}; st.auto = st.auto || {};
   const fresh = [];
-  let skipped = 0;
+  let skipped = 0, clamped = 0;
   for (const r of rows || []) {
     const rep = decodeReport(r.det);
     if (!rep || !sidPlausible(r.reporterSid) || !sidPlausible(rep.target) || String(rep.target) === String(r.reporterSid)) { skipped++; continue; }
     const rp = pidOf(r.reporterSid);
-    if ((st.seen[rp] | 0) >= rep.tsMin) { skipped++; continue; }
-    const at = tsMinToUnixMin(rep.tsMin);
-    if (at > nowUnixMin + 60) { skipped++; continue; }   // clock from the future = forged/skewed row, ignore
-    st.seen[rp] = rep.tsMin;
+    const sig = pidOf(rowKey(rep));
+    if (st.sig[rp] === sig) { skipped++; continue; }
+    if (st.sig[rp] === undefined && st.seen[rp] !== undefined && (st.seen[rp] | 0) === rep.tsMin) { st.sig[rp] = sig; skipped++; continue; }
+    let at = tsMinToUnixMin(rep.tsMin);
+    if (at > nowUnixMin) { at = nowUnixMin; clamped++; }
+    st.seen[rp] = rep.tsMin; st.sig[rp] = sig;
     const tp = pidOf(rep.target);
     const list = st.rep[tp] || (st.rep[tp] = []);
     if (!list.some(x => x[0] === rp)) list.push([rp, at]); else { const i = list.findIndex(x => x[0] === rp); list[i] = [rp, at]; }
     while (list.length > CHAT_MUTE.MAX_PER_TARGET) list.shift();
     fresh.push({ reporterSid: String(r.reporterSid), target: rep.target, scope: rep.scope, tsMin: rep.tsMin, text: rep.text });
   }
-  return { fresh, skipped };
+  return { fresh, skipped, clamped };
 }
 // Prune reports outside the window (pure; mutates).
 function prune(st, nowUnixMin) {
