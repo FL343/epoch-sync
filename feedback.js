@@ -283,6 +283,8 @@ function countAuthorDay(items, ap, tsMin) {
 //   allow: [itemId]        wordlist false-positive release (filtered -> live)
 //   clear: {itemId: tsMin} held review passed -- reports at/before tsMin stop
 //                          counting and the item returns to the boards
+//   recat: {itemId: cat}   misfiled item shown under another category (cat =
+//                          index into FB_CATS); dropping the key moves it back
 function loadMod(file) {
   try {
     const m = JSON.parse(fs.readFileSync(file || FB_MOD_FILE, 'utf8'));
@@ -290,8 +292,20 @@ function loadMod(file) {
       block: (m.block || []).map(n => n | 0),
       allow: (m.allow || []).map(n => n | 0),
       clear: (m.clear && typeof m.clear === 'object') ? m.clear : {},
+      recat: cleanRecat(m.recat),
     };
-  } catch (e) { return { block: [], allow: [], clear: {} }; }
+  } catch (e) { return { block: [], allow: [], clear: {}, recat: {} }; }
+}
+// Only integer categories inside FB_CATS survive; anything else is ignored
+// (a typo in the hand-edited file must not take an item off every board).
+function cleanRecat(r) {
+  const out = {};
+  if (!r || typeof r !== 'object' || Array.isArray(r)) return out;
+  for (const key of Object.keys(r)) {
+    const c = r[key];
+    if (Number.isInteger(c) && c >= 0 && c < FB_CATS.length && /^-?\d+$/.test(key)) out[String(key | 0)] = c;
+  }
+  return out;
 }
 
 // Unique reporters whose LATEST direction is still 'report', cast after the
@@ -312,14 +326,26 @@ function reportsSince(slot, authorPid, clearAt) {
 function trustPenaltyOf(pid) { return 0; }
 
 // Apply the moderation file + report threshold to the item set. Mutates items,
-// returns whether anything changed. Order: block list first (declarative, wins
-// over everything), then allow (filtered release), then the report hold.
+// returns whether anything changed. Category moves first (orthogonal to status,
+// so a blocked item keeps its move for when it is released), then the block list
+// (declarative, wins over everything), then allow (filtered release), then the
+// report hold.
 function governItems(items, votes, mod, nowMin) {
   let dirty = false;
   const blockSet = new Set(mod.block.map(String));
   const allowSet = new Set(mod.allow.map(String));
+  const recat = mod.recat || {};
   for (const key of Object.keys(items)) {
     const item = items[key];
+    // recat: item.oc keeps the category the author picked, so dropping the key
+    // restores it; the feed pass and the digest just read item.cat
+    const rc = recat[key];
+    if (rc != null) {
+      if ((item.cat | 0) !== rc) { if (item.oc == null) item.oc = item.cat | 0; item.cat = rc; dirty = true; }
+      if (item.oc != null && (item.oc | 0) === rc) { delete item.oc; dirty = true; }
+    } else if (item.oc != null) {
+      item.cat = item.oc | 0; delete item.oc; dirty = true;
+    }
     if (blockSet.has(key)) {
       if (item.st !== 'blocked') { item.st = 'blocked'; dirty = true; }
       continue;

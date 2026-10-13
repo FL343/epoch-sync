@@ -139,12 +139,55 @@ function mkWl(subWords, wordWords) {
   ok('[5] on-list stays blocked despite reports', items['100'].st === 'blocked');
 }
 
+// ---- [5b] recat: misfiled item moved to another category, reversibly ----
+{
+  const none = { block: [], allow: [], clear: {} };                   // legacy mod shape (no recat key) still works
+  const items = { '10': { ap: 'A', cat: 0, st: 'live', ts: 1 }, '20': { ap: 'B', cat: 0, st: 'live', ts: 1 } };
+  ok('[5b] no recat key -> untouched', vv.governItems(items, {}, none, 10) === false && items['10'].cat === 0 && items['10'].oc === undefined);
+  const mv = { block: [], allow: [], clear: {}, recat: { '10': 3 } };
+  ok('[5b] recat moves + keeps original', vv.governItems(items, {}, mv, 20) === true && items['10'].cat === 3 && items['10'].oc === 0);
+  ok('[5b] other items untouched', items['20'].cat === 0 && items['20'].oc === undefined);
+  ok('[5b] same mod again -> not dirty (no state churn every tick)', vv.governItems(items, {}, mv, 30) === false);
+  ok('[5b] status untouched by a move', items['10'].st === 'live');
+  vv.governItems(items, {}, { block: [], allow: [], clear: {}, recat: { '10': 1 } }, 40);
+  ok('[5b] re-move keeps the author original', items['10'].cat === 1 && items['10'].oc === 0);
+  ok('[5b] dropping the key restores', vv.governItems(items, {}, none, 50) === true && items['10'].cat === 0 && items['10'].oc === undefined);
+  vv.governItems(items, {}, { block: [], allow: [], clear: {}, recat: { '10': 2 } }, 60);
+  vv.governItems(items, {}, { block: [], allow: [], clear: {}, recat: { '10': 0 } }, 70);
+  ok('[5b] moving back to the original clears oc', items['10'].cat === 0 && items['10'].oc === undefined);
+  // a blocked item still carries its move (released later straight into the right category)
+  vv.governItems(items, {}, { block: [20], allow: [], clear: {}, recat: { '20': 3 } }, 80);
+  ok('[5b] blocked item moved too', items['20'].st === 'blocked' && items['20'].cat === 3 && items['20'].oc === 0);
+  vv.governItems(items, {}, { block: [], allow: [], clear: {}, recat: { '20': 3 } }, 90);
+  ok('[5b] released into the moved category', items['20'].st === 'live' && items['20'].cat === 3);
+  // wiring: the move only reaches the boards because governance runs before the feed pass
+  // and the feed pass picks candidates by item.cat (no second category source)
+  ok('[5b] governance runs before the feed pass',
+     SRC.indexOf('governItems(st.items, st.votes, mod, nowMin)') > 0 &&
+     SRC.indexOf('governItems(st.items, st.votes, mod, nowMin)') < SRC.indexOf('compute + write desired feed sets'));
+  ok('[5b] feed candidates keyed by item.cat', SRC.includes("(item.cat | 0) !== c"));
+}
+
 // ---- [6] moderation file loader ----
 {
   ok('[6] loadMod missing -> empty defaults', JSON.stringify(vv.loadMod(path.join(os.tmpdir(), 'nope-mod.json'))) ===
-     JSON.stringify({ block: [], allow: [], clear: {} }));
+     JSON.stringify({ block: [], allow: [], clear: {}, recat: {} }));
   const committed = vv.loadMod(path.join(__dirname, '..', 'feedback-mod.json'));
-  ok('[6] committed skeleton parses', Array.isArray(committed.block) && Array.isArray(committed.allow) && typeof committed.clear === 'object');
+  ok('[6] committed skeleton parses', Array.isArray(committed.block) && Array.isArray(committed.allow) && typeof committed.clear === 'object' &&
+     typeof committed.recat === 'object');
+  // committed recat entries must all be valid (a bad one is silently dropped by the loader = a move that never happens)
+  const rawMod = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'feedback-mod.json'), 'utf8'));
+  ok('[6] committed recat entries all valid', Object.keys(rawMod.recat || {}).length === Object.keys(committed.recat).length);
+  // hand-edit typos are dropped, never applied
+  const tmp = path.join(os.tmpdir(), 'fb-mod-recat-' + process.pid + '.json');
+  fs.writeFileSync(tmp, JSON.stringify({ recat: { '5': 3, '6': 9, '7': -1, '8': '2', '9': 1.5, 'x': 1, '-12': 2 } }));
+  const m = vv.loadMod(tmp);
+  fs.unlinkSync(tmp);
+  ok('[6] recat keeps only valid categories', JSON.stringify(m.recat) === JSON.stringify({ '5': 3, '-12': 2 }), JSON.stringify(m.recat));
+  fs.writeFileSync(tmp, JSON.stringify({ recat: [3] }));
+  const m2 = vv.loadMod(tmp);
+  fs.unlinkSync(tmp);
+  ok('[6] recat array -> ignored', JSON.stringify(m2.recat) === '{}');
 }
 
 // ---- [7] digest guards (network path is e2e-only) ----

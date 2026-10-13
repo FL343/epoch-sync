@@ -49,7 +49,8 @@ function git(args) {
 function loadJson(p, dflt) { try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch (e) { return dflt; } }
 function loadModFile() {
   const m = loadJson(MOD, {});
-  return { block: (m.block || []).map(n => n | 0), allow: (m.allow || []).map(n => n | 0), clear: m.clear || {} };
+  return { block: (m.block || []).map(n => n | 0), allow: (m.allow || []).map(n => n | 0), clear: m.clear || {},
+    recat: (m.recat && typeof m.recat === 'object' && !Array.isArray(m.recat)) ? m.recat : {} };
 }
 function saveModFile(m) { fs.writeFileSync(MOD, JSON.stringify(m, null, 1) + '\n'); }
 
@@ -95,6 +96,8 @@ async function dataPayload() {
     const clearAt = (mod.clear[id] != null) ? (mod.clear[id] | 0) : -1;
     return {
       id, cat: fb.FB_CATS[it.cat | 0] || String(it.cat), lang: it.lang, ts: it.ts | 0,
+      oc: it.oc != null ? (fb.FB_CATS[it.oc | 0] || String(it.oc)) : null,              // author's pick, when moved
+      mv: mod.recat[id] != null ? (fb.FB_CATS[mod.recat[id] | 0] || String(mod.recat[id])) : null, // move in the mod file
       ageMin: Math.max(0, nowMin - (it.ts | 0)), st: it.st, ha: it.ha | 0,
       up: t.up, down: t.down, rep: fb.reportsSince((st.votes || {})[id], it.ap, clearAt),
       repAll: t.rep, text: it.text != null ? it.text : null,
@@ -172,8 +175,12 @@ function match(x,v){
   return true;
 }
 function esc(s){return s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+const ZH=function(){return String.fromCharCode.apply(null,arguments);};
+const L_RECAT=ZH(0x6539,0x5206,0x7c7b), L_ORIG=ZH(0x539f), L_PEND=ZH(0x5f85,0x53d1,0x5e03);
 function card(x){
   const acts=[];
+  if(x.oc||x.mv)acts.push('<span class="meta">'+(x.oc?L_ORIG+' '+x.oc+' -&gt; '+x.cat:'')+(x.mv&&x.mv!==x.cat?' -&gt; '+x.mv+' ('+L_PEND+')':'')+'</span> ');
+  acts.push('<button onclick="recat('+x.id+')">'+L_RECAT+'</button>');
   if(x.st!=='blocked')acts.push('<button class="warn" onclick="act(\\'block\\','+x.id+')">\u4e0b\u67b6</button>');
   else acts.push('<button onclick="act(\\'unblock\\','+x.id+')">\u89e3\u9664\u4e0b\u67b6</button>');
   if(x.st==='filtered'||x.st==='capped')acts.push('<button onclick="act(\\'allow\\','+x.id+')">\u653e\u884c</button>');
@@ -183,6 +190,13 @@ function card(x){
     ' \u00b7 \u25b2'+x.up+' \u25bc'+x.down+' \u00b7 \u4e3e\u62a5 '+x.rep+'/'+DATA.holdAt+(x.repAll!==x.rep?' (\u7d2f\u8ba1 '+x.repAll+')':'')+
     ' \u00b7 id='+x.id+'<span class="st">'+x.st+'</span></div>'+
     '<div class="txt">'+(x.text!=null?esc(x.text):'<i>'+(GONE[x.gone]||GONE.replaced)+(x.gone==='err'?esc(x.goneMsg)+'\uff09':'')+'</i>')+'</div><div class="act">'+acts.join('')+'</div></div>';
+}
+async function recat(id){
+  const ans=prompt(L_RECAT+': 0=bug 1=idea 2=balance 3=other');
+  if(ans==null||ans==='')return;
+  const r=await (await fetch('/act?a=recat&id='+id+'&c='+encodeURIComponent(ans),{method:'POST'})).json();
+  document.getElementById('log').textContent=r.msg||JSON.stringify(r);
+  load();
 }
 async function act(a,id){
   const r=await (await fetch('/act?a='+a+'&id='+id,{method:'POST'})).json();
@@ -210,6 +224,14 @@ const server = http.createServer(async (req, res) => {
       else if (a === 'unblock') { mod.block = mod.block.filter(n => n !== id); }
       else if (a === 'allow') { if (mod.allow.indexOf(id) < 0) mod.allow.push(id); }
       else if (a === 'clear') { mod.clear[String(id)] = fb.nowTsMin(); }
+      else if (a === 'recat') {
+        // move a misfiled item; moving it back to the author's own pick drops the entry
+        const c = Number(u.searchParams.get('c'));
+        if (!Number.isInteger(c) || c < 0 || c >= fb.FB_CATS.length) return send(400, JSON.stringify({ ok: false, msg: 'bad category' }));
+        const it = (loadJson(STATE, { items: {} }).items || {})[String(id)];
+        const orig = it ? (it.oc != null ? it.oc | 0 : it.cat | 0) : -1;
+        if (c === orig) delete mod.recat[String(id)]; else mod.recat[String(id)] = c;
+      }
       else if (a === 'nuke') {
         const r = await nuke(id);
         return send(200, JSON.stringify({ ok: true, msg: '\u7d27\u6025\u64a4\u699c\u5b8c\u6210: \u626b ' + r.boards + ' \u699c, \u5220 ' + r.removed + ' \u6761 (\u5df2\u52a0\u5165 block; \u8bb0\u5f97\u70b9\u53d1\u5e03\u56fa\u5316)' }));
