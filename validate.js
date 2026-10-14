@@ -6418,7 +6418,12 @@ async function main() {
         if (sides[winTeam].length && empty !== winTeam) {
           for (const x of leavers0.concat(agreedAbs)) if (teamOfSeat(x.seat, _mts) === 1 - winTeam && !t2ex.has(pid(String(x.steamID)))) ghostLoss.push(x);
         }
-        if (!ghost.length && ghostLoss.length) {
+        //   Q167 rework 2: at a ranked settle only. A quick settle moves no points, so the stand-in protects nothing there,
+        //   and it was a lever: two pairs of zero-points accounts taking turns in quick 2V2 (one pair wins, the other writes
+        //   the start and leaves) walked each other's stored rating up to about 2750 in 30 matches, and the mismatch check
+        //   reads the stored rating for an account with no ranked rating yet (Q160), so one of them then left against two
+        //   grandmasters as if strong (+10 points a match). A quick settle rates the present against the present, as before Q167.
+        if (!ghost.length && ghostLoss.length && appliesLp(matchType)) {
           const g0 = ghostLoss.map(x => { const sk = skill[pid(x.steamID)] || ts.DEFAULTS; return { id: x.steamID, mu: sk.mu, sigma: sk.sigma }; });
           tsOut = leaverGhostUpdate(sides[winTeam], sides[1 - winTeam], g0);
           console.log('  leaver-ghost ' + c.m + ': team ' + winTeam + ' rated against team ' + (1 - winTeam) + ' with its ' + ghostLoss.length
@@ -6458,11 +6463,19 @@ async function main() {
               if (o) ghostRanked.push(o);
             }
           }
-          if (!ghostR.length && ghostLoss.length) {   // Q167: as the stored update above, from the ranked inputs
+          if (!ghostR.length && ghostLoss.length) {   // Q167: the winners as the stored update above, from the ranked inputs
             const gR = ghostLoss.map((x) => { const sk = skill[pid(x.steamID)] || ts.DEFAULTS; return rIn(x.steamID, { id: x.steamID, mu: sk.mu, sigma: sk.sigma }); });
-            playedOut = leaverGhostUpdate(sd[winT], sd[1 - winT], gR);
-            const gIds = new Set(gR.map((x) => x.id));   // Q167 rework: their side of the same full-team update
-            for (const o of ts.updateTeamMatch([{ players: sd[winT], rank: 1 }, { players: sd[1 - winT].concat(gR), rank: 2 }])) if (gIds.has(o.id)) ghostRanked.push(o);
+            const full = ts.updateTeamMatch([{ players: sd[winT], rank: 1 }, { players: sd[1 - winT].concat(gR), rank: 2 }]);
+            const gIds = new Set(gR.map((x) => x.id));
+            // Q167 rework 2: the present losers' RANKED rating takes the same full-team update as the winners' (their stored
+            //   rating and points stay with the update against the winners only, above). With the winners rated against the
+            //   full team and the loser who stayed against the winners alone (a 2-on-1 he was expected to lose: hardly a move),
+            //   he only went up: two pairs of zero-points accounts taking turns, one of the losing pair leaving at the start
+            //   and the other writing the loss, walked each other's ranked rating up to about 2650 in 30 matches, and the pair
+            //   then served as the leavers against two grandmasters (+10 points a match). An honest loser whose teammate left
+            //   takes the ranked-rating loss he would have taken had the teammate stayed and lost with him.
+            playedOut = full.filter((o) => !gIds.has(o.id));
+            for (const o of full) if (gIds.has(o.id)) ghostRanked.push(o);   // Q167 rework: the absent losers' side of the same update
           }
         } else playedOut = ts.updateMatch(asPlayed);
       }
@@ -6528,7 +6541,8 @@ async function main() {
       //   other writes the start and leaves) walked each other's ranked rating up to about 2750 in 30 matches, and the
       //   pair then left against two grandmasters as if strong (no mismatch: the full team win, +10 a match). The loss is
       //   the one he would have taken staying and losing with the team, and the ranked rating only feeds the mismatch
-      //   reading of the points plan, where a lower one can only soften his next loss or raise his next win.
+      //   reading of the points plan, where a lower one cuts both ways (Q167 rework 2: it can soften a later loss read as an
+      //   upset, and it can cost the strong side's halved upset loss); no points of this match move by it.
       for (const o of ghostRanked) {
         const k = pid(o.id), sk = skill[k] || { mu: ts.DEFAULTS.mu, sigma: ts.DEFAULTS.sigma }, pre = rankedRatingOf(sk) || sk;
         skill[k] = Object.assign({}, sk, { rm: o.mu, rv: o.sigma });

@@ -5,21 +5,26 @@
 //   win), and the mismatch check read the present only: two grandmasters whose two zero-points opponents left took the full
 //   team win (+10 points) every match, for ever. Now the losing team's convicted leavers (a confessed leave counts, a Q56
 //   excused dissenter does not) stand in at their pre-match ratings in the winners' update (stored and ranked rating), and
-//   teamLpPlan reads them in the mismatch of an expected win (absent argument). The present losers keep the update against
-//   the winners only; the leavers' stored rating never moves, their ranked rating takes the loss of the full team (Q167
+//   teamLpPlan reads them in the mismatch of an expected win (absent argument). The present losers keep the stored update
+//   against the winners only; the leavers' stored rating never moves, their ranked rating takes the loss of the full team (Q167
 //   rework: else two pairs of zero-points accounts taking turns walked each other's ranked rating up). A losing seat seen
 //   agreeing whose record is gone at the settle (Q149: finished) stands in the same way (Q167 rework: write the loss,
-//   then overwrite it with an empty record).
+//   then overwrite it with an empty record). Q167 rework 2: the present losers' ranked rating takes the full-team update too
+//   (else the pair took turns with ONE of the losers leaving and the other writing the loss, and the one who stayed only
+//   went up), and the stored stand-in is for ranked settles only (a quick settle rates the present against the present, as
+//   before Q167: in quick it only walked the stored rating up, which the mismatch reads for an account with no ranked one).
 // End-to-end over the REAL validate.js main() against an offline board stub (the harness of test/team-loss-side.js):
 //   [0] wiring pins (a failure here is a pin, not behaviour)
 //   [1] ranked 2V2, two grandmasters (hidden 30 / 2) beat two zero-points accounts (no rating yet) that wrote the start and
 //       left: logged, the winners' stored and ranked rating = the update against the two leavers at their pre-match rating,
 //       the leavers' stored rating never moves, their ranked rating = their side of that update, the grandmasters take no
 //       points (an expected win at grandmaster, compression 0)
-//   [2] the same, one loser stays and writes his loss: the winners rated against him and the leaver, he against the
-//       winners only (the update before Q167), the leaver's stored rating never moves, his ranked rating takes the loss
+//   [2] the same, one loser stays and writes his loss: the winners rated against him and the leaver, his stored rating
+//       against the winners only (the update before Q167), his ranked rating the full-team loss (rework 2), the leaver's
+//       stored rating never moves, his ranked rating takes the loss
 //   [3] a leaver on the WINNING team is not a ghost: rated as before (the present winner against the present losers)
-//   [4] quick 2V2 (no points, no ranked rating): the stored rating takes the same update; no points write
+//   [4] quick 2V2 (no points, no ranked rating), one loser leaves: nobody stands in (rework 2), the present rated against
+//       the present as before Q167; no points write
 //   [5] (trees with the Q56 team dissent) ranked 3v3 team-gamble dissent, two refusers and their third teammate agreeing,
 //       one refuser due (the leaver), one fresh (excused): only the due one stands in
 //   [6] (trees with the Q56 team dissent) the whole other team refuses, both due: the Q56 path, no Q167 line
@@ -41,6 +46,9 @@
 //       side's mild upset factor is the winners' case only, and a seat seen agreeing is no leave: no teammate shield)
 //   [14] ranked 2V2, one loser stays, the other leaves and confesses (an abandon confession counts as his own record):
 //       he stands in like a leaver who did not confess, and his leave is counted once
+//   [15] (rework 2) ranked 2V2, two pairs of fresh accounts taking turns, one of the losing pair leaving at the start and
+//       the other writing the loss: after every match each ranked rating is the one of the same turns with both losers
+//       staying and writing the loss (the one who stayed no longer only goes up)
 // State isolation is structural (every *_FILE var scanned and redirected, cwd = temp dir), like test/seat-gate.js.
 const { spawnSync } = require('child_process');
 const fs = require('fs'), path = require('path'), os = require('os');
@@ -214,11 +222,14 @@ console.log('=== a losing-side leaver counts at his pre-match rating for the win
   T('[0] only the losing team\'s leavers stand in' + (HAS_Q56 ? ', a Q56 excused dissenter not' : ''),
     HAS_Q56 ? /if \(teamOfSeat\(x\.seat, _mts\) === 1 - winTeam && !t2ex\.has\(pid\(String\(x\.steamID\)\)\)\) ghostLoss\.push\(x\);/.test(SRC)
       : /if \(teamOfSeat\(x\.seat, _mts\) === 1 - winTeam\) ghostLoss\.push\(x\);/.test(SRC));
-  T('[0] the ranked rating takes the same update', /playedOut = leaverGhostUpdate\(sd\[winT\], sd\[1 - winT\], gR\);/.test(SRC));
+  T('[0] the ranked rating: the winners and the present losers take the full-team update (rework 2)',
+    /const full = ts\.updateTeamMatch\(\[\{ players: sd\[winT\], rank: 1 \}, \{ players: sd\[1 - winT\]\.concat\(gR\), rank: 2 \}\]\);/.test(SRC)
+    && /playedOut = full\.filter\(\(o\) => !gIds\.has\(o\.id\)\);/.test(SRC));
+  T('[0] the stored stand-in at a ranked settle only (rework 2)', /if \(!ghost\.length && ghostLoss\.length && appliesLp\(matchType\)\) \{/.test(SRC));
   T('[0] a losing seat seen agreeing whose record is gone stands in too', /for \(const x of leavers0\.concat\(agreedAbs\)\) if \(teamOfSeat\(x\.seat, _mts\) === 1 - winTeam/.test(SRC)
     && /agreedSeats\.push\(x\.seat\);\n      agreedAbs\.push\(x\);/.test(SRC));
   T('[0] the absent losers\' ranked rating takes their side of the full-team update, the stored one never',
-    /\{ players: sd\[1 - winT\]\.concat\(gR\), rank: 2 \}\]\)\) if \(gIds\.has\(o\.id\)\) ghostRanked\.push\(o\);/.test(SRC)
+    /for \(const o of full\) if \(gIds\.has\(o\.id\)\) ghostRanked\.push\(o\);/.test(SRC)
     && /skill\[k\] = Object\.assign\(\{\}, sk, \{ rm: o\.mu, rv: o\.sigma \}\);/.test(SRC));
   T('[0] only with the winners present (a whole absent winning team filled by Q62 does not count)', /if \(sides\[winTeam\]\.length && empty !== winTeam\) \{/.test(SRC));
   T('[0] the points plan reads the leavers in the mismatch of an expected win only', /teamLpPlan\(planIn, matchType, scores, [^\n]*, t2Win, absentIn\)/.test(SRC)
@@ -259,8 +270,9 @@ const GMPTS = { [X]: 8200, [Y]: 8200, [Z0]: 0, [Z1]: 0 };
   T('[2] logged: one leaver stands in', GHOST_LINE(m.key, 1, 'seat 3').test(m.out), m.out.slice(-1200));
   T('[2] the winners rated against the loser who stayed and the leaver', storedIs(m.last, X, e[X]) && storedIs(m.last, Y, e[Y]) && rankedIs(m.last, X, e[X]) && rankedIs(m.last, Y, e[Y]),
     show(m.last, [X, Y]) + ' want ' + JSON.stringify([e[X], e[Y]]));
-  T('[2] the loser who stayed rated against the winners only (as before Q167)', storedIs(m.last, Z0, own[Z0]) && rankedIs(m.last, Z0, own[Z0]),
-    show(m.last, [Z0]) + ' want ' + JSON.stringify(own[Z0]));
+  T('[2] the loser who stayed: stored rating against the winners only (as before Q167), ranked rating the full-team loss (rework 2)',
+    storedIs(m.last, Z0, own[Z0]) && rankedIs(m.last, Z0, e[Z0]),
+    show(m.last, [Z0]) + ' want stored ' + JSON.stringify(own[Z0]) + ' ranked ' + JSON.stringify(e[Z0]));
   T('[2] the leaver\'s stored rating never moves, his ranked rating takes the loss of the full team', leaverIs(m.last, Z1, e[Z1]) && writesTo(m.rs, RATING, Z1).length === 0,
     show(m.last, [Z1]) + ' want ranked ' + JSON.stringify(e[Z1]));
 }
@@ -282,17 +294,16 @@ const HPTS = { [H1]: 2500, [H2]: 2500, [H3]: 2500, [H4]: 2500 };
     && rankedIs(m.last, H1, e[H1]) && rankedIs(m.last, H3, e[H3]), show(m.last, [H1, H3, H4]) + ' want ' + JSON.stringify([e[H1], e[H3], e[H4]]));
 }
 
-// ---- [4] quick 2V2: the stored rating takes the same update, no points ----
+// ---- [4] quick 2V2, one loser leaves: nobody stands in (Q167 rework 2), no points ----
 {
   const ros = [H1, H2, H3, H4];
   const m = startLeave(5, 0xE16A, ros, [0, 1, 2], HPTS, HSK);
-  const e = expect([P(H1, GOLD), P(H2, GOLD)], [P(H3, GOLD), P(H4, GOLD)]);
-  const own = expect([P(H1, GOLD), P(H2, GOLD)], [P(H3, GOLD)]);
+  const own = expect([P(H1, GOLD), P(H2, GOLD)], [P(H3, GOLD)]);   // the present against the present: the update before Q167
   T('[4] five runs exit 0, settled, the one who left convicted', m.rs.length === 5 && m.rs.every(r => r.code === 0) && processedOf(m.last).has(m.key)
     && leavesOf(m.last, H4) === 1, m.last.out.slice(-800));
-  T('[4] logged: one leaver stands in', GHOST_LINE(m.key, 1, 'seat 3').test(m.out), m.out.slice(-1200));
-  T('[4] the winners\' stored rating against the loser who stayed and the leaver, his against the winners only', storedIs(m.last, H1, e[H1]) && storedIs(m.last, H2, e[H2])
-    && storedIs(m.last, H3, own[H3]), show(m.last, [H1, H2, H3]));
+  T('[4] nobody stands in at a quick settle: no Q167 line', !/leaver-ghost /.test(m.out) && !/leaver-ranked /.test(m.out), m.out.slice(-1200));
+  T('[4] the present rated against the present (as before Q167); the leaver as he was, no ranked rating', storedIs(m.last, H1, own[H1]) && storedIs(m.last, H2, own[H2])
+    && storedIs(m.last, H3, own[H3]) && storedIs(m.last, H4, GOLD) && !Number.isFinite((skillOf(m.last, H4) || {}).rm), show(m.last, [H1, H2, H3, H4]));
   T('[4] no points write (quick)', [H1, H2, H3, H4].every(s => writesTo(m.rs, POINTS, s).length === 0));
 }
 
@@ -509,6 +520,39 @@ const lastPts = (m, sid) => { const w = writesTo(m.rs, POINTS, sid); return w.le
   T('[14] Z1 stands in: logged, the winners rated against Z0 and Z1', GHOST_LINE(key, 1, 'seat 3').test(m.out) && storedIs(m.last, X, e[X]) && rankedIs(m.last, X, e[X]),
     show(m.last, [X, Y]) + ' want ' + JSON.stringify(e[X]) + '\n' + m.out.slice(-1200));
   T('[14] Z1: stored rating never moves, ranked rating takes the loss of the full team', leaverIs(m.last, Z1, e[Z1]), show(m.last, [Z1]));
+}
+
+// ---- [15] two pairs taking turns, ONE of the losing pair leaving at the start (Q167 rework 2) ----
+{
+  const P0 = SID(41), P1 = SID(42), P2 = SID(43), P3 = SID(44);
+  const pts = { [P0]: 0, [P1]: 0, [P2]: 0, [P3]: 0 };
+  const N = 6;
+  // turn i: pair (P0, P1) wins on even turns, (P2, P3) on odd ones (seats 0 / 1 win); seat 3 (P3, then P1) writes the start
+  //   and leaves unless both losers stay; ratings carried from turn to turn
+  const turns = (oneLeaves) => {
+    let sk = {}; const out = [];
+    for (let i = 0; i < N; i++) {
+      const ros = (i % 2 === 0) ? [P0, P1, P2, P3] : [P2, P3, P0, P1];
+      const m = startLeave(6, 0xE180 + 2 * i + (oneLeaves ? 0 : 1), ros, oneLeaves ? [0, 1, 2] : [0, 1, 2, 3], pts, sk);
+      out.push(m);
+      if (!m.rs.every(r => r.code === 0) || !processedOf(m.last).has(m.key)) break;
+      sk = m.last.state.SKILL_FILE || {};
+    }
+    return out;
+  };
+  const a = turns(true), b = turns(false);
+  T('[15] ' + N + ' turns each way, every run exits 0, every turn settled', a.length === N && b.length === N
+    && a.concat(b).every(m => m.rs.every(r => r.code === 0) && processedOf(m.last).has(m.key)), (a[a.length - 1] || b[b.length - 1]).out.slice(-1200));
+  const rk = (m, sid) => { const x = skillOf(m.last, sid); return x && Number.isFinite(x.rm) ? [x.rm, x.rv] : null; };
+  const diverge = [];
+  for (let i = 0; i < Math.min(a.length, b.length); i++) for (const sid of [P0, P1, P2, P3]) {
+    const x = rk(a[i], sid), y = rk(b[i], sid);
+    if (!x || !y || !near(x[0], y[0]) || !near(x[1], y[1])) diverge.push('turn ' + i + ' ' + sid.slice(-2) + ' ' + JSON.stringify([x, y]));
+  }
+  T('[15] after every turn each ranked rating is the one of the same turns with both losers staying', a.length === N && diverge.length === 0, diverge.slice(0, 4).join('; '));
+  const disp = (m, sid) => { const x = rk(m, sid); return x ? tsm.displayRating(x[0], x[1]) : null; };
+  T('[15] ... so the one who stayed ends where an honest loser would (no climb)', a.length === N && [P0, P2].every(s => disp(a[N - 1], s) === disp(b[N - 1], s)),
+    JSON.stringify([P0, P2].map(s => [disp(a[N - 1], s), disp(b[N - 1], s)])));
 }
 
 console.log(failN ? 'leaver-ghost: ' + failN + ' FAIL' : 'leaver-ghost: all ok');
