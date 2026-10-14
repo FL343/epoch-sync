@@ -95,7 +95,10 @@ layer needs as history from day one: per-player settle/win/void/flag counts, end
 disposition distribution, score moments, and pairwise co-occurrence (matches together,
 premade/team together, who places above whom). Windows are pruned on save (pairs 45 d,
 players 90 d inactive) and an entry-count fuse warns when the state should move to
-external storage. De-identified like all other state.
+external storage. A forgery flag counts toward the trust tier for 90 days from the run
+that raised it, even for a player who keeps playing (the lifetime count stays as
+history), and one match flags a player once however long its records stay on the shards.
+De-identified like all other state.
 
 **Start attestations** close the blind spot of a match nobody settles: each client also
 writes a start-type record (a second magic, zeroed result fields, same roster layout)

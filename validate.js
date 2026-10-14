@@ -1556,22 +1556,22 @@ function sigPlayer(s, h, now) { const p = s.players[h] || (s.players[h] = { g: 0
 function recordFlag(s, g, m, now) {
   if (s.flagged[m]) return false;
   s.flagged[m] = now;
-  for (const sid of new Set(g.map(r => String(r.steamID)))) sigPlayer(s, pid(sid), now).f += 1;
+  for (const sid of new Set(g.map(r => String(r.steamID)))) flagPlayer(s, pid(sid), m, now);
   return true;
 }
 // Q166 (cloud audit 2026-10): a flag stays only while its key can come back on its own. A key whose records are on the
 //   shards re-surfaces every run, so its entry must stay (dropped, every player of it would be counted again: trust tier).
 //   A shard row is overwritten, never restored, so a key none of whose records is on the shards comes back only when a
-//   writer writes it again -- counting him again then is right. Before, an entry left only after SIG_PAIR_WINDOW_MS (45
-//   days) with no cap: a rejected solo segment flags its key and leaves the shards the next run, so one account writing
-//   50 a run grew the file by about 21 MB in 45 days (five accounts past GitHub's 100 MB file limit: the state push
-//   fails, settling stops). Now an entry whose match key was off the shards on two complete reads at least
-//   FLAG_PRUNE_WAIT_MS apart is dropped (an m|blank|pid flag: its writer's own blank start of m, not the key m -- see
-//   below): the first such read arms it (s.flagOff), a read that
-//   finds the key again disarms it. A read that is not complete changes nothing (main also passes false while the
-//   one-shot recovery pools are configured: their rows are not covered by shardsComplete). An account holds at most one
-//   row per shard, so the flags whose keys stay on the shards are bounded by the accounts writing them. No oldest-first
-//   cap like the pairs: it would drop entries whose records are still on a shard.
+//   writer writes it again -- its flagged entry is rebuilt then (Q98: the players of that match are not counted again,
+//   their fm remembers it). Before, an entry left only after SIG_PAIR_WINDOW_MS (45 days) with no cap: a rejected solo
+//   segment flags its key and leaves the shards the next run, so one account writing 50 a run grew the file by about 21
+//   MB in 45 days (five accounts past GitHub's 100 MB file limit: the state push fails, settling stops). Now an entry
+//   whose match key was off the shards on two complete reads at least FLAG_PRUNE_WAIT_MS apart is dropped (an
+//   m|blank|pid flag: its writer's own blank start of m, not the key m -- see below): the first such read arms it
+//   (s.flagOff), a read that finds the key again disarms it. A read that is not complete changes nothing (main also
+//   passes false while the one-shot recovery pools are configured: their rows are not covered by shardsComplete). An
+//   account holds at most one row per shard, so the flags whose keys stay on the shards are bounded by the accounts
+//   writing them. No oldest-first cap like the pairs: it would drop entries whose records are still on a shard.
 // Q166 rework (review): a blank-start flag (m|blank|pid, Q130: one per key AND writer) is looked up by its writer. By the
 //   key m, N accounts taking turns on one set of 50N matchmade keys (each key held by one blank start a run, the holder
 //   rotating) kept every account's flag on every key: 50N^2 flags, none ever armed (about 190 accounts past 100 MB in
@@ -1591,6 +1591,60 @@ function pruneFlagged(s, seen, readComplete, now) {
   }
   if (res.armed && !s.flagOff) s.flagOff = off;
   return res;
+}
+// Q98 (cloud audit R1-B2-07): a forgery flag counts toward the trust tier for TRUST_F_WINDOW_MS, then ages out.
+//   Before, f only ever grew, and a player who kept playing (every settle refreshes `at`, so the 90-day prune never
+//   came) sat on tier 1 for good after three honest mishaps (a joiner's fast clock, the bot-match pull-out race, one
+//   out-of-range field -- each flags every writer of the group).
+//   f stays the lifetime count (record-only history, O198 (1); the old code reads only f, so a rollback is safe).
+//   fm = { matchKey: ms of that flag } for the newest SIG_FLAG_KEYS_CAP flagged matches; fx = the f value fm
+//   accounts for. f - fx = flags without a stamp (state written before this change, or by the old code during a
+//   rollback): counted as current until stampLegacyFlags dates them to the run that first sees them.
+//   One match flags a player once: a flagged group whose records stay on the shards re-surfaces after its 45-day
+//   flagged[m] entry expires; it used to add a flag (and refresh `at`) every ~45 days for as long as the records sat
+//   there (a shard row rotates only every 50 records of its writer), so one honest mismatch of two casual players
+//   reached tier 1 by itself in three months. Every flag goes through flagPlayer (test/trust-decay.js pins it).
+const TRUST_F_WINDOW_MS = Number(process.env.TRUST_F_WINDOW_MS || 90 * 86400000);
+const SIG_FLAG_KEYS_CAP = 32;   // >= TRUST_T.F2: the newest stamps decide every floor; older keys only block re-flags
+const hasKey = (o, k) => !!o && typeof o === 'object' && Object.prototype.hasOwnProperty.call(o, k);
+function capFlagKeys(p) {
+  const ks = Object.keys(p.fm);
+  if (ks.length <= SIG_FLAG_KEYS_CAP) return;
+  ks.sort((a, b) => (Number(p.fm[a]) || 0) - (Number(p.fm[b]) || 0));
+  for (let i = 0; i < ks.length - SIG_FLAG_KEYS_CAP; i++) delete p.fm[ks[i]];
+}
+function stampUntimedFlags(p, now) {
+  const f = p.f | 0;
+  let k = Math.max(0, p.fx | 0);
+  if (k >= f) return false;
+  if (!p.fm || typeof p.fm !== 'object') p.fm = {};
+  for (; k < f; k++) p.fm['~' + k] = now;   // no match key known: '~' + ordinal never collides with one
+  p.fx = f;
+  capFlagKeys(p);
+  return true;
+}
+function flagPlayer(s, h, m, now) {
+  const old = s.players[h];
+  if (old && hasKey(old.fm, m)) return false;   // this match flagged him already: no second flag, no `at` refresh
+  const p = sigPlayer(s, h, now);
+  stampUntimedFlags(p, now);
+  if (!p.fm || typeof p.fm !== 'object') p.fm = {};
+  p.f = (p.f | 0) + 1;
+  p.fm[m] = now; p.fx = p.f;
+  capFlagKeys(p);
+  return true;
+}
+// once per run, right after loading the signals file: date the unstamped flags -> true = the state changed
+function stampLegacyFlags(s, now) {
+  let changed = false;
+  for (const h of Object.keys(s.players || {})) if (s.players[h] && stampUntimedFlags(s.players[h], now)) changed = true;
+  return changed;
+}
+function flagsInWindow(p, now) {
+  if (!p) return 0;
+  let n = Math.max(0, (p.f | 0) - Math.max(0, p.fx | 0));   // unstamped: counted as current
+  for (const k of Object.keys(p.fm || {})) if (now - (Number(p.fm[k]) || 0) < TRUST_F_WINDOW_MS) n++;
+  return n;
 }
 function sigDay(s, now) { const d = Math.floor(now / 86400000); if (s.day.d !== d) s.day = { d, n: {} }; return s.day; }
 // ---- player reports (client-written report_box board -> directional edges; record-only) ----
@@ -1658,15 +1712,16 @@ function pairKey(a, b) { return a < b ? a + '|' + b : b + '|' + a; }
 // A bare 0-3 tier per player on an open-read Trusted board (trust_tier). The client
 // matchmaker consumes it as a SORT-ONLY soft-avoid key (never a filter -- single-pool
 // invariant holds). Inputs are deliberately restricted to the high-confidence signals:
-//   f   = forgery-flag involvement (inconsistent/sanity-flagged groups; note an
-//         inconsistent group flags every writer incl. the honest side, hence the
+//   f   = forgery-flag involvement inside the last TRUST_F_WINDOW_MS (flagsInWindow; inconsistent/sanity-flagged
+//         groups; note an inconsistent group flags every writer incl. the honest side, hence the
 //         high floors -- repeat involvement is the signal, not one incident)
 //   vur = same-match-VERIFIED unique reporters (a rep edge only counts when the
 //         reporter/target pair actually co-occurred in a match window (signals.pairs)
 //         -- report-bombing from strangers who never played you counts zero)
 // Thresholds are conservative pre-traffic placeholders (expected: ~everyone tier 0 at
-// launch); recalibrate with real distributions at the B5/B6 judgment pass. The 45/90d
-// signal windows make tiers decay on their own (self-healing appeal).
+// launch); recalibrate with real distributions at the B5/B6 judgment pass. Tiers decay on
+// their own (self-healing appeal): a flag counts for 90 days even for a player who keeps
+// playing (Q98), report edges and co-play pairs live 45 days.
 // Board upkeep: entries exist only for tier>=1 (delete on decay to 0) -> the readable
 // surface stays a handful of coarse tiers, no counts, no reasons.
 const TRUST_LB = process.env.TRUST_LB || 'trust_tier';
@@ -1695,7 +1750,7 @@ function trustPlan(s, existing, touched, now) {
   const all = new Set([...Object.keys(existing || {}), ...touched]);
   for (const sid of all) {
     const p = pid(sid);
-    const tier = trustTierOf(((s.players || {})[p] || {}).f | 0, verifiedUniqueReporters(s, p));
+    const tier = trustTierOf(flagsInWindow((s.players || {})[p], now), verifiedUniqueReporters(s, p));
     const cur = (existing || {})[sid];
     if (tier > 0 && tier !== (cur | 0)) writes.push({ sid, tier });
     else if (tier === 0 && cur != null) deletes.push(sid);
@@ -2679,7 +2734,7 @@ function applyTeam2LoneDissent(gr, signals, processed, now, vecOf) {
       const nw = late.ids.filter(h => prevLt.indexOf(h) < 0);
       if (!nw.length) return;
       if (!signals.flagged[m]) { if (recordFlag(signals, late.recs.filter(r => nw.indexOf(pid(String(r.steamID))) >= 0), m, now)) res.dirty = true; }
-      else for (const h of nw) sigPlayer(signals, h, now).f += 1;
+      else for (const h of nw) flagPlayer(signals, h, m, now);
       prev.lt = prevLt.concat(nw); res.dirty = true;
       console.log('  team2 dissent ' + m + ': ' + nw.length + ' refusal(s) first seen after the verdict (' + prev.v + ') -> set aside, excused');
     };
@@ -2738,7 +2793,7 @@ function applyTeam2LoneDissent(gr, signals, processed, now, vecOf) {
       const exRecs = td.ds.filter(d => ex.indexOf(pid(d.sid)) >= 0);
       if (exRecs.length) {
         if (!signals.flagged[m]) { if (recordFlag(signals, [].concat(...exRecs.map(d => d.recs)), m, now)) res.dirty = true; }
-        else for (const d of flagNow) { sigPlayer(signals, pid(d.sid), now).f += 1; res.dirty = true; }
+        else for (const d of flagNow) { flagPlayer(signals, pid(d.sid), m, now); res.dirty = true; }
       }
       setAside();
       res.settle++;
@@ -2746,7 +2801,7 @@ function applyTeam2LoneDissent(gr, signals, processed, now, vecOf) {
     }
     // free: the dissenters alone, once per match (a dissenter first seen after the flag was set: directly)
     if (!signals.flagged[m]) { if (recordFlag(signals, [].concat(...td.ds.map(d => d.recs)), m, now)) res.dirty = true; }
-    else for (const d of flagNow) { sigPlayer(signals, pid(d.sid), now).f += 1; res.dirty = true; }
+    else for (const d of flagNow) { flagPlayer(signals, pid(d.sid), m, now); res.dirty = true; }
     setAside();
     res.free++;
     return 'drop';
@@ -4340,6 +4395,7 @@ async function main() {
   const prunedF = pruneFlagged(signals, blankSeen(seenKeys), shardsComplete && !recCfg, Date.now());   // Q166 rework: + each blank start's m|blank|pid
   if (prunedF.dropped || prunedF.armed || prunedF.disarmed) sigDirty = true;
   if (prunedF.dropped) console.log('signals: ' + prunedF.dropped + ' flag(s) of keys off the shards on two complete reads dropped, ' + Object.keys(signals.flagged).length + ' kept (Q166)');
+  if (stampLegacyFlags(signals, Date.now())) sigDirty = true;   // Q98: flags written without a date start aging now
   // trust-tier candidates seen this run (real sids; signals stay HMAC-keyed -- the only
   // place real ids persist is the trust board itself, which is the public artifact anyway)
   const trustTouched = new Set();
@@ -6783,6 +6839,7 @@ module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CHAT_MUTE: 
   pruneProcessed, PROCESSED_CAP, PROCESSED_KEEP, PROCESSED_PRUNE_WAIT_MS, PRUNE_NOTE,   // cloud audit Q144 what the job remembers about keys whose records are gone
   RECOVER_FILE, loadRecover, recoverPick, readRecoverRows };   // client knife 5.0i one-shot pool recovery
 Object.assign(module.exports, { KEY_CHANNEL, loadJobPubTable, soloKeyHeld, soloRunHasHeld });   // cloud audit R1-A5-07 per-channel key policy (test/playtest-key-policy.js)
+Object.assign(module.exports, { flagPlayer, flagsInWindow, stampLegacyFlags, TRUST_F_WINDOW_MS, SIG_FLAG_KEYS_CAP });   // cloud audit Q98 forgery flags age out of the trust tier (test/trust-decay.js)
 Object.assign(module.exports, { noteOwnStarts, hasOwnStart, OWN_START_CAP });   // cloud audit Q69 own-record evidence for leaver verdicts
 Object.assign(module.exports, { NL_OPP_CAP, NL_REPEAT });   // cloud audit Q161 named-only losing seats counted on the account
 Object.assign(module.exports, { leaveConfirmHold, startRosterGaps, LEAVE_CONFIRM_MS, LEAVE_CONFIRM_MIN_MS });   // cloud audit Q121 leave confirmation

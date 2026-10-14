@@ -12,8 +12,9 @@
 //       growing (before: +50 a run); every forged key is counted once (f) as before
 //   [3] main(): a key whose two players disagree, its records kept on the shards for three hours: flagged once, never
 //       armed, f 1 each
-//   [4] main(): the same key once its records left: armed, dropped an hour later; both records written back: flagged and
-//       counted again (they wrote it again); a key still on the shards in the same runs untouched
+//   [4] main(): the same key once its records left: armed, dropped an hour later; both records written back: flagged
+//       again, its players not counted again (Q98: one match flags a player once, his fm remembers it); a key still on
+//       the shards in the same runs untouched
 //   [5] main(): its records gone while a shard fails to read: nothing armed for two hours; the first complete read arms,
 //       the next one an hour later drops
 //   [6] main(): its records gone while the one-shot recovery pools are configured: nothing armed; past the file, armed and
@@ -21,7 +22,9 @@
 //   [7] main() (Q166 rework, the review's R2): six accounts take turns on one set of 300 matchmade keys, each account a
 //       different 50 a run (one per shard), every key always on the shards, a blank seat in every start, 30-minute
 //       cadence: each account keeps at most its live 50 plus two runs of arms (150; 900 in all; before: every account on
-//       every key, 50N^2 = 1800), counted again (f) once its flag was dropped, never fewer
+//       every key, 50N^2 = 1800); f: every key counted once when first written (300 after the six runs that cover all
+//       300), at most 50 more a run, never fewer (Q98: a key written again is not counted again while its writer's fm
+//       still holds it -- fm keeps the last 32, so how many of the last three runs count again is not pinned here)
 //   [8] main() (Q166 rework): one account keeps its blank start of one matchmade key on the shards for three hours: its
 //       flag is never armed, f 1 (not dropped and counted again)
 // State isolation is structural (every *_FILE var redirected, cwd = temp dir), like test/state-prune.js.
@@ -96,11 +99,11 @@ console.log('=== Q166: signals.flagged entries of keys off the shards are droppe
   s = { day: { d: 0, n: {} }, players: {}, pairs: {}, rep: {}, rseen: {}, flagged: { old: t0, young: t0 + 44 * 86400000 }, flagOff: { old: t0 + HOUR, young: t0 + HOUR, stray: t0 } };
   v.pruneSignals(s, t0 + 46 * 86400000);
   eq('[1] pruneSignals: a flag past 45 days goes, its arm and a stray arm with it', [Object.keys(s.flagged), Object.keys(s.flagOff)], [['young'], ['young']]);
-  // a key dropped and written again is counted again (recordFlag)
+  // a key dropped and written again is flagged again; its player is not counted again (Q98: his fm remembers the match)
   s = S();
   v.recordFlag(s, [{ steamID: '765611980000001' }], 'k9', t0);
   v.pruneFlagged(s, new Set(['k1', 'k2', 'k3', 'k3|blank|abc']), true, t0 + HOUR); v.pruneFlagged(s, new Set(['k1', 'k2', 'k3', 'k3|blank|abc']), true, t0 + 2 * HOUR);
-  eq('[1] a dropped key written again is flagged and counted again', [v.recordFlag(s, [{ steamID: '765611980000001' }], 'k9', t0 + 3 * HOUR), s.players[v.pid('765611980000001')].f], [true, 2]);
+  eq('[1] a dropped key written again is flagged again, its player not counted again (Q98)', [v.recordFlag(s, [{ steamID: '765611980000001' }], 'k9', t0 + 3 * HOUR), 'k9' in s.flagged, s.players[v.pid('765611980000001')].f], [true, true, 1]);
 }
 
 // ---- main() harness (offline fake Steam; a copy of this tree with one test signing key, as test/state-prune-rework.js) ----
@@ -271,7 +274,7 @@ const keyOf = (d) => d[3] + '_' + d[4] + '_' + d[2];
     [30 * MIN, kept],                            // 2: K1's records gone -> armed
     [30 * MIN, kept],                            // 3: 30 minutes into the hour -> kept
     [40 * MIN, kept],                            // 4: 70 minutes -> dropped
-    [5 * MIN, pair(K1, P, Q).concat(kept)],      // 5: both write K1 back -> flagged and counted again
+    [5 * MIN, pair(K1, P, Q).concat(kept)],      // 5: both write K1 back -> flagged again, not counted again (Q98)
     [60 * MIN, pair(K1, P, Q).concat(kept)],     // 6: still on the shards
   ];
   const rs = timeline(steps);
@@ -281,7 +284,7 @@ const keyOf = (d) => d[3] + '_' + d[4] + '_' + d[2];
     T('[3] the disagreeing key is flagged once, never armed, kept three hours on the shards, f 1 each',
       rs.every((r) => has(r, k2) && !armed(r, k2)) && fOf(rs[6], C) === 1 && fOf(rs[6], D) === 1, JSON.stringify([fOf(rs[6], C), fOf(rs[6], D)]));
     eq('[4] K1 flagged / armed per run', rs.map((r) => (has(r, k1) ? 'F' : '-') + (armed(r, k1) ? 'A' : '-')), ['F-', 'F-', 'FA', 'FA', '--', 'F-', 'F-']);
-    eq('[4] f of K1\'s players per run (counted again once both wrote it back)', rs.map((r) => [fOf(r, P), fOf(r, Q)]), [[1, 1], [1, 1], [1, 1], [1, 1], [1, 1], [2, 2], [2, 2]]);
+    eq('[4] f of K1\'s players per run (not counted again when both wrote it back: Q98, one match flags a player once)', rs.map((r) => [fOf(r, P), fOf(r, Q)]), [[1, 1], [1, 1], [1, 1], [1, 1], [1, 1], [1, 1], [1, 1]]);
     T('[4] no flagOff field before anything was armed', !('flagOff' in sigOf(rs[0])) && !('flagOff' in sigOf(rs[1])));
   }
 }
@@ -361,7 +364,13 @@ function start(hash, seed, seat, roster) {
     T('[7] each account keeps at most its live 50 plus two runs of arms (150), 900 in all (before: 50N^2 = 1800)',
       rs.every((r) => acct.every((_, a) => mine(r, a) <= 150)) && Math.max(...n) <= 150 * N && n.slice(-4).every((x) => x === n[n.length - 1]), JSON.stringify(n));
     T('[7] the arms are flags (a writer whose start of the key is off)', arms(rs[RUNS - 1]).length > 0 && arms(rs[RUNS - 1]).every((k) => k.indexOf('|blank|') > 0 && (sigOf(rs[RUNS - 1]).flagged || {})[k] != null));
-    T('[7] every account counted again once its flag was dropped and it wrote the key again (f 450: 50 a run; before: 300)', acct.every((x) => fOf(rs[RUNS - 1], x) === 50 * RUNS), JSON.stringify(acct.map((x) => fOf(rs[RUNS - 1], x))));
+    // Q98: the six first runs write 300 different keys (each counted once: f 50 a run up to 300); the last three write
+    //   keys again whose flags were dropped -- not counted again while the writer's fm still holds the match (fm keeps
+    //   the last 32), so f there sits between 300 and 450 and only never goes down. No pin on the 32 cap.
+    const fs7 = acct.map((x) => rs.map((r) => fOf(r, x)));
+    T('[7] f: every key counted once when first written (50 a run, 300 after six runs), at most 50 more a run, never fewer',
+      fs7.every((f) => f.slice(0, 6).every((y, i) => y === 50 * (i + 1)) && f.every((y, i) => i === 0 || (y >= f[i - 1] && y - f[i - 1] <= 50)) && f[RUNS - 1] >= 300 && f[RUNS - 1] <= 50 * RUNS),
+      JSON.stringify(fs7));
   }
 }
 
