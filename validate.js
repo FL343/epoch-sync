@@ -84,6 +84,22 @@ const START_MAGIC = 0xB2;   // start-attestation record (settle records stay 0xB
 // (came back and finished), the exact deducted amount is refunded and the exit-rate signal is
 // retracted -- the pending entry tracks the amount, never an identity (state stays de-identified).
 const CONFESS_MAGIC = 0xB5;
+// Exit-note record (Q64, cloud audit 2026-10): a matchmade client whose match ended for it WITHOUT a settle record -- the
+// migration after a host loss failed (no new host reachable / nobody joined the elected one), or the host left and this
+// client is not the sole survivor -- writes a self-claim "the match died on me" on its way to the menu. Same v3 layout
+// with zeroed results, disp slot = 2 host-left / 4 migrate-disband (lockstep with the client writer; NOTE_DISP below).
+// It is read at ONE place: the start-orphan verdict (reconcileStarts) skips a roster member whose own note for the key
+// was seen, so an orphaned start no longer charges an exit-rate hit to the honest seats of a migration failure (before:
+// every seat that wrote a start got one -- e.g. in a matchmade 2V2 the host's teammate is always elected, so a host
+// team that drops together sent both opponents to the menu with a quit each). A key that settles (consistent group)
+// never looks at notes: a client whose own network dropped while the others finished is a leaver as before.
+// Trust surface: a note only spares its own writer on an all-absent key, which a lone 0xB1 of his already does
+// (p.settled counts every settle writer, consistent or not) -- it opens nothing a modified client did not have.
+// The host's own "my network seems gone" exit (all joiners lost at once) writes no note on purpose: a host team that
+// cuts its network together to void a losing match still pays one exit-rate hit at the host (architecture decision 10:
+// the honest opponents are spared first; the seat-1 teammate cannot be told apart from an honest elected host).
+const NOTE_MAGIC = 0xBD;
+const NOTE_DISP = new Set([2, 4]);
 // 'kicked' (7) = removed by the host for in-match inactivity; classed abandoner like user-quit.
 // A kicked player never writes a settle record (they leave mid-match), so the code never appears
 // in a shard in practice -- it exists for client-side exit-signal classing and table lockstep.
@@ -1164,7 +1180,9 @@ function dropSeatlessPrivate(recs, starts, processed) {
 //   would read as never-settled. The verdict waits for the next complete read (counted in `held`).
 // preRegistered (Q80): main() registers this run's start rosters ahead of the seat gate and grouping and passes the count
 //   here; a direct caller leaves it out and the registration runs below as before.
-function reconcileStarts(starts, groups, consistentKeys, processed, pending, leavers, now, maturityMs, confState, readComplete, preRegistered, seenKeys) {
+// notedSet (Q64): "pid|key" of the exit notes read this run (see NOTE_MAGIC); a roster member's sighting is kept in the
+//   entry (p.noted, cumulative like p.settled: a later record of his can rotate the note off its shard before maturity).
+function reconcileStarts(starts, groups, consistentKeys, processed, pending, leavers, now, maturityMs, confState, readComplete, preRegistered, seenKeys, notedSet) {
   confState = confState || {};
   // Q144: no record of key m on the shards on a complete read (seenKeys: every key read this run, in main) -- nothing of it left
   const gone = (m) => !!seenKeys && readComplete !== false && !seenKeys.has(m);
@@ -1199,6 +1217,10 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
     // anyone who wrote ANY settle record was present at the end -> exempt. Tracked cumulatively:
     // a lone settle (e.g. the finishing side of a 2P match) can be overwritten before maturity.
     if (groups[m]) for (const r of groups[m]) { const h = pid(r.steamID); if (p.settled.indexOf(h) < 0) p.settled.push(h); }
+    if (notedSet && notedSet.size) for (const seat of Object.keys(p.roster)) {   // Q64: roster members only (an outsider's note names nobody)
+      const h = p.roster[seat];
+      if (notedSet.has(h + '|' + m) && !(Array.isArray(p.noted) && p.noted.indexOf(h) >= 0)) (Array.isArray(p.noted) ? p.noted : (p.noted = [])).push(h);
+    }
     noteOwnStarts(p, sg[m], now);   // Q69: who wrote his OWN start for this key, cumulative (entries from older builds start empty); Q121: and when
     if (isEndlessMt(p.mt)) noteTestimony(p, (sg[m] || []).concat(groups[m] || []));   // Q113: and what his records said about his seat
     if (consistentKeys.has(m)) continue;   // consistent settle group -> the normal pipeline owns this key
@@ -1217,12 +1239,13 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
     }
     if (now - (p.t0 || 0) < maturityMs) continue;
     if (readComplete === false) { held++; continue; }
-    const hit = [];
+    const hit = [], spared = [];
     for (const seat of Object.keys(p.roster)) {
       const h = p.roster[seat];
       if (p.settled.indexOf(h) >= 0) continue;
       if (!hasOwnStart(p, h)) continue;   // Q69: named by others only -- logged below, not convicted
       if (confState[h + '|' + m]) continue;   // confession already counted this leave (no double exit-rate)
+      if (Array.isArray(p.noted) && p.noted.indexOf(h) >= 0) { spared.push(h.slice(0, 8)); continue; }   // Q64: his own exit note -- the match died on him
       leavers[h] = leavers[h] || { leaves: 0, lastMatch: '' };
       leavers[h].leaves += 1; leavers[h].lastMatch = m;
       hit.push(h.slice(0, 8));
@@ -1247,11 +1270,13 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
       console.log('  start-orphan ' + m + ': ' + unatt.length + ' roster seat(s) never wrote their own start record -- not convicted (' + unatt.map((h) => h.slice(0, 8)).join(',') + ')');
     }
     convicted += hit.length;
+    if (spared.length) RUN.exitNoteSpared = (RUN.exitNoteSpared | 0) + spared.length;
     processed.add(m);   // idempotent: a super-late settlement of a convicted key is skipped as stale
     delete pending[m];
     const cn = pending['~' + m], wasContested = !!(cn && cn.c), who = wasContested ? noteParties(cn) : '';   // Q143: a contested key voids here
     if (wasContested) RUN.contestHeldVoid = (RUN.contestHeldVoid | 0) + 1;
     console.log('  start-orphan ' + m + ': started, never settled -> ' + hit.length + ' exit-rate hits (' + hit.join(',') + ')' + (p.settled.length ? ', ' + p.settled.length + ' exempt (wrote a settle record)' : '')
+      + (spared.length ? ', ' + spared.length + ' spared (own exit note: ' + spared.join(',') + ', Q64)' : '')
       + (wasContested ? '; contested once (Q127), nobody rated' + (who ? ', contested by ' + who : '') + ' (Q143)' : ''));
   }
   return { registered, convicted, cleaned, held, consoledSids };
@@ -2007,6 +2032,7 @@ function writeRunSummary() {
       '| consistent / fresh | ' + s('consistent', 0) + ' / ' + s('fresh', 0) + ' |',
       '| flagged inconsistent / sanity | ' + s('flagged', 0) + ' / ' + s('sanity', 0) + ' |',
       '| starts pending / exit-rate hits | ' + s('pending', 0) + ' / ' + s('convicted', 0) + ' |',
+      '| start-orphan seats spared by their own exit note (Q64) | ' + s('exitNoteSpared', 0) + ' |',
       '| starts-state notes / endless, friends\' room and bot entries dropped, no record of the key left on the shards (Q144) | ' + s('noteGone', 0) + ' / ' + s('entryGone', 0) + ' |',
       '| processed keys remembered / dropped past the cap (Q144) | ' + s('processedN', 0) + ' / ' + s('processedPruned', 0) + ' |',
       '| signed solo segments remembered while their key verifies / written back after they left the processed list (Q144) | ' + s('soloDone', 0) + ' / ' + s('soloReplay', 0) + ' |',
@@ -4496,13 +4522,18 @@ async function main() {
         const pc = d[8] | 0;
         const dispCode = (d.length > 10 + pc && pc >= 1) ? (d[10 + pc] | 0) : 0;
         out.push({ confess: true, steamID: e.steamID, shard: label, m: d[3] + '_' + d[4] + '_' + d[2], mt: d[2] | 0, dispCode });
+      } else if (d[0] === NOTE_MAGIC && d.length >= 10) {
+        // exit note (Q64): writer identity is the only thing it speaks for; disp slot at the v3 offset
+        const pc = d[8] | 0;
+        const dispCode = (d.length > 10 + pc && pc >= 1) ? (d[10 + pc] | 0) : 0;
+        out.push({ note: true, steamID: e.steamID, shard: label, m: d[3] + '_' + d[4] + '_' + d[2], mt: d[2] | 0, dispCode });
       }
     }
     return out;
   });
-  const starts = [], confessions = [];
+  const starts = [], confessions = [], notes = [];
   for (const r of shardOut) {
-    if (r.status === 'fulfilled') for (const rec of r.value) (rec.start ? starts : (rec.confess ? confessions : recs)).push(rec);
+    if (r.status === 'fulfilled') for (const rec of r.value) (rec.start ? starts : (rec.confess ? confessions : (rec.note ? notes : recs))).push(rec);
     else { shardsComplete = false; ghWarn('read shard failed: ' + (r.reason && r.reason.message || r.reason)); }
   }
   // confession keys still on the shards (retention input of saveConfessions); null = partial read
@@ -4522,10 +4553,10 @@ async function main() {
       console.log('recover: ' + fresh.length + ' solo segment(s) + ' + got.starts.length + ' start attestation(s) kept of ' + rows.length + ' pool rows (until ' + new Date(recCfg.until).toISOString() + ')');
     } catch (e) { ghWarn('recover pools read failed: ' + (e && e.message)); }
   }
-  console.log('records: ' + recs.length + (starts.length ? ' (+' + starts.length + ' start attestations)' : '') + (confessions.length ? ' (+' + confessions.length + ' abandon confessions)' : ''));
+  console.log('records: ' + recs.length + (starts.length ? ' (+' + starts.length + ' start attestations)' : '') + (confessions.length ? ' (+' + confessions.length + ' abandon confessions)' : '') + (notes.length ? ' (+' + notes.length + ' exit notes)' : ''));
   RUN.rec = recs.length; RUN.starts = starts.length;
   // Q144: every key with a record on the shards this run (results, starts, confessions), before any gate drops one
-  const seenKeys = new Set(recs.concat(starts).map((r) => r.d[3] + '_' + r.d[4] + '_' + r.d[2]).concat(confessions.map((c) => c.m)));
+  const seenKeys = new Set(recs.concat(starts).map((r) => r.d[3] + '_' + r.d[4] + '_' + r.d[2]).concat(confessions.map((c) => c.m), notes.map((c) => c.m)));
 
   const MAX_SEATS = 8;
   // consistency vector: the per-seat score slice, plus (endless only) the 4-int depth tail --
@@ -4636,7 +4667,9 @@ async function main() {
   const confState = loadConfessions();   // loaded before starts so the orphan verdict can skip confessed keys
   const consistentKeys = new Set(consistentMatches.map(c => c.m));
   const nowMs = Date.now();
-  const startsRes = reconcileStarts(starts, groups, consistentKeys, processed, startsPending, leavers, nowMs, STARTS_MATURITY_MS, confState, shardsComplete, registeredEarly, seenKeys);   // Q144: + seenKeys
+  // Q64: exit notes read this run ("pid|key", host-left / migrate-disband only) -> the start-orphan verdict spares their writers
+  const noted = new Set(notes.filter((n) => NOTE_DISP.has(n.dispCode | 0)).map((n) => pid(String(n.steamID)) + '|' + n.m));
+  const startsRes = reconcileStarts(starts, groups, consistentKeys, processed, startsPending, leavers, nowMs, STARTS_MATURITY_MS, confState, shardsComplete, registeredEarly, seenKeys, noted);   // Q144: + seenKeys; Q64: + noted
   if (startsRes.registered || startsRes.convicted || startsRes.cleaned || Object.keys(startsPending).length)
     console.log('starts: ' + Object.keys(startsPending).length + ' pending (+' + startsRes.registered + ' new), ' + startsRes.convicted + ' exit-rate hits, ' + startsRes.cleaned + ' cleaned' + (startsRes.held ? ', ' + startsRes.held + ' matured verdict(s) held (incomplete shard read)' : ''));
   RUN.pending = Object.keys(startsPending).filter((m) => m.charAt(0) !== '~').length; RUN.convicted = startsRes.convicted;
@@ -7133,7 +7166,7 @@ async function main() {
 if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
-module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CHAT_MUTE: chatMute.CHAT_MUTE, CHAT_MUTE_FILE, CHAT_MUTE_LB, CHAT_REPORT_LB, isVoidDisp, voidByConsensus, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, RS_SOLO_VS_TRIO, RS_TRIO_WIN, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, CONFESS_MAGIC, reconcileConfessions, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan, postForm, postFormDetails, findOrCreateBoard, isTestBoardName, sandboxOn, ghWarn, ghErr, PT_MODE, PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, ACTIVE_MATCH_LB, ptSeedCp, ptBoardPlan, PRIVATE_XP, isPrivateMt, privateProgressOf, creditXpPrivate, BOT_XP, isBotMt, botTierOf, botTierMult, botSeatSplit, botRanksOf, botRankEffOf, botXpGain, botProgressOf, creditXpBot, DEMO_APPID, ENDLESS_XP, computeXpEndless, creditXpEndless, CAMPAIGN_LB, SEEDCAP_REJECT_LADDER_MIN, seedcapRejectWindowMin, seedcapRejectUntilMin, seedcapRejectActive,
+module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CHAT_MUTE: chatMute.CHAT_MUTE, CHAT_MUTE_FILE, CHAT_MUTE_LB, CHAT_REPORT_LB, isVoidDisp, voidByConsensus, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, RS_SOLO_VS_TRIO, RS_TRIO_WIN, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, CONFESS_MAGIC, NOTE_MAGIC, NOTE_DISP, reconcileConfessions, SANITY, sanityFlags, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan, postForm, postFormDetails, findOrCreateBoard, isTestBoardName, sandboxOn, ghWarn, ghErr, PT_MODE, PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, ACTIVE_MATCH_LB, ptSeedCp, ptBoardPlan, PRIVATE_XP, isPrivateMt, privateProgressOf, creditXpPrivate, BOT_XP, isBotMt, botTierOf, botTierMult, botSeatSplit, botRanksOf, botRankEffOf, botXpGain, botProgressOf, creditXpBot, DEMO_APPID, ENDLESS_XP, computeXpEndless, creditXpEndless, CAMPAIGN_LB, SEEDCAP_REJECT_LADDER_MIN, seedcapRejectWindowMin, seedcapRejectUntilMin, seedcapRejectActive,
   ENDLESS_COMP_LB, SAVE_BOX_LB, SOLO_FILE, COMP, soloSanity, soloChainPlan, rerollChain, soloMilestones, soloAdvance, soloRunKey, soloStartAttested, loadSolo, saveSolo, segOrderOf, segStartOf, freshOrder, freshOrderPaced, writerReadyAt, writerClaim,
   ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, SAVE_BOX_LB_DUO, SAVE_BOX_LB_TRIO, teamRunKey, soloMsSlot, groupRecords,
   ENDLESS_COMP_LB_QUAD, SAVE_BOX_LB_QUAD, ENDLESS_LB_QUAD, ENDLESS_MAX_PC, compFamKeyOf,   // client knife 3.7a (O178 four seats)

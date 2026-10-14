@@ -174,10 +174,10 @@ console.log('=== what the job remembers about keys whose records are gone (Q144)
 {
   const pin = (label, s) => T('[0] ' + label, SRC.split(s).length === 2, 'not found exactly once: ' + s.slice(0, 120));
   pin('main: the seen keys, every record read this run, before any gate',
-    "  const seenKeys = new Set(recs.concat(starts).map((r) => r.d[3] + '_' + r.d[4] + '_' + r.d[2]).concat(confessions.map((c) => c.m)));\n");
+    "  const seenKeys = new Set(recs.concat(starts).map((r) => r.d[3] + '_' + r.d[4] + '_' + r.d[2]).concat(confessions.map((c) => c.m), notes.map((c) => c.m)));\n");   // Q64: + exit notes
   pin('main: the prune runs on the seen keys and the read state, after loadStarts',
     '  const startsPending = loadStarts();\n  // Q144: past PROCESSED_CAP, the oldest keys off the shards on two complete reads an hour apart are dropped\n  const prunedP = pruneProcessed(processed, startsPending, seenKeys, shardsComplete, Date.now());\n');
-  pin('main: reconcileStarts gets the seen keys', 'STARTS_MATURITY_MS, confState, shardsComplete, registeredEarly, seenKeys);');
+  pin('main: reconcileStarts gets the seen keys', 'STARTS_MATURITY_MS, confState, shardsComplete, registeredEarly, seenKeys, noted);');   // Q64: + the exit notes
   pin('reconcileStarts: gone = not seen on a complete read', "  const gone = (m) => !!seenKeys && readComplete !== false && !seenKeys.has(m);\n");
   pin('the summary row: notes / entries dropped', "      '| starts-state notes / endless, friends\\' room and bot entries dropped, no record of the key left on the shards (Q144) | ' + s('noteGone', 0) + ' / ' + s('entryGone', 0) + ' |',\n");
   pin('the summary row: the processed list', "      '| processed keys remembered / dropped past the cap (Q144) | ' + s('processedN', 0) + ' / ' + s('processedPruned', 0) + ' |',\n");
