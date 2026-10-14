@@ -6201,10 +6201,12 @@ async function main() {
     };
     // consensus-absent seats: LP penalty below + §7 teammate shield input -- minus anyone this job already saw agreeing
     //   on this match (pend.agreed): that record was lost to shard rotation while the group waited, the player finished
+    const agreedAbs = [];     // Q167: the same seats with their accounts (a losing one stands in for the winners' update below)
     const agreedSeats = [];   // Q149: those seats (finished, accounted for by the agreement seen earlier)
     const leavers0 = detectLeavers(g).filter((x) => {
       if (!(pend.agreed && pend.agreed.indexOf(pid(String(x.steamID))) >= 0)) return ownOrNamed(x);
       agreedSeats.push(x.seat);
+      agreedAbs.push(x);
       console.log('  leaver ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' record gone but seen agreeing earlier -- finished, not a leaver');
       return false;
     });
@@ -6407,8 +6409,14 @@ async function main() {
         //   team-gamble dissent; Q62 where it is merged), that update stands and no line is logged; its convicted leavers
         //   (for Q56 the due refusers) still count toward the mismatch (teamLpPlan absent): two zero-points accounts
         //   refusing the team gamble, one of them due, gave the grandmasters the same full win as two that left.
-        if (sides[winTeam].length) {
-          for (const x of leavers0) if (teamOfSeat(x.seat, _mts) === 1 - winTeam && !t2ex.has(pid(String(x.steamID)))) ghostLoss.push(x);
+        //   Q167 rework: a losing seat whose record is gone but who was seen agreeing earlier (agreedAbs, Q149: finished,
+        //   not a leaver) stands in the same way. Written at the start, then overwritten with an empty record before the
+        //   settle, it was neither a leaver nor rated against: the same full win as a leave, without the leaver's penalty.
+        //   An honest loser whose record shard rotation took counts here as his own record would have counted.
+        //   Only with the winners present: where Q62 is merged, a whole absent WINNING team is filled with its pre-match
+        //   ratings above; nobody stands in then (the ranked update below would rate the present losers against an empty side).
+        if (sides[winTeam].length && empty !== winTeam) {
+          for (const x of leavers0.concat(agreedAbs)) if (teamOfSeat(x.seat, _mts) === 1 - winTeam && !t2ex.has(pid(String(x.steamID)))) ghostLoss.push(x);
         }
         if (!ghost.length && ghostLoss.length) {
           const g0 = ghostLoss.map(x => { const sk = skill[pid(x.steamID)] || ts.DEFAULTS; return { id: x.steamID, mu: sk.mu, sigma: sk.sigma }; });
@@ -6432,6 +6440,7 @@ async function main() {
       //   a whole team absent (Q56) is rated against that team's pre-match ranked ratings as the stored update does, a side
       //   simply empty (the degenerate fallback) leaves it as it was
       let playedOut = null;
+      const ghostRanked = [];   // Q167 rework: the losing team's absent players rated against: their ranked rating after the loss (below)
       if (rankedNow && tsOut.length) {
         if (isTeamMt(matchType)) {
           const winT = (t2Win != null) ? t2Win : (((scores[2] | 0) + (scores[3] | 0)) > ((scores[0] | 0) + (scores[1] | 0)) ? 1 : 0);
@@ -6443,9 +6452,17 @@ async function main() {
             : [];
           if (ghostR.length) sd[emptyT] = ghostR;
           playedOut = (sd[0].length && sd[1].length) ? ts.updateTeamMatch([{ players: sd[winT], rank: 1 }, { players: sd[1 - winT], rank: 2 }]) : asPlayed;
+          if (ghostR.length && emptyT === 1 - winT) {   // Q167 rework: the convicted ones of a whole absent losing team (Q56)
+            for (const g0 of ghostR) {
+              const o = !t2ex.has(pid(String(g0.id))) && playedOut.find((x) => x.id === g0.id);
+              if (o) ghostRanked.push(o);
+            }
+          }
           if (!ghostR.length && ghostLoss.length) {   // Q167: as the stored update above, from the ranked inputs
             const gR = ghostLoss.map((x) => { const sk = skill[pid(x.steamID)] || ts.DEFAULTS; return rIn(x.steamID, { id: x.steamID, mu: sk.mu, sigma: sk.sigma }); });
             playedOut = leaverGhostUpdate(sd[winT], sd[1 - winT], gR);
+            const gIds = new Set(gR.map((x) => x.id));   // Q167 rework: their side of the same full-team update
+            for (const o of ts.updateTeamMatch([{ players: sd[winT], rank: 1 }, { players: sd[1 - winT].concat(gR), rank: 2 }])) if (gIds.has(o.id)) ghostRanked.push(o);
           }
         } else playedOut = ts.updateMatch(asPlayed);
       }
@@ -6504,6 +6521,19 @@ async function main() {
             + (d !== d0 ? (' [SERIES ' + (wonLike ? 'PROMOTED' : 'RELEGATED') + ' from ' + d0 + ']') : '');
         }
         console.log('  settle ' + c.m + ': ' + plog(r.id) + ' rank' + rankOf[r.id] + ' mu' + r.mu.toFixed(2) + ' sigma' + r.sigma.toFixed(2) + ' -> ' + ts.displayRating(r.mu, r.sigma) + lpLine);
+      }
+      // Q167 rework: the losing team's absent players the winners were rated against take the loss of the full team on their
+      //   RANKED rating only (the stored rating, matchmaking and the rating board stay as they were). Without it a leaver
+      //   kept every point the winners took from him: two pairs of zero-points accounts taking turns (one pair wins, the
+      //   other writes the start and leaves) walked each other's ranked rating up to about 2750 in 30 matches, and the
+      //   pair then left against two grandmasters as if strong (no mismatch: the full team win, +10 a match). The loss is
+      //   the one he would have taken staying and losing with the team, and the ranked rating only feeds the mismatch
+      //   reading of the points plan, where a lower one can only soften his next loss or raise his next win.
+      for (const o of ghostRanked) {
+        const k = pid(o.id), sk = skill[k] || { mu: ts.DEFAULTS.mu, sigma: ts.DEFAULTS.sigma }, pre = rankedRatingOf(sk) || sk;
+        skill[k] = Object.assign({}, sk, { rm: o.mu, rv: o.sigma });
+        console.log('  leaver-ranked ' + c.m + ': ' + plog(o.id) + ' ranked rating ' + ts.displayRating(pre.mu, pre.sigma) + ' -> ' + ts.displayRating(o.mu, o.sigma)
+          + ' (the loss of the full team; stored rating unchanged, Q167)');
       }
     }
     for (const x of leavers0) {
