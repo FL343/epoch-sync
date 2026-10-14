@@ -6390,7 +6390,17 @@ async function main() {
         const ghost = (empty >= 0)
           ? leavers0.filter(x => teamOfSeat(x.seat, _mts) === empty).map(x => { const sk = skill[pid(x.steamID)] || ts.DEFAULTS; return { id: x.steamID, mu: sk.mu, sigma: sk.sigma }; })
           : [];
-        if (ghost.length) {
+        // Q210 (cloud audit, found by the Q167 review 3): at a QUICK settle a whole absent team moves nobody's rating. Two pairs
+        //   of fresh accounts taking turns in quick 2V2 (one pair wins, the other writes the start and leaves; or refuses the
+        //   team gamble, Q56) walked each other's stored rating up against the absent pair's pre-match rating (the absent
+        //   never move): about 2750 in 30 turns. The mismatch check reads the stored rating for an account with no ranked one
+        //   yet (Q160), so the pair then left a ranked match against two grandmasters as if strong (+10 points a match with
+        //   Q167). A quick settle moves no points; the present winners give up a hidden-rating gain against an empty side,
+        //   nobody loses one, and the match settles as before (XP, the leavers convicted). Ranked settles are unchanged.
+        if (ghost.length && !appliesLp(matchType)) {
+          tsOut = [];
+          console.log('  team rating ' + c.m + ': whole team ' + empty + ' absent at a quick settle -> no rating move (Q210)');
+        } else if (ghost.length) {
           sides[empty] = ghost;
           const here = new Set(parts.map(p => p.steamID));
           tsOut = ts.updateTeamMatch([{ players: sides[winTeam], rank: 1 }, { players: sides[1 - winTeam], rank: 2 }]).filter(r => here.has(r.id));

@@ -11,7 +11,9 @@
 //   [2] ranked team brawl, the absent team was ahead on money: both present players lose the same rating (LP: both lost)
 //   [3] ranked 2v2 (mode 2), the other team gone: both winners gain the same rating
 //   [4] ranked 3v3, the other team gone: all three winners gain the same rating
-//   [5] quick team brawl (rating only, no points): both winners gain
+//   [5] quick team brawl (rating only, no points): nobody's rating moves (Q210, cloud audit: at a quick settle a whole absent
+//       team moves no rating -- two pairs taking turns walked each other's stored rating up against it); the match still
+//       settles, the winners take their XP, the absent are convicted
 //   [6] one absent member only (not a whole team): the normal team update, no whole-team line
 //   [7] absent stored ratings and the rating board never move (with Q167 merged their ranked rating takes the loss of the
 //       full team); the absent members are still convicted as leavers once
@@ -176,7 +178,13 @@ console.log('-- [4] ranked 3v3, the other team gone --');
 console.log('-- [5] quick team brawl (rating only) --');
 {
   const r = play(3, 0x6205, R4, [6000, 5000, 1000, 800], 0, [0, 1]);
-  T('[5] both winners gain, by the same amount; no points written', dMu(r, A) > 0 && dMu(r, B) > 0 && same(dMu(r, A), dMu(r, B)) && lpTo(r, A) == null, fmt(r, [A, B]));
+  const xpTo = (sid) => r.posts.some(x => /SetLeaderboardScore/.test(x.url) && new RegExp('leaderboardid=' + PROGRESS + '(&|$)').test(x.body) && new RegExp('steamid=' + sid + '(&|$)').test(x.body));
+  const lv = (sid) => (((r.state.LEAVERS_FILE || {})[v.pid(sid)]) || {}).leaves | 0;
+  T('[5] settled, the quick whole-team line logged', r.code === 0 && new Set(r.state.PROCESSED_FILE || []).has(keyOf(3, 0x6205))
+    && /team rating [^\n]*whole team 1 absent at a quick settle -> no rating move \(Q210\)/.test(r.out), r.out.slice(-500));
+  T('[5] nobody\'s rating moves (Q210); no points written', [A, B, C, D].every(s => skillOf(r, s) === null) && lpTo(r, A) == null && lpTo(r, B) == null, fmt(r, [A, B, C, D]));
+  T('[5] the winners take their XP, the absent are convicted once each', xpTo(A) && xpTo(B) && lv(C) === 1 && lv(D) === 1 && lv(A) === 0 && lv(B) === 0,
+    JSON.stringify([xpTo(A), xpTo(B), lv(C), lv(D)]));
 }
 
 // ---- [6] one absent member only ----

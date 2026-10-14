@@ -49,6 +49,10 @@
 //   [15] (rework 2) ranked 2V2, two pairs of fresh accounts taking turns, one of the losing pair leaving at the start and
 //       the other writing the loss: after every match each ranked rating is the one of the same turns with both losers
 //       staying and writing the loss (the one who stayed no longer only goes up)
+//   [16] (Q210) quick 2V2, two pairs of fresh accounts taking turns, the whole losing pair leaving at the start: no turn
+//       moves anybody's rating (the whole absent team at a quick settle), every turn settles, the leavers are convicted
+//   [6q] (Q210, trees with the Q56 team dissent) quick 2v2, the whole other team refuses the team gamble, both due: settled,
+//       nobody's rating moves
 // State isolation is structural (every *_FILE var scanned and redirected, cwd = temp dir), like test/seat-gate.js.
 const { spawnSync } = require('child_process');
 const fs = require('fs'), path = require('path'), os = require('os');
@@ -226,6 +230,7 @@ console.log('=== a losing-side leaver counts at his pre-match rating for the win
     /const full = ts\.updateTeamMatch\(\[\{ players: sd\[winT\], rank: 1 \}, \{ players: sd\[1 - winT\]\.concat\(gR\), rank: 2 \}\]\);/.test(SRC)
     && /playedOut = full\.filter\(\(o\) => !gIds\.has\(o\.id\)\);/.test(SRC));
   T('[0] the stored stand-in at a ranked settle only (rework 2)', /if \(!ghost\.length && ghostLoss\.length && appliesLp\(matchType\)\) \{/.test(SRC));
+  T('[0] a whole absent team at a quick settle moves nobody (Q210)', /if \(ghost\.length && !appliesLp\(matchType\)\) \{\n\s*tsOut = \[\];/.test(SRC));
   T('[0] a losing seat seen agreeing whose record is gone stands in too', /for \(const x of leavers0\.concat\(agreedAbs\)\) if \(teamOfSeat\(x\.seat, _mts\) === 1 - winTeam/.test(SRC)
     && /agreedSeats\.push\(x\.seat\);\n      agreedAbs\.push\(x\);/.test(SRC));
   T('[0] the absent losers\' ranked rating takes their side of the full-team update, the stored one never',
@@ -362,6 +367,18 @@ if (HAS_Q56) {
     T('[6] the winners rated against the absent team (Q56 unchanged)', storedIs(r, A, e[A]) && storedIs(r, B, e[B]) && rankedIs(r, A, e[A]), show(r, [A, B]));
     T('[6] both refusers (due): stored rating never moves, ranked rating takes the loss of that update', leaverIs(r, C, e[C]) && leaverIs(r, D, e[D]),
       show(r, [C, D]) + ' want ranked ' + JSON.stringify([e[C], e[D]]));
+  }
+  // [6q] (Q210) the same at a quick settle: settled, nobody's rating moves
+  {
+    const R4 = [A, B, C, D];
+    const recs = match(5, 0xE16F, R4, { 2: { rank: 0 }, 3: { rank: 0 } });
+    const key = keyOf(recs[0].d);
+    const t2ld = { [v.pid(C)]: [strikeIn('earlier', 86400000, G, [G, H])], [v.pid(D)]: [strikeIn('earlier', 86400000, G, [G, H])] };
+    const rs = runSettle(boardsWith(recs, pts), { STARTS_FILE: { [key]: startOf(5, R4, FLOOR + 5 * MIN) }, SIGNALS_FILE: { players: {}, flagged: {}, t2ld } });
+    const r = rs[rs.length - 1], out = rs.map(x => x.out).join('');
+    T('[6q] quick: runs exit 0, settled, both refusers the leavers', rs.every(x => x.code === 0) && processedOf(r).has(key) && leavesOf(r, C) === 1 && leavesOf(r, D) === 1, out.slice(-800));
+    T('[6q] quick: the Q210 line, nobody\'s rating moves', /whole team 1 absent at a quick settle -> no rating move \(Q210\)/.test(out) && [A, B, C, D].every(s => !skillOf(r, s)),
+      show(r, [A, B, C, D]) + '\n' + out.slice(-800));
   }
   // [7] ranked 2v2, the grandmasters' two zero-points opponents both refuse the team gamble, one of them due: the Q56
   //   whole-team path rates the stored and ranked rating as before; the due refuser (the leaver) counts toward the
@@ -553,6 +570,26 @@ const lastPts = (m, sid) => { const w = writesTo(m.rs, POINTS, sid); return w.le
   const disp = (m, sid) => { const x = rk(m, sid); return x ? tsm.displayRating(x[0], x[1]) : null; };
   T('[15] ... so the one who stayed ends where an honest loser would (no climb)', a.length === N && [P0, P2].every(s => disp(a[N - 1], s) === disp(b[N - 1], s)),
     JSON.stringify([P0, P2].map(s => [disp(a[N - 1], s), disp(b[N - 1], s)])));
+}
+
+// ---- [16] quick 2V2, two pairs taking turns, the whole losing pair leaving at the start (Q210) ----
+{
+  const Q0 = SID(51), Q1 = SID(52), Q2 = SID(53), Q3 = SID(54);
+  const pts = { [Q0]: 0, [Q1]: 0, [Q2]: 0, [Q3]: 0 };
+  const N = 4, ms = [];
+  let sk = {};
+  for (let i = 0; i < N; i++) {
+    const ros = (i % 2 === 0) ? [Q0, Q1, Q2, Q3] : [Q2, Q3, Q0, Q1];
+    const m = startLeave(5, 0xE190 + i, ros, [0, 1], pts, sk);
+    ms.push(m);
+    if (!m.rs.every(r => r.code === 0)) break;
+    sk = m.last.state.SKILL_FILE || {};
+  }
+  T('[16] ' + N + ' quick turns, every run exits 0, every turn settled, the leaving pair convicted each turn', ms.length === N
+    && ms.every((m, i) => m.rs.every(r => r.code === 0) && processedOf(m.last).has(m.key) && leavesOf(m.last, (i % 2 === 0) ? Q2 : Q0) === 1),
+    (ms[ms.length - 1] || {}).out ? ms[ms.length - 1].out.slice(-1200) : '');
+  T('[16] no turn moves anybody\'s rating (Q210 line every turn, no settle line)', ms.length === N && ms.every(m => /whole team 1 absent at a quick settle -> no rating move \(Q210\)/.test(m.out)
+    && !/  settle [^\n]* rank/.test(m.out)) && [Q0, Q1, Q2, Q3].every(s => !skillOf(ms[N - 1].last, s)), show(ms[ms.length - 1].last, [Q0, Q1, Q2, Q3]));
 }
 
 console.log(failN ? 'leaver-ghost: ' + failN + ' FAIL' : 'leaver-ghost: all ok');
