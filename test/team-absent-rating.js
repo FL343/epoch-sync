@@ -14,7 +14,8 @@
 //   [5] quick team brawl (rating only, no points): both winners gain
 //   [6] one absent member only (not a whole team): the normal team update, no whole-team line
 //   [7] absent ratings never move; the absent members are still convicted as leavers once
-//   [8] wiring pin + mutation self-check (the old dissent-only condition back -> [1] goes red)
+//   [8] wiring pin + mutation self-check (the old dissent-only condition back -> [2] goes red; with Q167 in, [1] is no
+//       witness: the absent team lost, so Q167's losing-side leaver stand-in rates the winners against it anyway)
 // Runs the REAL validate.js main() against an offline board stub (test/team2-team-dissent.js harness).
 const { spawnSync } = require('child_process');
 const fs = require('fs'), path = require('path'), os = require('os');
@@ -203,8 +204,10 @@ console.log('-- [8] wiring + mutation --');
     const script = path.join(__dirname, '..', '.mutant-team-absent-' + process.pid + '.js');
     try {
       fs.writeFileSync(script, SRC.replace(from, to));
-      const r = play(4, 0x6281, R4, [6000, 5000, 1000, 800], 0, [0, 1], script);
-      T('[8] the old dissent-only condition back -> rating moves between the winners again (red)', dMu(r, A) > 0 && dMu(r, B) < 0, fmt(r, [A, B]));
+      // [2]'s match (the absent team won): no losing-side leaver for Q167 to stand in, so the mutant falls back to the
+      //   ordinal update between the two present losers (rank 3 over rank 4)
+      const r = play(4, 0x6281, R4, [1000, 800, 6000, 5000], 1, [0, 1], script);
+      T('[8] the old dissent-only condition back -> rating moves between the present players again (red)', dMu(r, A) > 0 && dMu(r, B) < 0, fmt(r, [A, B]));
     } finally { try { fs.unlinkSync(script); } catch (e) {} }
   }
 }
