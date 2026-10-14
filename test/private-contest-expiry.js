@@ -16,11 +16,15 @@
 //       flagged or counted as a leaver), the note gone once processed, the log line and the summary row
 //   [3] the same for a bot match with two humans and two bot seats (the outsider at a bot seat)
 //   [4] a lone human against bots (the single-writer lane), the outsider at a bot seat: settled on the lone lane
-//   [5] the outsider also wrote a result (a claim to XP): still held after maturity and a day later, nobody paid
+//   [5] the outsider also wrote a result (a claim to XP): held until maturity; past it (Q214) two of the three result
+//       writers are on the players' table and his result is left out, his start by the filter above, and both players
+//       are paid in that run, he gets nothing (before Q214: held for good, nobody paid -- test/private-majority-table.js)
 //   [6] a player of the room wrote a start naming an alt at an extra seat and quit (no result): the other two are paid
 //       after maturity and the absence grace for his seat, the quitter nothing
 //   [7] made-up results ahead of the real one (Q80 third review): held in the first hours (six minutes in, past the pacing
-//       floor, only the made-up result written) and after them, the outsiders get nothing
+//       floor, only the made-up result written) up to maturity; past it (Q214) two against two, no table with more than
+//       half, so their table, which names the players, is set aside, both players are paid in that run, the outsiders get
+//       nothing (before Q214: held for good)
 //   [8] control: an honest friends' room settles at its first look past the pacing floor, no note, no lift line
 // State isolation is structural (every *_FILE var scanned and redirected, cwd = temp dir), like test/strict-gate.js.
 const { spawnSync } = require('child_process');
@@ -165,6 +169,8 @@ const neverPaid = (rs, sid) => xpIn(rs, sid).length === 0;
 const nobodyHurt = (rs, sids) => sids.every(s => rs.every(r => leavesOf(r, s) === 0 && fOf(r, s) === 0));
 const HELD = /roster contest, not settled \(Q75\)/;
 const LIFT = /contest-lifted ([0-9]+_[0-9]+_[0-9]+): contested since [^\n]* by start records alone -- ([0-9]+) start record\(s\) from accounts that wrote no result left out, settled as usual \(Q200\)/;
+const TMAJ = /table-majority ([0-9]+_[0-9]+_[0-9]+): ([0-9]+) of ([0-9]+) result writers on one table past the hold's maturity(?: \(([0-9]+) more set aside: [^)]*\))? -- ([0-9]+) result\(s\) on another table left out, nobody flagged \(Q214\)/;
+const TROW = (r, a, b) => new RegExp("\\| friends' room / bot match keys held past maturity by results on two tables: the other table's results left out / no table with more than half, still held \\(Q214\\) \\| " + a + ' / ' + b + ' \\|').test(r.summary);
 const ROW = (r, n) => new RegExp("\\| friends' room / bot match keys no longer held by start records alone, a contest past maturity \\(Q200\\) \\| " + n + ' \\|').test(r.summary);
 
 // ---- scenarios (each a list of timeline steps; the mutation script reruns them) ----
@@ -270,7 +276,7 @@ console.log("=== a friends' room or bot match held by start records alone, past 
   // an outside result is never left out
   const ur = unit(10, 9003, { res: [sidR(X, 10, 9003, 2, [A, B, X])], starts: [sidR(X, 10, 9003, 2, [A, B, X], 0xB2)] });
   const pr = { ['~' + ur.key]: { t0: t0 - DAY, s: [], r: 0, c: 0 } };
-  T('[1] an outside result still holds the key a day past maturity', quiet(() => call(ur, pr, t0)).held);
+  T('[1] an outside result still holds the key a day past maturity (this pass alone; Q214 leaves it out ahead of it in main())', quiet(() => call(ur, pr, t0)).held);
   // a bot match key behaves like a friends' room key
   const ubot = unit(11, 9004, { starts: [sidR(X, 11, 9004, 2, [A, B, X], 0xB2)] });
   const pbot = {};
@@ -320,11 +326,18 @@ scenario('[4]', 'a lone human against bots, the outsider at a bot seat', LONE, (
   T('[4] lifted and settled on the lone lane past it', LIFT.test(rs[3].out) && /bots settle [^\n]*\(lone lane x0\.6\)/.test(rs[3].out)
     && paidOnlyIn(rs, s.honest[0], 3) && neverPaid(rs, s.outside[0]), (rs[3].out.match(/[^\n]*(Q200|bots settle)[^\n]*/g) || []).join(' | '));
 });
-scenario('[5]', 'the outsider also wrote a result', RES, (s, rs) => {
+scenario('[5]', 'the outsider also wrote a result (Q214)', RES, (s, rs) => {
   T('[5] every run exits 0', allOk(rs, 5), outOf(rs).slice(-600));
-  T('[5] held in every run after the results, a day past maturity too; nothing lifted', rs.slice(1).every(r => HELD.test(r.out)) && !LIFT.test(outOf(rs))
-    && !processedOf(rs[4]).has(s.key));
-  T('[5] nobody paid', s.honest.concat(s.outside).every(x => neverPaid(rs, x)));
+  T('[5] held from the results to a minute before maturity, nothing left out yet', HELD.test(rs[1].out) && HELD.test(rs[2].out) && !processedOf(rs[2]).has(s.key)
+    && !TMAJ.test(outOf(rs.slice(0, 3))));
+  const t = TMAJ.exec(rs[3].out), m = LIFT.exec(rs[3].out);
+  T('[5] past maturity: two of the three result writers on the players\' table, nothing set aside, his result left out, his start by the filter, not held',
+    t && t[1] === s.key && t[2] === '2' && t[3] === '3' && t[4] === undefined && t[5] === '1' && m && m[1] === s.key && m[2] === '1' && !HELD.test(rs[3].out),
+    (rs[3].out.match(/[^\n]*(Q214|Q200|Q75)[^\n]*/g) || []).join(' | '));
+  T('[5] settled then: both players paid in that run only', processedOf(rs[3]).has(s.key) && s.honest.every(p => paidOnlyIn(rs, p, 3)), JSON.stringify(s.honest.map(p => rs.map(r => xpOf(r, p)))));
+  T('[5] the outsider gets nothing', s.outside.every(x => neverPaid(rs, x)));
+  T('[5] nobody counted as a leaver or flagged', nobodyHurt(rs, s.honest.concat(s.outside)));
+  T('[5] Q214 summary row: 0 / 0 while held, 1 / 0 in the run that settles it', TROW(rs[2], 0, 0) && TROW(rs[3], 1, 0) && TROW(rs[4], 0, 0), (rs[3].summary.match(/[^\n]*Q214[^\n]*/) || [''])[0]);
 });
 scenario('[6]', 'a player starts naming an alt at an extra seat and quits', MEMBER, (s, rs) => {
   T('[6] every run exits 0', allOk(rs, 6), outOf(rs).slice(-600));
@@ -339,8 +352,13 @@ scenario('[7]', 'a made-up result written ahead of the real one (Q80 third revie
   T('[7] every run exits 0', allOk(rs, 7), outOf(rs).slice(-600));
   T('[7] six minutes in (past the pacing floor), only the made-up result written: held by the players\' starts', HELD.test(rs[2].out) && !processedOf(rs[2]).has(s.key),
     (rs[2].out.match(/[^\n]*(Q75|Q200|private)[^\n]*/g) || []).join(' | '));
-  T('[7] held from the made-up result on, in the first hours and after them; nothing lifted', rs.slice(1).every(r => HELD.test(r.out)) && !LIFT.test(outOf(rs))
-    && !processedOf(rs[6]).has(s.key));
+  // the hold and its note begin with the outside start at the first look (run 0); maturity falls between runs 3 and 4
+  T('[7] held from the made-up result on, in the first hours, up to maturity; nothing lifted before it', rs.slice(1, 4).every(r => HELD.test(r.out)) && !LIFT.test(outOf(rs.slice(0, 4)))
+    && !TMAJ.test(outOf(rs.slice(0, 4))) && !processedOf(rs[3]).has(s.key));
+  const t = TMAJ.exec(rs[4].out);
+  T('[7] past maturity (Q214): two against two, no majority; their table names the players and is set aside with its 2 writers, their 2 results left out, both players paid in that run only',
+    t && t[1] === s.key && t[2] === '2' && t[3] === '2' && t[4] === '2' && t[5] === '2' && processedOf(rs[4]).has(s.key) && s.honest.every(p => paidOnlyIn(rs, p, 4)),
+    (rs[4].out.match(/[^\n]*(Q214|Q200|Q75)[^\n]*/g) || []).join(' | '));
   T('[7] the outside accounts get nothing', s.outside.every(x => neverPaid(rs, x)));
 });
 scenario('[8]', "control: an honest friends' room", HONEST, (s, rs) => {

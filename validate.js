@@ -430,6 +430,104 @@ function applyRosterContest(gr, starts, pending, signals, processed, now) {
   }
   return res;
 }
+// ---- a friends' room or bot match held by a result on another table (cloud audit Q214) ----
+// Q200 lets such a key settle once start records alone hold it past STARTS_MATURITY_MS. A result held it for good: an
+// outside account that also wrote a result -- with a seat count or seat map of its own, or at a player's seat -- left the
+// key contested (two seat layouts, or one seat named twice), and nothing ends the contest of a friends' room or a bot
+// match, so the players who finished never got its XP (Q200 README residual 1, repro-q200.js S1). Every honest record of
+// a key, start and result, names one table: the host's START_GAME seat count and seat map, its writer at his own seat in
+// it (rosterContestSeats, seatLayoutsDisagree, startRosterDisagrees). So once the key's Q200 note is STARTS_MATURITY_MS
+// old -- by then every player who finished has written his result -- and only on a run that read every shard in full,
+// the key's result writers are counted by table: each writer for the one table all his records of the key name (his
+// results and his own starts), nobody for a writer whose records name two tables or who is not at his own seat (he
+// still counts among the writers). When one table has more than half of the writers, the results on any other table are
+// left out (counted nowhere, like a record off its registered seat; nobody flagged), before grouping, and the key goes on
+// as usual: the Q200 filter leaves out the starts of the accounts whose results went (they wrote no result left in the
+// key), the contest lifts and the settle pays the writers of the results kept. A friends' room and a bot match convict
+// nobody (their settle stops ahead of every competitive pass).
+// When no table has more than half, a table that names a writer of another table while that table names none of its
+// writers is set aside with its writers, and the rest are counted again: outside accounts, as many as the players, that
+// wrote the players into a table of their own (their seats, extra seats) -- the players' records never name them, and
+// they cannot write the players' records; or one such account against the lone human of a bot match. The majority comes
+// first because the same records also fit a room whose fewer members wrote a table of their own that names none of the
+// others: set aside first, one such member would beat the room's majority and leave its players with nothing; counted
+// first, he is outvoted, and only in a tie (one against one in a two-seat room, two against two) is the room's table set
+// aside -- its players get nothing, as when it was held, and he the XP of the room he played. Two tables that name each
+// other's writers (one player against the room: a griefer, or honest records that disagree) set nothing aside. Still no
+// table with more than half (outside accounts with a table of their own that names none of the players, as many as the
+// players) keeps the key held, as before. Outside accounts that outnumber the players win, whether their table names the
+// players or not: the players get nothing, as when it was held, and the outside accounts the XP of a room they could have
+// played among themselves (same pacing, one-match-at-a-time rule and day cap). Matchmade keys keep their void, endless
+// runs their own settle, a key with a registered seat gate is the gate's.
+function recTable(r) {
+  const own = r.roster && r.roster[r.d[5] | 0];
+  if (own == null || String(own) !== String(r.steamID)) return null;   // not at his own seat: no honest record does that
+  return (r.d[8] | 0) + '|' + rosterCanon(r.roster);
+}
+// Drops, in place, the results the majority leaves out. Returns { n: results dropped, keys: [keys acted on], ties: [keys
+// still held, no table with more than half] }.
+function applyTableMajority(recs, starts, pending, processed, now, complete) {
+  const res = { n: 0, keys: [], ties: [] };
+  if (!complete || !pending || !recs || !recs.length) return res;
+  const byKey = {}, stByKey = {};
+  for (const r of recs) { const m = r.d[3] + '_' + r.d[4] + '_' + r.d[2]; (byKey[m] = byKey[m] || []).push(r); }
+  for (const r of starts || []) { const m = r.d[3] + '_' + r.d[4] + '_' + r.d[2]; (stByKey[m] = stByKey[m] || []).push(r); }
+  const out = new Set();
+  for (const m of Object.keys(byKey)) {
+    const g = byKey[m], mt = g[0].d[2] | 0;
+    if (!xpOnlyContestMt(mt) || isEndlessMt(mt) || processed.has(m) || seatGateRoster(pending[m])) continue;
+    const seen = pending['~' + m];
+    if (!seen || now - (seen.t0 || 0) < STARTS_MATURITY_MS) continue;
+    if (new Set(g.map(recTable)).size < 2) continue;   // every result on one table: nothing to leave out
+    const of = {};
+    for (const r of g) (of[String(r.steamID)] = of[String(r.steamID)] || new Set()).add(recTable(r));
+    for (const r of stByKey[m] || []) if (of[String(r.steamID)]) of[String(r.steamID)].add(recTable(r));
+    const writers = Object.keys(of), vote = {};
+    for (const w of writers) {
+      if (of[w].size !== 1) continue;
+      const t = of[w].values().next().value;
+      if (t !== null) vote[w] = t;
+    }
+    // the writers left once the tables in `aside` are set aside with their writers: the votes, how many writers are
+    //   counted, the table with more than half of them (undefined: none)
+    const count = (aside) => {
+      const votes = {};
+      let counted = 0;
+      for (const w of writers) {
+        if (aside.has(vote[w])) continue;
+        counted++;
+        if (vote[w] !== undefined) votes[vote[w]] = (votes[vote[w]] | 0) + 1;
+      }
+      return { votes, counted, win: Object.keys(votes).find((t) => votes[t] * 2 > counted) };
+    };
+    let tally = count(new Set());
+    if (tally.win === undefined) {
+      // no table has more than half of the writers: a table with a one-sided claim (it names a writer who votes for another
+      //   table, and that table names none of its writers) is set aside with its writers, and they are counted again
+      const named = {};
+      for (const r of g) { const t = recTable(r); if (t !== null && !named[t]) named[t] = new Set(Object.values(r.roster).map(String)); }
+      const claims = (t, u) => writers.some((w) => vote[w] === u && named[t].has(w));
+      const tables = Object.keys(named);
+      const aside = new Set(tables.filter((t) => tables.some((u) => u !== t && claims(t, u) && !claims(u, t))));
+      if (aside.size) tally = count(aside);
+    }
+    const { votes, counted, win } = tally;
+    const setAside = writers.length - counted;
+    const asideNote = setAside ? ' (' + setAside + ' more set aside: their own table names players of another table that never names them)' : '';
+    if (win === undefined) {
+      res.ties.push(m);
+      console.log('  table-majority ' + m + ': no table has more than half of the ' + counted + ' result writers' + asideNote + ' -- held as before (Q214)');
+      continue;
+    }
+    const drop = g.filter((r) => recTable(r) !== win);
+    for (const r of drop) out.add(r);
+    res.n += drop.length; res.keys.push(m);
+    console.log('  table-majority ' + m + ': ' + votes[win] + ' of ' + counted + ' result writers on one table past the hold\'s maturity' + asideNote + ' -- '
+      + drop.length + ' result(s) on another table left out, nobody flagged (Q214): ' + drop.map((r) => plog(r.steamID) + '@' + r.shard + '=' + (r.d[5] | 0)).join(' '));
+  }
+  if (out.size) { let w = 0; for (let i = 0; i < recs.length; i++) if (!out.has(recs[i])) recs[w++] = recs[i]; recs.length = w; }
+  return res;
+}
 // O93: the one-attester exception of reconcileStarts (solo competitive segment start)
 function soloStartAttested(att) {
   if (!att || att.length !== 1) return false;
@@ -1946,6 +2044,7 @@ function writeRunSummary() {
       '| settled keys with records that disagree, nobody flagged (Q114) | ' + s('lateMismatch', 0) + ' |',
       "| friends' room records whose writer is not on his own roster seat, not counted (Q123) | " + s('seatless', 0) + ' |',
       '| bot match records whose writer is not on his own roster seat, not counted (Q148) | ' + s('seatlessBot', 0) + ' |',
+      "| friends' room / bot match keys held past maturity by results on two tables: the other table's results left out / no table with more than half, still held (Q214) | " + s('tableMajority', 0) + ' / ' + s('tableTie', 0) + ' |',
       '| campaign grants / campaign endless | ' + s('campaign', '-') + ' / ' + s('campaignEndless', '-') + ' |',
       '| page-cap hits | ' + RUN.cap + ' |',
       '| solo segments held by the key policy (other channel / retired key; new this run) | ' + s('keyHeld', 0) + ' (' + s('keyHeldNew', 0) + ') |',
@@ -4434,6 +4533,10 @@ async function main() {
   const registeredEarly = registerStartRosters(starts, processed, startsPending, Date.now(), shardsComplete);   // Q113: endless keys wait for a full read
   const seatGate = applySeatGate(recs, starts, startsPending, processed);
   RUN.offSeat = seatGate.n;
+  // Q214: a friends' room or bot match still held past the Q200 maturity by results on two tables -- more than half of the
+  //   result writers on one table leaves the other table's results out, before grouping; nobody flagged
+  const tableMaj = applyTableMajority(recs, starts, startsPending, processed, Date.now(), shardsComplete);
+  RUN.tableMajority = tableMaj.keys.length; RUN.tableTie = tableMaj.ties.length;
   const gr = groupRecords(recs, { vecOf, MAX_SEATS });   // audit 2026-09-06: pure, testable consensus grouping (writer-deduped); O156 lone bot lane (type 11, every channel)
   const groups = gr.groups, consistentMatches = gr.consistentMatches, inconsistentGroups = gr.inconsistentGroups;
   RUN.flagged = gr.flagged;
@@ -6982,6 +7085,7 @@ Object.assign(module.exports, { leaveConfirmHold, startRosterGaps, LEAVE_CONFIRM
 Object.assign(module.exports, { rosterContestSeats, applyRosterContest, seatLayout, seatLayoutsDisagree });   // cloud audit Q75 one account per seat per match key (+ Q80 third review seat layout)
 Object.assign(module.exports, { registerStartRosters, startRosterSplit, rosterCanon, startRosterDisagrees, seatGateRoster, seatedOnRoster, applySeatGate });   // cloud audit Q80 seat gate
 Object.assign(module.exports, { seatlessPrivate, dropSeatlessPrivate });   // cloud audit Q123
+Object.assign(module.exports, { recTable, applyTableMajority });   // cloud audit Q214 a held friends' room / bot match settled on its majority table
 Object.assign(module.exports, { startSig, lateStartSplit, START_CONFIRM_MS, START_CONFIRM_MIN_MS });   // cloud audit Q118 provisional start roster
 Object.assign(module.exports, { testimonyOf, recTestimony, noteTestimony, endlessRosterHold, endlessTestified });   // cloud audit Q113 endless testimony
 Object.assign(module.exports, { teamLossCounted });   // cloud audit Q136 the losing team must be somebody
