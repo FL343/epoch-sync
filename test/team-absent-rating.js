@@ -13,7 +13,8 @@
 //   [4] ranked 3v3, the other team gone: all three winners gain the same rating
 //   [5] quick team brawl (rating only, no points): both winners gain
 //   [6] one absent member only (not a whole team): the normal team update, no whole-team line
-//   [7] absent ratings never move; the absent members are still convicted as leavers once
+//   [7] absent stored ratings and the rating board never move (with Q167 merged their ranked rating takes the loss of the
+//       full team); the absent members are still convicted as leavers once
 //   [8] wiring pin + mutation self-check (the old dissent-only condition back -> [2] goes red; with Q167 in, [1] is no
 //       witness: the absent team lost, so Q167's losing-side leaver stand-in rates the winners against it anyway)
 // Runs the REAL validate.js main() against an offline board stub (test/team2-team-dissent.js harness).
@@ -189,7 +190,18 @@ console.log('-- [6] one member absent (not a whole team) --');
 console.log('-- [7] the absent team --');
 {
   const r = play(4, 0x6207, R4, [6000, 5000, 1000, 800], 0, [0, 1]);
-  T('[7] absent ratings never move (no skill row written for them)', skillOf(r, C) === null && skillOf(r, D) === null);
+  // Q167 (cloud audit; its rework): the absent losers' ranked rating takes the loss of the full team (a lower ranked rating
+  //   only feeds the mismatch reading of the points plan), so a skill row is written for them next to the untouched
+  //   pre-match stored rating. Without Q167 no row is written at all.
+  const SIG0 = require(path.join(__dirname, '..', 'trueskill.js')).DEFAULTS.sigma;
+  const HAS_Q167 = /ghostRanked\.push\(o\)/.test(fs.readFileSync(VALIDATE, 'utf8'));
+  const still = (sid) => { const s = skillOf(r, sid); return s === null || (s.mu === MU0 && s.sigma === SIG0); };
+  const onBoard = (sid) => r.posts.some(x => /SetLeaderboardScore/.test(x.url) && new RegExp('leaderboardid=' + RATING + '(&|$)').test(x.body) && new RegExp('steamid=' + sid + '(&|$)').test(x.body));
+  T('[7] absent stored ratings never move, nothing on the rating board for them', still(C) && still(D) && !onBoard(C) && !onBoard(D),
+    JSON.stringify([skillOf(r, C), skillOf(r, D)]));
+  T('[7] ' + (HAS_Q167 ? 'their ranked rating takes the loss of the full team (Q167)' : 'no skill row written for them (no Q167)'),
+    HAS_Q167 ? [C, D].every((sid) => { const s = skillOf(r, sid); return s && Number.isFinite(s.rm) && s.rm < MU0 && Number.isFinite(s.rv); })
+      : skillOf(r, C) === null && skillOf(r, D) === null, JSON.stringify([skillOf(r, C), skillOf(r, D)]));
   const lv = (sid) => (((r.state.LEAVERS_FILE || {})[v.pid(sid)]) || {}).leaves | 0;
   T('[7] the absent members are still convicted as leavers, once each', lv(C) === 1 && lv(D) === 1 && lv(A) === 0 && lv(B) === 0);
 }
