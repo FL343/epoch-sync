@@ -42,8 +42,8 @@
 //   [11] one loser writes his loss, the other writes his loss too and then overwrites it with an empty record before the
 //       settle (seen agreeing, Q149: not a leaver): he stands in like a leaver, no points for the grandmasters
 //   [13] the same write-then-overwrite, every present player level and the overwriting loser a fresh account: the winners
-//       take the points of a normal finish; the loser who stayed keeps the present-only reading of a loss (the strong
-//       side's mild upset factor is the winners' case only, and a seat seen agreeing is no leave: no teammate shield)
+//       take the points of a normal finish; so does the loser who stayed (Q183: the teammate seen agreeing is read as a
+//       finished member of the team; before it he took the plain loss of a team read without him)
 //   [14] ranked 2V2, one loser stays, the other leaves and confesses (an abandon confession counts as his own record):
 //       he stands in like a leaver who did not confess, and his leave is counted once
 //   [15] (rework 2) ranked 2V2, two pairs of fresh accounts taking turns, one of the losing pair leaving at the start and
@@ -237,7 +237,7 @@ console.log('=== a losing-side leaver counts at his pre-match rating for the win
     /for \(const o of full\) if \(gIds\.has\(o\.id\)\) ghostRanked\.push\(o\);/.test(SRC)
     && /skill\[k\] = Object\.assign\(\{\}, sk, \{ rm: o\.mu, rv: o\.sigma \}\);/.test(SRC));
   T('[0] only with the winners present (a whole absent winning team filled by Q62 does not count)', /if \(sides\[winTeam\]\.length && empty !== winTeam\) \{/.test(SRC));
-  T('[0] the points plan reads the leavers in the mismatch of an expected win only', /teamLpPlan\(planIn, matchType, scores, [^\n]*, t2Win, absentIn\)/.test(SRC)
+  T('[0] the points plan reads the leavers in the mismatch of an expected win only', /teamLpPlan\(planIn, matchType, scores, [^\n]*, t2Win, absentIn(, finishedIn)?\)/.test(SRC)
     && /\} else if \(\(mismatch && tAvgMmr > mean\) \|\| \(won && mismatchA && tAvgMmr > meanA\)\) \{/.test(SRC));
 }
 
@@ -519,7 +519,10 @@ const lastPts = (m, sid) => { const w = writesTo(m.rs, POINTS, sid); return w.le
     && leavesOf(m.last, Z1) === 0 && GHOST_LINE(key, 1, 'seat 3').test(m.out), m.out.slice(-1200));
   T('[13] the winners take the points of the normal finish (an expected win, compressed)', [X, Y].every(s => lastPts(m, s) != null && lastPts(m, s) === lastPts(n, s) && lastPts(m, s) < 2500 + 21),
     JSON.stringify([X, Y].map(s => [lastPts(m, s), lastPts(n, s)])));
-  T('[13] the loser who stayed takes the plain loss (no mild strong-side factor: that is the winners\' case only)', lastPts(m, Z0) === 2500 + Math.round(-20 / 2 + 3),
+  // Q183 (cloud audit): the loser who stayed reads his teammate seen agreeing as a finished member of the team (his record
+  //   only went missing), so he takes the points of the normal finish, not the plain loss of a team read without him
+  T('[13] the loser who stayed takes the points of the normal finish (Q183; before it the plain loss, 2493)', lastPts(m, Z0) != null && lastPts(m, Z0) === lastPts(n, Z0)
+    && lastPts(m, Z0) === 2500 + Math.round(-20 * 0.5 / 2 + 3),
     JSON.stringify([lastPts(m, Z0), lastPts(n, Z0)]));
 }
 

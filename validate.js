@@ -3053,10 +3053,13 @@ function reducedStakesPlan(parts, matchType, premadeMask, premadeTrioAt) {
 //   leaverSeats: consensus-absent seats. winTeamOverride (mode-2 only): the sub-score-derived
 //   outcome from team2WinTeamOf -- money must never decide a base-5/6 match, so the caller passes
 //   the claims-derived winner and the money comparison below stays a 3/4-only fallback.
-//   absent (Q167, optional): [{ seat, mmr }] -- the losing team's convicted leavers at their pre-match rating; they count
-//   toward the mismatch of an expected win only (see the strong-team branch below).
+//   absent (Q167, optional): [{ seat, mmr, lp }] -- the losing team's convicted leavers at their pre-match rating; they count
+//   toward the mismatch of an expected win (see the strong-team branch below) and, with their points, toward the
+//   full-team reading of a shielded loser (Q183, below).
+//   finished (Q183, optional): [{ seat, mmr, lp }] -- seats seen agreeing whose record is gone at this settle (Q149: they
+//   finished): members of their team for every reading, as if their record were still there; no output of their own.
 //   Returns { [steamID]: { adjDelta, flag, normalDelta } } or null. =====
-function teamLpPlan(parts, matchType, scores, leaverSeats, winTeamOverride, absent) {
+function teamLpPlan(parts, matchType, scores, leaverSeats, winTeamOverride, absent, finished) {
   if (!appliesLp(matchType) || !isTeamMt(matchType)) return null;
   const ts = teamSizeOfMt(matchType);
   if (!parts || !parts.length || !scores || scores.length < 2 * ts) return null;
@@ -3067,9 +3070,16 @@ function teamLpPlan(parts, matchType, scores, leaverSeats, winTeamOverride, abse
     ? (bTotal > aTotal ? 1 : 0)              // tie -> team A (mirrors teamRankOf / the client rule)
     : (winTeamOverride | 0);
   // team aggregates over PRESENT members (an absent leaver has no record: not averaged in)
+  // Q183 (cloud audit): ... and over the seats seen agreeing whose record is gone (finished): those players played the match
+  //   out and agreed on its result, and only their record went missing before the settle (shard rotation while the group
+  //   waited, or a client that overwrote it). Read without them, the honest loser who stayed lost the mismatch protection of
+  //   the normal finish: a gold loser whose fresh-account teammate agreed and then lost his record took -7 where the normal
+  //   finish gave -2 (up to 11 points lower across tiers), and a withdrawal could just as well lighten a loss or move a win.
+  //   Counted here, every reading of every present player is the one of the normal finish.
+  const roster = parts.concat(finished || []);
   const agg = [{ n: 0, lp: 0, mmr: 0 }, { n: 0, lp: 0, mmr: 0 }];
-  for (const p of parts) { const t = teamOf(p.seat); agg[t].n++; agg[t].lp += p.lp | 0; agg[t].mmr += p.mmr | 0; }
-  const mmrs = parts.map(p => p.mmr | 0);
+  for (const p of roster) { const t = teamOf(p.seat); agg[t].n++; agg[t].lp += p.lp | 0; agg[t].mmr += p.mmr | 0; }
+  const mmrs = roster.map(p => p.mmr | 0);
   const mismatch = mmrs.length >= 2 && (Math.max.apply(null, mmrs) - Math.min.apply(null, mmrs) > RS_THRESHOLD);
   const mean = mmrs.reduce((a, b) => a + b, 0) / (mmrs.length || 1);
   // Q167 (cloud audit): the same spread and mean with the losing team's leavers counted at their pre-match rating
@@ -3108,8 +3118,29 @@ function teamLpPlan(parts, matchType, scores, leaverSeats, winTeamOverride, abse
       factor = won ? tSeg.rs : RS_STRONG_UPSET_LOSS;
     }
     if (!won && shielded.has(p.steamID)) { factor = Math.min(factor, ownSeg.rs); protectedLoss = true; }
-    const normalDelta = Math.round(base / 2 + ownSeg.drip);
-    const adjDelta = Math.round(base * factor / 2 + ownSeg.drip);
+    let normalDelta = Math.round(base / 2 + ownSeg.drip);
+    let adjDelta = Math.round(base * factor / 2 + ownSeg.drip);
+    // Q183 (cloud audit): the shielded loser also gets the full-team reading -- his team's convicted leavers counted at their
+    //   pre-match rating and points (absent), as if they had stayed and lost with him: the points of the normal finish --
+    //   and keeps whichever of the two costs him less. Read on the present only, a loser whose higher-tier teammate left
+    //   at the start lost up to 2 points more than if that teammate had stayed and lost (the team-average tier compresses
+    //   the loss, his own does not); so: never more than staying with the team, never more than before. (Capping the
+    //   full-team reading by his own tier as well would add at most a point in some cases: left out, the rule stays "the
+    //   better of before and the normal finish".) The leaver himself pays as before (the leave and its points).
+    const mine = (!won && shielded.has(p.steamID)) ? (absent || []).filter(a => teamOf(a.seat) === t) : [];
+    if (mine.length) {
+      let fn = agg[t].n, fl = agg[t].lp, fm = agg[t].mmr;
+      for (const a of mine) { fn++; fl += a.lp | 0; fm += a.mmr | 0; }
+      const fSeg = lpSeg(fl / fn), fAvg = fm / fn;
+      const fMmrs = mmrs.concat(mine.map(a => a.mmr | 0));
+      const fMis = Math.max.apply(null, fMmrs) - Math.min.apply(null, fMmrs) > RS_THRESHOLD;
+      const fMean = fMmrs.reduce((x, y) => x + y, 0) / fMmrs.length;
+      let ff = 1;
+      if (fMis && fAvg < fMean) ff = fSeg.rs;                   // the weak team, its loss compressed
+      else if (fMis && fAvg > fMean) ff = RS_STRONG_UPSET_LOSS; // the strong team, a mild upset loss
+      const fAdj = Math.round(-fSeg.loss * ff / 2 + ownSeg.drip);
+      if (fAdj > adjDelta) { adjDelta = fAdj; normalDelta = Math.round(-fSeg.loss / 2 + ownSeg.drip); }
+    }
     if (protectedLoss && normalDelta < 0 && flag === 0) flag = 2;
     out[p.steamID] = { adjDelta, flag, normalDelta, won };   // won feeds the series clamp at settle
   }
@@ -6650,9 +6681,30 @@ async function main() {
         }
       }
       // Q167: the losing team's leavers rated against above, at the rating the plan reads for everybody (ranked at a ranked settle)
-      const absentIn = ghostLoss.map((x) => { const sk = skill[pid(x.steamID)] || ts.DEFAULTS; const r = rIn(x.steamID, { mu: sk.mu, sigma: sk.sigma }); return { seat: x.seat | 0, mmr: ts.displayRating(r.mu, r.sigma) }; });
+      // Q183 (cloud audit): with their current points (as at their leave, before its penalty below) for the shielded loser's
+      //   full-team reading; a seat seen agreeing whose record is gone is not a leaver there but a finished member of its team
+      //   (either team): it goes in finishedIn instead, at the same rating and points the normal finish would have read
+      //   (a player with no points yet this season at the placement seed the settle would have given him, not persisted).
+      const agreedIds = new Set(agreedAbs.map((x) => String(x.steamID)));
+      const planRow = async (x) => {
+        const sk = skill[pid(x.steamID)] || ts.DEFAULTS; const r = rIn(x.steamID, { mu: sk.mu, sigma: sk.sigma });
+        let lpx = lp[x.steamID];
+        if (lpx == null && lpId && appliesLp(matchType)) {
+          let prevE = null;
+          if (prevLpId) { try { prevE = await readUserEntry(prevLpId, x.steamID, 'prev points'); } catch (err) { ghWarn('prev-season base read failed for ' + plog(x.steamID) + ' (plan only, nothing written): ' + (err && err.message)); } }
+          lpx = seasonSeedLp(prevE ? (prevE.score | 0) : null, ts.displayRating(sk.mu, sk.sigma));
+        }
+        return { seat: x.seat | 0, mmr: ts.displayRating(r.mu, r.sigma), lp: lpx == null ? 0 : lpx };
+      };
+      const absentIn = [], finishedIn = [];
+      if (!noRating && isTeamMt(matchType)) {
+        for (const x of ghostLoss) if (!agreedIds.has(String(x.steamID))) absentIn.push(await planRow(x));
+        for (const x of agreedAbs) finishedIn.push(await planRow(x));
+        if (finishedIn.length && lpId && appliesLp(matchType)) console.log('  agreed-gone ' + c.m + ': ' + agreedAbs.map((x) => 'seat ' + x.seat).join(', ')
+          + ' read as finished member(s) of their team in the points plan (Q183)');
+      }
       const rsPlan = isTeamMt(matchType)
-        ? teamLpPlan(planIn, matchType, scores, leavers0.concat(namedOnly).map(x => x.seat), t2Win, absentIn)   // Q69: named-only seats still shield their teammates
+        ? teamLpPlan(planIn, matchType, scores, leavers0.concat(namedOnly).map(x => x.seat), t2Win, absentIn, finishedIn)   // Q69: named-only seats still shield their teammates
         : reducedStakesPlan(planIn, matchType, premadeMaskOf(matchType), premadeTrioAtOf(matchType));
       for (const r of tsOut) {
         // repeat-group decay: blend the update toward the pre-match rating by the streak weight
