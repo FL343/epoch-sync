@@ -301,7 +301,7 @@ function compChain(ros, writers, startsBy, base, script) {
   T('[10] own set built from the cumulative pending entry + this run\'s records and starts', /const ownE = endlessOwnSet\(startsPending\[c\.m\], c\.m, recs, starts\);/.test(SRC));
   T('[10] the own set reads both cumulative lists', /pend\.started[\s\S]{0,120}pend\.settled/.test(SRC.slice(SRC.indexOf('function endlessOwnSet('), SRC.indexOf('function endlessOwnSet(') + 1200)));
   T('[10] every endless signal call takes the own-record roster', (SRC.match(/recordEndlessSignals\(signals, ownRosterSids/g) || []).length === 3 && !/recordEndlessSignals\(signals, rosterSids/.test(SRC));
-  T('[10] the ladder replay runs on the masked nibbles', /const debits = endlessDebits\(contOwn\);/.test(SRC) && /if \(!isOwnE\(roster0\[seatKey\]\)\) contOwn &= ~\(0xF << \(4 \* \(seatKey \| 0\)\)\);/.test(SRC));
+  T('[10] the ladder replay runs on the masked nibbles', /const debits = endlessDebits\(contOwn\);/.test(SRC) && /if \(sid != null && isOwnE\(sid\)\) continue;/.test(SRC) && /contOwn &= ~\(0xF << \(4 \* seat\)\);/.test(SRC));   // Q201: the mask now walks every structural seat (an empty seat is masked too)
   T('[10] the resume fee is gated on the host\'s own record', /if \(isOwnE\(host\)\) \{\s*cp\[host\] =/.test(SRC));
   T('[10] run summary row', /s\('endlessNamedOnly', 0\) \+ ' \/ ' \+ s\('endlessNamedOnlyCp', 0\)/.test(SRC));
 }
@@ -330,7 +330,7 @@ console.log('-- [11] mutation self-checks --');
   };
   const mutants = [
     ['own-record gate removed', 'const isOwnE = (sid) => ownE.has(pid(String(sid)));', 'const isOwnE = (sid) => true;', frame],
-    ['ladder mask removed', 'if (!isOwnE(roster0[seatKey])) contOwn &= ~(0xF << (4 * (seatKey | 0)));', 'if (false) contOwn = 0;', ladder],
+    ['ladder mask removed', 'contOwn &= ~(0xF << (4 * seat));', '/* mask removed */', ladder],
     ['resume fee gate removed', 'if (isOwnE(host)) {', 'if (true) {', fee],
   ];
   for (const [label, from, to, check] of mutants) {

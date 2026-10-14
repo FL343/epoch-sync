@@ -2022,6 +2022,7 @@ function writeRunSummary() {
       '| endless seats named by others only / CP not charged | ' + s('endlessNamedOnly', 0) + ' / ' + s('endlessNamedOnlyCp', 0) + ' |',
       '| endless seats charged on the others\' word only (in full, A14): seats / CP / over 300 CP / balances clamped to int32 | ' + s('endlessOthersWord', 0) + ' / ' + s('endlessOthersWordCp', 0) + ' / ' + s('endlessOthersWordBig', 0) + ' / ' + s('cpClamped', 0) + ' |',
       '| endless groups held: a writer seated elsewhere than his own record (Q110) | ' + s('endlessSeatDispute', 0) + ' |',
+      '| endless seats empty on the agreed roster that carried continues, left off the price ladder (Q201) | ' + s('endlessEmptySeatCont', 0) + ' |',
       '| seedcap veto / reject-window discards | ' + s('seedcapVeto', 0) + ' / ' + s('seedcapReject', 0) + ' |',
       '| perk replay rejects | ' + s('perkRej', 0) + ' |',
       '| token resumes: replays caught / burnt-run segments / untagged settled / untagged refused | ' + s('resumeReplay', 0) + ' / ' + s('runBurnt', 0) + ' / ' + s('resumeUntagged', 0) + ' / ' + s('resumeUntaggedRej', 0) + ' |',
@@ -6100,8 +6101,23 @@ async function main() {
       // when the funding matchmade record settles a run later.
       // Q78: a seat that never wrote an own record for the run is neither charged nor counted on the ladder (its nibble
       //   is masked out before the replay, so a fabricated seat cannot push a real member up the escalating price).
+      // Q201 (cloud audit 2026-10): and the same for a seat the agreed roster leaves empty (sid 0: decodeRoster skips it).
+      //   Nobody sits there to charge, yet its nibble used to stay in the replay: a modified host (or two writers) could
+      //   put 15 continues on an empty seat in front of a real member and push his one continue from rung 1 (20 CP) to
+      //   rung 16 (8,758). Every honest empty seat carries 0 continues (nobody there pressed one), so leaving it off the
+      //   ladder only ever lowers what the real members pay; counted and logged, nobody flagged (its writers may be the
+      //   honest members who adopted the host's packed counts as sent). Q113 already holds a group whose records name
+      //   different rosters, so a seat without a strict majority cannot reach this point; the loop covers all 8 seats.
       let contOwn = t.continuesUsed | 0;
-      for (const seatKey of Object.keys(roster0)) if (!isOwnE(roster0[seatKey])) contOwn &= ~(0xF << (4 * (seatKey | 0)));
+      for (let seat = 0; seat < 8; seat++) {
+        const sid = roster0[seat];
+        if (sid != null && isOwnE(sid)) continue;
+        if (sid == null && endlessNib(contOwn, seat)) {
+          RUN.endlessEmptySeatCont = (RUN.endlessEmptySeatCont | 0) + 1;
+          console.log('  endless cp ' + c.m + ': seat ' + seat + ' is empty on the agreed roster but carries ' + endlessNib(contOwn, seat) + ' continues -- left off the price ladder, nobody charged (Q201)');
+        }
+        contOwn &= ~(0xF << (4 * seat));
+      }
       // Q110: a seat whose own record does not carry the agreed tail (left before the end, or a zero-tail reconnector) is
       //   charged in full (A14: no cap) and counted for the O407 watch item; every balance stays inside int32 (cpClamp).
       const debitsAll = endlessDebits(t.continuesUsed);
