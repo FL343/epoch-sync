@@ -6686,9 +6686,13 @@ async function main() {
       //   (either team): it goes in finishedIn instead, at the same rating and points the normal finish would have read
       //   (a player with no points yet this season at the placement seed the settle would have given him, not persisted).
       const agreedIds = new Set(agreedAbs.map((x) => String(x.steamID)));
-      const planRow = async (x) => {
+      const planRow = async (x, leaver) => {
         const sk = skill[pid(x.steamID)] || ts.DEFAULTS; const r = rIn(x.steamID, { mu: sk.mu, sigma: sk.sigma });
         let lpx = lp[x.steamID];
+        // Q207: a confessed leave was fined at first sight (reconcileConfessions, before the board read above): the board holds
+        //   his points after the leave; add the recorded fine back, so his points read as at his leave as for a convicted one.
+        //   Not when this settle seeded him (no row on this season's board: the fine is not on it, the seed is the base already)
+        if (leaver && lpx != null && !seededNow.has(x.steamID)) { const cs = confState[pid(String(x.steamID)) + '|' + c.m]; if (cs && !cs.refunded && (cs.ded | 0) > 0) lpx += cs.ded | 0; }
         if (lpx == null && lpId && appliesLp(matchType)) {
           let prevE = null;
           if (prevLpId) { try { prevE = await readUserEntry(prevLpId, x.steamID, 'prev points'); } catch (err) { ghWarn('prev-season base read failed for ' + plog(x.steamID) + ' (plan only, nothing written): ' + (err && err.message)); } }
@@ -6698,7 +6702,7 @@ async function main() {
       };
       const absentIn = [], finishedIn = [];
       if (!noRating && isTeamMt(matchType)) {
-        for (const x of ghostLoss) if (!agreedIds.has(String(x.steamID))) absentIn.push(await planRow(x));
+        for (const x of ghostLoss) if (!agreedIds.has(String(x.steamID))) absentIn.push(await planRow(x, true));
         for (const x of agreedAbs) finishedIn.push(await planRow(x));
         if (finishedIn.length && lpId && appliesLp(matchType)) console.log('  agreed-gone ' + c.m + ': ' + agreedAbs.map((x) => 'seat ' + x.seat).join(', ')
           + ' read as finished member(s) of their team in the points plan (Q183)');

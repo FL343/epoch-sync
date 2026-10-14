@@ -27,6 +27,12 @@
 //       loser takes the better of his two readings, the one seen agreeing counted once (not also as a leaver)
 //   [8] the teammate seen agreeing has a ranked rating apart from his stored one: the plan reads the ranked one, as the
 //       normal finish does
+//   [9] (Q207) the teammate who left quit with a confession, fined on the board before the settle run: his points read
+//       as at his leave (the fine added back), so the loser who stayed again takes the normal-finish points
+//   [10] (Q207) the same, but this season's board shows no row for him at the settle (the fine is not on it): the settle
+//       seeds him, and the seed is read as it stands (adding the fine on top of it would read him 100 points too high)
+//   [11] (Q207) the fine is added back once, not more: a teammate just below a tier line reads at his points as at his
+//       leave, so the loser who stayed takes the normal finish, not the softer loss of a team read a tier higher
 // State isolation is structural (every *_FILE var scanned and redirected, cwd = temp dir), like test/leaver-ghost.js.
 const { spawnSync } = require('child_process');
 const fs = require('fs'), path = require('path'), os = require('os');
@@ -175,8 +181,11 @@ console.log('=== a teammate seen agreeing whose record is gone, and a shielded l
   T('[0] the shielded loser keeps the better of the present-only and the full-team reading',
     /const mine = \(!won && shielded\.has\(p\.steamID\)\) \? \(absent \|\| \[\]\)\.filter\(a => teamOf\(a\.seat\) === t\) : \[\];/.test(SRC)
     && /if \(fMis && fAvg < fMean\) ff = fSeg\.rs;/.test(SRC) && /if \(fAdj > adjDelta\) \{ adjDelta = fAdj;/.test(SRC));
+  T('[0] Q207: a confessed leaver reads with his recorded fine added back (not when this settle seeded him, not once refunded)',
+    /if \(leaver && lpx != null && !seededNow\.has\(x\.steamID\)\) \{ const cs = confState\[pid\(String\(x\.steamID\)\) \+ '\|' \+ c\.m\]; if \(cs && !cs\.refunded && \(cs\.ded \| 0\) > 0\) lpx \+= cs\.ded \| 0; \}/.test(SRC)
+    && SRC.indexOf('const seededNow = new Set();') < SRC.indexOf('const planRow = async (x, leaver) => {'));
   T('[0] the settle passes the agreed seats as finished, not as absent leavers, with points',
-    /for \(const x of ghostLoss\) if \(!agreedIds\.has\(String\(x\.steamID\)\)\) absentIn\.push\(await planRow\(x\)\);/.test(SRC)
+    /for \(const x of ghostLoss\) if \(!agreedIds\.has\(String\(x\.steamID\)\)\) absentIn\.push\(await planRow\(x, true\)\);/.test(SRC)
     && /for \(const x of agreedAbs\) finishedIn\.push\(await planRow\(x\)\);/.test(SRC)
     && /teamLpPlan\(planIn, matchType, scores, [^\n]*, t2Win, absentIn, finishedIn\)/.test(SRC)
     && /return \{ seat: x\.seat \| 0, mmr: ts\.displayRating\(r\.mu, r\.sigma\), lp: lpx == null \? 0 : lpx \};/.test(SRC));
@@ -334,5 +343,70 @@ const HIGH = { mu: 30, sigma: 2 };   // display 1960; a fresh account (no row) r
     m.rs.every(r => r.code === 0) && lastPts(m, Z0) === lastPts(n, Z0) && lastPts(n, Z0) === 2500 + Math.round(-20 * 0.5 / 2 + 3), JSON.stringify([lastPts(m, Z0), lastPts(n, Z0)]));
 }
 
+// ---- [9] (Q207) the gold loser's diamond teammate quits with a confession: the confession path fines him at first sight,
+//   before the run reads the points board, so every later read holds his points after the leave (the stub keeps no
+//   writes: the board passes them per step). Read as they stand the team average falls a tier (3025 -> 2975) and the
+//   loser who stayed took -2 where the normal finish gives -1; with the fine added back he takes the normal finish ----
+{
+  const W = { mu: 31, sigma: 2 }, L = { mu: 16, sigma: 2 };   // displays 2000 / 1400
+  const sk0 = { [v.pid(X)]: W, [v.pid(Y)]: W, [v.pid(Z0)]: L, [v.pid(Z1)]: L };
+  const pts0 = { [X]: 0, [Y]: 0, [Z0]: 2000, [Z1]: 4050 }, pts1 = Object.assign({}, pts0, { [Z1]: 3950 });
+  const ros = [X, Y, Z0, Z1], mt = 6, hash = 0xE18E;
+  const conf = () => { const d = start(mt, hash, 3, ros); d[0] = 0xB5; d[10 + ros.length] = 5; return d; };   // user-quit
+  const S = ros.map((sid, i) => ({ sid, d: start(mt, hash, i, ros) }));
+  const all = S.concat([0, 1, 2].map((i) => ({ sid: ros[i], d: settle(mt, hash, i, ros) })), [{ sid: Z1, d: conf() }]);
+  const steps = [[0, S, pts0], [5 * MIN, all, pts0], [GRACE, all, pts1], [LEAVE, all, pts1], [3 * HOUR, all, pts1]];
+  const rs = []; let state = null;
+  for (const [ms, recs, pts] of steps) { const r = runCron(boardsWith(recs, pts), state ? advance(state, ms) : { SKILL_FILE: sk0 }); rs.push(r); state = r.state; if (r.code !== 0) break; }
+  const m = { rs, last: rs[rs.length - 1], out: rs.map(r => r.out).join('') };
+  const n = match(0xE18F, ros, pts0, sk0, null);
+  T('[9] both settle; Z1 fined once by his confession (-100), not convicted again', m.rs.every(r => r.code === 0) && n.rs.every(r => r.code === 0) && processedOf(m.last).has(keyOf(S[0].d))
+    && leavesOf(m.last, Z1) === 1 && writesTo(m.rs, POINTS, Z1).length === 1 && /already confessed -- consensus conviction skipped/.test(m.out), m.out.slice(-1500));
+  T('[9] the loser who stayed takes the normal-finish points (-1; read on the fined points: -2)', lastPts(n, Z0) === 1999 && lastPts(m, Z0) === lastPts(n, Z0), JSON.stringify([lastPts(m, Z0), lastPts(n, Z0)]));
+}
+// ---- [10] (Q207) a gold loser's teammate with no points row quits with a confession: the confession path seeds him
+//   (display 1775 -> 3100) and fines him 100 (written: 3000), but this season's board still shows no row for him at the
+//   settle (the stub keeps no writes and the step passes none: the case of a fine that is not on the board read). The
+//   settle seeds him again at 3100, and that is his points as at his leave: team average 2975 (gold), -2 as in the normal
+//   finish. Adding the recorded fine on top of the seed would read 3200 (team average 3025, platinum) and give -1 ----
+{
+  const W = { mu: 31, sigma: 2 }, L = { mu: 16, sigma: 2 }, F = { mu: 25.375, sigma: 2 };   // displays 2000 / 1400 / 1775
+  const sk0 = { [v.pid(X)]: W, [v.pid(Y)]: W, [v.pid(Z0)]: L, [v.pid(Z1)]: F };
+  const pts0 = { [X]: 0, [Y]: 0, [Z0]: 2850 };   // Z1: no row, before and after his fine
+  const ros = [X, Y, Z0, Z1], mt = 6, hash = 0xE1A0;
+  const conf = () => { const d = start(mt, hash, 3, ros); d[0] = 0xB5; d[10 + ros.length] = 5; return d; };   // user-quit
+  const S = ros.map((sid, i) => ({ sid, d: start(mt, hash, i, ros) }));
+  const all = S.concat([0, 1, 2].map((i) => ({ sid: ros[i], d: settle(mt, hash, i, ros) })), [{ sid: Z1, d: conf() }]);
+  const steps = [[0, S], [5 * MIN, all], [GRACE, all], [LEAVE, all], [3 * HOUR, all]];
+  const m = runSteps(steps, pts0, sk0);
+  const n = match(0xE1A1, ros, pts0, sk0, null);
+  T('[10] both settle; Z1 fined from his seed by his confession (3100 -> 3000), seeded again at the settle, not convicted again',
+    m.rs.every(r => r.code === 0) && n.rs.every(r => r.code === 0) && processedOf(m.last).has(keyOf(S[0].d)) && leavesOf(m.last, Z1) === 1
+    && /pts 3100-100->3000 \(seeded base\)/.test(m.out) && /leaver, first settle this season, display 1775 -> pts 3100/.test(m.out)
+    && /already confessed -- consensus conviction skipped/.test(m.out), m.out.slice(-1500));
+  T('[10] the loser who stayed takes the normal-finish points (-2; the fine added on top of the seed: -1)', lastPts(n, Z0) === 2848 && lastPts(m, Z0) === lastPts(n, Z0),
+    JSON.stringify([lastPts(m, Z0), lastPts(n, Z0)]));
+}
+// ---- [11] (Q207) the gold loser's teammate (3950, just below the platinum line) quits with a confession: fined to 3850 at
+//   first sight. Read as at his leave (3950: team average 2975, gold) the loser who stayed takes the normal finish, -2.
+//   The fine added back twice would read him at 4050 (team average 3025, platinum) and give -1: more than staying ----
+{
+  const W = { mu: 31, sigma: 2 }, L = { mu: 16, sigma: 2 };   // displays 2000 / 1400
+  const sk0 = { [v.pid(X)]: W, [v.pid(Y)]: W, [v.pid(Z0)]: L, [v.pid(Z1)]: L };
+  const pts0 = { [X]: 0, [Y]: 0, [Z0]: 2000, [Z1]: 3950 }, pts1 = Object.assign({}, pts0, { [Z1]: 3850 });
+  const ros = [X, Y, Z0, Z1], mt = 6, hash = 0xE1B0;
+  const conf = () => { const d = start(mt, hash, 3, ros); d[0] = 0xB5; d[10 + ros.length] = 5; return d; };   // user-quit
+  const S = ros.map((sid, i) => ({ sid, d: start(mt, hash, i, ros) }));
+  const all = S.concat([0, 1, 2].map((i) => ({ sid: ros[i], d: settle(mt, hash, i, ros) })), [{ sid: Z1, d: conf() }]);
+  const steps = [[0, S, pts0], [5 * MIN, all, pts0], [GRACE, all, pts1], [LEAVE, all, pts1], [3 * HOUR, all, pts1]];
+  const rs = []; let state = null;
+  for (const [ms, recs, pts] of steps) { const r = runCron(boardsWith(recs, pts), state ? advance(state, ms) : { SKILL_FILE: sk0 }); rs.push(r); state = r.state; if (r.code !== 0) break; }
+  const m = { rs, last: rs[rs.length - 1], out: rs.map(r => r.out).join('') };
+  const n = match(0xE1B1, ros, pts0, sk0, null);
+  T('[11] both settle; Z1 fined once by his confession (3950 -> 3850), not convicted again', m.rs.every(r => r.code === 0) && n.rs.every(r => r.code === 0) && processedOf(m.last).has(keyOf(S[0].d))
+    && leavesOf(m.last, Z1) === 1 && /pts 3950-100->3850/.test(m.out) && /already confessed -- consensus conviction skipped/.test(m.out), m.out.slice(-1500));
+  T('[11] the loser who stayed takes the normal-finish points (-2; the fine added back twice: -1)', lastPts(n, Z0) === 1998 && lastPts(m, Z0) === lastPts(n, Z0),
+    JSON.stringify([lastPts(m, Z0), lastPts(n, Z0)]));
+}
 console.log(failN ? 'agreed-teammate: ' + failN + ' FAIL' : 'agreed-teammate: all ok');
 process.exit(failN ? 1 : 0);
