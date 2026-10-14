@@ -368,6 +368,22 @@ function seatLayoutsDisagree(recs) {
 // grouping). There the roster is the players' own, so a record that names someone else at a seat is one player's word
 // against the others' -- settled by the ordinary per-seat majority, as before -- and holding the key on it would hand
 // any player a way to void his match. A roster its voters split (startRosterSplit) gates nothing and stays here.
+// ---- a friends' room or bot match held by start records alone (cloud audit Q200) ----
+// A contested matchmade key voids STARTS_MATURITY_MS after it was first contested (its note, Q127: nobody rated, the
+// players who wrote a result get the consolation XP). A friends' room (type 10) and a bot match (type 11) had no such end:
+// their start entry is exempt from the orphan verdict (no leaver economy) and the note's contest mark is matchmade-only,
+// so the key stayed held for as long as the record that held it stayed on its shard. One outside start record (from a
+// seat the room does not have, or a player's seat) written before the job's first look kept the players' XP from them for
+// good, at no cost to its writer (B009 final review, review4 of Q75 / Q80 D3: 31 days, both players 0 XP). Now such a key
+// gets a note of its own when it is first found contested (pending['~' + key], no contest mark, so nothing voids it), and
+// once that note is STARTS_MATURITY_MS old, a start record whose writer wrote no result for the key is left out of the
+// check. Every honest start is written at level 1 and every honest result by the end of the match, so by then the players
+// who finished have written theirs; a record that can still hold the key is a result, and a result is never left out
+// (made-up results that disagree with the players' keep it held, as before). In the first hours a start record still
+// holds the key against a made-up result written ahead of the real one (Q80 third review); after them, an account that
+// wrote only a start record has no say. The settle that follows is the ordinary one (pacing, the one-match-at-a-time
+// rule, the day cap, XP only to the writers of the result). Matchmade keys keep the void, endless runs their own settle.
+function xpOnlyContestMt(mt) { return isPrivateMt(mt) || isBotMt(mt); }
 function applyRosterContest(gr, starts, pending, signals, processed, now) {
   const res = { contested: new Map(), dirty: false, touched: [] };
   const byKey = {};
@@ -378,9 +394,22 @@ function applyRosterContest(gr, starts, pending, signals, processed, now) {
     const seen = pending && pending['~' + m];
     if (seen && seen.c) { res.contested.set(m, []); (res.sticky = res.sticky || new Set()).add(m); continue; }   // Q127: contested once, held until it voids
     if (seatGateRoster(pending && pending[m])) continue;   // Q80: a registered start roster already decides who counts (applySeatGate)
-    const recsM = g.concat(byKey[m] || []);
+    const xpOnly = xpOnlyContestMt(g[0].d[2] | 0);
+    let st = byKey[m] || [], left = 0;
+    if (xpOnly && seen && now - (seen.t0 || 0) >= STARTS_MATURITY_MS) {   // Q200: a start-only writer has no say any more
+      const wrote = new Set(g.map((r) => String(r.steamID)));
+      const keep = st.filter((r) => wrote.has(String(r.steamID)));
+      left = st.length - keep.length; st = keep;
+    }
+    const recsM = g.concat(st);
     const seats = rosterContestSeats(recsM);
     if (seats.length || seatLayoutsDisagree(recsM)) { res.contested.set(m, seats); markContest(pending, m, now); }   // Q80 third review: or two seat layouts; Q127: for good
+    if (res.contested.has(m)) { if (xpOnly && pending) seenNote(pending, m, now); }   // Q200: when the hold began
+    else if (left) {
+      RUN.contestLifted = (RUN.contestLifted | 0) + 1;
+      console.log('  contest-lifted ' + m + ': contested since ' + new Date(seen.t0 || 0).toISOString() + ' by start records alone -- ' + left
+        + ' start record(s) from accounts that wrote no result left out, settled as usual (Q200)');
+    }
     if (res.contested.has(m)) noteContestParties(pending, m, now, contestParties(recsM));   // Q143: whose records
   }
   if (!res.contested.size) return res;
@@ -1911,6 +1940,7 @@ function writeRunSummary() {
       '| endless keys without a seat gate whose records disagree, nobody flagged (Q128) | ' + s('endlessUngated', 0) + ' |',
       '| start rosters split by a later start / confirmed (Q118) | ' + s('lateSplit', 0) + ' / ' + s('confirmed', 0) + ' |',
       '| contested matchmade keys voided, no start roster / held to maturity (Q127) | ' + s('contestVoid', 0) + ' / ' + s('contestHeldVoid', 0) + ' |',
+      "| friends' room / bot match keys no longer held by start records alone, a contest past maturity (Q200) | " + s('contestLifted', 0) + ' |',
       "| accounts noted in contested keys' disagreeing records, named by another record / by none -- counted, nobody flagged (Q143) | " + s('contestOn', 0) + ' / ' + s('contestOff', 0) + ' |',
       '| matchmade keys whose outside starts were past their writers\' daily cap, left out / outside contests counted (Q208) | ' + s('capKeys', 0) + ' / ' + s('capCounted', 0) + ' |',
       '| settled keys with records that disagree, nobody flagged (Q114) | ' + s('lateMismatch', 0) + ' |',
