@@ -718,6 +718,139 @@ function screenLateStarts(starts, recs, pending, processed, now, readComplete) {
   RUN.lateStarts = late.size;
   return late.size;
 }
+// ---- an outside account may hold up only a few matches a day (cloud audit Q208) ----
+// Q143 counts who contested a key but holds nothing back, and a free account voided every match it read: it copied each key
+// off a public start, wrote one start of its own (a player's seat before the job's first look, one seat more while the
+// roster is provisional), let one run read it and wrote the next key over it -- 100 four-player ranked matches voided in two
+// runs, their 400 players got the consolation XP only, the account lost nothing (Q208 repro; Steam lets an account write
+// about one row a minute, some 1,400 matches a day). The job cannot tell such a start from a player's: the key, the seat
+// map and the seat count are public. What it can count is how often one account does it. So ahead of registration, on a
+// matchmade key not contested yet whose records carry exactly one complete table -- a roster (seat count + seat map) each
+// seat of which names an account that wrote a record of the key from that seat and told no other story there -- or, while
+// a registered roster is provisional, that roster's own complete table: every other account with a start that would
+// contest the key (any start on an unregistered key; on a provisional one a start naming another roster that does not
+// leave a seat empty, as lateStartSplit counts it) is an outside writer of the key, and the key is noted once in his ledger
+// (CAP_NOTE in the starts state: per account the short hashes of his last few such keys and when, for CONTEST_CAP_MS).
+// When every outside writer of the key already holds CONTEST_CAP other keys there, their records of the key (start and
+// settle) are left out of this run and the key goes on with its complete table (it registers, settles and rates as if they
+// had written nothing; a left-out start that leaves a seat empty still flags its writer, Q130); otherwise nothing changes
+// (the start contests the key, Q127 / Q143). One account voids at most CONTEST_CAP matches a day.
+// Why this cannot hurt an honest player (architecture decision 10): a player is an outside writer only of his own match and
+// only where the one complete table does not seat him: an opponent and his alt wrote a table with the alt at his seat
+// (Q118), or outside accounts wrote a whole table of their own where his opponents' starts never arrived. A player in his
+// match's complete table is never noted, so a bad connection, a missing start, a cold-reconnect copy or many contested
+// matches a day leave his ledger empty. Where a player is left out, today's rules give him nothing on that key either (the
+// roster that registers, or the contested key that voids, does not seat him): he is not convicted, flagged or charged for
+// it; only the match goes on without him instead of voiding.
+// What it does not stop: a key with no complete table (a player's start missing -- an outside start contests it as before)
+// and a key with two (outside accounts writing a whole table of their own before the job's first look, one account per
+// seat): both stay contested and void, nobody noted. Closing those needs the client to prove a player's start (roadmap
+// O462). Endless keys, friends' rooms and bot matches keep their own rules; an incomplete shard read changes nothing.
+const CONTEST_CAP = 3;                       // other contested matchmade keys an outside writer may hold within CONTEST_CAP_MS
+const CONTEST_CAP_MS = 24 * 3600 * 1000;
+const CONTEST_CAP_ACCOUNTS = 1024;           // accounts the ledger keeps (those with the most keys, then the latest, stay)
+const CAP_NOTE = '~#contest-cap';            // the ledger's slot in the starts state: no loop that reads rosters sees it
+function capKeyHash(m) { return crypto.createHash('sha256').update(String(m)).digest('hex').slice(0, 6); }
+// the complete tables among one key's records: [{ sig, pc, writers: Set(pid) }]
+function completeTables(recs) {
+  const story = {}, sample = {};   // pid -> 'sig@seat' ('x': two stories); sig -> a record carrying it
+  for (const r of recs || []) {
+    if (!r || !r.d) continue;
+    const w = pid(String(r.steamID)), sig = startSig(r), st = sig + '@' + (r.d[5] | 0);
+    story[w] = story[w] == null || story[w] === st ? st : 'x';
+    if (!sample[sig]) sample[sig] = r;
+  }
+  const out = [];
+  for (const sig of Object.keys(sample)) {
+    const r = sample[sig], pc = r.d[8] | 0, ro = r.roster || {};
+    if (pc < 2) continue;
+    const writers = new Set();
+    for (let s = 0; s < pc; s++) {
+      const h = ro[s] ? pid(String(ro[s])) : null;
+      if (!h || story[h] !== sig + '@' + s) { writers.clear(); break; }
+      writers.add(h);
+    }
+    if (writers.size === pc) out.push({ sig, pc, writers });
+  }
+  return out;
+}
+function capLedger(pending, now) {
+  const e = pending[CAP_NOTE], a = (e && typeof e === 'object' && e.a && typeof e.a === 'object' && !Array.isArray(e.a)) ? e.a : {};
+  const nowMin = Math.floor(now / 60000), keep = CONTEST_CAP_MS / 60000;
+  for (const h of Object.keys(a)) {
+    const list = Array.isArray(a[h]) ? a[h].filter((x) => typeof x === 'string' && /^[0-9a-z]+\.[0-9a-f]{6}$/.test(x) && nowMin - parseInt(x.split('.')[0], 36) < keep) : [];
+    if (list.length) a[h] = list; else delete a[h];
+  }
+  return a;
+}
+function saveCapLedger(pending, a, now) {
+  const ids = Object.keys(a);
+  if (ids.length > CONTEST_CAP_ACCOUNTS) {
+    const lastOf = (h) => parseInt(a[h][a[h].length - 1].split('.')[0], 36);
+    ids.sort((x, y) => (a[y].length - a[x].length) || (lastOf(y) - lastOf(x)) || (x < y ? -1 : 1));
+    for (const h of ids.slice(CONTEST_CAP_ACCOUNTS)) delete a[h];
+  }
+  if (Object.keys(a).length) pending[CAP_NOTE] = { t0: now, a }; else delete pending[CAP_NOTE];   // t0: an older build keeps the slot a day
+}
+// Drops, in place, the starts and settle records of outside writers past their cap. Returns { keys, dropped, counted }.
+function capContests(starts, recs, pending, processed, now, readComplete) {
+  const res = { keys: 0, dropped: 0, counted: 0 };
+  if (readComplete === false) return res;
+  const led = capLedger(pending, now), nowMin = Math.floor(now / 60000);
+  const keyOf = (r) => r.d[3] + '_' + r.d[4] + '_' + r.d[2];
+  const byKey = {};
+  for (const r of starts || []) if (r && r.d && isMatchmadeMt(r.d[2] | 0)) { const m = keyOf(r); (byKey[m] = byKey[m] || { s: [], r: [] }).s.push(r); }
+  for (const r of recs || []) if (r && r.d && isMatchmadeMt(r.d[2] | 0)) { const m = keyOf(r); (byKey[m] = byKey[m] || { s: [], r: [] }).r.push(r); }
+  const out = new Map();   // key -> Set(pid) left out
+  for (const m of Object.keys(byKey).sort()) {
+    if (processed.has(m)) continue;
+    const note = pending['~' + m], p = pending[m];
+    if (note && note.c) continue;   // contested already: it voids (Q127)
+    if (p && (p.split || p.synth || !p.prov)) continue;   // a final roster: the seat gate leaves the outside records out anyway
+    const tabs = completeTables(byKey[m].s.concat(byKey[m].r));
+    const G = p ? (tabs.find((t) => t.sig === p.prov) || null) : (tabs.length === 1 ? tabs[0] : null);
+    if (!G) continue;
+    const outside = new Set();
+    for (const r of byKey[m].s) {
+      const h = pid(String(r.steamID));
+      if (G.writers.has(h) || (p && (startSig(r) === p.prov || blankSeatStart(r)))) continue;
+      outside.add(h);
+    }
+    if (!outside.size) continue;
+    const k = capKeyHash(m);
+    let all = true;
+    for (const h of [...outside].sort()) {
+      const list = led[h] || (led[h] = []);
+      if (list.filter((x) => x.slice(-6) !== k).length < CONTEST_CAP) all = false;
+      if (!list.some((x) => x.slice(-6) === k)) { list.push(nowMin.toString(36) + '.' + k); res.counted++; }
+      if (list.length > CONTEST_CAP + 1) list.splice(0, list.length - CONTEST_CAP - 1);
+    }
+    if (all) out.set(m, outside);
+  }
+  saveCapLedger(pending, led, now);
+  if (out.size) {
+    const lines = new Map();
+    for (const list of [starts, recs]) {
+      if (!list) continue;
+      let w = 0;
+      for (let i = 0; i < list.length; i++) {
+        const r = list[i], m = r && r.d ? keyOf(r) : null, o = m && out.get(m);
+        if (o && o.has(pid(String(r.steamID)))) {
+          res.dropped++; (lines.get(m) || lines.set(m, []).get(m)).push(plog(r.steamID) + '@' + (r.d[5] | 0) + (list === starts ? 's' : ''));
+          if (list === starts && blankSeatStart(r)) { noteBlankStarts(m, [r]); if (!pending[m]) RUN.blankStarts = (RUN.blankStarts | 0) + 1; }   // Q130 flags its writer as before
+          continue;
+        }
+        list[w++] = r;
+      }
+      list.length = w;
+    }
+    res.keys = out.size;
+    for (const [m, who] of lines) console.log('  contest-cap ' + m + ': ' + who.length + ' record(s) of outside account(s) past ' + CONTEST_CAP
+      + ' contested keys a day, left out -- the key goes on with its complete table, the cap flags nobody (Q208): ' + who.join(' '));
+  }
+  RUN.capKeys = (RUN.capKeys | 0) + res.keys; RUN.capCounted = (RUN.capCounted | 0) + res.counted;
+  return res;
+}
 function registerStartRosters(starts, processed, pending, now, readComplete) {
   const sg = {};
   for (const r of starts || []) { const m = r.d[3] + '_' + r.d[4] + '_' + r.d[2]; (sg[m] = sg[m] || []).push(r); }
@@ -917,6 +1050,7 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
   // 2) upkeep + maturity verdicts for pending entries
   for (const m of Object.keys(pending)) {
     if (m === PRUNE_NOTE) continue;   // Q144: the processed list's prune candidate (pruneProcessed)
+    if (m === CAP_NOTE) continue;   // Q208: the outside writers' ledger (capContests)
     if (m.charAt(0) === '~') {   // Q127: a key's note, kept until the key is processed or a day old (Q144: or its records are gone)
       const key = m.slice(1), e = pending[m];
       // a contested key no start roster registered for (a seat claimed twice from the first look) has no entry that voids
@@ -1723,6 +1857,7 @@ function writeRunSummary() {
       '| start rosters split by a later start / confirmed (Q118) | ' + s('lateSplit', 0) + ' / ' + s('confirmed', 0) + ' |',
       '| contested matchmade keys voided, no start roster / held to maturity (Q127) | ' + s('contestVoid', 0) + ' / ' + s('contestHeldVoid', 0) + ' |',
       "| accounts noted in contested keys' disagreeing records, named by another record / by none -- counted, nobody flagged (Q143) | " + s('contestOn', 0) + ' / ' + s('contestOff', 0) + ' |',
+      '| matchmade keys whose outside starts were past their writers\' daily cap, left out / outside contests counted (Q208) | ' + s('capKeys', 0) + ' / ' + s('capCounted', 0) + ' |',
       '| settled keys with records that disagree, nobody flagged (Q114) | ' + s('lateMismatch', 0) + ' |',
       "| friends' room records whose writer is not on his own roster seat, not counted (Q123) | " + s('seatless', 0) + ' |',
       '| bot match records whose writer is not on his own roster seat, not counted (Q148) | ' + s('seatlessBot', 0) + ' |',
@@ -4185,6 +4320,7 @@ async function main() {
   //   in RUN.seatlessBot)
   RUN.seatless = dropSeatlessPrivate(recs, starts, processed).n;
   screenLateStarts(starts, recs, startsPending, processed, Date.now(), shardsComplete);   // Q127 / Q138: a start first read after the result counts nowhere
+  capContests(starts, recs, startsPending, processed, Date.now(), shardsComplete);   // Q208: an outside account past its daily cap contests nothing
   const registeredEarly = registerStartRosters(starts, processed, startsPending, Date.now(), shardsComplete);   // Q113: endless keys wait for a full read
   const seatGate = applySeatGate(recs, starts, startsPending, processed);
   RUN.offSeat = seatGate.n;
@@ -6657,5 +6793,6 @@ Object.assign(module.exports, { startSig, lateStartSplit, START_CONFIRM_MS, STAR
 Object.assign(module.exports, { testimonyOf, recTestimony, noteTestimony, endlessRosterHold, endlessTestified });   // cloud audit Q113 endless testimony
 Object.assign(module.exports, { teamLossCounted });   // cloud audit Q136 the losing team must be somebody
 Object.assign(module.exports, { contestParties, contestTable, noteContestParties, noteParties, CONTEST_PARTY_CAP, CONTEST_PARTIES, LATE_SPLIT_WHO });   // cloud audit Q143 whose records contested a matchmade key
+Object.assign(module.exports, { completeTables, capContests, capLedger, CONTEST_CAP, CONTEST_CAP_MS, CONTEST_CAP_ACCOUNTS, CAP_NOTE });   // cloud audit Q208 an outside account may hold up only a few matches a day
 Object.assign(module.exports, { soloKeyGone, pruneSoloDone, soloDoneNote, SOLO_DONE_CAP, SEEN_PER_WRITER, screenLateStarts });   // cloud audit Q144 rework: processed solo segments remembered while their key verifies, a room per writer across the start-seen notes
 Object.assign(module.exports, { pruneFlagged, flagBaseKey, FLAG_PRUNE_WAIT_MS, blankSeen, BLANK_STARTS });   // cloud audit Q166 a signals flag goes once its key left the shards
