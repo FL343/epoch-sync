@@ -446,100 +446,156 @@ function applyRosterContest(gr, starts, pending, signals, processed, now) {
   }
   return res;
 }
-// ---- a friends' room or bot match held by a result on another table (cloud audit Q214) ----
+// ---- a friends' room or bot match held by results on two tables: each table settles on a key of its own (cloud audit Q214, Q220) ----
 // Q200 lets such a key settle once start records alone hold it past STARTS_MATURITY_MS. A result held it for good: an
 // outside account that also wrote a result -- with a seat count or seat map of its own, or at a player's seat -- left the
 // key contested (two seat layouts, or one seat named twice), and nothing ends the contest of a friends' room or a bot
 // match, so the players who finished never got its XP (Q200 README residual 1, repro-q200.js S1). Every honest record of
 // a key, start and result, names one table: the host's START_GAME seat count and seat map, its writer at his own seat in
-// it (rosterContestSeats, seatLayoutsDisagree, startRosterDisagrees). So once the key's Q200 note is STARTS_MATURITY_MS
-// old -- by then every player who finished has written his result -- and only on a run that read every shard in full,
-// the key's result writers are counted by table: each writer for the one table all his records of the key name (his
-// results and his own starts), nobody for a writer whose records name two tables or who is not at his own seat (he
-// still counts among the writers). When one table has more than half of the writers, the results on any other table are
-// left out (counted nowhere, like a record off its registered seat; nobody flagged), before grouping, and the key goes on
-// as usual: the Q200 filter leaves out the starts of the accounts whose results went (they wrote no result left in the
-// key), the contest lifts and the settle pays the writers of the results kept. A friends' room and a bot match convict
-// nobody (their settle stops ahead of every competitive pass).
-// When no table has more than half, a table that names a writer of another table while that table names none of its
-// writers is set aside with its writers, and the rest are counted again: outside accounts, as many as the players, that
-// wrote the players into a table of their own (their seats, extra seats) -- the players' records never name them, and
-// they cannot write the players' records; or one such account against the lone human of a bot match. The majority comes
-// first because the same records also fit a room whose fewer members wrote a table of their own that names none of the
-// others: set aside first, one such member would beat the room's majority and leave its players with nothing; counted
-// first, he is outvoted, and only in a tie (one against one in a two-seat room, two against two) is the room's table set
-// aside -- its players get nothing, as when it was held, and he the XP of the room he played. Two tables that name each
-// other's writers (one player against the room: a griefer, or honest records that disagree) set nothing aside. Still no
-// table with more than half (outside accounts with a table of their own that names none of the players, as many as the
-// players) keeps the key held, as before. Outside accounts that outnumber the players win, whether their table names the
-// players or not: the players get nothing, as when it was held, and the outside accounts the XP of a room they could have
-// played among themselves (same pacing, one-match-at-a-time rule and day cap). Matchmade keys keep their void, endless
-// runs their own settle, a key with a registered seat gate is the gate's.
+// it (rosterContestSeats, seatLayoutsDisagree, startRosterDisagrees). A friends' room and a bot match pay XP only, each
+// writer for his own result, with no leaver economy: a result on one table takes nothing from the writers of another.
+// So once the key's Q200 note is STARTS_MATURITY_MS old -- by then every player who finished has written his result --
+// and only on a run that read every shard in full, each table of the key settles on a key of its own (splitKey: the
+// original key with the match hash replaced by a hash of the key and the table), before grouping:
+//   - a writer counts for a table when every result he wrote for the key names it at his own seat; the results of any
+//     other writer (two tables, or not at his own seat) are left out, nobody flagged (like a record off its registered
+//     seat). Q214 had counted his own starts too: the starts only follow their table now, so a player whose start and
+//     result ever disagreed would still be paid on his result's table.
+//   - each such table gets a starts entry for its key (on the first split: t0 from the original key's entry, else from
+//     the note: no pacing restart, no `ns` signal; split: no seat gate; the original entry's sightings of the table's
+//     own starts, so no leave wait restarts either), its results and the starts that name it move to that key, and
+//     from there it settles as any key does (pacing, the one-match-at-a-time rule, the absent-seat hold, the day cap,
+//     the lone bot lane, XP to the writers of its results). A friends' room table with one writer does not settle (as
+//     before).
+//   - the split is sticky: the first split marks the key (splitMark, in the processed list, kept while any record of
+//     the key is on the shards) and the original entry and note it lent its t0 from (`lent`); from then on every run
+//     moves the key's tables again whatever its read, note or seat gate, so no table is ever paid twice and a table
+//     written later (an outside account's) settles on a key of its own too -- on an entry of its own that starts now,
+//     with no sightings carried: a table first written after the split waits as a new match does, so an outside account
+//     who writes onto such a key from another seat each round cannot settle matches back to back on the original key's
+//     old t0 (Q220 review). The mark, not the tables read this run, says the key was split: the tables of the first
+//     split leave the shards once their writers' rows are written over, and a run whose tables were all written since
+//     would otherwise split the key again on the old t0, every round (Q220 review 2).
+//   - with one table left it moves to a key of its own too (only the other results left out); with none, it is held.
+// The split keys start with a letter: no record a client writes can carry one (its match hash is a number), so no
+// outside account can write onto the key a table settles on. Outside accounts get the XP of their own table, as if
+// they had played a room among themselves (same pacing, one-match-at-a-time rule and day cap; they wait out the hold
+// first, and a table of theirs first written after the split waits again from its first sighting). The seedcap veto
+// and the other settle checks read the split key; seedcap.js audits the original keys only: a veto an outside
+// account's over-cap result wrote onto the original key ahead of the players' results stops and flags nobody on a
+// table it never belonged to (with Q214 it flagged the players once their majority settled there).
+// What it costs: an over-cap table that two tables hold this long settles without the veto (XP only, its scores count
+// for nothing there) -- a seedcap pass per table is the follow-up (README).
+// Matchmade keys keep their void, endless runs their own settle, a key with a registered seat gate is the gate's.
 function recTable(r) {
   const own = r.roster && r.roster[r.d[5] | 0];
   if (own == null || String(own) !== String(r.steamID)) return null;   // not at his own seat: no honest record does that
   return (r.d[8] | 0) + '|' + rosterCanon(r.roster);
 }
-// Drops, in place, the results the majority leaves out. Returns { n: results dropped, keys: [keys acted on], ties: [keys
-// still held, no table with more than half] }.
-function applyTableMajority(recs, starts, pending, processed, now, complete) {
-  const res = { n: 0, keys: [], ties: [] };
-  if (!complete || !pending || !recs || !recs.length) return res;
+// FNV-1a over the original key and the table: the split key's first part
+function splitHash(m, t) {
+  let h = 0x811c9dc5;
+  const s = String(m) + '#' + String(t);
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); }
+  return h >>> 0;
+}
+function splitKey(m, t) { const p = String(m).split('_'); return 't' + splitHash(m, t) + '_' + p[1] + '_' + p[2]; }
+// the key was split (Q220 review 2): a mark in the processed list, set at every split and kept there while any record of
+//   the key is on the shards (main adds the mark of every key read this run to the keys seen); like a split key it starts
+//   with a letter, so no record a client writes carries it
+function splitMark(m) { const p = String(m).split('_'); return 's' + splitHash(m, '') + '_' + p[1] + '_' + p[2]; }
+// a record moves to split key k: a copy of its details with the key's first part in place of the match hash (h0 keeps it)
+function moveToKey(r, k) {
+  if (r.h0 === undefined) r.h0 = r.d[3];
+  r.d = r.d.slice();
+  r.d[3] = k.slice(0, k.indexOf('_'));
+}
+// Moves the results and starts of every split key, in place, and drops the results left out. Returns { n: results left
+// out, keys: keys split this run for the first time into two tables or more, one: ... into one table (the others'
+// results left out), again: keys split before (sticky), held: keys with no writer on a table of his own }.
+function applyTableSplit(recs, starts, pending, processed, now, complete) {
+  const res = { n: 0, keys: [], again: 0, one: [], held: [] };
+  if (!pending || !recs || !recs.length) return res;
   const byKey = {}, stByKey = {};
   for (const r of recs) { const m = r.d[3] + '_' + r.d[4] + '_' + r.d[2]; (byKey[m] = byKey[m] || []).push(r); }
   for (const r of starts || []) { const m = r.d[3] + '_' + r.d[4] + '_' + r.d[2]; (stByKey[m] = stByKey[m] || []).push(r); }
   const out = new Set();
   for (const m of Object.keys(byKey)) {
     const g = byKey[m], mt = g[0].d[2] | 0;
-    if (!xpOnlyContestMt(mt) || isEndlessMt(mt) || processed.has(m) || seatGateRoster(pending[m])) continue;
-    const seen = pending['~' + m];
-    if (!seen || now - (seen.t0 || 0) < STARTS_MATURITY_MS) continue;
-    if (new Set(g.map(recTable)).size < 2) continue;   // every result on one table: nothing to leave out
+    if (!xpOnlyContestMt(mt) || isEndlessMt(mt) || processed.has(m)) continue;
     const of = {};
     for (const r of g) (of[String(r.steamID)] = of[String(r.steamID)] || new Set()).add(recTable(r));
-    for (const r of stByKey[m] || []) if (of[String(r.steamID)]) of[String(r.steamID)].add(recTable(r));
-    const writers = Object.keys(of), vote = {};
-    for (const w of writers) {
+    const tableOf = {}, tables = [];
+    for (const w of Object.keys(of)) {
       if (of[w].size !== 1) continue;
       const t = of[w].values().next().value;
-      if (t !== null) vote[w] = t;
+      if (t === null) continue;
+      tableOf[w] = t;
+      if (tables.indexOf(t) < 0) tables.push(t);
     }
-    // the writers left once the tables in `aside` are set aside with their writers: the votes, how many writers are
-    //   counted, the table with more than half of them (undefined: none)
-    const count = (aside) => {
-      const votes = {};
-      let counted = 0;
-      for (const w of writers) {
-        if (aside.has(vote[w])) continue;
-        counted++;
-        if (vote[w] !== undefined) votes[vote[w]] = (votes[vote[w]] | 0) + 1;
+    const base = pending[m], note = pending['~' + m];
+    // split before: the key's mark, or the original entry or the note lent its t0 to a split (each carries the time,
+    //   `lent`, so neither can lend it again should the mark be pruned first), or a table of this run already has a key
+    //   of its own. Never inferred from the tables alone (Q220 review 2): once the tables of the first split are off the
+    //   shards -- their writers' rows overwritten, by an outside account's alts or by the players' later matches -- a run
+    //   whose tables were all written since would split the key again, on the original entry's old t0, every round
+    const before = processed.has(splitMark(m)) || !!(base && base.lent) || !!(note && note.lent)
+      || tables.some((t) => { const k = splitKey(m, t); return processed.has(k) || !!pending[k]; });
+    if (!before) {
+      if (!complete || seatGateRoster(pending[m])) continue;
+      const seen = pending['~' + m];
+      if (!seen || now - (seen.t0 || 0) < STARTS_MATURITY_MS) continue;
+      if (new Set(g.map(recTable)).size < 2) continue;   // every result on one table: nothing to split
+      if (!tables.length) {
+        res.held.push(m);
+        console.log('  table-split ' + m + ': no result writer on one table of his own -- held as before (Q220)');
+        continue;
       }
-      return { votes, counted, win: Object.keys(votes).find((t) => votes[t] * 2 > counted) };
-    };
-    let tally = count(new Set());
-    if (tally.win === undefined) {
-      // no table has more than half of the writers: a table with a one-sided claim (it names a writer who votes for another
-      //   table, and that table names none of its writers) is set aside with its writers, and they are counted again
-      const named = {};
-      for (const r of g) { const t = recTable(r); if (t !== null && !named[t]) named[t] = new Set(Object.values(r.roster).map(String)); }
-      const claims = (t, u) => writers.some((w) => vote[w] === u && named[t].has(w));
-      const tables = Object.keys(named);
-      const aside = new Set(tables.filter((t) => tables.some((u) => u !== t && claims(t, u) && !claims(u, t))));
-      if (aside.size) tally = count(aside);
     }
-    const { votes, counted, win } = tally;
-    const setAside = writers.length - counted;
-    const asideNote = setAside ? ' (' + setAside + ' more set aside: their own table names players of another table that never names them)' : '';
-    if (win === undefined) {
-      res.ties.push(m);
-      console.log('  table-majority ' + m + ': no table has more than half of the ' + counted + ' result writers' + asideNote + ' -- held as before (Q214)');
+    const drop = g.filter((r) => tableOf[String(r.steamID)] === undefined);
+    for (const r of drop) out.add(r);
+    res.n += drop.length;
+    const dropLog = drop.length ? drop.length + ' result(s) from writers not on one table of their own left out, nobody flagged: '
+      + drop.map((r) => plog(r.steamID) + '@' + r.shard + '=' + (r.d[5] | 0)).join(' ') : 'nothing left out';
+    // the first split: t0 from the original entry, else the note (the hold's own start, no pacing restart); a table first
+    //   seen after the split starts its own clock now (an outside account who names a new table each round must not take
+    //   the original key's old t0 and settle a match a round back to back -- a bot match has no day cap)
+    const t0 = before ? now : ((base && base.t0) || (note && note.t0) || 0);
+    const keyOfT = {}, made = [];
+    for (const t of tables) {
+      const k = keyOfT[t] = splitKey(m, t);
+      if (processed.has(k) || pending[k] || !t0) continue;
+      const e = pending[k] = { t0, mt, roster: {}, settled: [], split: 1 };
+      made.push(t);
+      // what the original key's entry saw of this table's own starts (Q69 / Q121: who, and when), so the move restarts no
+      //   leave wait
+      if (base && base.t0 === t0) for (const r of stByKey[m] || []) {
+        const h = pid(String(r.steamID));
+        if (recTable(r) !== t || !hasOwnStart(base, h) || hasOwnStart(e, h)) continue;
+        (e.started = e.started || []).push(h);
+        if (base.startSeen && base.startSeen[h] != null) (e.startSeen = e.startSeen || {})[h] = base.startSeen[h];
+      }
+    }
+    for (const r of g) { const t = tableOf[String(r.steamID)]; if (t !== undefined) moveToKey(r, keyOfT[t]); }
+    for (const r of stByKey[m] || []) { const t = recTable(r); if (t !== null && keyOfT[t]) moveToKey(r, keyOfT[t]); }
+    processed.add(splitMark(m));
+    if (base && !base.lent) base.lent = now;
+    if (note && !note.lent) note.lent = now;
+    const told = (ts) => ts.map((t) => keyOfT[t] + ' ' + Object.keys(tableOf).filter((w) => tableOf[w] === t).length + ' writer(s)').join(', ');
+    if (before) {
+      res.again++;
+      if (made.length) console.log('  table-split ' + m + ': split before -- ' + made.length + ' table(s) written since on a key of their own ('
+        + told(made) + '), ' + dropLog + ' (Q220)');   // else quiet: the same move as every run since the split
       continue;
     }
-    const drop = g.filter((r) => recTable(r) !== win);
-    for (const r of drop) out.add(r);
-    res.n += drop.length; res.keys.push(m);
-    console.log('  table-majority ' + m + ': ' + votes[win] + ' of ' + counted + ' result writers on one table past the hold\'s maturity' + asideNote + ' -- '
-      + drop.length + ' result(s) on another table left out, nobody flagged (Q214): ' + drop.map((r) => plog(r.steamID) + '@' + r.shard + '=' + (r.d[5] | 0)).join(' '));
+    if (tables.length < 2) {
+      res.one.push(m);
+      console.log('  table-split ' + m + ': one table left past the hold\'s maturity -- it settles on a key of its own (' + told(tables) + '), ' + dropLog + ' (Q220)');
+      continue;
+    }
+    res.keys.push(m);
+    console.log('  table-split ' + m + ': results on ' + tables.length + ' tables past the hold\'s maturity -- each table settles on a key of its own ('
+      + told(tables) + '), ' + dropLog + ' (Q220)');
   }
   if (out.size) { let w = 0; for (let i = 0; i < recs.length; i++) if (!out.has(recs[i])) recs[w++] = recs[i]; recs.length = w; }
   return res;
@@ -2071,7 +2127,7 @@ function writeRunSummary() {
       '| settled keys with records that disagree, nobody flagged (Q114) | ' + s('lateMismatch', 0) + ' |',
       "| friends' room records whose writer is not on his own roster seat, not counted (Q123) | " + s('seatless', 0) + ' |',
       '| bot match records whose writer is not on his own roster seat, not counted (Q148) | ' + s('seatlessBot', 0) + ' |',
-      "| friends' room / bot match keys held past maturity by results on two tables: the other table's results left out / no table with more than half, still held (Q214) | " + s('tableMajority', 0) + ' / ' + s('tableTie', 0) + ' |',
+      "| friends' room / bot match keys held past maturity by results on two tables: two tables or more, each on a key of its own / one table, on a key of its own, the others' results left out / no writer on one table, still held (Q214, Q220) | " + s('tableSplit', 0) + ' / ' + s('tableOne', 0) + ' / ' + s('tableHeld', 0) + ' |',
       '| campaign grants / campaign endless | ' + s('campaign', '-') + ' / ' + s('campaignEndless', '-') + ' |',
       '| page-cap hits | ' + RUN.cap + ' |',
       '| solo segments held by the key policy (other channel / retired key; new this run) | ' + s('keyHeld', 0) + ' (' + s('keyHeldNew', 0) + ') |',
@@ -4578,6 +4634,21 @@ async function main() {
   //   -- before grouping, so an outside account's record votes nowhere below (consistency, dissent, absent seats, own records)
   const processed = loadProcessed();
   let processedN0 = processed.size;   // grow-only set: a size change = keys added on this run (persistStartsSide)
+  // Q220: the keys seen this run also hold the split key of every friends' room / bot match record on a table of its
+  //   writer's own (applyTableSplit), so a split key is not pruned below or let go (reconcileStarts) while records of its
+  //   table are on the shards
+  for (const r of recs.concat(starts)) {
+    const mt = r.d[2] | 0;
+    if (!xpOnlyContestMt(mt) || isEndlessMt(mt)) continue;
+    const t = recTable(r);
+    if (t !== null) seenKeys.add(splitKey(r.d[3] + '_' + r.d[4] + '_' + r.d[2], t));
+  }
+  // Q220 review 2: and the split mark of every friends' room / bot match key read this run (a result, a start or a
+  //   confession), so the mark outlives the key's entry and note (dropped once no record of the key is on the shards)
+  for (const k of [...seenKeys]) {
+    const s = String(k), mt = Number(s.slice(s.lastIndexOf('_') + 1)) | 0;
+    if (/^-?[0-9]/.test(s) && xpOnlyContestMt(mt) && !isEndlessMt(mt)) seenKeys.add(splitMark(s));
+  }
   const startsPending = loadStarts();
   // Q144: past PROCESSED_CAP, the oldest keys off the shards on two complete reads an hour apart are dropped
   const prunedP = pruneProcessed(processed, startsPending, seenKeys, shardsComplete, Date.now());
@@ -4596,10 +4667,11 @@ async function main() {
   const registeredEarly = registerStartRosters(starts, processed, startsPending, Date.now(), shardsComplete);   // Q113: endless keys wait for a full read
   const seatGate = applySeatGate(recs, starts, startsPending, processed);
   RUN.offSeat = seatGate.n;
-  // Q214: a friends' room or bot match still held past the Q200 maturity by results on two tables -- more than half of the
-  //   result writers on one table leaves the other table's results out, before grouping; nobody flagged
-  const tableMaj = applyTableMajority(recs, starts, startsPending, processed, Date.now(), shardsComplete);
-  RUN.tableMajority = tableMaj.keys.length; RUN.tableTie = tableMaj.ties.length;
+  // Q214 / Q220: a friends' room or bot match still held past the Q200 maturity by results on two tables -- each table moves
+  //   to a key of its own (sticky once split), before grouping; results off one table of their writer's own left out,
+  //   nobody flagged
+  const tableSplit = applyTableSplit(recs, starts, startsPending, processed, Date.now(), shardsComplete);
+  RUN.tableSplit = tableSplit.keys.length; RUN.tableOne = tableSplit.one.length; RUN.tableHeld = tableSplit.held.length;
   const gr = groupRecords(recs, { vecOf, MAX_SEATS });   // audit 2026-09-06: pure, testable consensus grouping (writer-deduped); O156 lone bot lane (type 11, every channel)
   const groups = gr.groups, consistentMatches = gr.consistentMatches, inconsistentGroups = gr.inconsistentGroups;
   RUN.flagged = gr.flagged;
@@ -4812,7 +4884,7 @@ async function main() {
       for (const r of recs) {
         const roster = decodeRoster(r.d);
         const host = roster && (roster[0] != null ? roster[0] : roster['0']);
-        if (host) matchIndex.set(r.d[3] >>> 0, { hostSid: host });
+        if (host) matchIndex.set((r.h0 !== undefined ? r.h0 : r.d[3]) >>> 0, { hostSid: host });   // Q220: a record moved to a split key keeps its match hash in h0
       }
       const umState = loadUnmatched();
       const collected = [];
@@ -7190,7 +7262,7 @@ Object.assign(module.exports, { leaveConfirmHold, startRosterGaps, LEAVE_CONFIRM
 Object.assign(module.exports, { rosterContestSeats, applyRosterContest, seatLayout, seatLayoutsDisagree });   // cloud audit Q75 one account per seat per match key (+ Q80 third review seat layout)
 Object.assign(module.exports, { registerStartRosters, startRosterSplit, rosterCanon, startRosterDisagrees, seatGateRoster, seatedOnRoster, applySeatGate });   // cloud audit Q80 seat gate
 Object.assign(module.exports, { seatlessPrivate, dropSeatlessPrivate });   // cloud audit Q123
-Object.assign(module.exports, { recTable, applyTableMajority });   // cloud audit Q214 a held friends' room / bot match settled on its majority table
+Object.assign(module.exports, { recTable, splitKey, splitMark, applyTableSplit });   // cloud audit Q214 / Q220 a held friends' room / bot match: each table on a key of its own
 Object.assign(module.exports, { startSig, lateStartSplit, START_CONFIRM_MS, START_CONFIRM_MIN_MS });   // cloud audit Q118 provisional start roster
 Object.assign(module.exports, { testimonyOf, recTestimony, noteTestimony, endlessRosterHold, endlessTestified });   // cloud audit Q113 endless testimony
 Object.assign(module.exports, { teamLossCounted });   // cloud audit Q136 the losing team must be somebody
