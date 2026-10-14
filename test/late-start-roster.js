@@ -417,7 +417,8 @@ const settledHonest = (tag, rs, key, settleRun) => {
   const script = mutant('    if (processed.has(m)) {\n      RUN.lateMismatch', '    if (false) {\n      RUN.lateMismatch', '[5] T9');
   if (script) try {
     const m = timeline(steps, script);
-    T('[5] T9 mutant: settled keys flagged again -> each player +1, +1 more after the prune', allOk(m, 9) && RR.every(s => fOf(m[6], s) === 1 && fOf(last(m), s) === 2),
+    // Q98: one match flags a player once, so the prune no longer lets the same key flag him a second time (it gave +1 more)
+    T('[5] T9 mutant: settled keys flagged again -> each player +1 (Q98: not again after the prune)', allOk(m, 9) && RR.every(s => fOf(m[6], s) === 1 && fOf(last(m), s) === 1),
       JSON.stringify(RR.map(s => [fOf(m[6], s), fOf(last(m), s)])));
   } finally { try { fs.unlinkSync(script); } catch (e) {} }
 }
