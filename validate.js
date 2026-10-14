@@ -2923,8 +2923,10 @@ function reducedStakesPlan(parts, matchType, premadeMask, premadeTrioAt) {
 //   leaverSeats: consensus-absent seats. winTeamOverride (mode-2 only): the sub-score-derived
 //   outcome from team2WinTeamOf -- money must never decide a base-5/6 match, so the caller passes
 //   the claims-derived winner and the money comparison below stays a 3/4-only fallback.
+//   absent (Q167, optional): [{ seat, mmr }] -- the losing team's convicted leavers at their pre-match rating; they count
+//   toward the mismatch of an expected win only (see the strong-team branch below).
 //   Returns { [steamID]: { adjDelta, flag, normalDelta } } or null. =====
-function teamLpPlan(parts, matchType, scores, leaverSeats, winTeamOverride) {
+function teamLpPlan(parts, matchType, scores, leaverSeats, winTeamOverride, absent) {
   if (!appliesLp(matchType) || !isTeamMt(matchType)) return null;
   const ts = teamSizeOfMt(matchType);
   if (!parts || !parts.length || !scores || scores.length < 2 * ts) return null;
@@ -2940,6 +2942,10 @@ function teamLpPlan(parts, matchType, scores, leaverSeats, winTeamOverride) {
   const mmrs = parts.map(p => p.mmr | 0);
   const mismatch = mmrs.length >= 2 && (Math.max.apply(null, mmrs) - Math.min.apply(null, mmrs) > RS_THRESHOLD);
   const mean = mmrs.reduce((a, b) => a + b, 0) / (mmrs.length || 1);
+  // Q167 (cloud audit): the same spread and mean with the losing team's leavers counted at their pre-match rating
+  const mmrsA = mmrs.concat((absent || []).map(a => a.mmr | 0));
+  const mismatchA = mmrsA.length >= 2 && (Math.max.apply(null, mmrsA) - Math.min.apply(null, mmrsA) > RS_THRESHOLD);
+  const meanA = mmrsA.reduce((a, b) => a + b, 0) / (mmrsA.length || 1);
   const shielded = new Set();
   for (const s of (leaverSeats || [])) for (const p of parts) {
     if (teamOf(p.seat) === teamOf(s) && (p.seat | 0) !== (s | 0)) shielded.add(p.steamID);
@@ -2955,13 +2961,20 @@ function teamLpPlan(parts, matchType, scores, leaverSeats, winTeamOverride) {
     if (mismatch && tAvgMmr < mean) {                          // weak team
       if (won) { factor = RS_UPSET_BONUS; flag = 1; }
       else { factor = tSeg.rs; protectedLoss = true; }
-    } else if (mismatch && tAvgMmr > mean) {                   // strong team
+    } else if ((mismatch && tAvgMmr > mean) || (won && mismatchA && tAvgMmr > meanA)) {   // strong team (Q167: or the weak team left)
       // Q160 layer 5 (cloud audit): an expected win compresses at the TEAM-average tier for every member, the strong one
       // included. Holding him at his own tier instead (the rework's fourth layer) cut a grandmaster carrying zero-points
       // accounts, but cut the honest grandmaster queued with lower-tier friends as hard (a gold friend, 6 wins in 8: -12
       // where this gives +12; a master with a diamond friend +20 for +30), and the carry came back once the zeros were
       // walked to silver (14 matches). Architecture decision 10 keeps the honest side whole: the carry is a known residual
       // (+4 a 2V2 win, +9 a 3V3), as the third farming form is, held by O226 and the manual top-100 check.
+      // Q167 (cloud audit): an expected win stays an expected win when the weak team leaves at the start (the second half
+      // of the condition). The spread and the mean see the present only, so two grandmasters whose two zero-points
+      // opponents wrote the level-1 start and left (convicted leavers, -100 points each at the floor) took the full team
+      // win every match (+10): no spread among the present. With the losing team's leavers counted at their pre-match
+      // rating (mismatchA, meanA) the win is the expected one and takes this same compression, written once here so the
+      // strong-team factor of whatever base this sits on serves both. Only this case reads them: the weak team, an upset
+      // and a loss keep the present-only reading (a leaver's rating says nothing about how the players who stayed did).
       factor = won ? tSeg.rs : RS_STRONG_UPSET_LOSS;
     }
     if (!won && shielded.has(p.steamID)) { factor = Math.min(factor, ownSeg.rs); protectedLoss = true; }
@@ -2971,6 +2984,18 @@ function teamLpPlan(parts, matchType, scores, leaverSeats, winTeamOverride) {
     out[p.steamID] = { adjDelta, flag, normalDelta, won };   // won feeds the series clamp at settle
   }
   return out;
+}
+// ---- Q167 (cloud audit): the winners of a team match rated against the losing team with its leavers ----
+//   win: the present winners; here: the present losers; ghosts: the losing team's convicted leavers at their pre-match
+//   rating ({ id, mu, sigma }; their own ratings never move -- they pay the leave). The winners' outputs come from the
+//   update against the whole losing team (here + ghosts), the present losers' from the update against the winners only
+//   (as before Q167: losing a man short is not losing to a full team). Returns the outputs, winners first (the order
+//   updateTeamMatch gives). See the settle (leaver-ghost).
+function leaverGhostUpdate(win, here, ghosts) {
+  const winIds = new Set(win.map((p) => p.id));
+  const full = ts.updateTeamMatch([{ players: win, rank: 1 }, { players: here.concat(ghosts), rank: 2 }]).filter((r) => winIds.has(r.id));
+  const own = here.length ? ts.updateTeamMatch([{ players: win, rank: 1 }, { players: here, rank: 2 }]).filter((r) => !winIds.has(r.id)) : [];
+  return full.concat(own);
 }
 // ---- the losing side of a team match must be somebody (cloud audit Q136) ----
 // Two accounts (no game launched) can write one consistent team result for a match key nobody played, each from his own
@@ -6340,6 +6365,7 @@ async function main() {
         parts.map(p => pid(p.steamID)).concat(leavers0.map(x => pid(x.steamID))), nowMs);
       if (!noRating) groupsDirty = true;
       let tsOut;
+      const ghostLoss = [];   // Q167: the losing team's convicted leavers rated against in the winners' update (below)
       if (noRating) {
         tsOut = [];   // Q136: nothing below moves (no TrueSkill update, no points line)
       } else if (isTeamMt(matchType)) {
@@ -6370,6 +6396,26 @@ async function main() {
         } else tsOut = (sides[0].length && sides[1].length)
           ? ts.updateTeamMatch([{ players: sides[winTeam], rank: 1 }, { players: sides[1 - winTeam], rank: 2 }])
           : ts.updateMatch(tsIn);   // one side fully absent -> degenerate: ordinal fallback among the present
+        // Q167 (cloud audit): the losing team's convicted leavers (a confessed leave counts, a Q56-excused dissenter does
+        //   not) stand in for themselves at their pre-match ratings in the WINNERS' update: two grandmasters whose two
+        //   zero-points opponents wrote the level-1 start and left were rated against nobody (the ordinal fallback between
+        //   the two of them above; the ranked rating did not move at all), so their rating never rose above the leavers'
+        //   and the mismatch compression never came; with one opponent left on the court, against him alone (a 2-on-1
+        //   they were expected to win: hardly any move). The present losers keep the update against the winners only (the
+        //   §7 shield reads the same way: losing a man short is not losing to a full team); the leavers' ratings never move
+        //   (they pay the leave). Where the update above already rated against a whole absent losing team (the Q56
+        //   team-gamble dissent; Q62 where it is merged), that update stands and no line is logged; its convicted leavers
+        //   (for Q56 the due refusers) still count toward the mismatch (teamLpPlan absent): two zero-points accounts
+        //   refusing the team gamble, one of them due, gave the grandmasters the same full win as two that left.
+        if (sides[winTeam].length) {
+          for (const x of leavers0) if (teamOfSeat(x.seat, _mts) === 1 - winTeam && !t2ex.has(pid(String(x.steamID)))) ghostLoss.push(x);
+        }
+        if (!ghost.length && ghostLoss.length) {
+          const g0 = ghostLoss.map(x => { const sk = skill[pid(x.steamID)] || ts.DEFAULTS; return { id: x.steamID, mu: sk.mu, sigma: sk.sigma }; });
+          tsOut = leaverGhostUpdate(sides[winTeam], sides[1 - winTeam], g0);
+          console.log('  leaver-ghost ' + c.m + ': team ' + winTeam + ' rated against team ' + (1 - winTeam) + ' with its ' + ghostLoss.length
+            + ' leaver(s) at their pre-match rating (' + ghostLoss.map(x => 'seat ' + x.seat).join(', ') + '), its ' + sides[1 - winTeam].length + ' present player(s) against team ' + winTeam + ' only (Q167)');
+        }
       } else {
         tsOut = ts.updateMatch(tsIn);
       }
@@ -6397,6 +6443,10 @@ async function main() {
             : [];
           if (ghostR.length) sd[emptyT] = ghostR;
           playedOut = (sd[0].length && sd[1].length) ? ts.updateTeamMatch([{ players: sd[winT], rank: 1 }, { players: sd[1 - winT], rank: 2 }]) : asPlayed;
+          if (!ghostR.length && ghostLoss.length) {   // Q167: as the stored update above, from the ranked inputs
+            const gR = ghostLoss.map((x) => { const sk = skill[pid(x.steamID)] || ts.DEFAULTS; return rIn(x.steamID, { id: x.steamID, mu: sk.mu, sigma: sk.sigma }); });
+            playedOut = leaverGhostUpdate(sd[winT], sd[1 - winT], gR);
+          }
         } else playedOut = ts.updateMatch(asPlayed);
       }
       if (rankedNow) {
@@ -6410,8 +6460,10 @@ async function main() {
             + ' -- spread ' + spread(bare) + ' -> ' + spread(used) + (on ? ' (mismatch only with the ranked rating, Q160)' : (off ? ' (no mismatch with the ranked rating, Q160)' : '')));
         }
       }
+      // Q167: the losing team's leavers rated against above, at the rating the plan reads for everybody (ranked at a ranked settle)
+      const absentIn = ghostLoss.map((x) => { const sk = skill[pid(x.steamID)] || ts.DEFAULTS; const r = rIn(x.steamID, { mu: sk.mu, sigma: sk.sigma }); return { seat: x.seat | 0, mmr: ts.displayRating(r.mu, r.sigma) }; });
       const rsPlan = isTeamMt(matchType)
-        ? teamLpPlan(planIn, matchType, scores, leavers0.concat(namedOnly).map(x => x.seat), t2Win)   // Q69: named-only seats still shield their teammates
+        ? teamLpPlan(planIn, matchType, scores, leavers0.concat(namedOnly).map(x => x.seat), t2Win, absentIn)   // Q69: named-only seats still shield their teammates
         : reducedStakesPlan(planIn, matchType, premadeMaskOf(matchType), premadeTrioAtOf(matchType));
       for (const r of tsOut) {
         // repeat-group decay: blend the update toward the pre-match rating by the streak weight

@@ -180,6 +180,10 @@ console.log('=== Q160 layer 5: the strong member of a mixed-tier party takes the
   const ph = reducedStakesPlan([{ steamID: 'a', seat: 0, mmr: 1600, rank: 1, lp: 300 }, { steamID: 'b', seat: 1, mmr: 1600, rank: 2, lp: 300 },
     { steamID: 'c', seat: 2, mmr: 1000, rank: 3, lp: 300 }, { steamID: 'd', seat: 3, mmr: 900, rank: 4, lp: 300 }], 0x12, 1);
   eq('honest same-tier strong pair: unchanged shared delta', [ph.a.adjDelta, ph.b.adjDelta], [Math.round(lpSeg(300).win * (2 * (2.5 / 3) - 1) * lpSeg(300).rs + lpSeg(300).drip), Math.round(lpSeg(300).win * (2 * (2.5 / 3) - 1) * lpSeg(300).rs + lpSeg(300).drip)]);
+  // Q167's leaver branch (an expected win where the losing team left at the start) takes the same team plan: grandmaster
+  // + gold friend present (400 apart, no spread among the present), both opponents convicted leavers at 1000
+  const tg = teamLpPlan([P('g', 0, 2000, 8500), P('f', 1, 1600, 2500)], 6, [6100, 5200, 0, 0], [2, 3], 0, [{ seat: 2, mmr: 1000 }, { seat: 3, mmr: 1000 }]);
+  eq('Q167 leavers: grandmaster + gold friend take the team plan (4 / 7), not the own-tier 0', [tg.g.adjDelta, tg.f.adjDelta], [4, 7]);
 }
 
 console.log('=== reveal magic ===');
