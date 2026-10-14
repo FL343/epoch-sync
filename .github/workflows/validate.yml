@@ -41,17 +41,49 @@ jobs:
           ref: ${{ github.ref_name }}
           # full history: the replica push rejects shallow updates
           fetch-depth: 0
-      - name: test
+      # O463 (2026-10-14): the full suite went from seconds (10-08) to 3+ min (10-13) as audit fixes landed end-to-end
+      # tests that run validate.js tens to hundreds of times, while the settlement itself stayed at about a second --
+      # most of the 5-min cadence, and at that rate past the 10-min job timeout (= no settlement at all). Same code +
+      # same node = same verdict, so a pass is proven once per code change: the key hashes every tracked file except the
+      # state files the workflows write back (tools/code-hash.js), a pass is remembered in the Actions cache, and an
+      # unchanged tree goes straight to the run. Code that has not passed still never settles (no pass = no cache entry
+      # = the tests run; a cache outage only means they run). Retests go 4 at a time. The nightly audit reruns the whole
+      # suite on the real date (a test that only breaks on a later day still surfaces, without holding settlement).
+      - name: code hash
+        id: code
         if: steps.gate.outputs.yield != 'true'
+        run: |
+          k=$(node tools/code-hash.js) || k=""
+          echo "key=tests-pass-${k:-unhashed-$GITHUB_RUN_ID}" >> "$GITHUB_OUTPUT"
+      - name: tests passed before?
+        id: passed
+        if: steps.gate.outputs.yield != 'true'
+        continue-on-error: true
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .tests-passed
+          key: ${{ steps.code.outputs.key }}
+          lookup-only: true
+      - name: test
+        if: steps.gate.outputs.yield != 'true' && steps.passed.outputs.cache-hit != 'true'
         run: |
           # Fixture-driven tests deliberately trip the real ::warning:: emitters and the step-summary
           # writer (forgery / seedcap over-cap / signals eviction / page-cap). Stop the runner from
           # scraping that as run annotations + summary: ~20 fixture warnings per run drowned any real
-          # production warning. Workflow commands resume after the loop; a failing test still fails.
+          # production warning. Workflow commands resume after the suite; a failing test still fails.
           unset GITHUB_STEP_SUMMARY
           t="tests-$(date +%s%N)"; echo "::stop-commands::$t"
-          for f in test/*.js; do echo "== $f =="; node "$f" || exit 1; done
+          node tools/run-tests.js --jobs=4 test/*.js || exit 1
           echo "::$t::"
+          date -u +%FT%TZ > .tests-passed
+      # only after a green test step (no status function in the condition = success() implied)
+      - name: remember the pass
+        if: steps.gate.outputs.yield != 'true' && steps.passed.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .tests-passed
+          key: ${{ steps.code.outputs.key }}
       - name: run
         id: run
         # R1-B2-03: the step times out before the job does (job: 10 min), so a wedged run still leaves the persist

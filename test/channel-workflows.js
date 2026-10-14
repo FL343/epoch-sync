@@ -162,15 +162,19 @@ console.log('-- schedule offsets --');
 // "warnings" + a fake populated summary that bury any real production warning (2026-09-13).
 console.log('-- test-step annotation hygiene --');
 {
+  // the suite runs either as the per-file loop or through tools/run-tests.js (O463: reconcile + nightly audit)
+  const SUITE = '(?:for f in test\\/|node tools\\/run-tests\\.js )';
   for (const f of fs.readdirSync(WF).filter(x => /\.ya?ml$/.test(x))) {
     const src = read(f);
-    const m = src.match(/- name: test\n[\s\S]*?run: \|\n([\s\S]*?)\n\s+- name: /);
-    if (!m) continue;   // workflows without a test step (audit/canary)
+    // a test step may be the last step of its file (audit.yml)
+    const m = src.match(/- name: test\n[\s\S]*?run: \|\n([\s\S]*?)(?=\n\s+- name: |\s*$)/);
+    if (!m) continue;   // workflows without a test step (canary)
     const step = m[1];
-    const loop = step.match(/for f in test\/[^\n]*; do echo "== \$f =="; node "\$f" \|\| exit 1; done/);
-    T(f + ': test step has the fixture loop', !!loop);
-    T(f + ': unsets GITHUB_STEP_SUMMARY before the loop', /unset GITHUB_STEP_SUMMARY[\s\S]*for f in test\//.test(step));
-    T(f + ': ::stop-commands:: opened before the loop and resumed after', /echo "::stop-commands::\$t"[\s\S]*for f in test\/[\s\S]*echo "::\$t::"/.test(step));
+    const loop = /for f in test\/[^\n]*; do echo "== \$f =="; node "\$f" \|\| exit 1; done/.test(step);
+    const runner = /node tools\/run-tests\.js [^\n]*test\/[^\n]* \|\| exit 1/.test(step);
+    T(f + ': test step runs the fixture suite (loop or tools/run-tests.js, red = exit 1)', loop || runner);
+    T(f + ': unsets GITHUB_STEP_SUMMARY before the suite', new RegExp('unset GITHUB_STEP_SUMMARY[\\s\\S]*' + SUITE).test(step));
+    T(f + ': ::stop-commands:: opened before the suite and resumed after', new RegExp('echo "::stop-commands::\\$t"[\\s\\S]*' + SUITE + '[\\s\\S]*echo "::\\$t::"').test(step));
   }
 }
 

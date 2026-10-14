@@ -31,3 +31,14 @@ jobs:
           XP_LB: ${{ secrets.XP_LB }}
           STATE_SALT: ${{ secrets.STATE_SALT }}
         run: node audit.js
+      # O463: the reconcile now runs the suite only when the code changes (a pass is cached per code hash), so a test
+      # that breaks only from some date on (a season start, a year boundary) no longer surfaces on that day there. Rerun
+      # the whole suite here every night on the real clock: red = fix the test or the code; settlement is not held.
+      - name: test
+        if: always()
+        run: |
+          # same annotation hygiene as the reconcile test step (fixtures trip the real ::warning:: emitters)
+          unset GITHUB_STEP_SUMMARY
+          t="tests-$(date +%s%N)"; echo "::stop-commands::$t"
+          node tools/run-tests.js --jobs=4 test/*.js || exit 1
+          echo "::$t::"
