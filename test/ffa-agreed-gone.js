@@ -34,6 +34,26 @@
 //   [10] premade pair (mask): the withdrawn member's partner settles in the pair unit as in the honest twin
 //   [11] residual pinned: a 1V1 where the loser withdraws leaves one record (a lone group never settles, Q184) -> nobody
 //       rated, no put-back line, before and after
+//   Q185 review (the put-back only takes the result he was seen agreeing to, pend.agv: the scores and his own seat):
+//   [3t] ranked 4P with a tie (2nd and 3rd on the same score), one of the tied seats withdraws -> as the honest twin
+//       (shares the place); mutant (the put-back seat scored a point under) -> he drops below the tie
+//   [7pt] playtest channel (PT_MODE, quick only, XP by place): the 2nd withdraws -> the others' XP equals the honest twin;
+//       mutant (no put-back on the channel) -> the 3rd's XP moves up a place
+//   [8p] friends' room (type 10, XP only): out of scope, unchanged -> everyone's XP as when the withdrawn seat never
+//       wrote, no put-back line; mutant (guard widened to every non-team base) -> the XP moves
+//   [5q] quick FFA: M seen agreeing, then his result blanked and a quit confession written (quick: no points fine, the exit
+//       only) -> he stays out, no rating post, the left-out line, the row 0 / 1; mutant (only a points fine counts as
+//       standing) -> his rating moves
+//   [12] ranked 4P, the honest H (seat 0) wins; H and two others seen agreeing while the third is late; H's result row is
+//       then overwritten (his next match) and the three others write ONE NEW consistent result with H's seat last -> H is
+//       left out (as before Q185), not rated last, the moved line, the moved row 1; the same timeline with the agreed scores
+//       kept puts him back at 1st; mutant (pin check off) -> H rated at the rewritten last place
+//   [13] ranked 4P, the same scores, but the two players left write a roster that swaps the honest winner H (record row
+//       overwritten) with another seat that went missing after agreeing (B, 3rd) -> both left out (H not moved to 3rd, B not
+//       to 1st), the moved row 2; the roster kept -> both back at their own places; mutant (pin without the seat) -> H rated
+//       3rd, B 1st
+//   [14] the deploy: a pending entry from before the pin (pend.agreed, no pend.agv) -> the seat is left out as before Q185
+//       (the moved line), the others as before; mutant (a missing pin taken as a match) -> he is rated
 // State isolation is structural (every *_FILE var scanned and redirected, cwd = temp dir), like test/ffa-named-count.js.
 const { spawnSync } = require('child_process');
 const fs = require('fs'), path = require('path'), os = require('os');
@@ -169,10 +189,10 @@ function boardsWith(recs) {
   return boards;
 }
 // steps: [[ms since the previous run, recs, env?], ...]; files0: the state the first run starts from
-function timeline(steps, script, files0) {
+function timeline(steps, script, files0, mkBoards) {
   const out = []; let state = null;
   for (const [ms, recs, env] of steps) {
-    const r = runCron(boardsWith(recs), state ? advance(state, ms) : (files0 || null), env || null, script);
+    const r = runCron((mkBoards || boardsWith)(recs), state ? advance(state, ms) : (files0 || null), env || null, script);
     out.push(r); state = r.state;
     if (r.code !== 0) break;
   }
@@ -233,11 +253,20 @@ const CONF_LINE = (key, sid) => new RegExp('agreed-back ' + key + ': seat [0-9] 
 const ROW_RE = /\| matchmade FFA seats seen agreeing whose record is gone at the settle: settled at their agreed place \/ left out, their own confession for the match standing \(Q185\) \| (\d+) \/ (\d+) \|/;
 const rowSum = (rs) => rs.reduce((a, r) => { const m = ROW_RE.exec(r.summary || ''); return m ? [a[0] + +m[1], a[1] + +m[2]] : [NaN, NaN]; }, [0, 0]);
 const ROWS = (rs, want) => JSON.stringify(rowSum(rs)) === JSON.stringify(want);
+const MOVED_RE = /\| of those seats, left out: the scores or the seat read at the settle are not the ones they were seen agreeing to \(Q185 review\) \| (\d+) \|/;
+const movedSum = (rs) => rs.reduce((a, r) => { const m = MOVED_RE.exec(r.summary || ''); return m ? a + +m[1] : NaN; }, 0);
+const MOVED_LINE = (key, sid) => new RegExp('agreed-back ' + key + ': seat [0-9] = ' + v.pid(sid).slice(0, 8) + ' record gone, but the result read now is not the one he was seen agreeing to -- left out \\(Q185 review\\)');
 const PARTS_LOOP = "    for (let seat = 0; seat < pc; seat++) { if (seatToId[seat] != null) parts.push({ steamID: seatToId[seat], seat, score: scores[seat] | 0 }); }\n";
 const GUARD_IF = 'if (baseMt(matchType) === 1 || baseMt(matchType) === 2) {\n      let back = 0;\n';
 const GUARD = '    ' + GUARD_IF;
 const AGREED = "        if (!(pend.agreed && pend.agreed.indexOf(hx) >= 0) || parts.some((p) => String(p.steamID) === String(x.steamID))) continue;\n";
 const CONF = '        if (cs && !cs.refunded && (cs.ded > 0 || cs.ex)) {\n';
+const PIN = "        if (!(pend.agv && pend.agv[hx] === agreedPin(x.seat))) {   // Q185 review: not the scores or the seat he agreed to (or no pin yet)\n"
+  + "          RUN.agreedMoved = (RUN.agreedMoved | 0) + 1;\n";
+const PIN_OFF = "        if (false) {\n          RUN.agreedMoved = (RUN.agreedMoved | 0) + 1;\n";
+const PIN_REC = "    const agreedPin = (seat) => crypto.createHash('sha256').update(vNow + '|' + (seat | 0)).digest('hex').slice(0, 16);\n"
+  + "    { const agv = pend.agv || (pend.agv = {}); for (const r of g) { const h = pid(String(r.steamID)); if (agv[h] == null) agv[h] = agreedPin(r.d[5]); } }\n";
+const AGREED_PUSH = "    for (const sid of writerSids) { const h = pid(sid); if (agreed.indexOf(h) < 0) agreed.push(h); }\n";
 const PUSH = '        parts.push({ steamID: x.steamID, seat: x.seat, score: scores[x.seat] | 0 });\n';
 const SEATS = '      if (back) parts.sort((a, b) => a.seat - b.seat);\n';
 const SORTED = '    const sorted = [...parts].sort((a, b) => b.score - a.score);\n';
@@ -257,6 +286,10 @@ console.log('=== a matchmade FFA seat seen agreeing whose record is gone settles
   T('[0] the absent seats from the consensus roster (detectLeavers), his own confession keyed on the match',
     SRC.indexOf('      for (const x of detectLeavers(g)) {\n        const hx = pid(String(x.steamID));\n', at(GUARD)) > 0 && SRC.indexOf("        const cs = confState[hx + '|' + c.m];\n", at(AGREED)) > 0);
   T('[0] the Q185 summary row', /'\| matchmade FFA seats seen agreeing whose record is gone at the settle: settled at their agreed place \/ left out, their own confession for the match standing \(Q185\) \| ' \+ s\('agreedBack', 0\) \+ ' \/ ' \+ s\('agreedConf', 0\) \+ ' \|',/.test(SRC));
+  T('[0] Q185 review: the pin recorded right after the agreed push (scores + own seat, first sighting kept), checked between the agreed and the confession checks; its summary row',
+    [PIN, PIN_REC, AGREED_PUSH].every((a) => SRC.split(a).length === 2) && at(AGREED_PUSH) < at(PIN_REC) && at(PIN_REC) - at(AGREED_PUSH) < 1200 && at(PIN_REC) < at(GUARD)
+    && at(AGREED) + AGREED.length === at(PIN) && at(PIN) < at(CONF)
+    && /'\| of those seats, left out: the scores or the seat read at the settle are not the ones they were seen agreeing to \(Q185 review\) \| ' \+ s\('agreedMoved', 0\) \+ ' \|',/.test(SRC));
 }
 
 // ---- [1] ranked 4P, M last withdraws ----
@@ -266,7 +299,8 @@ console.log('=== a matchmade FFA seat seen agreeing whose record is gone settles
   T('[1] both runs exit 0, settled', allOk(a, 5) && allOk(b, 5) && processedOf(last(a)).has(k.key) && processedOf(last(b)).has(k.key), last(a).out.slice(-600));
   T('[1] every account\'s points and rating posts equal the honest twin (M last: -17 for him)', sameFor(a, b, sids) && down(a, W) && up(a, O[0]), show(a, sids) + ' vs ' + show(b, sids));
   T('[1] M not convicted, the put-back line, the agreed line kept, the row 1 / 0', leavesOf(last(a), W) === 0 && BACK_LINE(k.key, W).test(outOf(a))
-    && /record gone but seen agreeing earlier -- finished, not a leaver/.test(outOf(a)) && ROWS(a, [1, 0]) && ROWS(b, [0, 0]), JSON.stringify(rowSum(a)));
+    && /record gone but seen agreeing earlier -- finished, not a leaver/.test(outOf(a)) && ROWS(a, [1, 0]) && ROWS(b, [0, 0]) && movedSum(a) === 0 && movedSum(b) === 0,
+    JSON.stringify([rowSum(a), movedSum(a)]));
   OFF((script) => {
     const m = timeline(t.w, script);
     const p1 = ptsIn(m, O[1]), q1 = ptsIn(b, O[1]), p2 = ptsIn(m, O[2]), q2 = ptsIn(b, O[2]);
@@ -295,6 +329,18 @@ console.log('=== a matchmade FFA seat seen agreeing whose record is gone settles
   const a = timeline(t.w), b = timeline(t.o);
   T('[3] ranked 3P: every account as the honest twin, the put-back line', allOk(a, 5) && allOk(b, 5) && sameFor(a, b, sids) && down(a, W) && BACK_LINE(k.key, W).test(outOf(a)),
     show(a, sids) + ' vs ' + show(b, sids));
+}
+
+// ---- [3t] (Q185 review) a tie: the withdrawn seat shares its place as in the honest twin ----
+{
+  const k = keyRecs(2, 0xF38B, [O[9], O[10], W, O[11]], [6100, 4800, 4800, 3900]), t = wd(k, 2, 3), sids = k.ros;
+  const a = timeline(t.w), b = timeline(t.o);
+  T('[3t] ranked 4P, tied 2nd / 3rd, one tied seat withdraws: every account as the honest twin, the put-back line', allOk(a, 5) && allOk(b, 5) && sameFor(a, b, sids)
+    && BACK_LINE(k.key, W).test(outOf(a)) && JSON.stringify(ptsIn(a, W)) === JSON.stringify(ptsIn(a, O[10])), show(a, sids) + ' vs ' + show(b, sids));
+  withMutant('under', PUSH, '        parts.push({ steamID: x.steamID, seat: x.seat, score: (scores[x.seat] | 0) - 1 });\n', (script) => {
+    const m = timeline(t.w, script);
+    T('[3t] mutant: the put-back seat scored a point under -> he drops below the tie', allOk(m, 5) && !sameFor(m, b, [W]), show(m, sids));
+  });
 }
 
 // ---- [4] an honest player's result row overwritten by his next match's start while the group waited ----
@@ -360,12 +406,43 @@ console.log('=== a matchmade FFA seat seen agreeing whose record is gone settles
   });
 }
 
+// ---- [5q] (Q185 review) quick FFA: a quit confession charges the exit only (no points fine) and still keeps him out ----
+{
+  const k = keyRecs(1, 0xF595, [O[9], O[10], O[11], W], S4);
+  const conf = { sid: W, d: rec(0xB5, 1, 0xF595, 3, 0, false, k.ros, S4, 5) };
+  const t = wd(k, 3, 2, { instead: [conf] }), sids = k.ros;
+  const a = timeline(t.w), b = timeline(t.o);
+  T('[5q] quick: runs exit 0; M left out (no rating post, one leave from the confession, no points anywhere), the others rated, the left-out line, the row 0 / 1',
+    allOk(a, 5) && allOk(b, 5) && rOf(a, W).length === 0 && leavesOf(last(a), W) === 1 && sids.every((s) => none(a, s)) && rOf(a, O[9]).length === 1
+    && CONF_LINE(k.key, W).test(outOf(a)) && !BACK_LINE(k.key, W).test(outOf(a)) && ROWS(a, [0, 1]) && movedSum(a) === 0,
+    JSON.stringify([rOf(a, W), leavesOf(last(a), W), rowSum(a)]) + last(a).out.slice(-500));
+  withMutant('dedonly', CONF, '        if (cs && !cs.refunded && cs.ded > 0) {\n', (script) => {
+    const m = timeline(t.w, script);
+    T('[5q] mutant: only a points fine counts as standing -> his rating moves (put back on top of the exit)', allOk(m, 5) && rOf(m, W).length === 1, show(m, sids));
+  });
+}
+
 // ---- [7] quick FFA: the hidden rating ----
 {
   const k = keyRecs(1, 0xF785, [O[6], O[7], O[8], W], S4), t = wd(k, 3, 2), sids = k.ros;
   const a = timeline(t.w), b = timeline(t.o);
   T('[7] quick 4P: rating posts equal the honest twin, no points move, the put-back line', allOk(a, 5) && allOk(b, 5) && sameFor(a, b, sids) && rOf(a, W).length === 1
     && sids.every((s) => none(a, s)) && BACK_LINE(k.key, W).test(outOf(a)), show(a, sids) + ' vs ' + show(b, sids));
+}
+
+// ---- [7pt] (Q185 review) playtest channel: quick only, XP by place ----
+{
+  const k = keyRecs(1, 0xF2B5, [O[6], W, O[7], O[8]], S4), t = wd(k, 1, 3), sids = k.ros;
+  const pt = (steps) => steps.map(([ms, recs]) => [ms, recs, { PT_MODE: '1' }]);
+  const ptB = (recs) => boardsWith(recs).filter((x) => x.name !== 'rating' && x.name !== 'points');   // the channel refuses to run beside them
+  const a = timeline(pt(t.w), null, null, ptB), b = timeline(pt(t.o), null, null, ptB);
+  T('[7pt] playtest quick 4P, the 2nd withdraws: the others\' XP equals the honest twin, the put-back line', allOk(a, 5) && allOk(b, 5) && processedOf(last(a)).has(k.key)
+    && [O[6], O[7], O[8]].every((s) => xpOf(a, s) === xpOf(b, s) && xpOf(a, s) > 0) && xpOf(a, W) === 0 && BACK_LINE(k.key, W).test(outOf(a)),
+    JSON.stringify(sids.map((s) => [xpOf(a, s), xpOf(b, s)])) + last(a).out.slice(-400));
+  withMutant('nopt', GUARD_IF, 'if (!PT_MODE && (baseMt(matchType) === 1 || baseMt(matchType) === 2)) {\n      let back = 0;\n', (script) => {
+    const m = timeline(pt(t.w), script, null, ptB);
+    T('[7pt] mutant: no put-back on the channel -> the 3rd\'s XP moves up a place', allOk(m, 5) && xpOf(m, O[7]) > xpOf(b, O[7]), JSON.stringify(sids.map((s) => xpOf(m, s))));
+  });
 }
 
 // ---- [8] ranked team brawl (base 4): unchanged, no put-back ----
@@ -380,6 +457,20 @@ console.log('=== a matchmade FFA seat seen agreeing whose record is gone settles
   });
 }
 
+// ---- [8p] (Q185 review) a friends' room (type 10, XP only) is out of scope: unchanged ----
+{
+  const k = keyRecs(10, 0xF2A5, [O[3], W, O[4], O[5]], S4), t = wd(k, 1, 3), sids = k.ros;
+  const a = timeline(t.w);
+  const Sn = k.S.filter((_, i) => i !== 1), Rn = k.R.filter((_, i) => i !== 1);   // as when W never wrote anything
+  const pre = timeline([[0, Sn], [5 * MIN, Sn.concat(Rn.slice(0, 2))], [GRACE, Sn.concat(Rn)], [LEAVE, Sn.concat(Rn)], [3 * HOUR, Sn.concat(Rn)]]);
+  T('[8p] friends\' room, the 2nd withdraws: settled, everyone\'s XP as when he never wrote, no put-back line', allOk(a, 5) && allOk(pre, 5) && processedOf(last(a)).has(k.key)
+    && sids.every((s) => xpOf(a, s) === xpOf(pre, s)) && xpOf(a, O[3]) > 0 && !/agreed-back/.test(outOf(a)), JSON.stringify(sids.map((s) => [xpOf(a, s), xpOf(pre, s)])));
+  withMutant('wide2', GUARD_IF, 'if (!isTeamMt(matchType)) {\n      let back = 0;\n', (script) => {
+    const m = timeline(t.w, script);
+    T('[8p] mutant: the guard widened to every non-team base -> the room\'s XP moves', allOk(m, 5) && !sids.every((s) => xpOf(m, s) === xpOf(pre, s)), JSON.stringify(sids.map((s) => xpOf(m, s))));
+  });
+}
+
 // ---- [9] a seat named by the others only is not put back ----
 {
   const k = keyRecs(2, 0xF985, [O[0], O[1], O[2], N], S4);
@@ -388,9 +479,9 @@ console.log('=== a matchmade FFA seat seen agreeing whose record is gone settles
   const a = timeline(steps);
   T('[9] named-only (never wrote): not rated, not put back, the Q69 line', allOk(a, 5) && none(a, N) && up(a, O[0]) && !/agreed-back/.test(outOf(a))
     && /named by the others but never wrote his own record for this match -- not a leaver \(Q69\)/.test(outOf(a)), last(a).out.slice(-500));
-  withMutant('noagree', AGREED, "        if (parts.some((p) => String(p.steamID) === String(x.steamID))) continue;\n", (script) => {
+  withMutant('noagree', AGREED + PIN, "        if (parts.some((p) => String(p.steamID) === String(x.steamID))) continue;\n" + PIN_OFF, (script) => {
     const m = timeline(steps, script);
-    T('[9] mutant: agreed check off -> the named-only seat is rated', allOk(m, 5) && !none(m, N), show(m, k.ros));
+    T('[9] mutant: agreed check (and the pin check) off -> the named-only seat is rated', allOk(m, 5) && !none(m, N), show(m, k.ros));
   });
 }
 
@@ -415,6 +506,78 @@ console.log('=== a matchmade FFA seat seen agreeing whose record is gone settles
   const a = timeline(steps);
   T('[11] 1V1 withdrawn after the group was seen (pacing): one record left, a lone group, nobody rated, no put-back line', allOk(a, 5) && none(a, H) && none(a, W)
     && /lone\(1\)/.test(outOf(a)) && !/agreed-back/.test(outOf(a)), last(a).out.slice(-500));
+}
+
+// ---- [12] (Q185 review) the scores read at the settle are not the ones he agreed to: left out ----
+{
+  const ros = [H, O[0], O[1], O[2]], X = [3000, 6100, 5200, 4800];
+  const k = keyRecs(2, 0xFC85, ros, S4);
+  const next = { sid: H, d: rec(0xB2, 2, 0xFC86, 0, 0, false, [H, Jn[0], Jn[1], Jn[2]], S4), shard: 1 };   // his result row = shard 1
+  const Rx = ros.map((s, i) => ({ sid: s, d: rec(0xB1, 2, 0xFC85, i, placeIn(X, i), placeIn(X, i) === 1, ros, X) }));
+  const t1 = k.S.concat(k.R.slice(0, 3));                                        // O[2] late; H, O[0], O[1] seen agreeing
+  const moved = k.S.concat([next], Rx.slice(1)), kept = k.S.concat([next], k.R.slice(1));
+  const run = (x, script) => timeline([[0, k.S], [5 * MIN, t1], [GRACE, x], [LEAVE, x], [3 * HOUR, x]], script);
+  const a = run(moved), b = run(kept);
+  T('[12] rewritten after he agreed: H left out (not rated, not rated last), the moved line, no put-back line, the rows 0 / 0 and 1', allOk(a, 5) && processedOf(last(a)).has(k.key)
+    && none(a, H) && rOf(a, H).length === 0 && leavesOf(last(a), H) === 0 && MOVED_LINE(k.key, H).test(outOf(a)) && !BACK_LINE(k.key, H).test(outOf(a)) && ROWS(a, [0, 0]) && movedSum(a) === 1,
+    show(a, ros) + JSON.stringify([rowSum(a), movedSum(a)]) + last(a).out.slice(-500));
+  T('[12] the agreed scores kept: H put back at 1st, the moved row 0', allOk(b, 5) && up(b, H) && BACK_LINE(k.key, H).test(outOf(b)) && ROWS(b, [1, 0]) && movedSum(b) === 0, show(b, ros));
+  withMutant('nopin', PIN, PIN_OFF, (script) => {
+    const m = run(moved, script);
+    T('[12] mutant: pin check off -> H rated at the rewritten last place', allOk(m, 5) && down(m, H), show(m, ros));
+  });
+}
+
+// ---- [13] (Q185 review) the seat read at the settle is not the one he agreed to: left out ----
+//   H (seat 0, 1st) and B (seat 2, 3rd) seen agreeing with A while C is late; H's result row is overwritten by his next match,
+//   B blanks both of his rows, and A and C (C's result now in) write a roster with H at seat 2 and B at seat 0 -- the scores
+//   unchanged, so a pin of the scores alone matches for both
+{
+  const B = O[4], A = O[3], C = O[5];
+  const ros = [H, A, B, C], sw = [B, A, H, C];
+  const k = keyRecs(2, 0xFD85, ros, S4);
+  const next = { sid: H, d: rec(0xB2, 2, 0xFD86, 0, 0, false, [H, Jn[0], Jn[1], Jn[2]], S4), shard: 1 };
+  const Rsw = ros.map((s, i) => ({ sid: s, d: rec(0xB1, 2, 0xFD85, i, placeIn(S4, i), placeIn(S4, i) === 1, sw, S4) }));
+  const t1 = k.S.concat(k.R.slice(0, 3));                                        // C late; H, A, B seen agreeing
+  const startsLeft = [k.S[0], k.S[1], k.S[3]];                                   // B's rows both gone
+  const swapped = startsLeft.concat([next, Rsw[1], Rsw[3]]), kept = startsLeft.concat([next, k.R[1], k.R[3]]);
+  const run = (x, script) => timeline([[0, k.S], [5 * MIN, t1], [GRACE, x], [LEAVE, x], [3 * HOUR, x]], script);
+  const a = run(swapped), b = run(kept);
+  T('[13] seats swapped after they agreed: H and B left out (H not rated 3rd, B not rated 1st), the moved lines, the rows 0 / 0 and 2', allOk(a, 5) && processedOf(last(a)).has(k.key)
+    && none(a, H) && none(a, B) && leavesOf(last(a), H) === 0 && leavesOf(last(a), B) === 0 && MOVED_LINE(k.key, H).test(outOf(a)) && MOVED_LINE(k.key, B).test(outOf(a))
+    && !/agreed-back [^\n]*settled at his agreed place/.test(outOf(a)) && ROWS(a, [0, 0]) && movedSum(a) === 2, show(a, ros) + JSON.stringify([rowSum(a), movedSum(a)]) + last(a).out.slice(-600));
+  T('[13] the roster kept: H back at 1st, B at 3rd (as their own places), the rows 2 / 0 and 0', allOk(b, 5) && up(b, H) && down(b, B) && BACK_LINE(k.key, H).test(outOf(b))
+    && BACK_LINE(k.key, B).test(outOf(b)) && ROWS(b, [2, 0]) && movedSum(b) === 0, show(b, ros) + JSON.stringify([rowSum(b), movedSum(b)]));
+  withMutant('noseat', "update(vNow + '|' + (seat | 0))", 'update(vNow)', (script) => {
+    const m = run(swapped, script);
+    T('[13] mutant: pin without the seat -> H rated at the swapped 3rd place, B at 1st', allOk(m, 5) && down(m, H) && up(m, B), show(m, ros));
+  });
+}
+
+// ---- [14] (Q185 review) the deploy: an entry from before the pin puts nobody back ----
+//   [1]'s timeline, the pins taken out of the carried starts state after the run that saw M agree (an entry written by the
+//   job before this change has pend.agreed but no pend.agv)
+{
+  const k = keyRecs(2, 0xFE85, [O[0], O[1], O[2], W], S4), t = wd(k, 3, 2), sids = k.ros;
+  const old = (script) => {
+    const head = timeline(t.w.slice(0, 2), script);
+    const st = JSON.parse(JSON.stringify(last(head).state));
+    let had = 0;
+    for (const e of Object.values(st.STARTS_FILE || {})) if (e && e.agv) { had++; delete e.agv; }
+    const [ms0] = t.w[2];
+    const tail = timeline([[0, t.w[2][1]]].concat(t.w.slice(3)), script, advance(st, ms0));
+    return { rs: head.concat(tail), had };
+  };
+  const o = old(), b = timeline(t.o);
+  const pre = timeline([[0, k.S.slice(0, 3)], [5 * MIN, k.S.slice(0, 3).concat(k.R.slice(0, 2))], [GRACE, k.S.slice(0, 3).concat(k.R.slice(0, 3))],
+    [LEAVE, k.S.slice(0, 3).concat(k.R.slice(0, 3))], [3 * HOUR, k.S.slice(0, 3).concat(k.R.slice(0, 3))]]);
+  T('[14] an entry from before the pin (agreed, no pins): M left out as before Q185 (not rated, not a leaver), the moved line, the others as when he never wrote',
+    o.had === 1 && allOk(o.rs, 5) && processedOf(last(o.rs)).has(k.key) && none(o.rs, W) && rOf(o.rs, W).length === 0 && leavesOf(last(o.rs), W) === 0 && MOVED_LINE(k.key, W).test(outOf(o.rs))
+    && [O[0], O[1], O[2]].every((s) => pts(o.rs, [s]) === pts(pre, [s])), JSON.stringify([o.had]) + show(o.rs, sids) + ' vs ' + show(pre, sids));
+  withMutant('nopinok', PIN, "        if (pend.agv && pend.agv[hx] != null && pend.agv[hx] !== agreedPin(x.seat)) {\n          RUN.agreedMoved = (RUN.agreedMoved | 0) + 1;\n", (script) => {
+    const m = old(script);
+    T('[14] mutant: a missing pin taken as a match -> M rated (as the honest twin)', m.had === 1 && allOk(m.rs, 5) && sameFor(m.rs, b, [W]) && down(m.rs, W), show(m.rs, sids));
+  });
 }
 
 console.log(failN ? '=== FAIL -- ' + failN + ' fail (ffa-agreed-gone) ===' : '=== PASS -- 0 fail (ffa-agreed-gone) ===');

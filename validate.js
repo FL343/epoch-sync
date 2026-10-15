@@ -2382,6 +2382,7 @@ function writeRunSummary() {
       '| ranked matches the ranked rating turns into / out of a mismatch, quick matches and the repeat-group decay set aside (Q160) | ' + s('heldMismatch', 0) + ' / ' + s('heldMismatchOff', 0) + ' |',
       '| absent seats named by others only, not convicted (Q69) | ' + s('unattested', 0) + ' |',
       '| matchmade FFA seats seen agreeing whose record is gone at the settle: settled at their agreed place / left out, their own confession for the match standing (Q185) | ' + s('agreedBack', 0) + ' / ' + s('agreedConf', 0) + ' |',
+      '| of those seats, left out: the scores or the seat read at the settle are not the ones they were seen agreeing to (Q185 review) | ' + s('agreedMoved', 0) + ' |',
       '| team matches with nobody on the losing team, settled without a rating move (Q136) | ' + s('noLoser', 0) + ' |',
       '| team matches with a losing seat nobody accounts for (named by the others only or left blank), settled without a rating move (Q149) | ' + s('namedLoser', 0) + ' |',
       '| named-only losing seats counted on their account / of them repeated: ' + NL_REPEAT + ' or more such matches and different opponents / of those more losses unwritten than written / not counted, no signals of his own (Q161, nobody flagged) | ' + s('nlSeat', 0) + ' / ' + s('nlRepeat', 0) + ' / ' + s('nlUnwritten', 0) + ' / ' + s('nlNone', 0) + ' |',
@@ -6782,6 +6783,16 @@ async function main() {
     //   rest of the group settles -- see the leaver filter below
     const agreed = pend.agreed || (pend.agreed = []);
     for (const sid of writerSids) { const h = pid(sid); if (agreed.indexOf(h) < 0) agreed.push(h); }
+    // Q185 review: what each writer was seen agreeing to -- the consistency vector and the seat his own record was written
+    //   from, as a short hash per pid (pend.agv), the first sighting kept. The FFA put-back below takes a seat only while
+    //   the records read now give that seat the same pin: the same scores and the same seat for him. Without it the place
+    //   came from whatever the records left at the settle said, and the players left could write him somewhere else after
+    //   he agreed -- new scores for every seat (repro: an honest winner rated last, -17) or a roster that swaps him with
+    //   another agreed seat that went missing (scores unchanged). A missing pin (an entry from before this) puts nobody
+    //   back, as before Q185. Recorded on every lane that passes here, so a wider guard below still finds pins.
+    const vNow = vecOf(g[0]);
+    const agreedPin = (seat) => crypto.createHash('sha256').update(vNow + '|' + (seat | 0)).digest('hex').slice(0, 16);
+    { const agv = pend.agv || (pend.agv = {}); for (const r of g) { const h = pid(String(r.steamID)); if (agv[h] == null) agv[h] = agreedPin(r.d[5]); } }
     // absent-seat hold (R1-B2-04 / R1-X14, see absenceHold): a roster seat with no record is not settled around until this
     //   run read every record shard and the gap has stood for the grace. Stamped before the pacing gate (the grace runs
     //   alongside the start floor), judged after it; ahead of the one-match-at-a-time claim (a held group claims no slot)
@@ -6841,9 +6852,11 @@ async function main() {
     //   was seen agreeing while the group waited for a late record, then overwrote both of his records with empty ones kept
     //   his points (not convicted: he was seen agreeing), and the honest players around him took the smaller field (ranked
     //   4P, M last: 2nd +3 instead of +15, 3rd -17 instead of -4); in a 1V1 the winner was left alone and nobody was rated.
-    //   Only his own record puts him on that list (no other account can) and the result is the one he agreed to, so nothing
-    //   here rests on anybody else's word. An honest player whose next match overwrote his record while the group waited (the
-    //   same shard row, 1 in 50) now gets the result this match gave him, the one his client showed, instead of none.
+    //   Only his own record puts him on that list (no other account can), and (Q185 review) he is put back only while the
+    //   scores and his seat read now are the ones he was seen agreeing to (pend.agv): if the players left wrote something
+    //   else after he agreed, he stays out as before. An honest player whose record was overwritten while the group waited
+    //   (the same shard row: one device writes 50 more records before it comes back to a row, so in practice another device
+    //   or a reinstall, whose count starts over) now gets the result this match gave him, the one his client showed.
     //   XP / CP stay per record (no record, none for him, as before). A seat whose own confession for this match still
     //   stands (penalty not refunded) stays out as before: the confession already charged that leave. Team matches read such
     //   seats in the points plan only (Q183), unchanged.
@@ -6852,6 +6865,11 @@ async function main() {
       for (const x of detectLeavers(g)) {
         const hx = pid(String(x.steamID));
         if (!(pend.agreed && pend.agreed.indexOf(hx) >= 0) || parts.some((p) => String(p.steamID) === String(x.steamID))) continue;
+        if (!(pend.agv && pend.agv[hx] === agreedPin(x.seat))) {   // Q185 review: not the scores or the seat he agreed to (or no pin yet)
+          RUN.agreedMoved = (RUN.agreedMoved | 0) + 1;
+          console.log('  agreed-back ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' record gone, but the result read now is not the one he was seen agreeing to -- left out (Q185 review)');
+          continue;
+        }
         const cs = confState[hx + '|' + c.m];
         if (cs && !cs.refunded && (cs.ded > 0 || cs.ex)) {
           RUN.agreedConf = (RUN.agreedConf | 0) + 1;
