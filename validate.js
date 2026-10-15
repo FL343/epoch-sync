@@ -3888,9 +3888,10 @@ function creditXpEndless(g, tail, xp, changedXp, spSet, mult) {   // O216: class
     const cls = dispClassOf(r.dispCode);
     if (cls === 'abandoner') continue;
     const bm = xpBoostMult(xpLevelOf(xp[sid] | 0), !!(spSet && spSet.has(String(sid))));
-    const gain = Math.round(computeXpEndless(tail.startDepth, tail.endDepth, bm) * ((mult > 0 && isFinite(mult)) ? mult : 1));
+    const sd = (typeof tail.startOf === 'function' && tail.startOf(sid) != null) ? (tail.startOf(sid) | 0) : (tail.startDepth | 0);   // cloud audit Q237: the team competitive lane passes each writer's own start
+    const gain = Math.round(computeXpEndless(sd, tail.endDepth, bm) * ((mult > 0 && isFinite(mult)) ? mult : 1));
     if (gain > 0) { xp[sid] = (xp[sid] | 0) + gain; changedXp[sid] = xp[sid]; }
-    console.log('  xp-endless ' + plog(sid) + ' ' + cls + ' depth ' + (tail.startDepth | 0) + '->' + (tail.endDepth | 0)
+    console.log('  xp-endless ' + plog(sid) + ' ' + cls + ' depth ' + sd + '->' + (tail.endDepth | 0)
       + (bm !== 1 ? ' boost x' + bm : '') + ' +' + gain + ' -> ' + (xp[sid] | 0));
   }
 }
@@ -4194,6 +4195,54 @@ function soloAdvance(st, key, f, m, plan, nowMs) {
   delete st.wait[m];
   if (st.held) delete st.held[m];
   return run;
+}
+// ---- cloud audit Q237: team competitive progress XP, a floor per member ----
+// A rolled-back "save & quit" whose suspended records two or more ends could not take back (or whose ABORT never reached them)
+//   still settles on its own: those residual records agree, so they make a save point for THEIR writers and the chain head jumps
+//   to the save depth. The member whose take-back worked is not in that group, yet the head-based rules (B-F2 overlap: XP from
+//   the head; chain-back: nothing) treated the depths up to the head as his too -- the next checkpoint paid him only past the
+//   head, a retried save or the run's FINAL at the head paid him nothing, and in the run's first stride every later segment was
+//   lost for the whole team (a second depth-0 segment is a 'restart'). The chain file now keeps what each member was credited:
+//   run.xf[pid] = the deepest depth his progress XP reached on this run (every settled writer, a catch-up included); run.xf0 =
+//   the floor of a member not in the map: 0 for a run first settled with this code, the head at its first touch for a run that
+//   was in the chain file before (the old rule credited nobody past the head: crediting from there never pays a depth twice, and
+//   nothing already credited is recomputed). A chain file without the fields (an older cron) reads every floor as the head --
+//   the old rule. Team competitive lane only; solo and team classic keep their rules.
+function teamXpFloor(run, p) {
+  if (!run) return 0;
+  if (run.xf && run.xf[p] != null) return run.xf[p] | 0;
+  if (run.xf0 != null) return run.xf0 | 0;
+  return run.max | 0;
+}
+function teamXpWriters(g) { return [...new Set((g || []).map((r) => String(r.steamID)))]; }
+// each writer's progress XP start: from his own floor, never further than the old rule max(segment start, proven) -- nobody gets
+//   less than before; a member whose floor is his own never gets a depth twice
+function teamXpStarts(run, g, f, proven) {
+  const sd = f.startDepth | 0, old = Math.max(sd, proven | 0), out = {};
+  for (const sid of teamXpWriters(g)) out[sid] = Math.min(old, Math.max(sd, teamXpFloor(run, pid(sid))));
+  return out;
+}
+// after a settle (a catch-up included): every writer's floor reaches the segment end (never moves down); the first touch fixes
+//   the run's default floor at the head it had before this settle
+function teamXpMark(run, g, f, prevMax) {
+  if (!run) return;
+  if (run.xf0 == null) run.xf0 = prevMax | 0;
+  run.xf = run.xf || {};
+  for (const sid of teamXpWriters(g)) { const p = pid(sid); run.xf[p] = Math.max(run.xf[p] == null ? 0 : (run.xf[p] | 0), f.endDepth | 0); }
+}
+// a chain reject that is the shadow of a residual save point, not a replay (plan = soloChainPlan's verdict, run = the chain entry
+//   read before it): a second depth-0 segment reaching past the head is the B-F2 overlap one stride earlier; a segment at or
+//   behind the head ('chain-back', or a depth-0 'restart' at the head) still settles for the writers whose floor is below its
+//   end -- a catch-up: their progress XP from their floor, their ladder and milestones; the chain is left as it is (no head,
+//   save point, resume fee or FINAL mark -- exactly what the reject left), nobody flagged. A replay of settled depths has no
+//   writer behind (every writer's floor reached its end when it settled) and stays rejected; so does any other reject.
+function teamRollbackPlan(run, g, f, plan) {
+  if (!plan || plan.ok !== false || !run) return plan;
+  const sd = f.startDepth | 0, ed = f.endDepth | 0, head = run.max | 0;
+  if (plan.reason === 'restart' && sd === 0 && ed > head) return { ok: true, proven: head, overlap: 0 };
+  const behind = teamXpWriters(g).filter((sid) => teamXpFloor(run, pid(sid)) < ed);
+  if ((plan.reason === 'chain-back' || plan.reason === 'restart') && behind.length) return { ok: true, proven: head, catchUp: behind };
+  return plan;
 }
 // Same-tick segment ordering (2026-09-09): the settle loop walks `fresh` in order and the chain memory
 // (soloAdvance) is updated synchronously, so two segments of one run that land in the same tick must be
@@ -6689,7 +6738,12 @@ async function main() {
         const f = { startDepth: t.startDepth | 0, endDepth: t.endDepth | 0, flags: t.flags | 0,
           build: t.build >>> 0, picksLo: t.picksLo | 0, picksHi: t.picksHi | 0, seasonId: t.seasonId | 0,
           rerollLo: t.rerollLo >>> 0, rerollHi: t.rerollHi >>> 0 };   // perk tail + reroll bitmap ride the same consensus vector
-        const plan = soloChainPlan(soloState, key, f, c.m, nowMs);
+        // cloud audit Q237: the chain entry is read before the planner (XP floors + the head this settle starts from); a reject that
+        //   is the shadow of a residual save point becomes a depth-0 overlap or a catch-up (teamRollbackPlan)
+        const runT0 = soloState.runs[key], headT0 = runT0 ? (runT0.max | 0) : 0;
+        const plan0 = soloChainPlan(soloState, key, f, c.m, nowMs);
+        const plan = teamRollbackPlan(runT0, g, f, plan0);
+        const catchUp = plan.catchUp ? new Set(plan.catchUp) : null;
         if (plan.ok === null) { console.log('  endless-comp ' + c.m + ': depth ' + f.startDepth + '->' + f.endDepth + ' waiting for its chain (' + plan.reason + ')'); continue; }
         if (plan.ok === false) {
           RUN.soloRej = (RUN.soloRej | 0) + 1;
@@ -6706,8 +6760,8 @@ async function main() {
         }
         const pvT = perks.verifyPerkPicks(f, soloState.runs[key], pc7);   // shared team build: the co-op draw pool, same replay + chain rules
         if (!pvT.ok) {
-          recordFlag(signals, g, c.m, nowMs); sigDirty = true; RUN.perkRej = (RUN.perkRej | 0) + 1;
-          ghWarn('match=' + c.m + ': team comp segment perk REJECT (' + pvT.reason + ': ' + pvT.why + ') build ' + (f.build >>> 0) + ' depth ' + f.startDepth + '->' + f.endDepth + ' ' + rosterSids.map(plog).join('+'));
+          if (!catchUp) { recordFlag(signals, g, c.m, nowMs); sigDirty = true; RUN.perkRej = (RUN.perkRej | 0) + 1; }   // Q237: a catch-up was a plain chain-back reject before (never flagged)
+          ghWarn('match=' + c.m + ': team comp segment perk REJECT (' + pvT.reason + ': ' + pvT.why + ') build ' + (f.build >>> 0) + ' depth ' + f.startDepth + '->' + f.endDepth + ' ' + rosterSids.map(plog).join('+') + (catchUp ? ' (catch-up, nobody flagged)' : ''));
           processed.add(c.m);
           continue;
         }
@@ -6720,12 +6774,15 @@ async function main() {
           console.log('  endless-comp-pacing ' + c.m + ': depth ' + f.startDepth + '->' + f.endDepth + ' (proven ' + plan.proven + ') needs ' + Math.round(reqT / 1000) + 's real time, seen ' + Math.round((nowMs - (pendT.t0 || 0)) / 1000) + 's -- deferred');
           continue;
         }
-        const dayT = sigDay(signals, nowMs);
-        for (const sid of writerSids) dayT.n[pid(sid)] = (dayT.n[pid(sid)] || 0) + 1;
-        recordEndlessSignals(signals, ownRosterSids, nowMs); sigDirty = true;   // Q78: own-record seats only
-        namedOnlyAt('endless-comp');
+        const xpFrom = teamXpStarts(runT0, g, f, plan.proven);   // Q237: read before the head moves
         if (PT_MODE) ptSeedCp(cp, changedCp, [...new Set(ownRosterSids.concat(writerSids))]);
-        soloAdvance(soloState, key, f, c.m, plan, nowMs);
+        if (!catchUp) {   // Q237: a catch-up re-counts no run (signals) and leaves the chain as the reject would have
+          const dayT = sigDay(signals, nowMs);
+          for (const sid of writerSids) dayT.n[pid(sid)] = (dayT.n[pid(sid)] || 0) + 1;
+          recordEndlessSignals(signals, ownRosterSids, nowMs); sigDirty = true;   // Q78: own-record seats only
+          namedOnlyAt('endless-comp');
+          soloAdvance(soloState, key, f, c.m, plan, nowMs);
+        }
         if (plan.consume) {
           const host = rosterSids[0];
           if (isOwnE(host)) {
@@ -6739,6 +6796,7 @@ async function main() {
         let teamT = 0;
         for (let i = 0; i < pc7; i++) teamT += g[0].d[10 + i] | 0;
         for (const sid of writerSids) {
+          if (catchUp && !catchUp.has(sid)) continue;   // Q237: a catch-up's ladder / milestones go to the writers behind only
           // audit 2026-09-06 B-F5: a writer inside the seedcap reject window gets his ladder/CP restored by scRestore, but the
           //   milestone bitmap lives in the chain state file (not in the snapshot) -> skip his outputs here entirely so a
           //   discarded settlement cannot burn a once-per-season milestone
@@ -6753,8 +6811,11 @@ async function main() {
             if (fam.seasonId && (t.seasonId | 0) === (seasonId | 0) && (fam.seasonBest[sid] == null || packed > fam.seasonBest[sid])) { fam.seasonBest[sid] = packed; fam.seasonChanged[sid] = { s: packed, ts: teamT, build: f.build >>> 0 }; console.log('  endless-comp season best (' + fam.low + ') ' + c.m + ': ' + plog(sid) + ' -> board ' + packed); }
           }
         }
-        if (xpId) creditXpEndless(g, { startDepth: Math.max(f.startDepth | 0, plan.proven | 0), endDepth: f.endDepth | 0 }, xp, changedXp, spSet);   // audit B-F2: overlap credits new depth only
-        console.log('  endless-comp settle ' + c.m + ': pc ' + pc7 + ' depth ' + f.startDepth + '->' + f.endDepth + ' team ' + teamT + ' flags ' + f.flags + ' proven ' + plan.proven + (plan.overlap != null ? ' (overlap from ' + plan.overlap + ')' : ''));
+        // audit B-F2: an overlap credits new depth only -- Q237: from each writer's own floor (teamXpStarts), never less than that rule
+        if (xpId) creditXpEndless(catchUp ? g.filter((r) => catchUp.has(String(r.steamID))) : g, { startDepth: f.startDepth | 0, endDepth: f.endDepth | 0, startOf: (sid) => xpFrom[String(sid)] }, xp, changedXp, spSet);
+        teamXpMark(soloState.runs[key], g, f, headT0);
+        if (catchUp) console.log('  endless-comp catch-up ' + c.m + ': pc ' + pc7 + ' depth ' + f.startDepth + '->' + f.endDepth + ' at the head ' + plan.proven + ' (' + plan0.reason + ') for ' + [...catchUp].map(plog).join('+') + ' -- chain left as it is');
+        else console.log('  endless-comp settle ' + c.m + ': pc ' + pc7 + ' depth ' + f.startDepth + '->' + f.endDepth + ' team ' + teamT + ' flags ' + f.flags + ' proven ' + plan.proven + (plan.overlap != null ? ' (overlap from ' + plan.overlap + ')' : ''));
         processed.add(c.m); settledEndlessComp++;
         continue;
       }
@@ -7996,3 +8057,4 @@ Object.assign(module.exports, { contestParties, contestTable, noteContestParties
 Object.assign(module.exports, { completeTables, capContests, capLedger, CONTEST_CAP, CONTEST_CAP_MS, CONTEST_CAP_ACCOUNTS, CAP_NOTE });   // cloud audit Q208 an outside account may hold up only a few matches a day
 Object.assign(module.exports, { soloKeyGone, pruneSoloDone, soloDoneNote, SOLO_DONE_CAP, SEEN_PER_WRITER, screenLateStarts });   // cloud audit Q144 rework: processed solo segments remembered while their key verifies, a room per writer across the start-seen notes
 Object.assign(module.exports, { pruneFlagged, flagBaseKey, FLAG_PRUNE_WAIT_MS, blankSeen, BLANK_STARTS });   // cloud audit Q166 a signals flag goes once its key left the shards
+Object.assign(module.exports, { teamXpFloor, teamXpStarts, teamXpMark, teamRollbackPlan });   // cloud audit Q237 team competitive XP floors (test/team-comp-ghost-xp.js)
