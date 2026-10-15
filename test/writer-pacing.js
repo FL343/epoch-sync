@@ -12,7 +12,8 @@
 //   [8] the older start wins the slot even when its key sorts later (oldest-first order)
 //   [9] wiring pins (gate order, every lane, export, no bypass)
 //   [10] outage drain + shard rotation: a finisher whose record rotates away while his 3P ranked group waits is not
-//        convicted as a leaver once the rest of the group settles (he was seen agreeing earlier)
+//        convicted as a leaver once the rest of the group settles (he was seen agreeing earlier); since Q185 he settles at
+//        the place he agreed to (his 3rd-place loss), never the leaver penalty
 //   [11] the per-day settle signal counts a drained bot match once, not on every run it waited
 // State isolation is structural (every *_FILE var scanned and redirected, cwd = temp dir), like test/strict-gate.js.
 const { spawnSync } = require('child_process');
@@ -265,10 +266,13 @@ const FLOOR = v.SANITY.MIN_START_AGE_MS;
     exempt += (r.out.match(/seen agreeing earlier -- finished, not a leaver/g) || []).length;
   }
   const lvC = ((r.state.LEAVERS_FILE || {})[v.pid(C)] || { leaves: 0 }).leaves;
-  T('[10] the rest settle without C (2 more groups)', processedOf(r).size === 3, 'settled=' + processedOf(r).size);
+  T('[10] the rest settle (2 more groups)', processedOf(r).size === 3, 'settled=' + processedOf(r).size);
   T('[10] C is never convicted as a leaver (exempt twice, exit-rate untouched)', convicted === 0 && exempt === 2 && lvC === 0, 'convicted=' + convicted + ' exempt=' + exempt + ' leaves=' + lvC);
   const lpC = posts(r, 7).filter(p => /steamid=76561198000000003(&|$)/.test(p.body));
-  T('[10] no points write for C (no leaver penalty)', lpC.length === 0, 'writes=' + lpC.length);
+  // Q185: C is read back in at his agreed 3rd place (as if his record were still there): one points write, his loss as 3rd of
+  //   3 from 2000, never the leaver penalty (2000 - 100)
+  const lpCv = lpC.map((p) => Number(/score=(-?[0-9]+)/.exec(p.body)[1]));
+  T('[10] C\'s points move by his 3rd-place loss only (no leaver penalty)', lpCv.length === 1 && lpCv[0] < 2000 && lpCv[0] > 2000 - 100, 'writes=' + JSON.stringify(lpCv));
 }
 
 // ---- [11] per-day settle signal: a drained bot match counts once ----

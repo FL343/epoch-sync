@@ -2381,6 +2381,7 @@ function writeRunSummary() {
       '| one-match-at-a-time deferrals | ' + s('writerPaced', 0) + ' |',
       '| ranked matches the ranked rating turns into / out of a mismatch, quick matches and the repeat-group decay set aside (Q160) | ' + s('heldMismatch', 0) + ' / ' + s('heldMismatchOff', 0) + ' |',
       '| absent seats named by others only, not convicted (Q69) | ' + s('unattested', 0) + ' |',
+      '| matchmade FFA seats seen agreeing whose record is gone at the settle: settled at their agreed place / left out, their own confession for the match standing (Q185) | ' + s('agreedBack', 0) + ' / ' + s('agreedConf', 0) + ' |',
       '| team matches with nobody on the losing team, settled without a rating move (Q136) | ' + s('noLoser', 0) + ' |',
       '| team matches with a losing seat nobody accounts for (named by the others only or left blank), settled without a rating move (Q149) | ' + s('namedLoser', 0) + ' |',
       '| named-only losing seats counted on their account / of them repeated: ' + NL_REPEAT + ' or more such matches and different opponents / of those more losses unwritten than written / not counted, no signals of his own (Q161, nobody flagged) | ' + s('nlSeat', 0) + ' / ' + s('nlRepeat', 0) + ' / ' + s('nlUnwritten', 0) + ' / ' + s('nlNone', 0) + ' |',
@@ -6833,6 +6834,36 @@ async function main() {
     const pc = g[0].d[8] | 0, scores = g[0].d.slice(10, 10 + pc);
     const parts = [];
     for (let seat = 0; seat < pc; seat++) { if (seatToId[seat] != null) parts.push({ steamID: seatToId[seat], seat, score: scores[seat] | 0 }); }
+    // Q185 (cloud audit, found doing Q174): a matchmade FFA seat seen agreeing on this match (pend.agreed) whose record is
+    //   gone at this settle (Q149: he finished, not a leaver) takes part as if his record were still there: at the place the
+    //   agreed scores give him, in the ranking, the player count, the rating update and the points plan, and his own rating
+    //   and points move by that result. Before, the match settled among the records left: a player who wrote his last place,
+    //   was seen agreeing while the group waited for a late record, then overwrote both of his records with empty ones kept
+    //   his points (not convicted: he was seen agreeing), and the honest players around him took the smaller field (ranked
+    //   4P, M last: 2nd +3 instead of +15, 3rd -17 instead of -4); in a 1V1 the winner was left alone and nobody was rated.
+    //   Only his own record puts him on that list (no other account can) and the result is the one he agreed to, so nothing
+    //   here rests on anybody else's word. An honest player whose next match overwrote his record while the group waited (the
+    //   same shard row, 1 in 50) now gets the result this match gave him, the one his client showed, instead of none.
+    //   XP / CP stay per record (no record, none for him, as before). A seat whose own confession for this match still
+    //   stands (penalty not refunded) stays out as before: the confession already charged that leave. Team matches read such
+    //   seats in the points plan only (Q183), unchanged.
+    if (baseMt(matchType) === 1 || baseMt(matchType) === 2) {
+      let back = 0;
+      for (const x of detectLeavers(g)) {
+        const hx = pid(String(x.steamID));
+        if (!(pend.agreed && pend.agreed.indexOf(hx) >= 0) || parts.some((p) => String(p.steamID) === String(x.steamID))) continue;
+        const cs = confState[hx + '|' + c.m];
+        if (cs && !cs.refunded && (cs.ded > 0 || cs.ex)) {
+          RUN.agreedConf = (RUN.agreedConf | 0) + 1;
+          console.log('  agreed-back ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' record gone but seen agreeing earlier, his own confession for this match stands -- left out (Q185)');
+          continue;
+        }
+        parts.push({ steamID: x.steamID, seat: x.seat, score: scores[x.seat] | 0 });
+        back++; RUN.agreedBack = (RUN.agreedBack | 0) + 1;
+        console.log('  agreed-back ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' record gone but seen agreeing earlier -- settled at his agreed place ' + (1 + scores.filter((y) => (y | 0) > (scores[x.seat] | 0)).length) + ' of ' + pc + ', as if his record were still there (Q185)');
+      }
+      if (back) parts.sort((a, b) => a.seat - b.seat);
+    }
     const sorted = [...parts].sort((a, b) => b.score - a.score);
     let rank = 1; const rankOf = {};
     for (let i = 0; i < sorted.length; i++) { if (i > 0 && sorted[i].score < sorted[i - 1].score) rank = i + 1; sorted[i].rank = rank; rankOf[sorted[i].steamID] = rank; }
