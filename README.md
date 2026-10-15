@@ -197,6 +197,16 @@ absent, so a run is unaffected before it is provisioned.
   a trusted per-difficulty ladder. Rejections are counted into a permanent offense board and
   a trailing-24h histogram; a burst of rejections mails the ops inbox (`campaign-endless.json`
   keeps the settled signatures + reject histogram + last mail hour).
+- Endless competitive rating (client knife 5.1a, 2026-10-15; `test/endless-rating.js`): every settled
+  competitive endless segment (solo lane, team lane) enters or raises its run in a per-(player, family,
+  season) history kept in `endless-solo.json` (`hist`, pid-keyed: deepest run + the last 10 runs); players
+  with 5 or more runs get a row on `endless_rating_{solo,duo,trio,quad}` (+ season twins; EA app id only)
+  = 75 x deepest + 25 x mean of the window, in 0.01-depth units, maintained like `trust_tier` (read, write
+  the rows that differ, delete the rows that no longer qualify; a seedcap conviction removes the run). A
+  carrier row on `endless_tiercut` publishes, once per UTC day, the lowest score of each tier per family
+  (prior depth floors blending into the live percentile as the field grows; details = magic, season, then
+  N + six cuts per family). The carrier account is `TIERCUT_CARRIER_SID` or, unset, the account already
+  carrying the app's `version_gate` row. Board names: `ENDLESS_RATING_LB_*`, `ENDLESS_TIERCUT_LB`.
 
 State files committed back each run (idempotency): `processed.json`, `skill.json`,
 `leavers.json`, `xp.json` (per-player `{ lastWinDay, games }` for the daily-first bonus

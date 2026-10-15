@@ -2373,6 +2373,7 @@ function writeRunSummary() {
       '| team-gamble host charges / at trust threshold | ' + s('t2lh', '0/0') + ' |',
       '| reports seen / counted | ' + s('repSeen', 0) + ' / ' + s('repCounted', 0) + ' |',
       '| trust writes / deletes | ' + s('trustW', 0) + ' / ' + s('trustD', 0) + ' |',
+      '| endless rating rows written / deleted / tier cuts (O103) | ' + s('ratingW', 0) + ' / ' + s('ratingD', 0) + ' / ' + s('tiercut', '-') + ' |',
       '| team-gamble lone / team dissent unsettled / settled | ' + s('t2ld', '0/0') + ' |',
       '| board writes rating/points/xp | ' + s('writes', '0/0 0/0 0/0') + ' |',
       '| endless settles / cp+board writes | ' + s('endless', 0) + ' (+' + s('endlessComp', 0) + ' team comp, +' + s('solo', 0) + ' solo) / ' + s('writesEndless', '0/0 0/0') + ' |',
@@ -3972,7 +3973,145 @@ function overallDominant(bests) {
   }
   return at;
 }
-function loadSolo() { try { const st = JSON.parse(fs.readFileSync(SOLO_FILE, 'utf8')) || {}; st.runs = st.runs || {}; st.wait = st.wait || {}; st.ms = st.ms || {}; st.held = st.held || {}; return st; } catch (e) { return { runs: {}, wait: {}, ms: {}, held: {} }; } }
+// ===== O103 endless competitive rating (client knife 5.1a, 2026-10-15; companion KNIFE_51_SEASON_BOARDS_PLAN sections 0b / 2.1) =====
+// Per-player run history for the COMPETITIVE endless lanes (solo + duo / trio / quad), a derived rating ladder per family and
+// season, and a daily published "tier cut" table the client turns a rating into one of the seven versus tiers with.
+//   - history (endless-solo.json `hist`, pid-keyed like the chain memory, no steamIDs): per (player, family, season) the deepest
+//     run ever (`best` = [runId, depth]) and the last WINDOW runs ([runId, maxDepth, firstSeenMs], first-seen order). A run is
+//     its chain key (solo: runSeed; team: roster set + runSeed) hashed; its first settled segment enters the run, every later
+//     segment raises its depth in place -- a run that ended early, crashed or was quit counts at the depth it reached (no
+//     FINAL needed). Ids of runs pushed out of the window stay in `old`, so a late segment of one cannot re-enter as a new run.
+//     A seedcap conviction (corrections, applied next tick) removes the run and recomputes `best` from the window.
+//   - rating (one board per family, season 0 included, EA app id only): players with >= MIN_RUNS runs in the window;
+//     score = W_BEST * best + W_AVG * mean(window) in 0.01-depth units; details [best, mean x 100, runs, 0]. Maintained like
+//     trust_tier on every exit path: the board is read, only rows that differ are written, a player who no longer qualifies
+//     (runs removed, history pruned) is deleted; a read failure skips the family for the run -- never deletes.
+//   - tier cuts (endless_tiercut, one carrier row): per family the lowest score of grandmaster .. silver. With few rated players
+//     the PRIOR floors (depths) carry the cut; from N_PRIOR_ONLY to N_FULL players the cut blends linearly into the live
+//     percentile (TIERS7 upper bounds: top 1 % grandmaster, 4 % master, 10 % diamond, 20 % platinum, 35 % gold, 60 % silver);
+//     a higher tier stays at least one depth above the next. Published once per UTC day (score = YYYYMMDD) -- a stronger field
+//     can move a player down at most once a day -- and at once when the season or the carrier changes; details
+//     [magic, season, N_solo, cuts x 6, N_duo, cuts x 6, N_trio, cuts x 6, N_quad, cuts x 6] (30 ints). The carrier account
+//     is TIERCUT_CARRIER_SID or, unset, the account already carrying this app's version_gate row (ops-provisioned; every client
+//     reads it) -- no new secret. Companion repo mirror: RANKED_CONFIG.ENDLESS.RATING (weights / MIN_RUNS / WINDOW / TIERS7 /
+//     board names / PCT_MIN_PLAYERS, lockstep-pinned); PRIOR and the blend bounds live here only (retuned without a client build).
+const ENDLESS_RATING_LB_SOLO = process.env.ENDLESS_RATING_LB_SOLO || 'endless_rating_solo';
+const ENDLESS_RATING_LB_DUO = process.env.ENDLESS_RATING_LB_DUO || 'endless_rating_duo';
+const ENDLESS_RATING_LB_TRIO = process.env.ENDLESS_RATING_LB_TRIO || 'endless_rating_trio';
+const ENDLESS_RATING_LB_QUAD = process.env.ENDLESS_RATING_LB_QUAD || 'endless_rating_quad';
+const ENDLESS_TIERCUT_LB = process.env.ENDLESS_TIERCUT_LB || 'endless_tiercut';
+const TIERCUT_CARRIER_SID = process.env.TIERCUT_CARRIER_SID || '';
+const RATING = {
+  W_BEST: 75, W_AVG: 25,                      // lockstep: client RANKED_CONFIG.ENDLESS.RATING (score = W_BEST * best + W_AVG * mean; 0.01-depth units)
+  MIN_RUNS: 5, WINDOW: 10,                    // lockstep: rated from the 5th run; the mean is over the last 10 runs
+  TIERS7: [[1, 'grandmaster'], [4, 'master'], [10, 'diamond'], [20, 'platinum'], [35, 'gold'], [60, 'silver'], [100, 'bronze']],   // lockstep: percentile upper bound -> tier (top to bottom)
+  PCT_MIN_PLAYERS: 50,                        // lockstep: "top x %" wording needs this many rated players
+  // cron-only (retuned without a client build): depth floors grandmaster..silver per family (2026-10-15 playtest ladder: solo 60 % of
+  //   players reach 7, 35 % 13, 15 % 24, 5 % 45; duo x1.6 for the extra hooks; trio / quad = duo until they have data of their own)
+  PRIOR: { solo: [60, 40, 28, 20, 14, 8], duo: [96, 64, 45, 32, 22, 13], trio: [96, 64, 45, 32, 22, 13], quad: [96, 64, 45, 32, 22, 13] },
+  N_PRIOR_ONLY: 20, N_FULL: 200,             // cron-only: blend bounds (<= 20 rated players pure prior, >= 200 pure live percentile)
+  OLD_IDS: 20,                                // ids of runs pushed out of the window remembered per entry
+  HIST_SEASONS: 2,                            // history kept for the current and the previous season
+  TC_MAGIC: 0xEC,                             // tier-cut carrier details[0]
+};
+const RATING_FAMS = [['solo', ENDLESS_RATING_LB_SOLO], ['duo', ENDLESS_RATING_LB_DUO], ['trio', ENDLESS_RATING_LB_TRIO], ['quad', ENDLESS_RATING_LB_QUAD]];
+function ratingFamOf(pc) { return (pc | 0) <= 1 ? 'solo' : compFamKeyOf(pc | 0).toLowerCase(); }
+function fnv32(s) { let h = 0x811c9dc5; s = String(s); for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); } return h >>> 0; }
+function ratingRunId(chainKey) { return fnv32(chainKey); }
+function ratingHistKey(p, fam, seasonId) { return p + '|' + fam + '|' + (seasonId | 0); }
+// a settled segment of run `runId` reached `depth`: enter the run (first segment) or raise it in place; best never drops
+function ratingHistUpsert(st, p, fam, seasonId, runId, depth, nowMs) {
+  st.hist = st.hist || {};
+  const k = ratingHistKey(p, fam, seasonId);
+  const h = st.hist[k] || (st.hist[k] = { best: [0, 0], runs: [], old: [], t: 0 });
+  h.runs = h.runs || []; h.old = h.old || []; if (!Array.isArray(h.best)) h.best = [0, 0];
+  depth = Math.max(0, depth | 0); h.t = nowMs; runId = runId >>> 0;
+  const i = h.runs.findIndex((r) => (r[0] >>> 0) === runId);
+  if (i >= 0) { if (depth > (h.runs[i][1] | 0)) h.runs[i][1] = depth; }
+  else if (h.old.indexOf(runId) < 0) {
+    h.runs.push([runId, depth, nowMs]);
+    h.runs.sort((a, b) => (a[2] - b[2]) || ((a[0] >>> 0) - (b[0] >>> 0)));
+    while (h.runs.length > RATING.WINDOW) { const gone = h.runs.shift(); h.old.push(gone[0] >>> 0); }
+    if (h.old.length > RATING.OLD_IDS) h.old.splice(0, h.old.length - RATING.OLD_IDS);
+  }
+  if (depth > (h.best[1] | 0)) h.best = [runId, depth];
+  return h;
+}
+// a convicted run leaves the history; best is recomputed from the window (a deeper run that already left the window is
+//   forgotten -- the lower side for a convicted account). Returns true when anything changed.
+function ratingHistRemove(st, p, fam, seasonId, runId) {
+  const h = st.hist && st.hist[ratingHistKey(p, fam, seasonId)];
+  if (!h) return false;
+  runId = runId >>> 0;
+  const n0 = (h.runs || []).length, o0 = (h.old || []).length;
+  h.runs = (h.runs || []).filter((r) => (r[0] >>> 0) !== runId);
+  h.old = (h.old || []).filter((id) => (id >>> 0) !== runId);
+  let hit = h.runs.length !== n0 || h.old.length !== o0;
+  if (Array.isArray(h.best) && (h.best[0] >>> 0) === runId) { hit = true; h.best = h.runs.reduce((b, r) => ((r[1] | 0) > (b[1] | 0) ? [r[0] >>> 0, r[1] | 0] : b), [0, 0]); }
+  return hit;
+}
+// rating row of one history entry; null = not rated (fewer than MIN_RUNS runs in the window)
+function ratingScoreOf(h) {
+  if (!h || !Array.isArray(h.runs) || h.runs.length < RATING.MIN_RUNS) return null;
+  let sum = 0; for (const r of h.runs) sum += r[1] | 0;
+  const avg = sum / h.runs.length, best = Array.isArray(h.best) ? (h.best[1] | 0) : 0;
+  const avg100 = Math.round(avg * 100);
+  return { score: Math.round(RATING.W_BEST * best + RATING.W_AVG * avg), best, avg100, n: h.runs.length, details: [best, avg100, h.runs.length, 0] };
+}
+const sameInts = (a, b) => Array.isArray(a) && Array.isArray(b) && a.length >= b.length && b.every((x, i) => (a[i] | 0) === (x | 0));
+// writes / deletes for one family board: existing = { sid: { s, det } } rows on the board, touched = sids settled this run
+function ratingPlan(st, seasonId, fam, existing, touched) {
+  const writes = [], deletes = [];
+  const all = new Set([...Object.keys(existing || {}), ...(touched || [])]);
+  for (const sid of all) {
+    const want = ratingScoreOf(st && st.hist ? st.hist[ratingHistKey(pid(sid), fam, seasonId)] : null);
+    const cur = (existing || {})[sid];
+    if (want) { if (!cur || (cur.s | 0) !== want.score || !sameInts(cur.det, want.details)) writes.push({ sid, score: want.score, details: want.details }); }
+    else if (cur) deletes.push(sid);
+  }
+  return { writes, deletes };
+}
+// the six cuts (grandmaster .. silver, score units) of one family from its rated players' scores and the family's prior
+function ratingCutsOf(scores, prior) {
+  const N = (scores || []).length;
+  const sorted = (scores || []).slice().sort((a, b) => b - a);
+  const w = Math.max(0, Math.min(1, (N - RATING.N_PRIOR_ONLY) / (RATING.N_FULL - RATING.N_PRIOR_ONLY)));
+  const cuts = [];
+  for (let i = 0; i < 6; i++) {
+    const pr = ((prior && prior[i]) | 0) * 100;
+    const rank = Math.max(1, Math.ceil(RATING.TIERS7[i][0] / 100 * N));
+    const live = N ? (sorted[Math.min(N - 1, rank - 1)] | 0) : pr;
+    cuts.push(Math.round((1 - w) * pr + w * live));
+  }
+  for (let i = 4; i >= 0; i--) if (cuts[i] < cuts[i + 1] + 100) cuts[i] = cuts[i + 1] + 100;   // monotone: one depth apart at least
+  return { N, w, cuts };
+}
+function ratingTierOf(score, cuts) {
+  if (!Array.isArray(cuts) || cuts.length < 6) return null;
+  for (let i = 0; i < 6; i++) if ((score | 0) >= (cuts[i] | 0)) return RATING.TIERS7[i][1];
+  return RATING.TIERS7[6][1];
+}
+function tiercutDay(nowMs) { const d = new Date(nowMs); return d.getUTCFullYear() * 10000 + (d.getUTCMonth() + 1) * 100 + d.getUTCDate(); }
+function tiercutEncode(seasonId, byFam) {
+  const out = [RATING.TC_MAGIC, seasonId | 0];
+  for (const [fam] of RATING_FAMS) { const c = (byFam || {})[fam] || { N: 0, cuts: [0, 0, 0, 0, 0, 0] }; out.push(c.N | 0); for (let i = 0; i < 6; i++) out.push(c.cuts[i] | 0); }
+  return out;
+}
+function tiercutDecode(score, det) {
+  if (!Array.isArray(det) || det.length < 2 + 7 * RATING_FAMS.length || ((det[0] | 0) & 0xff) !== RATING.TC_MAGIC) return null;
+  const byFam = {}; let at = 2;
+  for (const [fam] of RATING_FAMS) { byFam[fam] = { N: det[at] | 0, cuts: det.slice(at + 1, at + 7).map((x) => x | 0) }; at += 7; }
+  return { day: score | 0, season: det[1] | 0, byFam };
+}
+function tiercutDue(published, seasonId, dayNow) { return !published || (published.season | 0) !== (seasonId | 0) || (published.day | 0) !== (dayNow | 0); }
+// history older than the previous season leaves the file
+function pruneRatingHist(st, seasonId) {
+  if (!st || !st.hist) return 0;
+  let n = 0;
+  for (const k of Object.keys(st.hist)) { const s = Number(k.slice(k.lastIndexOf('|') + 1)); if (!(s >= (seasonId | 0) - (RATING.HIST_SEASONS - 1))) { delete st.hist[k]; n++; } }
+  return n;
+}
+function loadSolo() { try { const st = JSON.parse(fs.readFileSync(SOLO_FILE, 'utf8')) || {}; st.runs = st.runs || {}; st.wait = st.wait || {}; st.ms = st.ms || {}; st.held = st.held || {}; st.hist = st.hist || {}; return st; } catch (e) { return { runs: {}, wait: {}, ms: {}, held: {}, hist: {} }; } }
 function pruneSolo(st, nowMs) {
   for (const k of Object.keys(st.runs)) if (nowMs - (st.runs[k].t || 0) > COMP.RUN_TTL_MS) delete st.runs[k];
   for (const m of Object.keys(st.wait)) if (nowMs - (st.wait[m].t0 || 0) > COMP.CHAIN_WAIT_MS + 86400000) delete st.wait[m];
@@ -5024,7 +5163,8 @@ async function main() {
   if (!PT_MODE) {
     const names0 = ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).map(x => String(x.name || x.Name));
     for (const [nm, trusted] of [[ENDLESS_COMP_LB, true], [SAVE_BOX_LB, false], [ENDLESS_COMP_LB_DUO, true], [SAVE_BOX_LB_DUO, false], [ENDLESS_COMP_LB_TRIO, true], [SAVE_BOX_LB_TRIO, false], [ENDLESS_COMP_LB_QUAD, true], [SAVE_BOX_LB_QUAD, false], [ENDLESS_COMP_LB_OVERALL, true], [ENDLESS_LB_SOLO, true], [SAVE_BOX_LB_CASUAL, false],
-      [ENDLESS_LB_CLASSIC_SOLO, true], [SAVE_BOX_LB_CLASSIC, false], [ENDLESS_LB_CLASSIC_DUO, true], [SAVE_BOX_LB_CLASSIC_DUO, false], [ENDLESS_LB_CLASSIC_TRIO, true], [SAVE_BOX_LB_CLASSIC_TRIO, false], [ENDLESS_LB_CLASSIC_QUAD, true], [SAVE_BOX_LB_CLASSIC_QUAD, false]]) {   // O216/N3 classic surface (lifetime ladders + guard-row save boxes)
+      [ENDLESS_LB_CLASSIC_SOLO, true], [SAVE_BOX_LB_CLASSIC, false], [ENDLESS_LB_CLASSIC_DUO, true], [SAVE_BOX_LB_CLASSIC_DUO, false], [ENDLESS_LB_CLASSIC_TRIO, true], [SAVE_BOX_LB_CLASSIC_TRIO, false], [ENDLESS_LB_CLASSIC_QUAD, true], [SAVE_BOX_LB_CLASSIC_QUAD, false],   // O216/N3 classic surface (lifetime ladders + guard-row save boxes)
+      [ENDLESS_RATING_LB_SOLO, true], [ENDLESS_RATING_LB_DUO, true], [ENDLESS_RATING_LB_TRIO, true], [ENDLESS_RATING_LB_QUAD, true], [ENDLESS_TIERCUT_LB, true]]) {   // O103 rating ladders (season 0 = base name; twins via resolveSeasonBoard) + tier-cut carrier (trusted, cron-only)
       if (names0.indexOf(nm) >= 0) continue;
       const id0 = await findOrCreateBoard(nm, trusted);
       if (id0) console.log('solo boards: provisioned ' + nm + (trusted ? ' (trusted)' : ' (client-writable)'));
@@ -5508,6 +5648,73 @@ async function main() {
       }
     } catch (e) { ghWarn('trust board upkeep failed: ' + (e && e.message)); }
   };
+  // O103 endless competitive rating upkeep (client knife 5.1a): the per-family ladder rows from the run history + the daily
+  //   tier-cut carrier. Every exit path, like trust: a delete after a conviction / season prune and the daily publish must not
+  //   wait for a fresh match. EA app id only (the channel twins keep no rating surface). st = the chain memory (`hist` lives
+  //   there; the settle-free paths load it read-only), touched = sids whose history moved this run.
+  const maintainRating = async (st, touched) => {
+    if (PT_MODE) return;
+    const list0 = (lr.json && lr.json.response && lr.json.response.leaderboards) || [];
+    const byName0 = (name) => { const f = list0.find((x) => String(x.name || x.Name) === name); return f ? (f.id || f.ID) : null; };
+    const nowR = seasonNowMs();
+    const scoresByFam = {};
+    let skipped = 0, wN = 0, dN = 0;
+    for (const [fam, base] of RATING_FAMS) {
+      const name = seasonBoardName(base, seasonId);
+      let bid = null;
+      try { bid = seasonId >= 1 ? (await resolveSeasonBoard(lr, base, seasonId)).id : (byName0(base) || await findOrCreateBoard(base, true)); } catch (e) { bid = null; }
+      if (!bid) { ghWarn('rating ' + fam + ': board ' + name + ' unresolved -- skipped this run'); skipped++; continue; }
+      const existing = {};
+      try { const br = await readBoardAll(bid, 'rating ' + fam + ' board'); for (const e of br.ents) existing[String(e.steamID)] = { s: e.score | 0, det: decodeDetails(e.detailData) }; }
+      catch (e) { ghWarn('rating ' + fam + ': read failed (' + (e && e.message) + ') -- skipped this run, nothing deleted'); skipped++; continue; }
+      const plan = ratingPlan(st, seasonId, fam, existing, touched);
+      wN += plan.writes.length; dN += plan.deletes.length;
+      if (plan.writes.length || plan.deletes.length) console.log('rating ' + fam + ': ' + plan.writes.length + ' writes [' + plan.writes.map((w) => plog(w.sid) + '=' + w.score).join(' ') + '], ' + plan.deletes.length + ' deletes [' + plan.deletes.map(plog).join(' ') + ']');
+      if (!APPLY_MMR) { scoresByFam[fam] = Object.values(existing).map((x) => x.s | 0); continue; }
+      for (const w of plan.writes) {
+        const r = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: bid, steamid: w.sid, score: w.score, scoremethod: 'ForceUpdate', format: 'json' }, w.details);
+        const okW = r.ok && !(r.json && r.json.result && r.json.result.result && r.json.result.result !== 1);
+        if (okW) existing[w.sid] = { s: w.score, det: w.details }; else ghWarn('rating ' + fam + ' write failed ' + plog(w.sid) + ': HTTP ' + r.status);
+      }
+      for (const sid of plan.deletes) {
+        const r = await postForm('/ISteamLeaderboards/DeleteLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: bid, steamid: sid, format: 'json' });
+        if (r.ok) delete existing[sid]; else ghWarn('rating ' + fam + ' delete failed ' + plog(sid) + ': HTTP ' + r.status);
+      }
+      const sc = Object.values(existing).map((x) => x.s | 0).sort((a, b) => b - a);
+      scoresByFam[fam] = sc;
+      // calibration summary (numbers only): rated players and the median score / best / mean of the family this run
+      const med = (arr) => (arr.length ? arr[Math.floor((arr.length - 1) / 2)] : 0);
+      console.log('rating summary ' + JSON.stringify({ fam, rated: sc.length, p50: med(sc), p50best: med(Object.values(existing).map((x) => x.det[0] | 0).sort((a, b) => b - a)), p50avg100: med(Object.values(existing).map((x) => x.det[1] | 0).sort((a, b) => b - a)) }));
+    }
+    RUN.ratingW = (RUN.ratingW | 0) + wN; RUN.ratingD = (RUN.ratingD | 0) + dN;
+    if (skipped) { console.log('tiercut: ' + skipped + ' family board(s) skipped this run -> cuts not published'); return; }
+    // tier cuts: once per UTC day, and at once on a season change / an empty or foreign carrier
+    let tcId = null;
+    try { tcId = byName0(ENDLESS_TIERCUT_LB) || await findOrCreateBoard(ENDLESS_TIERCUT_LB, true); } catch (e) { tcId = null; }
+    if (!tcId) { ghWarn('tiercut: board ' + ENDLESS_TIERCUT_LB + ' unresolved -- not published'); return; }
+    let published = null, carrierOnBoard = null;
+    try {
+      const br = await readBoardAll(tcId, 'tiercut board');
+      const top = br.ents[0];
+      if (top) { published = tiercutDecode(top.score | 0, decodeDetails(top.detailData)); carrierOnBoard = String(top.steamID); }
+    } catch (e) { ghWarn('tiercut: read failed (' + (e && e.message) + ') -- not published this run'); return; }
+    const day = tiercutDay(nowR);
+    if (!tiercutDue(published, seasonId, day)) { RUN.tiercut = 'current ' + published.day; return; }
+    const byFam = {};
+    for (const [fam] of RATING_FAMS) byFam[fam] = ratingCutsOf(scoresByFam[fam] || [], RATING.PRIOR[fam]);
+    let carrier = TIERCUT_CARRIER_SID || carrierOnBoard;
+    if (!carrier) {   // the account carrying this app's version_gate row (ops-provisioned, read by every client)
+      try { const vg = byName0('version_gate'); if (vg) { const br = await readBoardAll(vg, 'version gate board'); if (br.ents[0]) carrier = String(br.ents[0].steamID); } } catch (e) { carrier = null; }
+    }
+    if (!carrier) { console.log('tiercut: no carrier account (set TIERCUT_CARRIER_SID or provision version_gate) -- not published'); RUN.tiercut = 'no carrier'; return; }
+    const detTc = tiercutEncode(seasonId, byFam);
+    for (const [fam] of RATING_FAMS) console.log('tiercut ' + fam + ': N=' + byFam[fam].N + ' w=' + byFam[fam].w.toFixed(3) + ' cuts=[' + byFam[fam].cuts.join(',') + ']');
+    if (!APPLY_MMR) { console.log('tiercut: dry-run, carrier untouched'); return; }
+    const r = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: tcId, steamid: carrier, score: day, scoremethod: 'ForceUpdate', format: 'json' }, detTc);
+    const okTc = r.ok && !(r.json && r.json.result && r.json.result.result && r.json.result.result !== 1);
+    if (okTc) { RUN.tiercut = 'published ' + day; console.log('tiercut: published day ' + day + ' season ' + seasonId + (published ? ' (was day ' + published.day + ' season ' + published.season + ')' : ' (first)')); }
+    else ghWarn('tiercut: write failed HTTP ' + r.status + ' ' + String(r.text).slice(0, 140));
+  };
   const persistStartsSide = () => {
     if (!APPLY_MMR) { console.log('APPLY_MMR=0 dry-run, nothing written'); return; }
     saveStarts(startsPending);
@@ -5910,11 +6117,11 @@ async function main() {
   const PT_MODE_MAIL_OFF = false;
 
   RUN.consistent = consistentMatches.length;
-  if (consistentMatches.length === 0) { console.log('no consistent matches'); persistStartsSide(); await maintainTrust(); await processRedeems(null); await processCampaignGrants(); await processCampaignEndless(); await processChatMute(); await processSupporters(null, []); writeRunSummary(); return; }
+  if (consistentMatches.length === 0) { console.log('no consistent matches'); persistStartsSide(); await maintainTrust(); await maintainRating(loadSolo(), new Set()); await processRedeems(null); await processCampaignGrants(); await processCampaignEndless(); await processChatMute(); await processSupporters(null, []); writeRunSummary(); return; }
   const fresh = consistentMatches.filter(c => !processed.has(c.m));
   RUN.fresh = fresh.length;
   console.log(consistentMatches.length + ' consistent, ' + fresh.length + ' fresh (settled ' + (consistentMatches.length - fresh.length) + ')');
-  if (fresh.length === 0) { console.log('no fresh matches, skip'); persistStartsSide(); await maintainTrust(); await processRedeems(null); await processCampaignGrants(); await processCampaignEndless(); await processChatMute(); await processSupporters(null, []); writeRunSummary(); return; }
+  if (fresh.length === 0) { console.log('no fresh matches, skip'); persistStartsSide(); await maintainTrust(); await maintainRating(loadSolo(), new Set()); await processRedeems(null); await processCampaignGrants(); await processCampaignEndless(); await processChatMute(); await processSupporters(null, []); writeRunSummary(); return; }
 
   // playtest channel: no rating board exists (and must not -- lock layer 3); the TrueSkill
   // update block below is skipped wholesale, so the id is never consulted.
@@ -6290,6 +6497,7 @@ async function main() {
   };
   // ===== O93 solo competitive segment settle (COMP block above) =====
   const soloState = loadSolo();
+  const ratingTouched = new Set();   // O103: sids whose competitive run history moved this run (settled segment / conviction) -> their rating row is redone in maintainRating
   const soloPub = loadJobPubTable(nowMs) || {};
   const soloPubRec = recCfg ? (loadJobPubTable(nowMs, recCfg.keys) || {}) : soloPub;   // R1-A5-07: only RECOVERED segments (demo, until the file's date) keep the recovery keys
   const soloAllowDev = /_test$/.test(ENDLESS_COMP_LB);   // dev-key records only ever land on a *_test ladder
@@ -6476,6 +6684,8 @@ async function main() {
       if (compBest[sid] == null || packed > compBest[sid]) { compBest[sid] = packed; changedComp[sid] = { s: packed, ts: f.score | 0, build: f.build >>> 0 }; console.log('  solo best ' + m + ': ' + plog(sid) + ' depth ' + f.endDepth + ' bank ' + f.score + ' -> board ' + packed); }
       if (compSeasonId && (f.seasonId | 0) === (seasonId | 0) && (compSeasonBest[sid] == null || packed > compSeasonBest[sid])) { compSeasonBest[sid] = packed; changedCompSeason[sid] = { s: packed, ts: f.score | 0, build: f.build >>> 0 }; console.log('  solo season best ' + m + ': ' + plog(sid) + ' depth ' + f.endDepth + ' -> board ' + packed); }
     }
+    // O103 rating history (client knife 5.1a): every settled competitive segment enters / raises its run (depth reached, FINAL or not)
+    if (!PT_MODE) { ratingHistUpsert(soloState, p, 'solo', f.seasonId, ratingRunId(key), f.endDepth, nowMs); ratingTouched.add(sid); }
     }
     if (xpId) creditXpEndless(c.g, { startDepth: Math.max(f.startDepth | 0, plan.proven | 0), endDepth: f.endDepth }, xp, changedXp, spSet, classic ? CLASSIC.XP_MUL : 1);   // audit B-F2: overlap credits new depth only; O216 classic x0.5
     console.log('  solo settle ' + m + ': ' + plog(sid) + (classic ? ' classic' : (casual ? ' casual' : '')) + ' depth ' + f.startDepth + '->' + f.endDepth + ' bank ' + f.score + ' flags ' + f.flags + ((f.dispCode | 0) === attest.DISP_USER_QUIT ? ' (quit)' : '') + ' key=' + f.keyName + (v.sealed ? '' : ' [dev]') + (plan.overlap != null ? ' (overlap from ' + plan.overlap + ', proven ' + plan.proven + ')' : '') + (plan.truncated ? ' (recovered pool segment: truncated chain, head ' + plan.proven + ')' : '') + (plan.revive ? (classic ? ' (revived by a classic token resume)' : ' (revived by a casual token resume)') : ''));
@@ -6827,6 +7037,8 @@ async function main() {
             if (fam.best[sid] == null || packed > fam.best[sid]) { fam.best[sid] = packed; fam.changed[sid] = { s: packed, ts: teamT, build: f.build >>> 0 }; console.log('  endless-comp best (' + fam.low + ') ' + c.m + ': ' + plog(sid) + ' depth ' + f.endDepth + ' team ' + teamT + ' -> board ' + packed); }
             if (fam.seasonId && (t.seasonId | 0) === (seasonId | 0) && (fam.seasonBest[sid] == null || packed > fam.seasonBest[sid])) { fam.seasonBest[sid] = packed; fam.seasonChanged[sid] = { s: packed, ts: teamT, build: f.build >>> 0 }; console.log('  endless-comp season best (' + fam.low + ') ' + c.m + ': ' + plog(sid) + ' -> board ' + packed); }
           }
+          // O103 rating history (client knife 5.1a): each writer's run in the family history (depth reached; a catch-up only for the writers behind)
+          if (!PT_MODE) { ratingHistUpsert(soloState, pid(sid), fam.low, t.seasonId, ratingRunId(key), f.endDepth, nowMs); ratingTouched.add(sid); }
         }
         // audit B-F2: an overlap credits new depth only -- Q237: from each writer's own floor (teamXpStarts), never less than that rule
         if (xpId) creditXpEndless(catchUp ? g.filter((r) => catchUp.has(String(r.steamID))) : g, { startDepth: f.startDepth | 0, endDepth: f.endDepth | 0, startOf: (sid) => xpFrom[String(sid)] }, xp, changedXp, spSet);
@@ -7727,9 +7939,16 @@ async function main() {
         [casC.id, casC.best, casC.tag],
         [casC.seasonId, casC.seasonBest, 'endless-season'],
       ];
+      // O103 rating history (client knife 5.1a): the convicted run leaves the flagged seats' competitive history (best recomputed), their row is redone below
+      const famR = clsC ? null : (pcC === 1 ? 'solo' : (famC ? famC.low : null));
+      const keyR = !famR ? null : (pcC === 1 ? null : teamRunKey(Object.values(rosterC).map(String), tC.seasonId, cg[0].d[4] | 0));
       for (const seat of (cor.seats || [])) {
         const sidC = rosterC[seat] != null ? String(rosterC[seat]) : null;
         if (!sidC) continue;
+        if (famR && !PT_MODE && ratingHistRemove(soloState, pid(sidC), famR, tC.seasonId, ratingRunId(keyR || soloRunKey(pid(sidC), tC.seasonId, cg[0].d[4] | 0)))) {
+          ratingTouched.add(sidC);
+          console.log('  seedcap correction ' + cor.id + ': removed the run from ' + plog(sidC) + '\'s ' + famR + ' rating history');
+        }
         for (const [bidC, bestMapC, labelC] of targets) {
           if (!bidC || !bestMapC || bestMapC[sidC] == null || bestMapC[sidC] !== packedC) continue;
           const resC = await postForm('/ISteamLeaderboards/DeleteLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: bidC, steamid: sidC, format: 'json' });
@@ -7997,7 +8216,10 @@ async function main() {
     if (overallId) await writeOverall(overallId, false, 'overall comp');
     if (overallSeasonId) await writeOverall(overallSeasonId, true, 'overall comp season');
   }
-  for (const [sbxId, sbxLabel] of [[saveBoxId, 'save box'], [compFam.DUO.saveBoxId, 'duo save box'], [compFam.TRIO.saveBoxId, 'trio save box'], [compFam.QUAD.saveBoxId, 'quad save box'], [casualSaveBoxId, 'casual save box']]) {
+  // client knife 5.1a (2026-10-15, user call 10-07 "casual saves no longer expire with the season"): only the COMPETITIVE save boxes are pruned
+  //   past their season (the competitive run is bound to the season seed); the casual checkpoint rows (and the classic ones, never on this
+  //   list) stay until the run is resumed or replaced -- the client stopped refusing a past-season casual save the same day.
+  for (const [sbxId, sbxLabel] of [[saveBoxId, 'save box'], [compFam.DUO.saveBoxId, 'duo save box'], [compFam.TRIO.saveBoxId, 'trio save box'], [compFam.QUAD.saveBoxId, 'quad save box']]) {
   if (sbxId && seasonId >= 1) {
     try {
       const sb = await readBoardAll(sbxId, sbxLabel);
@@ -8014,6 +8236,7 @@ async function main() {
     } catch (e) { ghWarn(sbxLabel + ' prune failed: ' + (e && e.message)); }
   }
   }
+  { const nPr = pruneRatingHist(soloState, seasonId); if (nPr) console.log('rating history: ' + nPr + ' entries older than the previous season pruned'); }   // O103: before the chain memory is saved below
   saveProcessed(processed);
   saveSkill(skill);
   if (groupsDirty) saveGroups(groupMem, nowMs);
@@ -8024,6 +8247,7 @@ async function main() {
   saveConfessions(confState, nowMs, confLive);
   if (sigDirty) saveSignals(signals, nowMs);
   if (xpId) saveXp(xpState);
+  await maintainRating(soloState, ratingTouched);   // O103: rating rows + the daily tier-cut carrier (history saved above)
   await maintainTrust();
   // redeem channel last: wallet debits base on the in-memory post-settle balances just written
   // above (passing the map avoids re-reading scores that global reads may still serve stale).
@@ -8076,3 +8300,5 @@ Object.assign(module.exports, { completeTables, capContests, capLedger, CONTEST_
 Object.assign(module.exports, { soloKeyGone, pruneSoloDone, soloDoneNote, SOLO_DONE_CAP, SEEN_PER_WRITER, screenLateStarts });   // cloud audit Q144 rework: processed solo segments remembered while their key verifies, a room per writer across the start-seen notes
 Object.assign(module.exports, { pruneFlagged, flagBaseKey, FLAG_PRUNE_WAIT_MS, blankSeen, BLANK_STARTS });   // cloud audit Q166 a signals flag goes once its key left the shards
 Object.assign(module.exports, { teamXpFloor, teamXpStarts, teamXpMark, teamRollbackPlan });   // cloud audit Q237 team competitive XP floors (test/team-comp-ghost-xp.js)
+Object.assign(module.exports, { RATING, RATING_FAMS, ENDLESS_RATING_LB_SOLO, ENDLESS_RATING_LB_DUO, ENDLESS_RATING_LB_TRIO, ENDLESS_RATING_LB_QUAD, ENDLESS_TIERCUT_LB, ratingFamOf, fnv32, ratingRunId, ratingHistKey,
+  ratingHistUpsert, ratingHistRemove, ratingScoreOf, ratingPlan, ratingCutsOf, ratingTierOf, tiercutDay, tiercutEncode, tiercutDecode, tiercutDue, pruneRatingHist });   // O103 endless competitive rating (client knife 5.1a; test/endless-rating.js)
