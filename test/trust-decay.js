@@ -132,7 +132,8 @@ console.log('=== trust decay (Q98: forgery flags count 90 days) ===');
   const rest = fp ? SRC.replace(fp[0], '\n') : SRC;
   const writes = rest.split('\n').map((l, i) => [i + 1, l]).filter(([, l]) => /\.f\s*(\+\+|--|[-+*|]?=(?!=))/.test(l.replace(/\/\/.*$/, '')));
   T('[6] no other write of a player\'s f (every flag goes through flagPlayer)', writes.length === 0, writes.map(([n, l]) => n + ': ' + l.trim()).join(' | '));
-  T('[6] trustPlan judges flagsInWindow, not the lifetime f', /trustTierOf\(flagsInWindow\(\(s\.players \|\| \{\}\)\[p\], now\), verifiedUniqueReporters\(s, p\)\)/.test(SRC));
+  T('[6] trustPlan judges flagsInWindow, not the lifetime f', /trustTierOf\(flagsInWindow\(\(s\.players \|\| \{\}\)\[p\], now\), verifiedUniqueReporters\(s, p\),\s*hostDissentCount\(\(s\.t2lh \|\| \{\}\)\[p\], now/.test(SRC));
+  //   (Q57 restack: the tier line takes a third argument, the team-gamble host charges; the first two stay pinned as they were)
   // Q98 rework 2: B022's Q166 prunes the flagged map right after `let sigDirty = false;` (its own pin, test/flag-prune.js
   //   [0]); the stamp follows it. What matters here: right after loading the signals file, nothing between that could
   //   flag a player (only sigDirty and the Q166 prune, which drops map entries and counts nobody).
