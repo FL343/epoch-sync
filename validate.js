@@ -1906,6 +1906,11 @@ function pruneSignals(s, now) {
   for (const k of Object.keys(s.flagOff || {})) if (!s.flagged[k]) delete s.flagOff[k];   // Q166: an arm goes with its flag (pruneFlagged)
   for (const k of Object.keys(s.rep || {})) if (now - (s.rep[k].at || 0) > SIG_PAIR_WINDOW_MS) delete s.rep[k];
   for (const k of Object.keys(s.rseen || {})) if (now - (s.rseen[k] || 0) > SIG_PAIR_WINDOW_MS) delete s.rseen[k];
+  // Q57 host charges age out of their own window (they only feed the trust tier)
+  for (const k of Object.keys(s.t2lh || {})) {
+    const live = (s.t2lh[k] || []).filter(e => e && now - (Number(e.t) || 0) <= T2LH.WINDOW_MS);
+    if (live.length) s.t2lh[k] = live; else delete s.t2lh[k];
+  }
   // Q51 lone-dissent strikes age out of their own window; the per-match verdicts live as long as a flag does
   //   (a verdict is only consulted while its key is unprocessed -- at most the start maturity window)
   for (const k of Object.keys(s.t2ld || {})) {
@@ -2097,6 +2102,9 @@ function pairKey(a, b) { return a < b ? a + '|' + b : b + '|' + a; }
 //   vur = same-match-VERIFIED unique reporters (a rep edge only counts when the
 //         reporter/target pair actually co-occurred in a match window (signals.pairs)
 //         -- report-bombing from strangers who never played you counts zero)
+//   hd  = team-gamble host charges (Q57): opposing seats struck for dropping out of
+//         the gamble in matches this player hosted, counted as distinct matches AND
+//         distinct victims inside the window (hostDissentCount)
 // Thresholds are conservative pre-traffic placeholders (expected: ~everyone tier 0 at
 // launch); recalibrate with real distributions at the B5/B6 judgment pass. Tiers decay on
 // their own (self-healing appeal): a flag counts for 90 days even for a player who keeps
@@ -2104,7 +2112,8 @@ function pairKey(a, b) { return a < b ? a + '|' + b : b + '|' + a; }
 // Board upkeep: entries exist only for tier>=1 (delete on decay to 0) -> the readable
 // surface stays a handful of coarse tiers, no counts, no reasons.
 const TRUST_LB = process.env.TRUST_LB || 'trust_tier';
-const TRUST_T = { F1: 3, F2: 8, VUR1: 4, VUR2: 10 };
+const TRUST_T = { F1: 3, F2: 8, VUR1: 4, VUR2: 10,
+  HD1: Math.max(1, Number(process.env.TRUST_HD1 || 3)), HD2: Math.max(1, Number(process.env.TRUST_HD2 || 8)) };
 function verifiedUniqueReporters(s, tp) {
   let n = 0;
   for (const k of Object.keys(s.rep || {})) {
@@ -2114,11 +2123,12 @@ function verifiedUniqueReporters(s, tp) {
   }
   return n;
 }
-function trustTierOf(f, vur) {
-  f |= 0; vur |= 0;
+function trustTierOf(f, vur, hd) {
+  f |= 0; vur |= 0; hd |= 0;
   let t = 0;
   t += f >= TRUST_T.F2 ? 2 : (f >= TRUST_T.F1 ? 1 : 0);
   t += vur >= TRUST_T.VUR2 ? 2 : (vur >= TRUST_T.VUR1 ? 1 : 0);
+  t += hd >= TRUST_T.HD2 ? 2 : (hd >= TRUST_T.HD1 ? 1 : 0);
   return Math.min(3, t);
 }
 // existing = {sid: tier on board}; touched = iterable of real sids seen this run with
@@ -2129,7 +2139,8 @@ function trustPlan(s, existing, touched, now) {
   const all = new Set([...Object.keys(existing || {}), ...touched]);
   for (const sid of all) {
     const p = pid(sid);
-    const tier = trustTierOf(flagsInWindow((s.players || {})[p], now), verifiedUniqueReporters(s, p));
+    const tier = trustTierOf(flagsInWindow((s.players || {})[p], now), verifiedUniqueReporters(s, p),
+      hostDissentCount((s.t2lh || {})[p], now == null ? Date.now() : now));
     const cur = (existing || {})[sid];
     if (tier > 0 && tier !== (cur | 0)) writes.push({ sid, tier });
     else if (tier === 0 && cur != null) deletes.push(sid);
@@ -2269,6 +2280,7 @@ function writeRunSummary() {
       '| groups waiting for a seat that started but has no result yet, until the match must be over (Q121) | ' + s('leaveWait', 0) + ' |',
       '| confessions seen/penalized/refunded | ' + s('confess', '0/0/0') + ' |',
       '| ranked 1V1s only the winner wrote (Q184): counted on the silent seat / waiting for a second opponent / paid (points written) / not counted, no signals of his own / over the weekly cap | ' + s('lone1v1', '0 / 0 / 0 / 0 / 0') + ' (' + s('lone1v1Paid', 0) + ') |',
+      '| team-gamble host charges / at trust threshold | ' + s('t2lh', '0/0') + ' |',
       '| reports seen / counted | ' + s('repSeen', 0) + ' / ' + s('repCounted', 0) + ' |',
       '| trust writes / deletes | ' + s('trustW', 0) + ' / ' + s('trustD', 0) + ' |',
       '| team-gamble lone / team dissent unsettled / settled | ' + s('t2ld', '0/0') + ' |',
@@ -2912,6 +2924,7 @@ function team2RankOf(parts, winTeam, ts) {
 // link died through the gamble window (or who was cut by a modded host) is struck the same way;
 // his first strike in a window is always free. Record-only signals beside it: players[p].ld (lone
 // dissents written) and players[host].lh (lone dissents by opponents in matches he hosted).
+// Q57 (follow-up): the host side of the same strikes feeds the trust tier -- signals.t2lh, see T2LH below.
 // Q56 (follow-up): two or three TEAMMATES refusing together -- a premade blocking the game connection as
 // one -- are struck the same way, one strike per account (team2TeamDissent / team2Dissent below); the
 // match settles as soon as ANY of them is due, and the ones not yet due are excused for this match
@@ -3067,6 +3080,47 @@ function t2ldVerdict(prior, cur, now) {
   for (let i = 0; i < opp.length; i++) if (root(i) === i) hosts++;
   return (own + hosts >= T2LD.K || live.length >= T2LD.K_HARD) ? 'settle' : 'free';
 }
+// ---- team-gamble host charges (Q57) ----
+// After Q51 a modded host who cuts an opponent's game connection through the gamble window (Steam online) costs the
+// victim a strike and himself nothing but players[host].lh, which nothing read. Now every OPPOSING-side dissenter
+// struck in a match whose host (roster seat 0) wrote one of the agreeing records -- and is backed as the host by the
+// records, team2HostOwnsSeat0 -- charges that host too:
+// signals.t2lh[host] = [{ m, t, v: [victim pids] }], one entry per match, later victims of the same match joining it.
+// A charge is a trust-tier input (TRUST_T.HD1 / HD2: sort-only soft-avoid in matchmaking, decays with the window),
+// never a verdict -- the record still carries no reason for the dissent, and an honest host whose opponents' links
+// died is charged the same way. hostDissentCount counts distinct matches AND distinct victims (the smaller one), so
+// one dodger blocking again and again in the same honest host's matches counts once, and one match losing a whole
+// opposing team at once (one shared connection) counts once. Own-side dissents never charge the host (a premade
+// voiding behind its own host is Q51's / Q56's). A host who skips his settle record to dodge the charge is absent from
+// the agreeing side: the absent-seat / orphan verdicts judge him a leaver instead when he wrote his own start (Q69); one
+// who wrote nothing at all for the match is only counted, like any seat that only the others' rosters name (Q69).
+// Who the host is comes from the agreeing writers' roster consensus, and a colluding majority of them can write an
+// honest teammate into seat 0 (3v3: three accounts, the true host among them on another seat, and one honest seat
+// writing nothing). So the roster host is charged only when the records back it: his own agreeing record sits at
+// seat 0 (an honest client writes its own seat, so an honest player is never charged for a match he did not host),
+// or -- his record claiming another seat -- every OTHER record of the match that names seat 0, the struck dissenters'
+// own included, names him (a modded host moving his record to an empty seat still pays; a framed player is spared
+// while one other record, normally the cut victim's, tells the truth).
+function team2HostOwnsSeat0(td) {
+  const h = td && td.host;
+  if (!h) return false;
+  const own = td.rest.filter(r => String(r.steamID) === h);
+  if (!own.length) return false;   // never on the others' roster alone (they could name anybody)
+  if (own.some(r => (r.d[5] | 0) === 0)) return true;
+  const others = td.rest.filter(r => String(r.steamID) !== h);
+  for (const d of td.ds) for (const r of d.recs) others.push(r);
+  return others.every(r => !r.roster || r.roster[0] == null || String(r.roster[0]) === h);
+}
+const T2LH = { WINDOW_MS: Number(process.env.T2LH_WINDOW_MS || 30 * 86400000) };
+function hostDissentCount(list, now) {
+  const ms = new Set(), vs = new Set();
+  for (const e of list || []) {
+    if (!e || now - (Number(e.t) || 0) > T2LH.WINDOW_MS) continue;
+    ms.add(String(e.m));
+    for (const v of (Array.isArray(e.v) ? e.v : [])) vs.add(String(v));
+  }
+  return Math.min(ms.size, vs.size);
+}
 // One run's classification pass, BEFORE the start/settle cross-check (a settle verdict's key is then
 // owned by the normal pipeline; a free verdict's key matures through the orphan verdict like any
 // other never-settled match). Mutates gr.consistentMatches / gr.inconsistentGroups in place.
@@ -3093,7 +3147,7 @@ function team2LateRefusers(g, known) {   // pids of accounts outside `known` tha
   return out;
 }
 function applyTeam2LoneDissent(gr, signals, processed, now, vecOf) {
-  const res = { dirty: false, free: 0, settle: 0, touched: [] };
+  const res = { dirty: false, free: 0, settle: 0, touched: [], hosts: 0, hostsAt: 0 };
   signals.t2ld = signals.t2ld || {}; signals.t2lv = signals.t2lv || {};
   const judge = (c) => {   // -> null (leave as is) | 'drop' | replacement consistent entry
     const m = c.m, prev = signals.t2lv[m];
@@ -3167,6 +3221,20 @@ function applyTeam2LoneDissent(gr, signals, processed, now, vecOf) {
         if (v !== 'settle') ex = [];
         signals.t2lv[m] = Object.assign((all.length === 1) ? { p: all[0], t: prev ? prev.t : now, v } : { p: all, t: prev ? prev.t : now, v, ex }, prevLt.length ? { lt: prevLt } : {});
         if (!td.lone || prev) console.log('  team2 team dissent ' + m + ': ' + all.length + ' dissenters -> match verdict ' + v + (v === 'settle' && ex.length ? ' (excused ' + ex.length + ')' : ''));
+      }
+      // Q57: the opposing seats struck just now charge the host who wrote the agreeing side (one entry per match)
+      const vic = fresh.filter(d => d.opp).map(d => pid(d.sid));
+      if (vic.length && team2HostOwnsSeat0(td)) {
+        const hh = pid(td.host);
+        signals.t2lh = signals.t2lh || {};
+        const hl = signals.t2lh[hh] || (signals.t2lh[hh] = []);
+        let he = hl.find(e => e && e.m === m);
+        if (!he) { he = { m, t: now, v: [] }; hl.push(he); }
+        for (const x of vic) if (he.v.indexOf(x) < 0) he.v.push(x);
+        const n = hostDissentCount(hl, now);
+        res.hosts++; if (n >= TRUST_T.HD1) res.hostsAt++;
+        res.touched.push(td.host);
+        console.log('  team2 dissent host ' + m + ': ' + plog(td.host) + ' charged for ' + vic.length + ' opposing seat(s) -> ' + n + ' in window' + (n >= TRUST_T.HD1 ? ' (trust threshold)' : ''));
       }
     }
     for (const d of td.ds) res.touched.push(d.sid);
@@ -4906,6 +4974,9 @@ async function main() {
   //   Q56: two or three teammates refusing together are struck one by one the same way (any one due settles it)
   const t2ldRes = applyTeam2LoneDissent(gr, signals, processed, Date.now(), vecOf);
   if (t2ldRes.dirty) sigDirty = true;
+  // Q57: hosts charged for opposing seats dropping out of their gamble (in touched below; the trust pass re-tiers them)
+  if (t2ldRes.hosts) console.log('team2 dissent hosts: ' + t2ldRes.hosts + ' charges, ' + t2ldRes.hostsAt + ' at the trust threshold');
+  RUN.t2lh = t2ldRes.hosts + '/' + t2ldRes.hostsAt;
   for (const sid of t2ldRes.touched) trustTouched.add(String(sid));
   if (t2ldRes.free || t2ldRes.settle) console.log('team2 lone dissent: ' + t2ldRes.free + ' left unsettled (dissenter flagged), ' + t2ldRes.settle + ' settling from the agreeing records');
   RUN.t2ld = t2ldRes.free + '/' + t2ldRes.settle;
@@ -7535,6 +7606,7 @@ module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CHAT_MUTE: 
   ENDLESS_COMP_LB_OVERALL, overallScore, overallDominant,   // knife 3.5d composite ladder
   CAMPAIGN_ENDLESS_BOX_PREFIX, CAMPAIGN_ENDLESS_LB_PREFIX, CAMPAIGN_ENDLESS_SUFFIX, CAMPAIGN_ENDLESS_OFFENSE_LB, CAMPAIGN_ENDLESS_FILE, CE_MAIL_MIN, CE_SETTLED_TTL_MS, loadCe, saveCe,   // client knife 3.9b N4 (Gold Rush lane)
   absentRosterSeats, absenceHold, shardPlan, transientStatus, ABSENT_GRACE_MS, ABSENT_GRACE_MIN_MS, LEDGER_SHARDS,   // R1-B2-04 / R1-X14 absent-seat hold
+  T2LH, hostDissentCount, team2HostOwnsSeat0,   // cloud audit Q57 team-gamble host charges
   PERKS_CFG: perks.PERKS_CFG, verifyPerkPicks: perks.verifyPerkPicks,
   pruneConfessions, CONFESS_PRUNE_MS,   // confession entries outlive the window while their record is still on a shard
   pruneProcessed, PROCESSED_CAP, PROCESSED_KEEP, PROCESSED_PRUNE_WAIT_MS, PRUNE_NOTE,   // cloud audit Q144 what the job remembers about keys whose records are gone

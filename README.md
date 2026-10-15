@@ -100,6 +100,20 @@ that raised it, even for a player who keeps playing (the lifetime count stays as
 history), and one match flags a player once however long its records stay on the shards.
 De-identified like all other state.
 
+**Team-gamble host charges** feed the trust tier from the host's side of the dissent strikes
+above: each dissenter struck on the opposing team charges the host (roster seat 0) when the
+host wrote one of the agreeing records and the records back him as the host -- his own record
+sits at seat 0, or every other record of the match that names seat 0 (the struck dissenters'
+included) names him -- one entry per match (`signals.json` `t2lh`). A colluding majority of
+the agreeing writers can name an honest teammate at seat 0; his own record and the cut
+victim's still tell the truth, so he is not charged. Inside
+`T2LH_WINDOW_MS` (30 days) the distinct matches and the distinct victims are counted and the
+smaller number is the host's count, so one player blocking again and again in the same
+host's matches, or a whole team dropping out of one match together, counts once. From
+`TRUST_HD1` (3) the host is one trust tier up, from `TRUST_HD2` (8) two: a sort-only soft
+avoid in matchmaking that decays with the window, never a verdict (the record carries no
+reason for the dissent).
+
 **Start attestations** close the blind spot of a match nobody settles: each client also
 writes a start-type record (a second magic, zeroed result fields, same roster layout)
 when play actually begins. A start group with two-plus distinct writers and a
@@ -218,4 +232,6 @@ between board read retries, default 8 s; tests set 0),
 `GROUPS_FILE` (repeat-group decay state path, default `groups.json`),
 `CONFESSIONS_FILE` (pending abandon-confession state path, default `confessions.json`),
 `T2LD_K` / `T2LD_K_HARD` / `T2LD_WINDOW_MS` (team-gamble lone dissent: strikes that convict, total
-strike cap whatever the host, rolling window; defaults 2 / 4 / 30 days).
+strike cap whatever the host, rolling window; defaults 2 / 4 / 30 days),
+`T2LH_WINDOW_MS` / `TRUST_HD1` / `TRUST_HD2` (team-gamble host charges: rolling window, and the
+counts that add one / two trust tiers; defaults 30 days / 3 / 8).
