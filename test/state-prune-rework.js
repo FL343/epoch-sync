@@ -208,7 +208,7 @@ console.log('=== Q144 rework: signed solo segments written back, the remembered-
   pin('the solo lane checks the done memory first', "    if (soloState.done && soloState.done[m]) {\n      processed.add(m); RUN.soloReplay = (RUN.soloReplay | 0) + 1;");
   if (KP) pin('the done memory is pruned with both tables the lane verifies with', 'const soloDonePruned = pruneSoloDone(soloState, [soloPub, soloPubRec]);');
   else pin('the done memory is pruned with the table the lane verifies with (no per-channel key policy on this path)', 'const soloDonePruned = pruneSoloDone(soloState, [soloPub]);');
-  pin('soloDone = processed + remembered, after the signature verified', '    const f = v.fields;\n    const soloDone = () => { processed.add(m); soloDoneNote(soloState, m, f.keyName, nowMs); };');
+  pin('soloDone = processed + remembered, after the signature verified', '    const f = v.fields;\n    const soloDone = () => {   // Q144 rework: a verified segment this lane processed (pruneSoloDone)\n      processed.add(m); soloDoneNote(soloState, m, f.keyName, nowMs);\n');
   const a = SRC.indexOf('    const soloDone = () => {'), b = SRC.indexOf('  for (const c of fresh) {', a);
   const body = SRC.slice(a, b);
   T('[0] every processed.add after the signature is soloDone (five: chain, reroll, perk, seedcap window, settle)', (body.match(/soloDone\(\);/g) || []).length === 5 && !/processed\.add\(m\)/.test(body.replace('processed.add(m); soloDoneNote', '')), (body.match(/soloDone\(\);/g) || []).length + ' soloDone() calls');

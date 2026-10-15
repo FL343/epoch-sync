@@ -2384,6 +2384,7 @@ function writeRunSummary() {
       '| perk replay rejects | ' + s('perkRej', 0) + ' |',
       '| token resumes: replays caught / burnt-run segments / untagged settled / untagged refused | ' + s('resumeReplay', 0) + ' / ' + s('runBurnt', 0) + ' / ' + s('resumeUntagged', 0) + ' / ' + s('resumeUntaggedRej', 0) + ' |',
       '| solo same-key forks (another signed record under a settled segment key) | ' + s('soloKeyFork', 0) + ' |',
+      '| signed solo segments whose guard clock went back inside the segment, counted and handled as usual (Q242) | ' + s('soloNegDur', 0) + ' |',
       '| one-match-at-a-time deferrals | ' + s('writerPaced', 0) + ' |',
       '| ranked matches the ranked rating turns into / out of a mismatch, quick matches and the repeat-group decay set aside (Q160) | ' + s('heldMismatch', 0) + ' / ' + s('heldMismatchOff', 0) + ' |',
       '| absent seats named by others only, not convicted (Q69) | ' + s('unattested', 0) + ' |',
@@ -4073,9 +4074,19 @@ function soloSanity(f) {
     const cap = (classic ? classicGoalFor(Math.max(1, f.endDepth | 0), 1) : endlessGoalFor(Math.max(1, f.endDepth | 0), 1)) * ENDLESS.SCORE_MULT;   // O216: classic line (650/1195/… linear +2705)
     if ((f.score | 0) > cap || (f.score | 0) < SANITY.SCORE_FLOOR) out.push('score');
   }
-  if ((f.durationSec | 0) < 0) out.push('duration');
+  // durationSec is NOT a bound (cloud audit Q242, 2026-10): the guard measures it on the WALL clock (run_tracker.h soloNow =
+  //   time(nullptr) at the segment's start and end), so it goes negative when an honest player's clock goes back inside a
+  //   segment (a manual change, a time sync correcting a clock that ran fast, a dual boot fighting over the hardware clock).
+  //   Rejecting it here flagged the account and parked the run's later segments on the 7-day chain wait (architecture
+  //   decision 10: a false positive on an honest player costs more than the check catches). Nothing in this lane reads the value: pacing runs on this job's own
+  //   clock (startsPending t0), ladder / CP / milestones / XP come from depths and the score. A key holder could sign any
+  //   non-negative duration anyway, so a negative one buys nothing. A new consumer (a rate bound, a pacing input, a reward)
+  //   must decide what a negative value means first -- test/solo-neg-duration.js keeps every other read of the field red.
+  // durationSec: counted by the caller (soloClockBack), never a reason to reject -- see the note above (Q242)
   return out;
 }
+// the guard's wall clock went back inside this verified segment (Q242): counted on the run summary, settled like any other segment
+function soloClockBack(f) { return (f.durationSec | 0) < 0; }
 // resume tags a segment carries (cloud audit R1-A3-02, 2026-10-08): the consumed save row's nonce folded to 23 bits, on the FIRST
 //   segment of a resumed session only. Solo = the guard-signed attest field (attest.js fields.resumeTag); team = the clients' 12th tail
 //   int (endlessTail; not in the consensus vector, so the team settle passes every writer's non-zero tag: a cold rejoiner writes 0).
@@ -6336,7 +6347,13 @@ async function main() {
       return false;
     }
     const f = v.fields;
-    const soloDone = () => { processed.add(m); soloDoneNote(soloState, m, f.keyName, nowMs); };   // Q144 rework: a verified segment this lane processed (pruneSoloDone)
+    const soloDone = () => {   // Q144 rework: a verified segment this lane processed (pruneSoloDone)
+      processed.add(m); soloDoneNote(soloState, m, f.keyName, nowMs);
+      if (soloClockBack(f)) {   // Q242: an honest clock change, not a forgery -- counted, the segment handled like any other
+        RUN.soloNegDur = (RUN.soloNegDur | 0) + 1;
+        console.log('  solo ' + m + ': ' + plog(sid) + ' the guard clock went back inside the segment (negative duration) -- counted (Q242)');
+      }
+    };
     // R1-A3-02 residual watch: another signed record under this segment key that verifies too but differs from the one settled here
     //   (the guard re-signing a segment after an ambiguous write, or a modified client that reused the session id for a replay and got
     //   both copies onto the board inside one tick -- the first verified copy settles, the other is never looked at again). Counted only.
@@ -8026,6 +8043,7 @@ module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CHAT_MUTE: 
   ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, SAVE_BOX_LB_DUO, SAVE_BOX_LB_TRIO, teamRunKey, soloMsSlot, groupRecords,
   ENDLESS_COMP_LB_QUAD, SAVE_BOX_LB_QUAD, ENDLESS_LB_QUAD, ENDLESS_MAX_PC, compFamKeyOf,   // client knife 3.7a (O178 four seats)
   ENDLESS_LB_SOLO, SAVE_BOX_LB_CASUAL, CASUAL_LIVES,   // client knife 3.7a (O218 casual solo lane)
+  soloClockBack,   // cloud audit Q242 a verified solo segment whose guard clock went back (counted, never a reason to reject)
   T2LD, team2LoneDissent, t2ldVerdict, applyTeam2LoneDissent,   // cloud audit Q51 team-gamble lone dissent
   team2TeamDissent, team2Dissent, team2HostTeam, team2NamesSeat, T2_NAME_TAG, team2LateRefusers,   // cloud audit Q56 team-gamble team dissent
   ENDLESS_LB_CLASSIC_SOLO, SAVE_BOX_LB_CLASSIC, CLASSIC, classicGoalAt, classicGoalFor, packClassicScore,   // client knife 3.9b N2 (O216 classic lane)

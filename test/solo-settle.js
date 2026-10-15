@@ -74,7 +74,10 @@ assert('final + user-quit is legal', soloSanity(seg({ flags: A.SEG_FINAL, dispCo
 assert('end < start -> depth', soloSanity(seg({ startDepth: 5, endDepth: 4 })).indexOf('depth') >= 0);
 assert('season out of domain -> season', soloSanity(seg({ seasonId: 5000 })).indexOf('season') >= 0);
 assert('score above the depth-scaled cap -> score', soloSanity(seg({ score: 99999999 })).indexOf('score') >= 0);
-assert('negative duration -> duration', soloSanity(seg({ durationSec: -1 })).indexOf('duration') >= 0);
+// cloud audit Q242: a negative duration is the guard's wall clock gone back inside the segment (an honest clock change), no
+//   longer a bound; the lane counts it (soloClockBack) and settles the segment -- test/solo-neg-duration.js covers main()
+assert('negative duration is no bound, counted as a clock that went back (Q242)', soloSanity(seg({ durationSec: -1 })).length === 0
+  && v.soloClockBack(seg({ durationSec: -1 })) && !v.soloClockBack(seg()));
 
 console.log('-- chain rules --');
 {
