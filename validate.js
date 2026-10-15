@@ -2368,6 +2368,7 @@ function writeRunSummary() {
       '| absent-seat holds (incomplete read / grace) | ' + s('absentHeld', 0) + ' |',
       '| groups waiting for a seat that started but has no result yet, until the match must be over (Q121) | ' + s('leaveWait', 0) + ' |',
       '| confessions seen/penalized/refunded | ' + s('confess', '0/0/0') + ' |',
+      '| leaves convicted at a settle this run, kept for a late result / late results forgiven (points of the finish, exit retracted) / late results over the cap, the leave stands (Q228) | ' + s('lateCv', 0) + ' / ' + s('lateForgive', 0) + ' / ' + s('lateCapped', 0) + ' |',
       '| ranked 1V1s only the winner wrote (Q184): counted on the silent seat / waiting for a second opponent / paid (points written) / not counted, no signals of his own / over the weekly cap | ' + s('lone1v1', '0 / 0 / 0 / 0 / 0') + ' (' + s('lone1v1Paid', 0) + ') |',
       '| team-gamble host charges / at trust threshold | ' + s('t2lh', '0/0') + ' |',
       '| reports seen / counted | ' + s('repSeen', 0) + ' / ' + s('repCounted', 0) + ' |',
@@ -2606,6 +2607,72 @@ function loadSeedcap() { try { return JSON.parse(fs.readFileSync(SC_STATE_FILE, 
 // visible and no consistent settlement).
 const CONFESSIONS_FILE = process.env.CONFESSIONS_FILE || 'confessions.json';
 const CONFESS_PRUNE_MS = Number(process.env.CONFESS_PRUNE_MS || 48 * 3600 * 1000);
+// ---- a convicted leave whose own finished result comes in late (cloud audit Q228) ----
+// The client keeps a result it could not upload and sends it again from the menus and at the next boot, for up to two
+// hours (the outbox, cloud workbench W34). A player whose Steam was down for over an hour, or who closed the game on the
+// results screen and opened it again later, is convicted at the settle before his result arrives: an absent seat is
+// convicted once LEAVE_CONFIRM_MS has passed since his own start was read (ranked: -LEAVER_LP_PENALTY, every matchmade
+// type: an exit) and the key is processed, so his result then reached a processed key and changed nothing: the fine and
+// the exit stood for a match he finished.
+// Each conviction at the settle now leaves an entry in confState (key "pid|matchKey", the confession table):
+//   { t0, mt, ded, ex: 1, cv: 1, s: the convicted seat, v: vecTag of the settled scores, and at a ranked settle b: the
+//   points board, w, g }. ded = the points the fine took (0 when this run's points write for him failed); w = the points
+//   delta the settle would have given him with his record there (lateShadow: the same plan with him rated at the place
+//   the settled scores give him); g = what the other members of his premade unit at an FFA settle (the party bits)
+//   gained by his absence (each one's delta above the one the plan with him there gives, summed; only writes that
+//   landed count; 0 at a team settle).
+// The confession upkeep (reconcileConfessions) forgives the conviction when his own record for the key shows up within
+//   LATE_RESULT_MS of it: a result record of his account, not 'abandoner', sanity-clean on its own fields, from the
+//   convicted seat, carrying the settled scores exactly (the others' records need not be on the shards any more). The
+//   exit is retracted and, on the same points board, his points move by ded + w - g, never down: the finish he would
+//   have had, less what his absence handed the others. Nobody else's points move; the match gives him no rating, XP or
+//   career (the others settled without him).
+// Why not the fine alone: a convicted leaver takes no match points, so a refund of the fine alone would turn a loss into
+//   nothing for a client that holds its record past the wait and writes it later. And at an FFA settle the other members
+//   of his premade unit settle without him at their own places, not at the unit's average (a pair placing 1st and 4th of
+//   four takes +3 each together, the 1st +38 alone): w - g leaves the late writer where staying would have put him, and
+//   his party where staying would have put it. Nobody else is charged: a stranger's gain from a smaller field is not his
+//   doing, and a team record cannot tell a party from strangers (the teammates' shield is a few points; see the residual).
+// The cap (LATE_CAP): the record carries nothing the others' public records do not, so a client that left can copy the
+//   settled scores after the settle and write them from its seat: forgiven, its leave would cost only the finish at the
+//   score it left with. So an account is forgiven at most LATE_CAP.N late results in LATE_CAP.MS (leavers[p].lf: the
+//   times); past that the leave stands as before Q228. A late upload is rare (the result failed to arrive for about an
+//   hour), so the cap leaves the honest player whole in practice (architecture decision 10); a guard-signed record
+//   (O226) would end the copying.
+// Not covered: the start-orphan verdict (STARTS_MATURITY_MS, an exit; nothing settled to check his record against, the
+//   outbox has stopped by then) and a ranked 1V1 only its winner wrote (Q184: nothing of the silent seat moves). Those
+//   stand as before.
+// Residuals (P3, cloud workbench AFTER_EA): the forgiven match moves no rating, so a client that holds its losing
+//   records back keeps its rating at the cost of each match's XP; at a team settle a party member holding his record
+//   back lets his teammates keep the abandoned-teammate shield. Both at most LATE_CAP.N times per account a week.
+const LATE_RESULT_MS = Number(process.env.LATE_RESULT_MS || 6 * 3600 * 1000);
+const LATE_CAP = { N: Number(process.env.LATE_CAP_N || 2), MS: Number(process.env.LATE_CAP_MS || 7 * 86400000) };
+// pure (Q228): what a convicted leaver's absence moved at the settle. rows: the points-plan rows of the players rated at
+//   the settle ({ steamID, seat, mmr, rank, lp }), x his ({ steamID, seat, mmr, rank, lp }: his rating and his points as
+//   at his leave), every rank as the settle ranks the players with him there (the FFA plan and lpDelta read it, team
+//   plans read the seats); moved: { [steamID]: the points delta the settle gave a rated player }; seeded: the ids the
+//   settle seeded (no series clamp, as at the settle); plan(all) -> the settle's points plan for all of them, or null;
+//   mates: the seats whose gain counts (the other members of his premade unit). Each delta is the settle's own: the
+//   plan's or lpDelta, the series clamp, then 0..LP_MAX.
+//   Returns { w: his delta with his record there, g: [[steamID, gain]] for each rated player at a seat in mates whose
+//   delta at the settle was above the one with him there (gain > 0) }.
+function lateShadow(rows, x, moved, seeded, plan, mates) {
+  const all = rows.concat([x]), n = all.length, alt = plan(all);
+  const deltaOf = (r) => {
+    const cur = r.lp | 0, rs = alt && alt[r.steamID];
+    const d0 = rs ? rs.adjDelta : lpDelta(cur, r.rank | 0, n);
+    const won = rs ? !!rs.won : ((r.rank | 0) <= (n + 1) / 2);
+    const d = ((rs && rs.flag === 2) || (seeded && seeded.has(r.steamID))) ? d0 : crosslineDelta(cur, d0, won);
+    return Math.max(0, Math.min(LP_MAX, cur + d)) - cur;
+  };
+  const g = [];
+  for (const r of rows) {
+    if (moved[r.steamID] == null || !(mates && mates.has(r.seat | 0))) continue;
+    const gain = (moved[r.steamID] | 0) - deltaOf(r);
+    if (gain > 0) g.push([String(r.steamID), gain]);
+  }
+  return { w: deltaOf(x), g };
+}
 function loadConfessions() { try { return JSON.parse(fs.readFileSync(CONFESSIONS_FILE, 'utf8')) || {}; } catch (e) { return {}; } }
 // live: Set of "pid|matchKey" keys whose 0xB5 record this run's shard read showed, built only when
 //   every shard was read completely (all fulfilled, none cut by PAGE_CAP); anything else (null) =
@@ -2637,14 +2704,19 @@ function saveUnmatched(s) { try { writeStateFile(UNMATCHED_FILE, JSON.stringify(
 //   groups: this run's settle-record groups (forgiveness probe: confessor wrote a settle record).
 //   opts: { penalty, lpMax, maturityMs, appliesLpFn, seedFor(sid) -> base LP for a first-ranked leaver,
 //           readLp: async(sid) -> {score, details}|null, writeLp: async(sid, score, details) -> ok,
-//           checkpoint: () -> void (optional; saves confState + leavers to disk after every points write) }
+//           checkpoint: () -> void (optional; saves confState + leavers to disk after every points write
+//             or exit retraction),
+//           lateMs, vecTag(rec) -> tag, lpBoard (Q228: the window, the scores check and the points board of a
+//             conviction's entry, cv) }
 // Effects per NEW confession on an unprocessed match: exit-rate leaves++ (all matchmade types) and,
 // for ranked, an immediate clamp-aware LP deduction (amount recorded for the refund). A later run
 // that sees the confessor's own settle record for the same match refunds the deduction and retracts
 // the exit signal (first-reconnect forgiveness, client mirror). detectLeavers / start-orphan
 // convictions skip confessed (pid|match) keys so nothing double-counts.
+// Q228: the upkeep also forgives a conviction's entry (cv, see LATE_RESULT_MS) on its own probe (lateRec), at most
+//   LATE_CAP.N times per account in LATE_CAP.MS.
 async function reconcileConfessions(confs, groups, processed, confState, leavers, now, opts) {
-  const res = { seen: 0, penalized: 0, exitHits: 0, refunded: 0, finalized: 0 };
+  const res = { seen: 0, penalized: 0, exitHits: 0, refunded: 0, finalized: 0, retracted: 0, late: 0, lateCapped: 0 };
   // absolution probe (2026-07-19 audit H3): "came back and finished" must mean a record inside a
   // CONSISTENT settle group (>=2 distinct writers, identical consistency vectors) whose own disp
   // is non-abandoner. The old any-record probe accepted a lone or divergent 0xB1 -- which any
@@ -2660,6 +2732,17 @@ async function reconcileConfessions(confs, groups, processed, confState, leavers
     return (rec && dispClassOf(rec.dispCode) !== 'abandoner') ? rec : null;
   };
   const settledBy = (m, p) => !!settleRec(m, p);
+  // Q228: a convicted player's own finished record for the key, from the seat he was convicted on, sanity-clean on its own
+  //   fields, carrying exactly the settled scores (st.v; an entry without them forgives nothing)
+  const lateRec = (m, p, st) => {
+    if (!st.v || !opts.vecTag) return null;
+    for (const r of (groups[m] || [])) {
+      if (pid(String(r.steamID)) !== p || dispClassOf(r.dispCode) === 'abandoner') continue;
+      if ((r.d[5] | 0) !== (st.s | 0) || sanityFlags([r]).length) continue;
+      if (opts.vecTag(r) === st.v) return r;
+    }
+    return null;
+  };
   const byKey = {};
   for (const c of (confs || [])) { const p = pid(String(c.steamID)); byKey[p + '|' + c.m] = Object.assign({ p }, c); }
   // 1) NEW confessions (visible on shards this run)
@@ -2695,27 +2778,58 @@ async function reconcileConfessions(confs, groups, processed, confState, leavers
     if (st.done || st.refunded) continue;
     const i = key.indexOf('|');
     const p = key.slice(0, i), m = key.slice(i + 1);
-    const rec = settleRec(m, p);   // hardened probe (consistent group + non-abandoner disp); lone/divergent records refund nothing
+    // forgiveness window (Q228: a conviction's entry waits LATE_RESULT_MS, and a record past it refunds nothing)
+    const winMs = st.cv ? (opts.lateMs || opts.maturityMs) : opts.maturityMs;
+    const closed = now - (st.t0 || 0) > winMs;
+    // hardened probe (consistent group + non-abandoner disp); lone/divergent records refund nothing. Q228: a conviction's
+    //   entry has its own (lateRec)
+    const rec = st.cv ? (closed ? null : lateRec(m, p, st)) : settleRec(m, p);
     if (rec) {
       // came back and finished: refund the exact deducted amount + retract the exit signal
-      let wrote = false;
-      if (st.ded > 0 && opts.readLp) {
+      const tag = st.cv ? '  late-result ' : '  confess-forgive ';
+      // Q228: a conviction is forgiven at most LATE_CAP.N times per account in LATE_CAP.MS (its times on leavers[p].lf)
+      let lf = null;
+      if (st.cv) {
+        const le = leavers[p] = leavers[p] || { leaves: 0, lastMatch: '' };
+        lf = (Array.isArray(le.lf) ? le.lf : []).filter((t) => now - (Number(t) || 0) < LATE_CAP.MS);
+        if (lf.length >= LATE_CAP.N) {
+          if (lf.length) le.lf = lf; else delete le.lf;
+          st.done = 1; res.finalized++; res.lateCapped++;
+          console.log(tag + m + ': ' + plog(p) + ' wrote his result after the conviction, but ' + lf.length + ' late result(s) of his were forgiven in the last '
+            + Math.round(LATE_CAP.MS / 86400000) + ' days -- the leave stands (Q228)');
+          continue;
+        }
+      }
+      // Q228: a conviction gives back the fine and the points the settle would have given him (w) less what the others gained
+      //   by his absence (g), never below 0, on the points board it was written on only (b); a confession its fine
+      const sameBoard = !st.cv || (st.b != null && opts.lpBoard != null && String(st.b) === String(opts.lpBoard));
+      const back = st.cv ? (sameBoard ? Math.max(0, (st.ded | 0) + (st.w | 0) - (st.g | 0)) : 0) : (st.ded | 0);
+      let wrote = false, retracted = false;
+      if (back > 0 && opts.readLp) {
         const sid = String(rec.steamID);
         const e = await opts.readLp(sid);
-        const nv = Math.min(opts.lpMax, ((e ? e.score : 0) | 0) + (st.ded | 0));
-        const okW = await opts.writeLp(sid, nv, e && e.details);
-        wrote = true;
-        if (okW) res.refunded++;
-        console.log('  confess-forgive ' + m + ': ' + plog(sid) + ' settled after all, refund +' + st.ded + ' -> ' + nv);
+        if (st.cv && !e) {
+          console.log(tag + m + ': ' + plog(sid) + ' settled after all, no points of his to move (Q228)');
+        } else {
+          const nv = Math.min(opts.lpMax, ((e ? e.score : 0) | 0) + back);
+          const okW = await opts.writeLp(sid, nv, e && e.details);
+          wrote = true;
+          if (okW) res.refunded++;
+          console.log(tag + m + ': ' + plog(sid) + ' settled after all, refund +' + back + ' -> ' + nv
+            + (st.cv ? ' (convicted before his result came in: fine ' + (st.ded | 0) + ', finish ' + (st.w | 0) + ', the others\' gain ' + (st.g | 0) + ', Q228)' : ''));
+        }
       } else {
-        console.log('  confess-forgive ' + m + ': ' + plog(p) + ' settled after all (exit signal retracted)');
+        console.log(tag + m + ': ' + plog(p) + ' settled after all (exit signal retracted)'
+          + (st.cv ? ' (convicted before his result came in' + (sameBoard ? ': fine ' + (st.ded | 0) + ', finish ' + (st.w | 0) + ', the others\' gain ' + (st.g | 0) + ', nothing to give back' : '') + ', Q228)' : ''));
       }
-      if (st.ex && leavers[p]) { leavers[p].leaves = Math.max(0, (leavers[p].leaves | 0) - 1); st.ex = 0; }
+      if (st.ex && leavers[p]) { leavers[p].leaves = Math.max(0, (leavers[p].leaves | 0) - 1); st.ex = 0; retracted = true; res.retracted++; }
+      if (st.cv) { leavers[p].lf = lf.concat([now]); res.late++; }
       st.refunded = 1;
       if (wrote && opts.checkpoint) opts.checkpoint();   // R1-B2-03: the refund is relative too -- its marker on disk before the next exit
+      else if ((retracted || st.cv) && opts.checkpoint) opts.checkpoint();   // Q228: an exit retracted or a late result forgiven alone too
       continue;
     }
-    if (now - (st.t0 || 0) > opts.maturityMs) { st.done = 1; res.finalized++; }   // forgiveness window closed; penalty stands
+    if (closed) { st.done = 1; res.finalized++; }   // forgiveness window closed; penalty stands
   }
   return res;
 }
@@ -4964,6 +5078,8 @@ async function main() {
     }
     return JSON.stringify(v);
   };
+  // Q228: a short tag of a record's consistency vector (kept on a conviction's entry: the scores his late result must carry)
+  const vecTag = (r) => crypto.createHash('sha256').update(vecOf(r)).digest('hex').slice(0, 12);
   // Q80: register this run's new start rosters first, then drop every record its writer is not seated for (applySeatGate)
   //   -- before grouping, so an outside account's record votes nowhere below (consistency, dissent, absent seats, own records)
   const processed = loadProcessed();
@@ -5177,7 +5293,7 @@ async function main() {
   }
   // abandon confessions: immediate authoritative leaver penalty without finisher consensus.
   // Runs before the early returns (the everyone-left scenario produces no settle groups at all).
-  let confRes = { seen: 0, penalized: 0, exitHits: 0, refunded: 0, finalized: 0 };
+  let confRes = { seen: 0, penalized: 0, exitHits: 0, refunded: 0, finalized: 0, retracted: 0, late: 0, lateCapped: 0 };
   if (confessions.length || Object.keys(confState).length) {
     const lpId0 = lpBoardId;   // season-resolved (see top of main)
     // playtest: no points surface by design -- confessions still record exit-rate signals, the
@@ -5186,6 +5302,7 @@ async function main() {
     const skill0 = loadSkill();   // read-only here (first-ranked leaver seeding base)
     confRes = await reconcileConfessions(confessions, groups, processed, confState, leavers, nowMs, {
       penalty: LEAVER_LP_PENALTY, lpMax: LP_MAX, maturityMs: STARTS_MATURITY_MS,
+      lateMs: LATE_RESULT_MS, vecTag, lpBoard: lpId0,   // Q228: a conviction's entry (cv)
       appliesLpFn: appliesLp,
       consistentKeys,   // absolution probe only trusts consistent settle groups (a lone/divergent 0xB1 cancels nothing)
       checkpoint: () => saveEarlyMarks(true),   // R1-B2-03: after every points write (fine or refund), before the next exit can happen
@@ -5213,6 +5330,7 @@ async function main() {
       console.log('confessions: ' + confRes.seen + ' seen, ' + confRes.penalized + ' penalized, ' + confRes.exitHits + ' exit-rate hits, ' + confRes.refunded + ' refunded, ' + confRes.finalized + ' finalized');
   }
   RUN.confess = confRes.seen + '/' + confRes.penalized + '/' + confRes.refunded;
+  RUN.lateForgive = confRes.late | 0; RUN.lateCapped = confRes.lateCapped | 0;   // Q228
   // forgery-flag counters for the inconsistent groups seen this run
   // (they are never processed, so they re-surface every run -- recordFlag dedups by match key).
   for (const { m, g } of inconsistentGroups) {
@@ -5335,7 +5453,7 @@ async function main() {
     saveStarts(startsPending);
     saveConfessions(confState, nowMs, confLive);
     if (sigDirty) saveSignals(signals, nowMs);
-    if (startsRes.convicted || confRes.exitHits || confRes.refunded) { saveLeavers(leavers); }
+    if (startsRes.convicted || confRes.exitHits || confRes.refunded || confRes.retracted || confRes.late) { saveLeavers(leavers); }   // Q228: + an exit retracted or a late result forgiven alone
     // persist on growth, not on conviction count: an orphan verdict marks its key processed even
     // when it convicts nobody (every roster member confessed or wrote a settle record). Its
     // pending entry is already gone from starts.json, so leaving the key unsaved made the next run
@@ -6014,6 +6132,7 @@ async function main() {
   }
   const today = Math.floor(Date.now() / 86400000);   // UTC day index (matches client lastWinDay) for the daily-first bonus
   const changed = {}; const changedLp = {}; const changedXp = {}; const changedCp = {}; const changedEndless = {}; const changedEndlessSeason = {}; const changedEndlessTrio = {}; const changedEndlessTrioSeason = {}; const changedEndlessQuad = {}; const changedEndlessQuadSeason = {}; const reveal = {}; const careerDet = {}; let settled = 0, voided = 0, settledEndless = 0, settledPrivate = 0, settledSolo = 0, settledEndlessComp = 0, settledBots = 0;
+  const lateCv = [];   // Q228: [entry key, sid, gains] of this run's convictions at a ranked settle (only writes that landed count, below)
   const changedEndlessSolo = {}, changedEndlessSoloSeason = {};   // O218 solo casual ladder write pools (client knife 3.7a)
   const changedEndlessClassicSolo = {};   // O216 classic solo lifetime ladder write pool (client knife 3.9b N2)
   const changedEndlessClassicDuo = {}, changedEndlessClassicTrio = {}, changedEndlessClassicQuad = {};   // N3 team classic lifetime ladder write pools
@@ -7154,6 +7273,7 @@ async function main() {
     // skill.json/groups.json stay untouched and the changed/changedLp pools stay empty. The
     // leaver loop below still runs (exit-rate is a channel-neutral signal); its LP half
     // self-gates on the absent points board. =====
+    const lateSh = {}, lpMoved = {};   // Q228: per leaver convicted below, lateShadow; per rated player, his points delta
     if (!PT_MODE) {
       const tsIn = parts.map(p => { const sk = skill[pid(p.steamID)] || ts.DEFAULTS; return { id: p.steamID, rank: rankOf[p.steamID], mu: sk.mu, sigma: sk.sigma }; });
       // placement seeding: first ranked settle -> seed the lp map itself (recorded in changedLp so a
@@ -7397,12 +7517,46 @@ async function main() {
           // PROTECTED (flag 2) keeps natural loss; a seed settle (first ranked) skips the series clamp too.
           const d = ((rs && rs.flag === 2) || seededNow.has(r.id)) ? d0 : crosslineDelta(cur, d0, wonLike);
           const nv = Math.max(0, Math.min(LP_MAX, cur + d));
-          lp[r.id] = nv; changedLp[r.id] = nv;
+          lp[r.id] = nv; changedLp[r.id] = nv; lpMoved[r.id] = nv - cur;
           if (rs && rs.flag) reveal[r.id] = { matchHash: g[0].d[3] | 0, seed: g[0].d[4] | 0, flag: rs.flag, adjDelta: d, normalDelta: rs.normalDelta };
           lpLine = ' | pts ' + cur + (d >= 0 ? '+' : '') + d + '->' + nv + (rs && rs.flag ? (' [' + (rs.flag === 1 ? 'UPSET' : 'PROTECTED') + ' normal ' + rs.normalDelta + ']') : '')
             + (d !== d0 ? (' [SERIES ' + (wonLike ? 'PROMOTED' : 'RELEGATED') + ' from ' + d0 + ']') : '');
         }
         console.log('  settle ' + c.m + ': ' + plog(r.id) + ' rank' + rankOf[r.id] + ' mu' + r.mu.toFixed(2) + ' sigma' + r.sigma.toFixed(2) + ' -> ' + ts.displayRating(r.mu, r.sigma) + lpLine);
+      }
+      // Q228: what each leaver convicted below would have taken with his record there, and what the other members of his
+      //   premade unit gained by his absence (lateShadow) -- kept on his conviction's entry for a late result of his own
+      //   (before his ranked rating moves below)
+      if (lpId && appliesLp(matchType) && !noRating) {
+        const rankWith = (list) => {   // the settle's ranking (above) of list = [{ steamID, seat, score }]
+          const so = [...list].sort((a, b) => b.score - a.score), out = {}; let rr = 1;
+          for (let i = 0; i < so.length; i++) { if (i > 0 && so[i].score < so[i - 1].score) rr = i + 1; out[so[i].steamID] = rr; }
+          if (isTeamMt(matchType)) {
+            const tr = isSubScoreMt(matchType) ? team2RankOf(list, t2Win, teamSizeOfMt(matchType)) : teamRankOf(list);
+            if (tr) for (const q of list) out[q.steamID] = tr[q.steamID];
+          }
+          return out;
+        };
+        const lSeats = leavers0.concat(namedOnly).map((y) => y.seat);
+        const mask = premadeMaskOf(matchType), t0 = premadeTrioAtOf(matchType) - 1;
+        const unitMates = (seat) => {   // reducedStakesPlan's units: a live trio first, then the seat pairs of the mask
+          if (isTeamMt(matchType)) return new Set();   // a team record carries no party bits (see LATE_RESULT_MS)
+          const inTrio = (q) => t0 >= 0 && q >= t0 && q <= t0 + 2;
+          if (inTrio(seat)) return new Set([t0, t0 + 1, t0 + 2].filter((q) => q !== seat));
+          const mate = seat ^ 1;
+          return (((mask >> (seat >> 1)) & 1) && !inTrio(mate)) ? new Set([mate]) : new Set();
+        };
+        for (const x of leavers0) {
+          const hx = pid(String(x.steamID));
+          if (confState[hx + '|' + c.m] || t2ex.has(hx)) continue;   // not convicted below
+          const xr = Object.assign({ steamID: x.steamID }, await planRow(x));
+          const rk = rankWith(planIn.concat([xr]).map((q) => ({ steamID: q.steamID, seat: q.seat | 0, score: scores[q.seat | 0] | 0 })));
+          const withRank = (q) => Object.assign({}, q, { rank: rk[q.steamID] });
+          const xs = x.seat | 0;
+          lateSh[x.steamID] = lateShadow(planIn.map(withRank), withRank(xr), lpMoved, seededNow, (all) => isTeamMt(matchType)
+            ? teamLpPlan(all, matchType, scores, lSeats.filter((s) => (s | 0) !== xs), t2Win, absentIn.filter((a) => (a.seat | 0) !== xs), finishedIn)
+            : reducedStakesPlan(all, matchType, mask, t0 + 1), unitMates(xs));
+        }
       }
       // Q167 rework: the losing team's absent players the winners were rated against take the loss of the full team on their
       //   RANKED rating only (the stored rating, matchmaking and the rating board stay as they were). Without it a leaver
@@ -7434,12 +7588,21 @@ async function main() {
       leavers[pid(x.steamID)] = leavers[pid(x.steamID)] || { leaves: 0, lastMatch: '' };
       leavers[pid(x.steamID)].leaves += 1; leavers[pid(x.steamID)].lastMatch = c.m; leaverHits++;
       console.log('  leaver ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' (in roster, no record; total ' + leavers[pid(x.steamID)].leaves + ')');
+      // Q228: kept, so his own result for these scores coming in late forgives this conviction (LATE_RESULT_MS)
+      const cvKey = pid(x.steamID) + '|' + c.m;
+      confState[cvKey] = { t0: nowMs, mt: matchType, ded: 0, ex: 1, cv: 1, s: x.seat | 0, v: vecTag(g[0]) };
+      RUN.lateCv = (RUN.lateCv | 0) + 1;
+      if (lpId && appliesLp(matchType)) {
+        const sh = lateSh[x.steamID];   // none at a settle that moves no rating (Q136): the finish there gives nobody points
+        Object.assign(confState[cvKey], { b: String(lpId), w: sh ? sh.w : 0, g: sh ? sh.g.reduce((a, y) => a + y[1], 0) : 0 });
+        lateCv.push([cvKey, String(x.steamID), sh ? sh.g : []]);
+      }
       // authoritative ranked leaver penalty: deduct LEAVER_LP_PENALTY from the points board so a client optimistic deduction survives read-back
       //   (would otherwise be reverted). Ranked-only; consensus-detected leaver only (single side can't frame); once/match (processed).
       if (lpId && appliesLp(matchType)) {
         const cur = lp[x.steamID] == null ? 0 : lp[x.steamID];
         const nv = leaverLpPenalty(cur, LEAVER_LP_PENALTY);
-        if (nv !== cur) { lp[x.steamID] = nv; changedLp[x.steamID] = nv; }
+        if (nv !== cur) { lp[x.steamID] = nv; changedLp[x.steamID] = nv; confState[cvKey].ded = cur - nv; }
         console.log('  leaver LP ' + c.m + ': ' + plog(x.steamID) + ' pts ' + cur + '-' + LEAVER_LP_PENALTY + '->' + nv);
       }
     }
@@ -7522,6 +7685,16 @@ async function main() {
     else console.log('  ok points ' + plog(sid) + ' = ' + changedLp[sid] + (rv ? (' [reveal ' + (rv.flag === 1 ? 'UPSET' : 'PROTECTED') + ']') : ''));
     return okFlag;
   });
+  // Q228: a conviction's entry counts only what landed -- no fine when his points write failed, no gain of a player whose
+  //   write failed
+  if (lateCv.length) {
+    const lpSids = Object.keys(changedLp), lpOk = new Set(lpSids.filter((sid, i) => wPoints[i] && wPoints[i].status === 'fulfilled' && wPoints[i].value));
+    for (const [k, sid, gains] of lateCv) {
+      const st = confState[k]; if (!st) continue;
+      if (!lpOk.has(sid)) st.ded = 0;
+      st.g = gains.reduce((a, y) => a + (lpOk.has(y[0]) ? y[1] : 0), 0);
+    }
+  }
   const wXp = await mapPool(Object.keys(changedXp), CONCURRENCY, async (sid) => {
     // career details ride every XP write ([CAREER_MAGIC, ver, games, wins, losses] -- the client's
     // authoritative W/L read-back surface). A sid whose XP changed always has fresh career totals.
@@ -7810,6 +7983,7 @@ Object.assign(module.exports, { noteOwnStarts, hasOwnStart, OWN_START_CAP });   
 Object.assign(module.exports, { NL_OPP_CAP, NL_REPEAT });   // cloud audit Q161 named-only losing seats counted on the account
 Object.assign(module.exports, { ffaPlaceOf, ffaLowerHalf });   // cloud audit Q174 named-only lower-half FFA seats counted on the account
 Object.assign(module.exports, { leaveConfirmHold, startRosterGaps, LEAVE_CONFIRM_MS, LEAVE_CONFIRM_MIN_MS });   // cloud audit Q121 leave confirmation
+Object.assign(module.exports, { LATE_RESULT_MS, LATE_CAP, lateShadow });   // cloud audit Q228 a convicted leave whose own result comes in late
 Object.assign(module.exports, { rosterContestSeats, applyRosterContest, seatLayout, seatLayoutsDisagree });   // cloud audit Q75 one account per seat per match key (+ Q80 third review seat layout)
 Object.assign(module.exports, { registerStartRosters, startRosterSplit, rosterCanon, startRosterDisagrees, seatGateRoster, seatedOnRoster, applySeatGate });   // cloud audit Q80 seat gate
 Object.assign(module.exports, { seatlessPrivate, dropSeatlessPrivate });   // cloud audit Q123

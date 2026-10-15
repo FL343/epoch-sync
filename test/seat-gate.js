@@ -216,6 +216,11 @@ const LEAVE = v.LEAVE_CONFIRM_MS + MIN;
 const LEAVE_WAIT = /leave-wait [^\n]*until the match must be over, deferred \(Q121\)/;
 // a mutant also needs the Q121 hold switched off when the scenario it checks is a conviction the hold now also stops
 const NOQ121 = (src) => src.replace('    if (lcHold.hold) {', '    if (false && lcHold.hold) {');
+// Q228: a leave convicted at a settle is undone when the convicted seat's own result comes in late with the settled scores.
+//   With the seat gate removed P1 / P2 are convicted on the outside pair's result and then forgiven by their real one (the
+//   same scores, their own seats), so the mutant that checks the conviction switches that later layer off too
+const Q228_LATE = '    const rec = st.cv ? (closed ? null : lateRec(m, p, st)) : settleRec(m, p);';
+const NOQ228 = (src) => src.replace(Q228_LATE, '    const rec = st.cv ? null : settleRec(m, p);');
 // Q127: a matchmade key that was split, disputed or contested once stays held until it voids (the key's note in the starts
 //   state, c = 1). A mutant that takes away an earlier layer (the split check, the agreement check, the layout check) also
 //   needs this second layer switched off, or the note holds the key anyway and the mutant shows nothing
@@ -562,11 +567,12 @@ console.log('=== a record counts only from the seat its start roster gives its w
   T('[11] run summary row', /s\('offSeat', 0\) \+ ' \/ ' \+ s\('disputed', 0\)/.test(SRC) && /RUN\.offSeat = seatGate\.n;/.test(SRC));
   T('[11] exports', ['registerStartRosters', 'seatGateRoster', 'seatedOnRoster', 'applySeatGate'].every(f => typeof v[f] === 'function'));
   T('[11] the sticky contest hold (Q127) the mutants below switch off is found exactly once', SRC.split(STICKY).length === 2);
+  T('[11] the late-result probe (Q228) the first mutant below switches off is found exactly once', SRC.split(Q228_LATE).length === 2);
   const mutants = [
     ['seat gate removed', 'const seatGate = applySeatGate(recs, starts, startsPending, processed);', 'const seatGate = { out: new Map(), n: 0 };', (script) => {
         const rs = timeline(r1Steps(0x8011), script);   // [2] the outside pair's result settles first, P1 / P2 convicted
         return [P1, P2].every(s => leavesOf(last(rs), s) === 1);
-      }, NOQ121],
+      }, (src) => NOQ228(NOQ121(src))],
     ['dispute rule removed', '    if (!isEndlessMt(sg[m][0].d[2] | 0)) {\n      const claim = {};', '    if (false) {\n      const claim = {};', (script) => {
         const rs = timeline(swingSteps(0x8014), script);   // [4] the outside roster registers: the real result no longer settles
         const key = keyOf(t2start(0x8014, 0, RR));          //   (held as a split roster, or the outside accounts take the win)
