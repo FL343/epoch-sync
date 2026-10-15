@@ -108,10 +108,9 @@ console.log('=== Q166: signals.flagged entries of keys off the shards are droppe
 
 // ---- main() harness (offline fake Steam; a copy of this tree with one test signing key, as test/state-prune-rework.js) ----
 const TREE = fs.mkdtempSync(path.join(os.tmpdir(), 'flag-prune-tree-'));
-for (const f of fs.readdirSync(ROOT)) {
-  if (f === '.git' || f === 'test' || f === 'node_modules') continue;
-  fs.cpSync(path.join(ROOT, f), path.join(TREE, f), { recursive: true });
-}
+// Q225: not the .mutant-*.js files other tests write into the root and delete while the suite runs 4 at a time, nor an
+//   entry gone between the listing and its copy (test/root-listing.js)
+require('./root-listing').copyRootTree(ROOT, TREE, ['.git', 'test', 'node_modules']);
 const PKCS8_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
 const KPRIV = crypto.createPrivateKey({ key: Buffer.concat([PKCS8_PREFIX, Buffer.from('4d'.repeat(32), 'hex')]), format: 'der', type: 'pkcs8' });
 const KPUB = crypto.createPublicKey(KPRIV).export({ type: 'spki', format: 'der' }).slice(-32).toString('hex');

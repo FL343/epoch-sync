@@ -92,7 +92,9 @@ const set = (id) => V.postForm(SET, { key: 'k', appid: 1, leaderboardid: id, ste
 
   console.log('-- static: every leaderboard write goes through postForm / postFormDetails');
   const root = path.join(__dirname, '..');
-  const files = fs.readdirSync(root).filter(f => f.endsWith('.js'));
+  // Q225: not the .mutant-*.js copies of validate.js other tests write into the root and delete while the suite runs
+  //   4 at a time (test/root-listing.js): scratch, not repo code, and one deleted between the listing and its read threw
+  const files = require('./root-listing').rootEntries(root).filter(f => f.endsWith('.js'));
   const leaks = [];
   for (const f of files) {
     const src = fs.readFileSync(path.join(root, f), 'utf8');
