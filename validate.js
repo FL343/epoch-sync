@@ -1911,6 +1911,11 @@ const SIG_PLAYER_WINDOW_MS = Number(process.env.SIG_PLAYER_WINDOW_MS || 90 * 864
 // Q161: a named-only seat of a losing team that unrated its match, counted on the account (signals.players[pid].nl / .nlo;
 //   .tw / .tl = the team results the account wrote itself), only an account that already has signals
 const NL_OPP_CAP = 8, NL_REPEAT = 3;
+// Q174: a named-only seat placed in the lower half of a matchmade FFA, counted on the account the same way (.nb / .nbo; .wb =
+//   the lower-half FFA places the account wrote itself). A seat's place is 1 + the seats with a higher agreed score (a tie
+//   shares it); the lower half is below the middle place: 2nd of 2, 3rd of 3, 3rd-4th of 4, 4th-5th of 5, 4th-6th of 6.
+function ffaPlaceOf(scores, seat) { const x = scores[seat] | 0; let n = 1; for (let i = 0; i < scores.length; i++) if ((scores[i] | 0) > x) n++; return n; }
+const ffaLowerHalf = (place, pc) => 2 * place > pc + 1;
 const SIG_PAIRS_CAP = Number(process.env.SIG_PAIRS_CAP || 200000);
 function loadSignals() { try { const s = JSON.parse(fs.readFileSync(SIGNALS_FILE, 'utf8')) || {}; s.day = s.day || { d: 0, n: {} }; s.players = s.players || {}; s.pairs = s.pairs || {}; s.flagged = s.flagged || {}; s.rep = s.rep || {}; s.rseen = s.rseen || {}; return s; } catch (e) { return { day: { d: 0, n: {} }, players: {}, pairs: {}, flagged: {}, rep: {}, rseen: {} }; } }
 function pruneSignals(s, now) {
@@ -2386,6 +2391,7 @@ function writeRunSummary() {
       '| team matches with nobody on the losing team, settled without a rating move (Q136) | ' + s('noLoser', 0) + ' |',
       '| team matches with a losing seat nobody accounts for (named by the others only or left blank), settled without a rating move (Q149) | ' + s('namedLoser', 0) + ' |',
       '| named-only losing seats counted on their account / of them repeated: ' + NL_REPEAT + ' or more such matches and different opponents / of those more losses unwritten than written / not counted, no signals of his own (Q161, nobody flagged) | ' + s('nlSeat', 0) + ' / ' + s('nlRepeat', 0) + ' / ' + s('nlUnwritten', 0) + ' / ' + s('nlNone', 0) + ' |',
+      '| named-only FFA seats in the lower half counted on their account / of them repeated: ' + NL_REPEAT + ' or more such matches and different opponents / of those more lower places unwritten than written / not counted, no signals of his own (Q174, nobody flagged) | ' + s('nbSeat', 0) + ' / ' + s('nbRepeat', 0) + ' / ' + s('nbUnwritten', 0) + ' / ' + s('nbNone', 0) + ' |',
       '| match keys with two accounts on one seat or two seat layouts, not settled (Q75) | ' + s('contested', 0) + ' |',
       '| records off their start-roster seat, not counted / start keys with a seat claimed twice / start rosters the voters split, no seat gate (Q80) | ' + s('offSeat', 0) + ' / ' + s('disputed', 0) + ' / ' + s('split', 0) + ' |',
       '| endless co-op groups held (records disagree on the roster, Q113) | ' + s('endlessHeld', 0) + ' |',
@@ -7107,6 +7113,42 @@ async function main() {
           + (rep ? ', repeated' : '') + (unw ? ', more losses unwritten than written' : '') + '; counted, nobody flagged (Q161)');
       }
     }
+    // Q174 (cloud audit, found doing Q161): a matchmade FFA has the same hole one seat at a time. A seat named by the others
+    //   only is not rated, not convicted (Q69), so a modified client (or a separate program overwriting the account's own
+    //   records before cron reads them) can write its good places only (the result alone, like a cold rejoiner: rated as any
+    //   place) and nothing for its bad ones: it counts only its good places. Counted only, like Q161: on each named-only
+    //   seat placed in the lower half whose account already has signals, `nb` = such matches, `nbo` = the different accounts
+    //   that wrote the match (up to NL_OPP_CAP), next to `wb` = the lower-half places each writer wrote himself (counted
+    //   here, quick or ranked). A count with NL_REPEAT or more of both is logged `repeated`; with more lower places unwritten
+    //   than written (nb > wb) also `more lower places unwritten than written`; both counted in the summary. Nobody is
+    //   flagged, the settle is unchanged. A match with one writer left never gets here (a lone record never settles).
+    if (!PT_MODE && (baseMt(matchType) === 1 || baseMt(matchType) === 2)) {
+      for (const p of parts) {
+        if (!ffaLowerHalf(ffaPlaceOf(scores, p.seat), pc)) continue;
+        const h = signals.players[pid(String(p.steamID))];
+        if (h) { h.wb = (h.wb | 0) + 1; sigDirty = true; }
+      }
+      const nbOpp = parts.map((p) => pid(String(p.steamID)));
+      for (const x of namedOnly) {
+        const place = ffaPlaceOf(scores, x.seat);   // a roster names seats 0..pc-1 only (decodeRoster), the group agrees on pc
+        if (!ffaLowerHalf(place, pc)) continue;
+        const h = signals.players[pid(String(x.steamID))];   // only an account that already has signals, its entry not refreshed
+        if (!h) {
+          RUN.nbNone = (RUN.nbNone | 0) + 1;
+          console.log('  named-ffa-account ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' place ' + place + ' of ' + pc + ' -- no signals of his own (no record of his this cron kept), not counted (Q174)');
+          continue;
+        }
+        h.nb = (h.nb | 0) + 1;
+        const o = Array.isArray(h.nbo) ? h.nbo : (h.nbo = []);
+        for (const q of nbOpp) if (o.length < NL_OPP_CAP && o.indexOf(q) < 0) o.push(q);
+        const rep = h.nb >= NL_REPEAT && o.length >= NL_REPEAT;
+        const unw = rep && h.nb > (h.wb | 0);
+        sigDirty = true; RUN.nbSeat = (RUN.nbSeat | 0) + 1; if (rep) RUN.nbRepeat = (RUN.nbRepeat | 0) + 1; if (unw) RUN.nbUnwritten = (RUN.nbUnwritten | 0) + 1;
+        console.log('  named-ffa-account ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' place ' + place + ' of ' + pc + ' -- ' + h.nb + ' such match(es), '
+          + o.length + (o.length >= NL_OPP_CAP ? '+' : '') + ' different opponent(s), lower-half places he wrote ' + (h.wb | 0)
+          + (rep ? ', repeated' : '') + (unw ? ', more lower places unwritten than written' : '') + '; counted, nobody flagged (Q174)');
+      }
+    }
     // ===== playtest channel: no rating/points surface (lock layer 3) -- the TrueSkill update,
     // placement seeding, group-decay memory and every points write are skipped wholesale, so
     // skill.json/groups.json stay untouched and the changed/changedLp pools stay empty. The
@@ -7766,6 +7808,7 @@ Object.assign(module.exports, { KEY_CHANNEL, loadJobPubTable, soloKeyHeld, soloR
 Object.assign(module.exports, { flagPlayer, flagsInWindow, stampLegacyFlags, TRUST_F_WINDOW_MS, SIG_FLAG_KEYS_CAP });   // cloud audit Q98 forgery flags age out of the trust tier (test/trust-decay.js)
 Object.assign(module.exports, { noteOwnStarts, hasOwnStart, OWN_START_CAP });   // cloud audit Q69 own-record evidence for leaver verdicts
 Object.assign(module.exports, { NL_OPP_CAP, NL_REPEAT });   // cloud audit Q161 named-only losing seats counted on the account
+Object.assign(module.exports, { ffaPlaceOf, ffaLowerHalf });   // cloud audit Q174 named-only lower-half FFA seats counted on the account
 Object.assign(module.exports, { leaveConfirmHold, startRosterGaps, LEAVE_CONFIRM_MS, LEAVE_CONFIRM_MIN_MS });   // cloud audit Q121 leave confirmation
 Object.assign(module.exports, { rosterContestSeats, applyRosterContest, seatLayout, seatLayoutsDisagree });   // cloud audit Q75 one account per seat per match key (+ Q80 third review seat layout)
 Object.assign(module.exports, { registerStartRosters, startRosterSplit, rosterCanon, startRosterDisagrees, seatGateRoster, seatedOnRoster, applySeatGate });   // cloud audit Q80 seat gate
