@@ -4,19 +4,26 @@
 // author SteamIDs with item ids whose state records the author as a pid; several pid-keyed counters equal public scores).
 // Report state keyed by pid therefore named every reporter. Now the three report lanes key by their own domain-prefixed
 // HMACs, reporter side and target side apart: player reports (signals.json rep / rseen / day.r), chat reports
-// (chat-mute.json) and voice votes incl. report votes (feedback state votes). State written before moves over once, from a
-// complete read of the board, and only what still resolves through the board is kept.
+// (chat-mute.json) and voice votes incl. report votes (feedback state votes). State written before is NOT carried onto
+// the lane keys (rework of Q190, coordinator B 2026-10-13): a value copied from a pid-keyed entry into a lane-keyed one in
+// the same commit tells anyone who diffs that commit which lane key is which pid. The pid-keyed report state is dropped
+// on a complete read of the board, and the reports on the board at that moment are marked as taken in a fixed keyed list
+// (rpre / pre); the pid-keyed votes stay on their items without a voter ('~n' keys) and the (voter, item) pairs are marked
+// (vpre), so a tally does not move and nobody is counted twice. The dedup key of a player report is one keyed token
+// (review of Q190: in the clear its match hash named the match, and starts.json names its players).
 //
 // Runs the REAL validate.js main() and feedback.js main() against an offline board stub (pinned clock):
 //   [1]  fresh run: edges / chat state on lane keys, no pid of anyone in the report state, reporter and target keys of
 //        one account differ, the digest queue keyed by the reporter's lane key; a second run counts nothing twice
-//   [2]  move from pid-keyed state (complete reads): what resolves keeps its counts / stamps / expiry, the rest is dropped,
-//        nothing is counted again, no new mute write, trust co-presence still verified, empty legacy fields stay clean
+//   [2]  drop of pid-keyed state (complete reads): nothing carried over, the reports on the boards marked as taken and
+//        not counted again, no mute written, a later report taken as usual on the lane keys
 //   [3]  partial read (PAGE_CAP=1, a full first page): pid-keyed state left untouched, harvest / lane deferred
 //   [4]  untouched empty chat state stays byte-identical (no marker on an empty state)
 //   [5]  votes: voter keys, the author's own vote and votes for unknown items are not stored, tallies as before
-//   [6]  votes: move from pid keys (complete read), [7] deferred on a partial read
+//   [6]  votes: fold of pid keys (tallies unchanged, no voter carried, pre-fold pairs not taken again)
+//   [7]  votes: fold without a full read; after a rollback; leftovers next to the voter-keyed table
 //   [8]  source pins
+//   [9]  player reports after a rollback: an older version's pid-keyed leftovers next to the lane keys are dropped too
 const { spawnSync } = require('child_process');
 const fs = require('fs'), path = require('path'), os = require('os');
 const SCRUB = ['PT_MODE', 'STRICT_BOARDS', 'APPLY_MMR', 'ALLOW_TEST', 'DEMO_APPID', 'RANKED_LB', 'LP_LB', 'XP_LB', 'STARTS_MATURITY_MS', 'CONFESS_PRUNE_MS', 'CONSOLATION_XP', 'REPORT_LB', 'TRUST_LB', 'SEEDCAP_ENFORCE', 'SEEDCAP_REJECT', 'GITHUB_STEP_SUMMARY',
@@ -155,6 +162,8 @@ let r1;
   T('[1] each edge carries the keyed pair token', Object.keys(s.rep || {}).every(k => /^[0-9a-f]{16}$/.test(s.rep[k].pk)) && s.rep[BY(R1) + '>' + OF(T1)].pk === v.REP_KEYS.pair(R1, T1));
   T('[1] no per-pid report counters (players[].ri / .ro)', Object.keys(s.players || {}).every(h => s.players[h].ri == null && s.players[h].ro == null));
   T('[1] no pid of any account in the report state (rep / rseen / day.r / players)', pidsIn(reportPart(s)).length === 0, pidsIn(reportPart(s)).join(','));
+  T('[1] each dedup key is one keyed token: no reason, no match hash in the clear (they name the match; starts.json names its players)',
+    Object.keys(s.rseen || {}).length === 4 && Object.keys(s.rseen || {}).every(k => /^[0-9a-f]{16}$/.test(k)), JSON.stringify(Object.keys(s.rseen || {})));
   T('[1] daily counts on the reporter lane key', JSON.stringify(Object.keys((s.day || {}).r || {}).sort()) === JSON.stringify([BY(R1), BY(X), BY(T1)].sort()));
   const left = new Set(Object.keys(s.rep).map(k => k.split('>')[0])), right = new Set(Object.keys(s.rep).map(k => k.split('>')[1]));
   T('[1] X reports and is reported: his reporter key and target key differ (no key on both sides)', [...left].every(k => !right.has(k)) && left.has(BY(X)) && right.has(OF(X)));
@@ -186,12 +195,12 @@ let r1;
   T('[1] next run over the same rows: no second write (watermarks and auto memory read back)', r2.code === 0 && muteWrites(r2).length === 0, JSON.stringify(muteWrites(r2)));
 }
 
-console.log('=== report-keys [2] move from pid-keyed state (complete reads) ===');
+console.log('=== report-keys [2] drop of pid-keyed state (complete reads): nothing carried over ===');
 const A0 = DAY1 - 3 * 3600000, U1 = NOWMIN + 600, U9 = NOWMIN + 300;
 const legacySignals = () => ({
   day: { d: Math.floor(DAY1 / 86400000), n: {}, r: { [v.pid(R1)]: 1, [v.pid(R9)]: 2 } },
   players: { [v.pid(T1)]: { g: 1, w: 0, v: 0, f: 0, ns: 0, disp: [1, 0, 0, 0, 0, 0, 0], s1: 0, s2: 0, smax: 0, at: A0, ri: 1 }, [v.pid(R1)]: { g: 1, w: 1, v: 0, f: 0, ns: 0, disp: [1, 0, 0, 0, 0, 0, 0], s1: 0, s2: 0, smax: 0, at: A0, ro: 1 } },
-  pairs: { [v.pairKey(v.pid(R1), v.pid(T1))]: { n: 1, t: 0, x: 1, at: A0 } },
+  pairs: { [v.pairKey(v.pid(R1), v.pid(T1))]: { n: 1, t: 0, x: 1, at: A0 }, [v.pairKey(v.pid(R1), v.pid(T2))]: { n: 1, t: 0, x: 1, at: A0 } },
   flagged: {},
   rep: { [v.pid(R1) + '>' + v.pid(T1)]: { n: 1, m: 4, at: A0 }, [v.pid(R9) + '>' + v.pid(T9)]: { n: 2, m: 2, at: A0 } },
   rseen: { [v.pid(R1) + '|' + v.pid(T1) + '|2|111']: A0, [v.pid(R9) + '|' + v.pid(T9) + '|1|7']: A0 },
@@ -200,45 +209,57 @@ const R1MS = DAY1 - 7200000;
 const fR1 = { reporterSid: R1, target: T1, scope: 3, tsMin: tsOf(R1MS), text: DM };
 const legacyChat = () => ({
   seen: { [v.pid(R1)]: tsOf(R1MS), [v.pid(R9)]: tsOf(R1MS) - 5 },
+  sig: { [v.pid(R1)]: v.pid('chat-row|1|3|0|1|' + T1 + '|1|' + tsOf(R1MS)) },   // row digest under the old key (W13)
   rep: { [v.pid(T1)]: [[v.pid(R1), NOWMIN - 120], [v.pid(R9), NOWMIN - 125]], [v.pid(T9)]: [[v.pid(R9), NOWMIN - 125]] },
   auto: { [v.pid(T1)]: U1, [v.pid(T9)]: U9 },
   digest: { day: '2026-11-20', at: NOWMIN - 120 },
   pend: { [v.pid(R1)]: cm.mailSig(fR1, v.pid), [v.pid(R9)]: 'abcdef0123456789' },
 });
 const W2 = { reports: [{ sid: R1, list: [{ t: T1, r: 2, m: 111 }] }], chat: [chatRow(R1, DM, T1, 3, R1MS)], mute: [{ steamID: T1, score: U1 }] };
+const preRow = (row) => cm.preKey(CBY, row.steamID, cm.decodeReport(row.details));
+let r2;
 {
-  const r = runValidate(world(W2), { SIGNALS_FILE: legacySignals(), CHAT_MUTE_FILE: legacyChat() }, MAIL);
-  const s = r.sig;
-  T('[2] run ok, both moves logged with their counts', r.code === 0 && /report state moved onto lane keys \(Q190\): 1 edge\(s\) kept, 1 no longer on the report box dropped/.test(r.out) &&
-    /chat-mute: state moved onto lane keys \(Q190\)/.test(r.out), tail(r));
-  const e = (s.rep || {})[BY(R1) + '>' + OF(T1)];
-  T('[2] the resolvable edge moved with its count, reasons and stamp; the unresolvable one dropped', Object.keys(s.rep || {}).length === 1 && e && e.n === 1 && e.m === 4 && e.at === A0 && e.pk === v.REP_KEYS.pair(R1, T1), JSON.stringify(s.rep));
-  T('[2] its report, still queued on the box, is not counted again (dedup key moved)', !/reports: \d+ new/.test(r.out) && JSON.stringify(Object.keys(s.rseen || {})) === JSON.stringify([BY(R1) + '|' + OF(T1) + '|2|111']), JSON.stringify(s.rseen));
-  T('[2] daily count moved to the reporter lane key, the gone reporter dropped', JSON.stringify((s.day || {}).r) === JSON.stringify({ [BY(R1)]: 1 }), JSON.stringify(s.day));
+  r2 = runValidate(world(W2), { SIGNALS_FILE: legacySignals(), CHAT_MUTE_FILE: legacyChat() }, MAIL);
+  const r = r2, s = r.sig;
+  T('[2] run ok, both drops logged with their counts', r.code === 0 && /reports: pid-keyed report state dropped for the lane keys \(Q190\): 8 entr\(ies\) dropped, 1 report\(s\) on the box marked as taken/.test(r.out) &&
+    /chat-mute: pid-keyed state dropped for the lane keys \(Q190\): 9 entr\(ies\) dropped, 1 row\(s\) on the report box marked as taken/.test(r.out), tail(r));
+  T('[2] nothing of the pid-keyed report state carried over: no edge, no dedup key, no daily count', JSON.stringify(s.rep) === '{}' && JSON.stringify(s.rseen) === '{}' && Object.keys((s.day || {}).r || {}).length === 0, JSON.stringify([s.rep, s.rseen, s.day]));
+  T('[2] the report on the box marked as taken: one keyed token, no account in it', JSON.stringify(s.rpre) === JSON.stringify([v.REP_KEYS.seen(R1, T1, 2, 111)]) && pidsIn(JSON.stringify(s.rpre)).length === 0, JSON.stringify(s.rpre));
+  T('[2] and not counted again under the lane keys', !/reports: \d+ new/.test(r.out), tail(r));
   T('[2] per-pid report counters removed, the other player signals kept', s.players[v.pid(T1)].ri === undefined && s.players[v.pid(R1)].ro === undefined && s.players[v.pid(R1)].g === 1);
-  T('[2] trust co-presence still verified after the move (pairs stay pid-keyed)', v.verifiedUniqueReporters(s, T1) === 1);
-  T('[2] no pid left in the report state (the pairs table is not report state)', pidsIn(JSON.stringify({ rep: s.rep, rseen: s.rseen, dayr: s.day.r })).length === 0);
+  T('[2] trust: the dropped reports count toward nobody (fewer, never more); the pairs stay', v.verifiedUniqueReporters(s, T1) === 0 && Object.keys(s.pairs).length === 2);
+  T('[2] marked (rkv), no pid left in the report state', s.rkv === v.REP_KEYS_VER && pidsIn(JSON.stringify({ rep: s.rep, rseen: s.rseen, dayr: s.day.r, rpre: s.rpre })).length === 0);
   const c = r.chat;
-  T('[2] chat: watermark moved, gone reporter dropped', JSON.stringify(c.seen) === JSON.stringify({ [CBY(R1)]: tsOf(R1MS) }), JSON.stringify(c.seen));
-  T('[2] chat: reporter set moved with its stamps, gone entries dropped', JSON.stringify(c.rep) === JSON.stringify({ [COF(T1)]: [[CBY(R1), NOWMIN - 120]] }), JSON.stringify(c.rep));
-  T('[2] chat: automatic mute expiry kept as recorded (not lengthened), gone target dropped', JSON.stringify(c.auto) === JSON.stringify({ [COF(T1)]: U1 }), JSON.stringify(c.auto));
-  T('[2] chat: no mute written by the move', muteWrites(r).length === 0, JSON.stringify(muteWrites(r)));
-  T('[2] chat: queued digest entry re-signed under the reporter lane key; the gone one counted as replaced', JSON.stringify(c.pend) === JSON.stringify({ [CBY(R1)]: cm.mailSig(fR1, CBY) }) && c.pendLost === 1, JSON.stringify([c.pend, c.pendLost]));
-  T('[2] chat: the row taken before is not taken again', !/chat-mute: reports \+/.test(r.out), tail(r));
+  T('[2] chat: nothing carried over (watermarks, row digests, reporter sets, mute memory all empty)', JSON.stringify([c.seen, c.sig || {}, c.rep, c.auto]) === '[{},{},{},{}]', JSON.stringify(c));
+  T('[2] chat: the queued digest entries counted in pendLost (their rows stay on the box), no queue left', c.pend === undefined && c.pendLost === 2, JSON.stringify([c.pend, c.pendLost]));
+  T('[2] chat: the row on the box marked as taken (one keyed token) and not taken again', JSON.stringify(c.pre) === JSON.stringify([preRow(W2.chat[0])]) && !/chat-mute: reports \+/.test(r.out), JSON.stringify(c.pre) + tail(r));
+  T('[2] chat: no mute written by the drop (the mute on the board keeps its row and expiry)', muteWrites(r).length === 0, JSON.stringify(muteWrites(r)));
   T('[2] chat: marked (kv), no pid of any account in the file', c.kv === cm.KEYS_VER && pidsIn(r.text.CHAT_MUTE_FILE).length === 0, pidsIn(r.text.CHAT_MUTE_FILE).join(','));
 }
-{ // old state with nothing report-related in it: marked at once, no move logged
+{ // a later run: R1 files a new player report (T2) and a new chat report; the marked ones stay untaken
+  const later = DAY1 + 3600000, CL = 'later chat line 8180';
+  const W2b = { reports: [{ sid: R1, list: [{ t: T1, r: 2, m: 111 }, { t: T2, r: 1, m: 222 }] }], chat: [chatRow(R1, CL, T2, 1, later - 60000)], mute: [{ steamID: T1, score: U1 }] };
+  const r = runValidate(world(W2b), { SIGNALS_FILE: r2.text.SIGNALS_FILE, CHAT_MUTE_FILE: r2.text.CHAT_MUTE_FILE }, Object.assign({ FAKE_NOW: String(later) }, MAIL));
+  const s = r.sig;
+  T('[2] later run: the new report taken on the lane keys, the marked one not', r.code === 0 && /reports: 1 new \(1 counted/.test(r.out) && JSON.stringify(Object.keys(s.rep)) === JSON.stringify([BY(R1) + '>' + OF(T2)]) &&
+    JSON.stringify(Object.keys(s.rseen)) === JSON.stringify([v.REP_KEYS.seen(R1, T2, 1, 222)]), tail(r));
+  T('[2] later run: the marked list is fixed (unchanged)', JSON.stringify(s.rpre) === JSON.stringify(r2.sig.rpre));
+  T('[2] later run: trust verifies the new report (R1 met T2)', v.verifiedUniqueReporters(s, T2) === 1 && v.verifiedUniqueReporters(s, T1) === 0);
+  T('[2] later run: the new chat row taken, the marked list unchanged', /chat-mute: reports \+1/.test(r.out) && JSON.stringify(Object.keys(r.chat.seen)) === JSON.stringify([CBY(R1)]) &&
+    JSON.stringify(Object.keys(r.chat.rep)) === JSON.stringify([COF(T2)]) && JSON.stringify(r.chat.pre) === JSON.stringify(r2.chat.pre), tail(r));
+}
+{ // old state with nothing report-related in it: marked at once, nothing dropped, harvest runs on lane keys
   const s0 = legacySignals(); s0.rep = {}; s0.rseen = {}; s0.day.r = {}; delete s0.players[v.pid(T1)].ri; delete s0.players[v.pid(R1)].ro;
   const r = runValidate(world(W2), { SIGNALS_FILE: s0 }, {});
-  T('[2] old state without report entries: no move needed, harvest runs on lane keys', r.code === 0 && !/moved onto lane keys/.test(r.out) && /reports: 1 new \(1 counted/.test(r.out) &&
-    r.sig.rkv === v.REP_KEYS_VER && JSON.stringify(Object.keys(r.sig.rep)) === JSON.stringify([BY(R1) + '>' + OF(T1)]), tail(r));
+  T('[2] old state without report entries: nothing to drop, harvest runs on lane keys', r.code === 0 && !/dropped for the lane keys/.test(r.out) && /reports: 1 new \(1 counted/.test(r.out) &&
+    r.sig.rkv === v.REP_KEYS_VER && r.sig.rpre === undefined && JSON.stringify(Object.keys(r.sig.rep)) === JSON.stringify([BY(R1) + '>' + OF(T1)]), tail(r));
 }
 
 console.log('=== report-keys [3] partial read: pid-keyed state untouched ===');
 {
   const r = runValidate(world(Object.assign({ pad: true }, W2)), { SIGNALS_FILE: legacySignals(), CHAT_MUTE_FILE: legacyChat() }, Object.assign({ PAGE_CAP: '1' }, MAIL));
-  T('[3] run ok, both lanes deferred and say why', r.code === 0 && /harvest deferred until a complete read moves it \(Q190\)/.test(r.out) && /chat-mute: partial read of the report box with pid-keyed state -- lane deferred/.test(r.out), tail(r));
-  T('[3] signals: report state exactly as before (no move, no new edge, no marker)', r.sig.rkv === undefined && JSON.stringify(r.sig.rep) === JSON.stringify(legacySignals().rep) && JSON.stringify(r.sig.rseen) === JSON.stringify(legacySignals().rseen), JSON.stringify(r.sig.rep));
+  T('[3] run ok, both lanes deferred and say why', r.code === 0 && /harvest deferred until a complete read drops it \(Q190\)/.test(r.out) && /chat-mute: partial read of the report box with pid-keyed state -- lane deferred until a complete read drops it/.test(r.out), tail(r));
+  T('[3] signals: report state exactly as before (no drop, no new edge, no marker, nothing marked as taken)', r.sig.rkv === undefined && r.sig.rpre === undefined && JSON.stringify(r.sig.rep) === JSON.stringify(legacySignals().rep) && JSON.stringify(r.sig.rseen) === JSON.stringify(legacySignals().rseen), JSON.stringify(r.sig.rep));
   T('[3] chat: state file untouched', r.text.CHAT_MUTE_FILE === r.before.CHAT_MUTE_FILE);
   T('[3] trust: the old edges still verify the old way meanwhile', v.verifiedUniqueReporters(r.sig, T1) === 1);
 }
@@ -314,40 +335,60 @@ let f5;
   T('[5] tallies: ID1 up 1 (self vote never counts), ID2 reports 2 / down 1', t1.up === 1 && t1.down === 0 && t2.rep === 2 && t2.down === 1, JSON.stringify([t1, t2]));
 }
 
-console.log('=== report-keys [6] votes: move from pid keys ===');
+console.log('=== report-keys [6] votes: fold of pid keys ===');
 const legacyVotes = (items) => ({ boards: {}, items, digest: { day: '', at: 0 },
-  votes: { [ID1]: { [v.pid(V1)]: [1, 100], [v.pid(A1)]: [1, 100], [v.pid(V9)]: [2, 100] }, [ID2]: { [v.pid(V1)]: [3, 101] }, '999': { [v.pid(V1)]: [1, 99] } } });
+  votes: { [ID1]: { [v.pid(V1)]: [1, 100], [v.pid(A1)]: [1, 100], [v.pid(V9)]: [2, 100] }, [ID2]: { [v.pid(V1)]: [3, 101], [v.pid(V9)]: [0, 102] }, '999': { [v.pid(V1)]: [1, 99] } } });
+const voterKeysIn = (vt) => { const o = new Set(); for (const it of Object.keys(vt || {})) for (const k of Object.keys(vt[it])) if (k.charAt(0) !== '~') o.add(k); return o; };
+let f6;
 {
-  const items = f5.st.items;
-  // A1 (author of ID1) is on the vote board too, so his own old vote on ID1 resolves -- and must still be dropped
-  const r = runFeedback(fbWorld([{ sid: V1, list: [{ id: ID1, dir: 1, ts: 100 }] }, { sid: A1, list: [{ id: ID2, dir: 1, ts: 105 }] }]), legacyVotes(items), {});
-  const vt = r.st.vv || {};
-  T('[6] run ok, move logged with its counts', r.code === 0 && /feedback: votes moved onto voter keys \(Q190\): 2 kept, 3 dropped/.test(r.out), r.out.slice(-500));
-  T('[6] the voter still on the board keeps his votes (and their stamps) under his voter key', JSON.stringify(vt[ID1]) === JSON.stringify({ [VK(V1)]: [1, 100] }) && JSON.stringify(vt[ID2]) === JSON.stringify({ [VK(V1)]: [3, 101], [VK(A1)]: [1, 105] }), JSON.stringify(vt));
-  T('[6] dropped: the author\'s own vote, the voter gone from the board, the unknown item; the pid table left empty', vt['999'] === undefined && JSON.stringify(r.st.votes) === '{}');
-  T('[6] no pid of a voter left', pidsIn(JSON.stringify(vt), [V1, V9, A1]).length === 0);
+  const items = f5.st.items, before = legacyVotes(items);
+  // V1 changes his vote on ID1 (up -> down) after the fold; A1 (author of ID1) votes on ID2 for the first time
+  f6 = runFeedback(fbWorld([{ sid: V1, list: [{ id: ID1, dir: 2, ts: 150 }, { id: ID2, dir: 3, ts: 101 }] }, { sid: A1, list: [{ id: ID2, dir: 1, ts: 105 }] }]), before, {});
+  const r = f6, vt = r.st.vv || {};
+  T('[6] run ok, fold logged with its counts', r.code === 0 && /feedback: pid-keyed votes folded for the voter keys \(Q190\): 3 kept on their items without a voter, 3 dropped, 6 voter\/item pair\(s\) marked as voted/.test(r.out), r.out.slice(-500));
+  T('[6] the votes that count stay on their items under numbered keys with no account (stamp order)', JSON.stringify(vt[ID1]) === JSON.stringify({ '~0': [1, 100], '~1': [2, 100] }) && JSON.stringify(vt[ID2]) === JSON.stringify({ '~0': [3, 101], [VK(A1)]: [1, 105] }), JSON.stringify(vt));
+  const tb1 = fb.tallyVotes(before.votes[ID1], items[ID1].ap), ta1 = fb.tallyVotes(vt[ID1], items[ID1].ap);
+  const tb2 = fb.tallyVotes(before.votes[ID2], items[ID2].ap), ta2 = fb.tallyVotes(vt[ID2], items[ID2].ap);
+  T('[6] tallies unchanged by the fold (ID1 up 1 / down 1, the author\'s own vote never counted; ID2 one report, plus A1\'s new up-vote)', JSON.stringify(tb1) === JSON.stringify(ta1) && tb2.rep === 1 && ta2.rep === 1 && ta2.up === tb2.up + 1, JSON.stringify([tb1, ta1, tb2, ta2]));
+  T('[6] the report hold counts the same reports as before', fb.reportsSince(vt[ID2], items[ID2].ap, -1) === fb.reportsSince(before.votes[ID2], items[ID2].ap, -1));
+  T('[6] V1 had voted on ID1 / ID2 before the fold: his later change there is not taken (the items keep his old votes)', !voterKeysIn(vt).has(VK(V1)), JSON.stringify(vt));
+  T('[6] no voter carried over: the only voter key is A1\'s new vote; no pid of a voter', JSON.stringify([...voterKeysIn(vt)]) === JSON.stringify([VK(A1)]) && pidsIn(JSON.stringify(vt), [V1, V9, A1]).length === 0, JSON.stringify([...voterKeysIn(vt)]));
+  T('[6] the pre-fold pairs marked: 6 keyed tokens (counted or not: the cleared vote and the unknown item too), no account in them', Array.isArray(r.st.vpre) && r.st.vpre.length === 6 && r.st.vpre.every(k => /^[0-9a-f]{16}$/.test(k)) &&
+    r.st.vpre.includes(fb.preVoteTok(v.pid(V1), ID1)) && r.st.vpre.includes(fb.preVoteTok(v.pid(V1), '999')) && pidsIn(JSON.stringify(r.st.vpre), [V1, V9, A1]).length === 0, JSON.stringify(r.st.vpre));
+  T('[6] dropped: the author\'s own vote, the cleared vote, the unknown item; the pid table left empty', vt['999'] === undefined && JSON.stringify(r.st.votes) === '{}');
+}
+{ // read back: the next run keeps the folded table and the marks, folds nothing again
+  const r = runFeedback(fbWorld([{ sid: V1, list: [{ id: ID1, dir: 2, ts: 150 }] }]), f6.text, {});
+  T('[6] next run: folded votes and marks read back as they were, no second fold', r.code === 0 && !/folded/.test(r.out) && JSON.stringify(r.st.vv) === JSON.stringify(f6.st.vv) && JSON.stringify(r.st.vpre) === JSON.stringify(f6.st.vpre), JSON.stringify(r.st.vv));
 }
 { // votes stored as vv are read back: a run with no vote rows left keeps them
   const r = runFeedback(fbWorld([]), f5.text, {});
-  T('[6] votes stored as vv read back (a later run with an empty vote board keeps them)', r.code === 0 && JSON.stringify(r.st.vv) === JSON.stringify(f5.st.vv) && JSON.stringify(r.st.votes) === '{}', JSON.stringify(r.st.vv));
+  T('[6] votes stored as vv read back (a later run with an empty vote board keeps them)', r.code === 0 && JSON.stringify(r.st.vv) === JSON.stringify(f5.st.vv) && JSON.stringify(r.st.votes) === '{}' && r.st.vpre === undefined, JSON.stringify(r.st.vv));
 }
-console.log('=== report-keys [7] votes: partial read leaves pid keys untouched ===');
+console.log('=== report-keys [7] votes: fold without a full read, after a rollback, leftovers ===');
 {
   const items = f5.st.items;
   const r = runFeedback(fbWorld([{ sid: V1, list: [{ id: ID1, dir: 1, ts: 100 }] }], true), legacyVotes(items), { PAGE_CAP: '1' });
-  T('[7] run ok, votes deferred and says why', r.code === 0 && /votes deferred until a complete read moves them \(Q190\)/.test(r.out), r.out.slice(-500));
-  T('[7] votes exactly as before, no vv', JSON.stringify(r.st.votes) === JSON.stringify(legacyVotes(items).votes) && r.st.vv === undefined, JSON.stringify(r.st.votes));
+  T('[7] a partial read of the vote board: the fold needs no board, done all the same', r.code === 0 && /pid-keyed votes folded for the voter keys \(Q190\): 3 kept/.test(r.out) &&
+    JSON.stringify(r.st.vv[ID1]) === JSON.stringify(f6.st.vv[ID1]) && JSON.stringify(r.st.vpre) === JSON.stringify(f6.st.vpre), r.out.slice(-500));
 }
-{ // rollback leftovers: an older version ran after the move -- it dropped vv (it keeps only the fields it knows) or left it,
-  // and wrote its own pid-keyed table into votes. Next run of this version: merged, one vote per voter and item, newer wins.
+{ // a real rollback: the older version keeps only the fields it knows (vv and vpre are gone) and rebuilds its pid-keyed
+  // table from the vote windows; the next run of this version folds that table as on the first run
   const items = f5.st.items;
-  const disk = { boards: {}, items, digest: { day: '', at: 0 }, vv: { [ID1]: { [VK(V1)]: [2, 90] }, [ID2]: { [VK(V1)]: [2, 120] } }, votes: { [ID1]: { [v.pid(V1)]: [1, 100] }, [ID2]: { [v.pid(V1)]: [3, 101] } } };
-  const r = runFeedback(fbWorld([{ sid: V1, list: [{ id: ID1, dir: 1, ts: 100 }] }]), disk, {});
+  const disk = { boards: {}, items, digest: { day: '', at: 0 }, votes: { [ID1]: { [v.pid(V1)]: [1, 100] }, [ID2]: { [v.pid(A1)]: [1, 105] } } };
+  const r = runFeedback(fbWorld([{ sid: V1, list: [{ id: ID1, dir: 1, ts: 100 }] }, { sid: A1, list: [{ id: ID2, dir: 1, ts: 105 }] }]), disk, {});
   const vt = r.st.vv || {};
-  T('[7] rollback leftovers merged into vv: the newer vote of the two kept (either side), one key per voter, pid table emptied', r.code === 0 && JSON.stringify(vt[ID1]) === JSON.stringify({ [VK(V1)]: [1, 100] }) &&
-    JSON.stringify(vt[ID2]) === JSON.stringify({ [VK(V1)]: [2, 120] }) && JSON.stringify(r.st.votes) === '{}', JSON.stringify([r.st.vv, r.st.votes]));
-  const t = fb.tallyVotes(vt[ID1], items[ID1].ap);
-  T('[7] after the merge the voter counts once', t.up === 1 && t.down === 0, JSON.stringify(t));
+  T('[7] after a rollback: folded again, each voter counted once, no voter key', r.code === 0 && JSON.stringify(vt[ID1]) === JSON.stringify({ '~0': [1, 100] }) && JSON.stringify(vt[ID2]) === JSON.stringify({ '~0': [1, 105] }) &&
+    fb.tallyVotes(vt[ID1], items[ID1].ap).up === 1 && voterKeysIn(vt).size === 0, JSON.stringify(vt));
+}
+{ // leftovers next to the voter-keyed table (only a hand-edited state: the older version drops vv on save): marked, not
+  // kept -- V1 already has his vote under his voter key, a second copy would count him twice
+  const items = f5.st.items;
+  const disk = { boards: {}, items, digest: { day: '', at: 0 }, vv: { [ID1]: { [VK(V1)]: [2, 90] } }, votes: { [ID1]: { [v.pid(V1)]: [1, 100] }, [ID2]: { [v.pid(V1)]: [3, 101] } } };
+  const r = runFeedback(fbWorld([]), disk, {});
+  const vt = r.st.vv || {}, t = fb.tallyVotes(vt[ID1], items[ID1].ap);
+  T('[7] leftovers next to vv: marked, not kept (V1 counts once), pid table emptied', r.code === 0 && JSON.stringify(vt[ID1]) === JSON.stringify({ [VK(V1)]: [2, 90] }) && vt[ID2] === undefined &&
+    t.up === 0 && t.down === 1 && JSON.stringify(r.st.votes) === '{}' && (r.st.vpre || []).includes(fb.preVoteTok(v.pid(V1), ID2)), JSON.stringify([r.st.vv, r.st.votes, r.st.vpre]));
 }
 
 console.log('=== report-keys [8] source pins ===');
@@ -355,14 +396,49 @@ console.log('=== report-keys [8] source pins ===');
   T('[8] player reports keyed by the lane keys in harvestReports', /const rk = REP_KEYS\.by\(rp\), tk = REP_KEYS\.of\(target\);/.test(SRC) && !/sigPlayer\(s, rk, now\)/.test(SRC) && !/\.ri = \(/.test(SRC));
   T('[8] trust counts co-presence through the pair token', /if \(met\.has\(e\.pk\)\) n\+\+;/.test(SRC) && /verifiedUniqueReporters\(s, sid, idx\)\);/.test(SRC));
   T('[8] chat lane passes the two lane keys (harvest / plan / auto / queue)', /chatMute\.harvest\(st, rows, CHAT_KEYS\.by, nowUnixMin, CHAT_KEYS\.of\)/.test(SRC) && /chatMute\.plan\(st, boardRows, targets, CHAT_KEYS\.of, nowUnixMin\)/.test(SRC) &&
-    /st\.auto\[CHAT_KEYS\.of\(w\.sid\)\]/.test(SRC) && /chatMute\.queueMail\(st, h\.fresh, CHAT_KEYS\.by\)/.test(SRC) && !/chatMute\.[a-zA-Z]+\([^)]*\bpid\b[^)]*\)/.test(SRC.replace(/chatMute\.rekeyLegacy\(st, rows, pid,/, '')));
-  T('[8] chat harvest keys targets with the target-side function', /const tp = \(tpidOf \|\| pidOf\)\(rep\.target\);/.test(CM_SRC) && /'kv'\]\);/.test(CM_SRC));
-  T('[8] votes merged under voter keys after the author / unknown-item filter, stored as vv', /mergeVotes\(st\.votes, voterKey\(String\(e\.steamID\)\), storableVotes\(st\.items, e\.steamID, decoded\)\)/.test(FB_SRC) &&
+    /st\.auto\[CHAT_KEYS\.of\(w\.sid\)\]/.test(SRC) && /chatMute\.queueMail\(st, h\.fresh, CHAT_KEYS\.by\)/.test(SRC) && /chatMute\.rekeyLegacy\(st, rows, CHAT_KEYS\.by\)/.test(SRC) && !/chatMute\.[a-zA-Z]+\([^)]*\bpid\b[^)]*\)/.test(SRC));
+  T('[8] chat harvest keys targets with the target-side function, skips the rows marked at the drop', /const tp = \(tpidOf \|\| pidOf\)\(rep\.target\);/.test(CM_SRC) && /'kv', 'pre'\]\);/.test(CM_SRC) &&
+    /if \(pre\.size && pre\.has\(preKey\(pidOf, r\.reporterSid, rep\)\)\) \{ skipped\+\+; continue; \}/.test(CM_SRC));
+  T('[8] player reports: the dedup key is one keyed token, the reports marked at the drop are never taken', /const seenKey = REP_KEYS\.seen\(rp, target, reason, mh\);/.test(SRC) && /if \(s\.rseen\[seenKey\] \|\| pre\.has\(seenKey\)\) continue;/.test(SRC));
+  // the drops carry no key over: no lane-key function applied to an old entry inside them
+  const body = (src, name) => { const i = src.indexOf('function ' + name + '('); const j = src.indexOf('\nfunction ', i + 10); return i < 0 ? '' : src.slice(i, j < 0 ? undefined : j); };
+  const bR = body(SRC, 'rekeyReports'), bC = body(CM_SRC, 'rekeyLegacy'), bV = body(FB_SRC, 'rekeyVotes');
+  T('[8] the drops carry nothing onto the lane keys (rekeyReports / rekeyLegacy / rekeyVotes)', bR && bC && bV && !/REP_KEYS\.(by|of|pair)\(/.test(bR) && !/sidOf|\.at\b/.test(bR) &&
+    !/ofOf|sidOf|byOf\((sid|k|x)/.test(bC) && /pre\.add\(preKey\(byOf, r\.reporterSid, rep\)\)/.test(bC) && !/voterKey\(/.test(bV) && /to\['~' \+ n\] = x;/.test(bV), [bR.length, bC.length, bV.length].join(','));
+  T('[8] votes merged under voter keys after the author / unknown-item / pre-fold filter, stored as vv', /mergeVotes\(st\.votes, voterKey\(String\(e\.steamID\)\), storableVotes\(st\.items, e\.steamID, decoded, pre\)\)/.test(FB_SRC) &&
     /return Object\.assign\(\{\}, storedState\(st\), \{ items \}\);/.test(FB_SRC) && /if \(s\.vv && typeof s\.vv === 'object'\)/.test(FB_SRC));
   const ADMIN = fs.readFileSync(path.join(__dirname, '..', 'tools', 'feedback-admin.js'), 'utf8');
   T('[8] the admin console reads vv', /const votes = st\.vv \|\| st\.votes \|\| \{\};/.test(ADMIN) && !/st\.votes \|\| \{\}\)\[id\]/.test(ADMIN));
   const ks = [v.pid(X), BY(X), OF(X), CBY(X), COF(X), VK(X)];
   T('[8] the five lane keys of one account differ from each other and from his pid', new Set(ks).size === ks.length && ks.every(k => /^[0-9a-f]{16}$/.test(k)), JSON.stringify(ks));
+}
+
+console.log('=== report-keys [9] player reports after a rollback: leftovers dropped too ===');
+{
+  // state after the drop and one later run (r2 + the later report), then an older version ran: it keeps the whole signals
+  // file (rkv, rpre, the lane-keyed edges) and wrote its own pid-keyed edge / dedup key / per-pid counters next to them
+  const s1 = JSON.parse(r2.text.SIGNALS_FILE);
+  s1.rep[BY(R1) + '>' + OF(T2)] = { n: 1, m: 2, at: DAY1 + 3600000, pk: v.REP_KEYS.pair(R1, T2) };
+  s1.rseen[v.REP_KEYS.seen(R1, T2, 1, 222)] = DAY1 + 3600000;
+  s1.rep[v.pid(R1) + '>' + v.pid(T2)] = { n: 1, m: 2, at: DAY1 + 7200000 };
+  s1.rseen[v.pid(R1) + '|' + v.pid(T2) + '|1|222'] = DAY1 + 7200000;
+  s1.players[v.pid(T2)] = { g: 1, w: 0, v: 0, f: 0, ns: 0, disp: [1, 0, 0, 0, 0, 0, 0], s1: 0, s2: 0, smax: 0, at: DAY1, ri: 1 };
+  T('[9] the leftovers are seen as pid-keyed state (harvest waits for them to go)', v.repKeysReady(JSON.parse(JSON.stringify(s1))) === false && v.repKeysReady(JSON.parse(r2.text.SIGNALS_FILE)) === true);
+  const only = (o) => Object.assign({ day: { d: 0, n: {} }, players: {}, pairs: {}, flagged: {}, rep: {}, rseen: {} }, o);
+  T('[9] a per-pid counter alone is pid-keyed state too, before and after the first drop (an edge aged out, the counter not)',
+    v.repKeysReady(only({ players: { a: { at: 1, ri: 1 } } })) === false && v.repKeysReady(only({ rkv: v.REP_KEYS_VER, players: { a: { at: 1, ro: 1 } } })) === false &&
+    v.repKeysReady(only({ rkv: v.REP_KEYS_VER, players: { a: { at: 1 } } })) === true);
+  const later = DAY1 + 3 * 3600000;
+  const W9 = { reports: [{ sid: R1, list: [{ t: T1, r: 2, m: 111 }, { t: T2, r: 1, m: 222 }, { t: X, r: 3, m: 333 }] }] };
+  const part = runValidate(world(Object.assign({ pad: true }, W9)), { SIGNALS_FILE: s1 }, { FAKE_NOW: String(later), PAGE_CAP: '1' });
+  T('[9] partial read: deferred, nothing dropped', part.code === 0 && /harvest deferred until a complete read drops it/.test(part.out) && JSON.stringify(part.sig.rep) === JSON.stringify(s1.rep), tail(part));
+  const r = runValidate(world(W9), { SIGNALS_FILE: s1 }, { FAKE_NOW: String(later) });
+  const s = r.sig;
+  T('[9] complete read: only the leftovers dropped, logged', r.code === 0 && /pid-keyed report state dropped for the lane keys \(Q190\): 3 entr\(ies\) dropped/.test(r.out), tail(r));
+  T('[9] the lane-keyed edge and its dedup token kept; the pid-keyed edge, dedup key and counter gone', JSON.stringify(Object.keys(s.rep)) === JSON.stringify([BY(R1) + '>' + OF(T2)]) &&
+    JSON.stringify(Object.keys(s.rseen)) === JSON.stringify([v.REP_KEYS.seen(R1, T2, 1, 222)]) && s.players[v.pid(T2)].ri === undefined && pidsIn(JSON.stringify({ rep: s.rep, rseen: s.rseen })).length === 0, JSON.stringify([s.rep, s.rseen]));
+  T('[9] the reports on the box now added to the marked list (the one filed meanwhile is not taken)', s.rpre.length === 3 && s.rpre.includes(v.REP_KEYS.seen(R1, X, 3, 333)) && s.rpre.includes(v.REP_KEYS.seen(R1, T1, 2, 111)) &&
+    !/reports: \d+ new/.test(r.out) && !Object.keys(s.rep).some(k => k.endsWith('>' + OF(X))), JSON.stringify(s.rpre) + tail(r));
 }
 
 console.log(failN ? 'FAIL ' + failN : 'report-keys: ALL PASS');

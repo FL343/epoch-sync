@@ -65,11 +65,13 @@ function rowKey(rep) { return 'chat-row|' + rep.ver + '|' + rep.scope + '|' + re
 // validate.js passes the lane's two pseudonyms (CHAT_KEYS, Q190), see rekeyLegacy.
 function harvest(st, rows, pidOf, nowUnixMin, tpidOf) {
   st.seen = st.seen || {}; st.sig = st.sig || {}; st.rep = st.rep || {}; st.auto = st.auto || {};
+  const pre = new Set(st.pre || []);   // rows on the box when a pid-keyed state was dropped: never taken (rekeyLegacy)
   const fresh = [];
   let skipped = 0, clamped = 0;
   for (const r of rows || []) {
     const rep = decodeReport(r.det);
     if (!rep || !sidPlausible(r.reporterSid) || !sidPlausible(rep.target) || String(rep.target) === String(r.reporterSid)) { skipped++; continue; }
+    if (pre.size && pre.has(preKey(pidOf, r.reporterSid, rep))) { skipped++; continue; }
     const rp = pidOf(r.reporterSid);
     const sig = pidOf(rowKey(rep));
     if (st.sig[rp] === sig) { skipped++; continue; }
@@ -185,7 +187,7 @@ function scrubLegacy(st, pidOf, mailOn) {
 }
 // The only keys that reach the committed file. A new state field has to be added here on purpose -- and must hold
 // keyed pseudonyms, counts or times only. (sig: keyed digest of a reporter's last harvested row, where present.)
-const PUBLIC_KEYS = Object.freeze(['seen', 'sig', 'rep', 'auto', 'digest', 'pend', 'pendLost', 'kv']);
+const PUBLIC_KEYS = Object.freeze(['seen', 'sig', 'rep', 'auto', 'digest', 'pend', 'pendLost', 'kv', 'pre']);
 function publicState(st) {
   const o = {};
   for (const k of PUBLIC_KEYS) if (st && st[k] !== undefined) o[k] = st[k];
@@ -199,56 +201,37 @@ function publicState(st) {
 // shows his automatic mute, and that must not reveal the reports he filed himself. st.kv marks a state on those keys
 // (written only while the state holds entries, so the untouched empty state stays byte-identical).
 const KEYS_VER = 1;
-const KEYED = ['seen', 'sig', 'rep', 'auto', 'pend'];
+const KEYED = ['seen', 'sig', 'rep', 'auto', 'pend', 'pre'];
 function hasEntries(st) { return KEYED.some(k => !!st && !!st[k] && Object.keys(st[k]).length > 0); }
 function keysReady(st) { return !!st && (st.kv === KEYS_VER || !hasEntries(st)); }
 function markKeys(st) { if (hasEntries(st)) st.kv = KEYS_VER; else delete st.kv; }
-// One-time move of a state written under oldOf (validate.js pid) onto byOf / ofOf, from a COMPLETE read of the report box
-// (rows as for harvest; validate.js calls it only then). Every reporter still on the box and every target of a row on it
-// resolves (old key -> sid); what no longer resolves is dropped -- that can only lower a count, and a resolved automatic
-// mute keeps its recorded expiry, so nobody is muted longer for the move. A queued digest entry moves only while it still
-// matches the reporter's row (re-signed under byOf), otherwise it is counted in pendLost like any row replaced before the
-// digest. st.sig (row digests under the old key) is dropped: harvest then takes a reporter's row as the one already
-// harvested when its stamp equals st.seen, the rule it keeps for state of an older version. Returns { kept, dropped }.
-function rekeyLegacy(st, rows, oldOf, byOf, ofOf) {
-  const sidOf = new Map(), cur = new Map();
+// st.pre: keyed tokens (through the reporter-side function) of the rows on the report box when a pid-keyed state was
+// dropped -- no account in them, fixed from then on (never pruned, never written again); harvest skips such a row.
+function preKey(pidOf, reporterSid, rep) { return pidOf('chat-pre|' + String(reporterSid) + '|' + rowKey(rep)); }
+// Drop a state written under validate.js pid, from a COMPLETE read of the report box (rows as for harvest; validate.js
+// calls it only then). Nothing of it is carried onto the lane keys: a value copied from a pid-keyed entry into a
+// lane-keyed one in the same commit (a reporter's stamp, a reporter set, a mute expiry) shows anyone who diffs that commit
+// which lane key is which pid, and so whose every later report it is. Instead every row now on the box goes into st.pre
+// (taken before, or still in flight: not taken again under the new keys). The cost only lowers counts: those reports
+// leave the 24h reporter sets (nobody is muted for them; a mute already on the mute board keeps its row and expiry, the
+// state's auto map only stops a rewrite inside the same window), and the digest entries still queued are counted in
+// pendLost (their rows stay readable on the report box). An older version that ran after the move dropped kv and pre
+// (they are not in its PUBLIC_KEYS), so its state comes back here whole. Returns { dropped, pre }.
+function rekeyLegacy(st, rows, byOf) {
+  const pre = new Set(st.pre || []);
   for (const r of rows || []) {
-    if (!sidPlausible(r.reporterSid)) continue;
-    const sid = String(r.reporterSid);
-    sidOf.set(oldOf(sid), sid);
     const rep = decodeReport(r.det);
-    if (!rep || !sidPlausible(rep.target)) continue;
-    sidOf.set(oldOf(rep.target), String(rep.target));
-    cur.set(sid, { reporterSid: sid, target: rep.target, scope: rep.scope, tsMin: rep.tsMin, text: rep.text });
+    if (!rep || !sidPlausible(r.reporterSid) || !sidPlausible(rep.target) || String(rep.target) === String(r.reporterSid)) continue;
+    pre.add(preKey(byOf, r.reporterSid, rep));
   }
-  const res = { kept: 0, dropped: 0 };
-  const move = (o, keyOf) => {
-    const n = {};
-    for (const k of Object.keys(o || {})) { const sid = sidOf.get(k); if (sid) { n[keyOf(sid)] = o[k]; res.kept++; } else res.dropped++; }
-    return n;
-  };
-  st.seen = move(st.seen, byOf);
-  st.auto = move(st.auto, ofOf);
-  const rep = {};
-  for (const tk of Object.keys(st.rep || {})) {
-    const list = st.rep[tk] || [], tsid = sidOf.get(tk);
-    const kept = tsid ? list.filter(x => sidOf.has(x[0])).map(x => [byOf(sidOf.get(x[0])), x[1]]) : [];
-    res.kept += kept.length; res.dropped += list.length - kept.length;
-    if (kept.length) rep[ofOf(tsid)] = kept;
-  }
-  st.rep = rep;
-  if (st.pend) {
-    const pend = {};
-    for (const k of Object.keys(st.pend)) {
-      const sid = sidOf.get(k), f = sid && cur.get(sid);
-      if (f && st.pend[k] === mailSig(f, oldOf)) { pend[byOf(sid)] = mailSig(f, byOf); res.kept++; }
-      else { st.pendLost = (st.pendLost | 0) + 1; res.dropped++; }
-    }
-    if (Object.keys(pend).length) st.pend = pend; else delete st.pend;
-  }
-  delete st.sig;
+  let dropped = Object.keys(st.seen || {}).length + Object.keys(st.auto || {}).length;
+  for (const tk of Object.keys(st.rep || {})) dropped += (st.rep[tk] || []).length;
+  const lost = Object.keys(st.pend || {}).length;
+  if (lost) st.pendLost = (st.pendLost | 0) + lost;
+  st.seen = {}; st.sig = {}; st.rep = {}; st.auto = {}; delete st.pend;
+  st.pre = Array.from(pre).sort();
   st.kv = KEYS_VER;
-  return res;
+  return { dropped: dropped + lost, pre: pre.size };
 }
 module.exports = { CHAT_MUTE, decodeReport, tsMinToUnixMin, harvest, prune, reporterCount, plan, digestLines, sidPlausible,
-  PEND_MAX, PUBLIC_KEYS, mailSig, queueMail, pendingRows, scrubLegacy, publicState, KEYS_VER, hasEntries, keysReady, markKeys, rekeyLegacy };
+  PEND_MAX, PUBLIC_KEYS, mailSig, queueMail, pendingRows, scrubLegacy, publicState, KEYS_VER, hasEntries, keysReady, markKeys, rekeyLegacy, preKey };

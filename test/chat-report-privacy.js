@@ -248,7 +248,7 @@ console.log('=== chat-report-privacy [7] helpers ===');
   const st = { seen: { a: 1 }, rep: {}, auto: {}, pendingMail: [{ reporterSid: R1, text: DM }], foo: R1, pend: { x: 'y' } };
   const pub = cm.publicState(st);
   T('[7] publicState keeps the whitelisted keys only (drops pendingMail and anything unknown)', JSON.stringify(pub) === JSON.stringify({ seen: { a: 1 }, rep: {}, auto: {}, pend: { x: 'y' } }), JSON.stringify(pub));
-  T('[7] whitelist pinned', JSON.stringify(cm.PUBLIC_KEYS) === JSON.stringify(['seen', 'sig', 'rep', 'auto', 'digest', 'pend', 'pendLost', 'kv']));
+  T('[7] whitelist pinned', JSON.stringify(cm.PUBLIC_KEYS) === JSON.stringify(['seen', 'sig', 'rep', 'auto', 'digest', 'pend', 'pendLost', 'kv', 'pre']));
   T('[7] untouched state serializes exactly as before (no spurious commit of the live files)', JSON.stringify(cm.publicState({ seen: {}, rep: {}, auto: {} })) === '{"seen":{},"rep":{},"auto":{}}');
   const f = { reporterSid: R1, target: T1, scope: 3, tsMin: 7, text: DM };
   T('[7] mailSig is keyed: the same row under another salt gives another digest', cm.mailSig(f, v.pid) !== cm.mailSig(f, (s) => require('crypto').createHmac('sha256', 'other').update(String(s)).digest('hex').slice(0, 16)));

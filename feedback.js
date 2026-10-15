@@ -445,34 +445,53 @@ function mergeVotes(votes, voterPid, decoded) {
 // st.vkv marks votes on voter keys.
 const FB_VOTER_KEYS = 1;
 function voterKey(sid) { return v.pid('fb-vote|' + sid); }
-// One voter's decoded window -> the votes to store: items the state holds, not his own.
-function storableVotes(items, sid, decoded) {
+// st.vpre: keyed tokens of the (voter, item) pairs that had a vote on pid keys when those votes were folded (rekeyVotes);
+// no account in them, fixed from then on. Such a voter's later votes on that item are not taken (see rekeyVotes).
+function preVoteTok(voterPid, itemKey) { return v.pid('fb-pre|' + voterPid + '|' + itemKey); }
+// One voter's decoded window -> the votes to store: items the state holds, not his own, not one he voted on before the fold.
+function storableVotes(items, sid, decoded, pre) {
   const own = v.pid(String(sid));
-  return decoded.filter(vt => { const it = items[String(vt.itemId)]; return !!it && it.ap !== own; });
+  return decoded.filter(vt => { const key = String(vt.itemId), it = items[key]; return !!it && it.ap !== own && !(pre && pre.size && pre.has(preVoteTok(own, key))); });
 }
-// The pid-keyed table still to move: the whole vote table before the first move, afterwards only what an older version
+// The pid-keyed table still to fold: the whole vote table before the first fold, afterwards only what an older version
 // left in the votes field after a rollback (loadState).
 function pidVoteTable(st) { return st.vkv === FB_VOTER_KEYS ? (st.pidVotes || {}) : (st.votes || {}); }
-// Move pid-keyed votes onto voterKey, from a COMPLETE read of the vote board (voterSids = every row's owner): every voter
-// still on the board resolves; votes of voters no longer on it, the authors' own votes and votes for items the state does
-// not hold are dropped (none of them counts in a tally). A voter with a vote on both keys keeps the newer one.
-// Returns { kept, dropped }.
-function rekeyVotes(st, voterSids) {
-  const sidOf = new Map();
-  for (const sid of voterSids || []) sidOf.set(v.pid(String(sid)), String(sid));
-  const from = pidVoteTable(st), votes = st.vkv === FB_VOTER_KEYS ? (st.votes || {}) : {};
-  const res = { kept: 0, dropped: 0 };
+// Fold pid-keyed votes into the voter-keyed table without carrying any voter over. A vote copied from a pid key onto the
+// voter's new key in the same commit (same direction, same stamp) shows anyone who diffs that commit which voter key is
+// which pid, and so every later vote and report of that voter. So each vote that counts (not the author's own, not for an
+// item the state does not hold, not cleared) stays on its item under a numbered key with no account in it ('~0', '~1', ...
+// in stamp order; never equal to a voter key or a pid): the item's up / down / report counts and the report hold stay
+// exactly as they were. Each (voter, item) pair that had a vote, counted or not, goes into st.vpre, so the voter's rolling
+// window -- which still carries those votes -- does not bring them in again under his voter key (that would count him twice,
+// and pair the two keys again). The cost: on an item he had voted on before the fold his later change, retraction or report
+// is not taken (the item keeps his old vote); new items are voted as usual. Needs no board read.
+// Pid-keyed leftovers NEXT TO a voter-keyed table (st.vkv) are only marked in st.vpre, not kept: the same voter may already
+// have his vote there under his voter key, and a second copy would count him twice (a report twice: a post held for
+// nothing). An older version keeps only the fields it knows (vv and vpre are not among them), so after a real rollback
+// the whole table comes back pid-keyed and is folded as on the first run. Returns { kept, dropped, pre }.
+function rekeyVotes(st) {
+  const leftovers = st.vkv === FB_VOTER_KEYS;
+  const from = pidVoteTable(st), votes = leftovers ? (st.votes || {}) : {};
+  const pre = new Set(st.vpre || []);
+  const res = { kept: 0, dropped: 0, pre: 0 };
   for (const key of Object.keys(from)) {
     const item = (st.items || {})[key], slot = from[key] || {};
+    const keep = [];
     for (const k of Object.keys(slot)) {
-      const sid = sidOf.get(k);
-      if (!item || !sid || k === item.ap) { res.dropped++; continue; }
-      const to = votes[key] || (votes[key] = {}), nk = voterKey(sid);
-      if (!to[nk] || (slot[k][1] | 0) > (to[nk][1] | 0)) to[nk] = slot[k];
-      res.kept++;
+      pre.add(preVoteTok(k, key));
+      const rec = slot[k] || [], dir = rec[0] | 0;
+      if (leftovers || !item || k === item.ap || dir < 1 || dir > 3) { res.dropped++; continue; }
+      keep.push([dir, rec[1] | 0]);
     }
+    if (!keep.length) continue;
+    keep.sort((a, b) => (a[1] - b[1]) || (a[0] - b[0]));
+    const to = votes[key] || (votes[key] = {});
+    let n = Object.keys(to).filter(k => k.charAt(0) === '~').length;
+    for (const x of keep) { while (to['~' + n]) n++; to['~' + n] = x; n++; res.kept++; }
   }
   st.votes = votes; st.pidVotes = {}; st.vkv = FB_VOTER_KEYS;
+  if (pre.size) st.vpre = Array.from(pre).sort(); else delete st.vpre;
+  res.pre = pre.size;
   return res;
 }
 
@@ -526,6 +545,7 @@ function loadState() {
     const o = { boards: s.boards || {}, items: s.items || {}, votes: s.votes || {}, digest: s.digest || { day: '', at: 0 } };
     // Q190: votes on voter keys are stored as vv (see storedState); votes on disk is then an older version's pid-keyed table
     if (s.vv && typeof s.vv === 'object') { o.pidVotes = o.votes; o.votes = s.vv; o.vkv = FB_VOTER_KEYS; }
+    if (Array.isArray(s.vpre) && s.vpre.length) o.vpre = s.vpre;
     return o;
   } catch (e) { return { boards: {}, items: {}, votes: {}, digest: { day: '', at: 0 } }; }
 }
@@ -540,9 +560,9 @@ function asciiJson(o) {
 }
 function saveState(st) { fs.writeFileSync(FB_STATE_FILE, asciiJson(publicState(st))); }
 // Q190 (publicState): once on voter keys (st.vkv), the vote table is written as vv and the votes field -- what an older version of this
-// job reads -- is left empty (or holds that version's pid-keyed leftovers until they are moved). A rollback then rebuilds
-// its pid-keyed table from the vote board windows instead of counting every voter twice (once per key), and the next
-// run of this version moves that table over again (rekeyVotes).
+// job reads -- is left empty (or holds that version's pid-keyed leftovers until they are folded). A rollback then rebuilds
+// its pid-keyed table from the vote board windows instead of counting every voter twice (once per key); it keeps only the
+// fields it knows (vv and vpre are gone after it), and the next run of this version folds that table again (rekeyVotes).
 function storedState(st) {
   const o = Object.assign({}, st);
   delete o.vkv; delete o.pidVotes;
@@ -720,24 +740,25 @@ async function main() {
     '(an id collision attempt, or STATE_SALT changed without resetting the feedback state)');
 
   // ---- harvest votes ----
+  // Q190: votes still on pid keys are folded once (and an older version's leftovers after a rollback), no voter carried
+  //   over (rekeyVotes); needs no board read, so the vote board below is always taken on voter keys only
+  if (st.vkv !== FB_VOTER_KEYS || Object.keys(st.pidVotes || {}).length) {
+    const had = Object.keys(pidVoteTable(st)).length;
+    const mv = rekeyVotes(st);
+    if (had) {
+      dirty = true;
+      console.log('feedback: pid-keyed votes folded for the voter keys (Q190): ' + mv.kept + ' kept on their items without a voter, ' + mv.dropped + ' dropped, ' + mv.pre + ' voter/item pair(s) marked as voted');
+    }
+  }
   let voteEnts = 0;
   if (voteId) {
     const vb = await v.readBoardAll(voteId, 'feedback votes');
-    // Q190: pid-keyed votes move onto voter keys once, from a complete read (a partial one would drop votes the unread
-    //   pages still resolve); until then this run merges nothing (no mixing of the two key sets)
-    const pidLeft = Object.keys(pidVoteTable(st)).length;
-    if (!pidLeft) st.vkv = FB_VOTER_KEYS;   // nothing to move
-    else if (vb.complete) {
-      const mv = rekeyVotes(st, vb.ents.map(e => String(e.steamID)));
-      dirty = true;
-      console.log('feedback: votes moved onto voter keys (Q190): ' + mv.kept + ' kept, ' + mv.dropped + ' dropped');
-    }
-    if (st.vkv !== FB_VOTER_KEYS) console.log('feedback: partial read of the vote board with pid-keyed votes -- votes deferred until a complete read moves them (Q190)');
-    else for (const e of vb.ents) {
+    const pre = new Set(st.vpre || []);
+    for (const e of vb.ents) {
       const decoded = decodeVoteEntry(v.decodeDetails(e.detailData));
       if (!decoded.length) continue;
       voteEnts++;
-      if (mergeVotes(st.votes, voterKey(String(e.steamID)), storableVotes(st.items, e.steamID, decoded))) dirty = true;
+      if (mergeVotes(st.votes, voterKey(String(e.steamID)), storableVotes(st.items, e.steamID, decoded, pre))) dirty = true;
     }
   }
 
@@ -867,7 +888,7 @@ module.exports = {
   FB_DAILY_CAP, FB_REPORT_HOLD, FB_WORDLIST_FILE, FB_MOD_FILE,
   feedBoardName, packLang, unpackLang, fnv1a32, unpackText, packText, sanitizeText,
   nowTsMin, decodeBoxEntry, foreignBoxRow, decodeVoteEntry, mergeVotes, tallyVotes, hotScoreOf, packFeedDetails,
-  FB_VOTER_KEYS, voterKey, storableVotes, rekeyVotes, pidVoteTable, storedState,
+  FB_VOTER_KEYS, voterKey, preVoteTok, storableVotes, rekeyVotes, pidVoteTable, storedState,
   dayOfTs, loadWordlist, adSurfaces, adReason, filterReason, countAuthorDay,
   loadMod, reportsSince, trustPenaltyOf, governItems, maybeSendDigest,
   wlHash, wlSubHit, wlWordHit, foldForWordlist, asciiJson,

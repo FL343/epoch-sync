@@ -79,7 +79,11 @@ const plog = (s) => pid(s).slice(0, 8);
 //   board shows the outcome (an automatic chat mute, a trust tier), which must not reveal the reports he filed himself.
 const laneKey = (domain) => (s) => pid(domain + '|' + s);
 const repPairTok = (k) => pid('rep-pair|' + k);   // k = pairKey of two pids (signals.pairs)
-const REP_KEYS = Object.freeze({ by: laneKey('rep-by'), of: laneKey('rep-of'), pair: (a, b) => repPairTok(pairKey(pid(a), pid(b))) });
+// seen = the dedup key of one report (reporter, target, reason, match hash) as ONE keyed token: in the clear its match hash
+//   names the match, and the start rosters in starts.json (keyed by the same hash32(matchId)) name its players -- a reporter
+//   key seen on two matches is the one player on both (review of Q190).
+const REP_KEYS = Object.freeze({ by: laneKey('rep-by'), of: laneKey('rep-of'), pair: (a, b) => repPairTok(pairKey(pid(a), pid(b))),
+  seen: (a, b, reason, mh) => pid('rep-seen|' + a + '|' + b + '|' + (reason | 0) + '|' + (mh | 0)) });
 const CHAT_KEYS = Object.freeze({ by: laneKey('chat-by'), of: laneKey('chat-of') });
 
 const START_MAGIC = 0xB2;   // start-attestation record (settle records stay 0xB1; lockstep with the client writer)
@@ -2046,7 +2050,7 @@ function sigDay(s, now) { const d = Math.floor(now / 86400000); if (s.day.d !== 
 // field -- a reporter cannot forge someone else's complaints. Targets/reasons/match keys ARE
 // client claims, so everything lands as signals for the future trust layer; nothing punishes.
 // Client packs its rolling queue (<=15) into details: [0xB3, ver<<8|count, (sidLo,sidHi,reason,matchHash)*n].
-// Re-uploads of the same queue are idempotent here (rseen dedup by reporter|target|reason|matchHash).
+// Re-uploads of the same queue are idempotent here (rseen dedup by a keyed token of reporter|target|reason|matchHash).
 // Per-reporter daily counted cap blunts report-bombing: beyond the cap entries are dedup-marked
 // but not counted (mirrors the DAILY_CAP record-only philosophy).
 const REPORT_MAGIC = 0xB3;
@@ -2065,60 +2069,59 @@ const REPORT_DAILY_CAP = Number(process.env.REPORT_DAILY_CAP || 20);
 // Q190): reporter = REP_KEYS.by, target = REP_KEYS.of, and each edge carries pk = REP_KEYS.pair(reporter, target), the
 // keyed token of the pid pair that verifiedUniqueReporters looks up in signals.pairs. s.rkv marks state on these keys.
 // Per-pid report counters (players[].ri / .ro) are not kept: the edges hold the same counts, and a pid-keyed counter
-// that moves in the same commit as a new edge names the reporter. State written before (pid keys) moves over once
-// in rekeyReports; harvestReports never mixes the two (it defers until the move is done).
+// that moves in the same commit as a new edge names the reporter. State written on pid keys is never carried over (see
+// rekeyReports); harvestReports never mixes the two (it defers until that state is gone).
 const REP_KEYS_VER = 1;
+// pid-keyed report state: all of it before the move; after it (s.rkv) only what an older version of this job wrote
+// meanwhile (a rollback) -- an edge without its pair token, a dedup key in the clear, a per-pid counter.
+function repLegacyLeft(s) {
+  const players = Object.keys(s.players || {}).some(h => s.players[h].ri != null || s.players[h].ro != null);
+  if (s.rkv !== REP_KEYS_VER) return !!(Object.keys(s.rep || {}).length || Object.keys(s.rseen || {}).length || Object.keys((s.day && s.day.r) || {}).length || players);
+  return players || Object.keys(s.rseen || {}).some(k => k.indexOf('|') >= 0) || Object.keys(s.rep || {}).some(k => !(s.rep[k] && s.rep[k].pk));
+}
 function repKeysReady(s) {
-  if (s.rkv === REP_KEYS_VER) return true;
-  const legacy = Object.keys(s.rep || {}).length || Object.keys(s.rseen || {}).length || Object.keys((s.day && s.day.r) || {}).length ||
-    Object.keys(s.players || {}).some(h => s.players[h].ri != null || s.players[h].ro != null);
-  if (legacy) return false;
-  s.rkv = REP_KEYS_VER;   // nothing to move
+  if (repLegacyLeft(s)) return false;
+  s.rkv = REP_KEYS_VER;   // nothing (left) to drop
   return true;
 }
-// One-time move of pid-keyed report state onto REP_KEYS, from a COMPLETE read of the report box (entries as for
-// harvestReports): every reporter still on the box and every target in his queue resolves (old pid -> sid); edges,
-// dedup keys and daily counts that no longer resolve are dropped -- that only lowers counts (nobody is reported
-// more for it), and a dropped dedup key whose report is still queued mints again under the new keys without being
-// counted twice (its edge was dropped with it). Returns { kept, dropped }.
+// Drop pid-keyed report state, from a COMPLETE read of the report box (entries as for harvestReports). Nothing of it is
+// carried onto the lane keys: a value copied from a pid-keyed entry into a lane-keyed one in the same commit (an edge's
+// count and stamp, a dedup stamp, a daily count) shows anyone who diffs that commit which lane key is which pid, and so
+// whose every later report it is. What the move does keep has no account in it: s.rpre, the dedup tokens (REP_KEYS.seen)
+// of every report on the box at that moment, fixed from then on (never pruned, never written again), so a report taken
+// on the old keys -- or still in flight -- is not taken again under the new ones. The cost only lowers counts: the
+// reports taken before (and those queued but not yet taken) count toward nobody's trust tier from then on, and the day's
+// report counts start over. Returns { dropped, pre }.
 function rekeyReports(entries, s) {
-  const sidOf = new Map();
+  const pre = new Set(s.rpre || []);
   for (const e of (entries || [])) {
     const rp = String(e.steamID || ''), d = e.d || [];
-    if (rp) sidOf.set(pid(rp), rp);
-    if (d[0] !== REPORT_MAGIC || d.length < 2) continue;
+    if (!rp || d[0] !== REPORT_MAGIC || d.length < 2) continue;
     for (let i = 0, count = d[1] & 0xFF; i < count && d.length >= 6 + i * 4; i++) {
-      const t = decodeSid(d[2 + i * 4] | 0, d[3 + i * 4] | 0);
-      if (t !== '0') sidOf.set(pid(t), t);
+      const target = decodeSid(d[2 + i * 4] | 0, d[3 + i * 4] | 0), reason = d[4 + i * 4] | 0;
+      if (target === '0' || target === rp || reason < REPORT_REASON_MIN || reason > REPORT_REASON_MAX) continue;
+      pre.add(REP_KEYS.seen(rp, target, reason, d[5 + i * 4] | 0));
     }
   }
-  const res = { kept: 0, dropped: 0 };
+  const after = s.rkv === REP_KEYS_VER, res = { dropped: 0, pre: pre.size };
   const rep = {}, rseen = {};
-  for (const k of Object.keys(s.rep || {})) {
-    const i = k.indexOf('>'), a = i > 0 && sidOf.get(k.slice(0, i)), b = i > 0 && sidOf.get(k.slice(i + 1));
-    if (!a || !b) { res.dropped++; continue; }
-    rep[REP_KEYS.by(a) + '>' + REP_KEYS.of(b)] = Object.assign({}, s.rep[k], { pk: REP_KEYS.pair(a, b) });
-    res.kept++;
+  for (const k of Object.keys(s.rep || {})) { if (after && s.rep[k] && s.rep[k].pk) rep[k] = s.rep[k]; else res.dropped++; }
+  for (const k of Object.keys(s.rseen || {})) { if (after && k.indexOf('|') < 0) rseen[k] = s.rseen[k]; else res.dropped++; }
+  if (s.day && s.day.r) { res.dropped += Object.keys(s.day.r).length; delete s.day.r; }
+  for (const h of Object.keys(s.players || {})) {
+    const p = s.players[h];
+    if (p.ri != null || p.ro != null) { res.dropped++; delete p.ri; delete p.ro; }
   }
-  for (const k of Object.keys(s.rseen || {})) {
-    const p = k.split('|'), a = p.length === 4 && sidOf.get(p[0]), b = p.length === 4 && sidOf.get(p[1]);
-    if (a && b) rseen[REP_KEYS.by(a) + '|' + REP_KEYS.of(b) + '|' + p[2] + '|' + p[3]] = s.rseen[k];
-  }
-  if (s.day && s.day.r) {
-    const r = {};
-    for (const k of Object.keys(s.day.r)) { const a = sidOf.get(k); if (a) r[REP_KEYS.by(a)] = s.day.r[k]; }
-    s.day.r = r;
-  }
-  for (const h of Object.keys(s.players || {})) { delete s.players[h].ri; delete s.players[h].ro; }
-  s.rep = rep; s.rseen = rseen; s.rkv = REP_KEYS_VER;
+  s.rep = rep; s.rseen = rseen; s.rpre = Array.from(pre).sort(); s.rkv = REP_KEYS_VER;
   return res;
 }
 // entries = [{steamID, d}] (d = decoded details ints). Returns {seen, counted, capped, bad, targets, deferred}.
 function harvestReports(entries, s, now) {
   const res = { seen: 0, counted: 0, capped: 0, bad: 0, targets: [], deferred: false };
-  if (!repKeysReady(s)) { res.deferred = true; return res; }   // pid-keyed state not moved yet (rekeyReports)
+  if (!repKeysReady(s)) { res.deferred = true; return res; }   // pid-keyed state not dropped yet (rekeyReports)
   const day = sigDay(s, now);
   day.r = day.r || {};
+  const pre = new Set(s.rpre || []);           // on the box when the pid-keyed state was dropped: never taken (rekeyReports)
   for (const e of (entries || [])) {
     const rp = String(e.steamID || '');
     const d = e.d || [];
@@ -2132,8 +2135,8 @@ function harvestReports(entries, s, now) {
       const mh = d[off + 3] | 0;
       if (target === '0' || target === rp || reason < REPORT_REASON_MIN || reason > REPORT_REASON_MAX) { res.bad++; continue; }
       const rk = REP_KEYS.by(rp), tk = REP_KEYS.of(target);
-      const seenKey = rk + '|' + tk + '|' + reason + '|' + mh;
-      if (s.rseen[seenKey]) continue;          // idempotent re-upload of the rolling queue
+      const seenKey = REP_KEYS.seen(rp, target, reason, mh);   // one keyed token: no match hash in the clear (review of Q190)
+      if (s.rseen[seenKey] || pre.has(seenKey)) continue;   // idempotent re-upload of the rolling queue
       res.targets.push(target);                // real sid -> trust-tier candidate this run
       res.seen++;
       const dayN = (day.r[rk] | 0);
@@ -5236,15 +5239,15 @@ async function main() {
     try {
       const rb = await readBoardAll(repLb.id || repLb.ID, 'report box');
       const repEnts = rb.ents.map(e => ({ steamID: e.steamID, d: decodeDetails(e.detailData) }));
-      // Q190: pid-keyed report state moves onto the lane keys once, and only from a complete read (a partial one would
-      //   drop what the unread pages still resolve); until then nothing is harvested (no mixing of the two key sets)
+      // Q190: pid-keyed report state is dropped, and only on a complete read (the reports on the unread pages would be
+      //   taken again under the lane keys); until then nothing is harvested (no mixing of the two key sets)
       if (!repKeysReady(signals) && rb.complete) {
         const mv = rekeyReports(repEnts, signals);
         sigDirty = true;
-        console.log('reports: report state moved onto lane keys (Q190): ' + mv.kept + ' edge(s) kept, ' + mv.dropped + ' no longer on the report box dropped');
+        console.log('reports: pid-keyed report state dropped for the lane keys (Q190): ' + mv.dropped + ' entr(ies) dropped, ' + mv.pre + ' report(s) on the box marked as taken');
       }
       const rres = harvestReports(repEnts, signals, nowMs);
-      if (rres.deferred) console.log('reports: partial read of the report box with pid-keyed report state -- harvest deferred until a complete read moves it (Q190)');
+      if (rres.deferred) console.log('reports: partial read of the report box with pid-keyed report state -- harvest deferred until a complete read drops it (Q190)');
       RUN.repSeen = rres.seen; RUN.repCounted = rres.counted;
       if (rres.seen || rres.bad) {
         if (rres.counted) sigDirty = true;
@@ -5659,12 +5662,12 @@ async function main() {
       if (!repId || !muteId) { ghWarn('chat-mute: boards unavailable (report=' + !!repId + ' mute=' + !!muteId + ') -- lane skipped'); return; }
       const rb = await readBoardAll(repId, 'chat report box');
       const rows = rb.ents.map(e => ({ reporterSid: String(e.steamID), det: decodeDetails(e.detailData) }));
-      // Q190: reporters and targets are keyed by the lane's own pseudonyms (CHAT_KEYS); a state still on pid keys moves
-      //   over once, from a complete read of the report box -- until then the lane waits (no mixing of the two key sets)
+      // Q190: reporters and targets are keyed by the lane's own pseudonyms (CHAT_KEYS); a state still on pid keys is
+      //   dropped, on a complete read of the report box -- until then the lane waits (no mixing of the two key sets)
       if (!chatMute.keysReady(st)) {
-        if (!rb.complete) { console.log('chat-mute: partial read of the report box with pid-keyed state -- lane deferred until a complete read moves it (Q190)'); return; }
-        const mv = chatMute.rekeyLegacy(st, rows, pid, CHAT_KEYS.by, CHAT_KEYS.of);
-        console.log('chat-mute: state moved onto lane keys (Q190): ' + mv.kept + ' entr(ies) kept, ' + mv.dropped + ' no longer on the report box dropped');
+        if (!rb.complete) { console.log('chat-mute: partial read of the report box with pid-keyed state -- lane deferred until a complete read drops it (Q190)'); return; }
+        const mv = chatMute.rekeyLegacy(st, rows, CHAT_KEYS.by);
+        console.log('chat-mute: pid-keyed state dropped for the lane keys (Q190): ' + mv.dropped + ' entr(ies) dropped, ' + mv.pre + ' row(s) on the report box marked as taken');
       }
       const h = chatMute.harvest(st, rows, CHAT_KEYS.by, nowUnixMin, CHAT_KEYS.of);
       chatMute.prune(st, nowUnixMin);
