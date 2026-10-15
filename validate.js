@@ -1337,6 +1337,119 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
   }
   return { registered, convicted, cleaned, held, consoledSids };
 }
+// ---- a ranked 1V1 whose loser wrote nothing (cloud audit Q184) ----
+// A 1V1 key needs two start votes to register a roster and two writers to settle. A loser who writes nothing for the match
+// -- no start, no result, no confession (a modded client, or a side program that blanks his rows once he has lost) --
+// leaves the winner's start alone (one vote: no roster, only the Q127 note) and the winner's result alone: the match
+// never settles and never reaches the start-orphan verdict (no pending entry). The winner's win is lost, the loser loses
+// nothing; writing only the matches he won kept his points climbing (cloud audit Q174 R3: 6 games, 2500 -> 2597 where
+// writing every game gave 2583; his six honest opponents -41 together where honest play gave them +63).
+// The loser is never charged on the winner's word: any account that owns the game can write a start and a result for a
+// 1V1 that never happened naming anybody (Q69 / Q80). So the job pays the winner and only counts the loser.
+// lone1v1Verdicts: at the note's age STARTS_MATURITY_MS (the start-orphan verdict's), on a complete read, a key is decided
+// when lone1v1Claim holds -- a plain ranked 1V1 (match type 2, no party bits), no roster registered, never contested, and
+// every record of it is one account's: the starts read before the result (the note's s, Q127) are all his, from one seat,
+// naming one table, and his results are sanity-clean 'finished' records from that seat, naming that table, with his score
+// above the other seat's. The other seat's account wrote no start the job kept, no result and no abandon confession for
+// the key. The key is then processed (one verdict; the pair's later rows count nowhere). lone1v1Count, on the signals:
+//   - counted on the silent seat's account only when it has signals of its own (a record of his this job kept within
+//     SIG_PLAYER_WINDOW_MS; a made-up account gets no entry, as in Q174): l1 += 1, l1o = the distinct claimants (at most
+//     OPP_CAP). His entry is not refreshed (it still expires 90 days after his own last record). Nobody is flagged.
+//   - paid once at least GATE distinct accounts have made such a claim against him: one account alone can write a fake
+//     1V1 against anybody, two colluding accounts could already settle matches between themselves, so the floor stays
+//     where it was. Claims made before the gate wait on his entry (l1q, at most QUEUE_CAP, RETRO_MS) and are paid in
+//     the first run that can name their writer (his record is on the shards that run).
+//   - at most WEEK_CAP payments per claimant per WEEK_MS (l1t on the claimant's entry): what a pair of colluders can take
+//     from fake 1V1s against a third account stays below what settling matches between themselves gives them.
+// A payment (main) is the points of a normal 1V1 win against the silent seat's pre-match rating (reducedStakesPlan /
+// lpDelta at rank 1 of 2, the series clamp unless it seeds his season) on the claimant's points board, plus the flat
+// CONSOLATION_XP of a lone writer at the start-orphan verdict. No rating, career or win XP; the silent seat's points,
+// rating and exits are untouched. At most once: the key is processed and the claimant's l1t is on disk before the write
+// (saveEarlyMarks), a failed write is forfeited (as the consolation).
+const LONE1V1 = { GATE: 2, OPP_CAP: 8, QUEUE_CAP: 4, RETRO_MS: 14 * 86400000, WEEK_MS: 7 * 86400000, WEEK_CAP: 3 };
+function lone1v1Claim(e, key, g, confState, confSeen) {
+  if (!e || e.c || !Array.isArray(e.s) || !e.s.length || !g || !g.length) return null;
+  const r0 = g[0];
+  if ((r0.d[2] | 0) !== 2 || (r0.d[8] | 0) !== 2) return null;   // ranked brawl with two seats; quick, party bits and teams keep their rules
+  const w = String(r0.steamID), seat = r0.d[5] | 0, ro = r0.roster || {};
+  if ((seat !== 0 && seat !== 1) || String(ro[seat]) !== w) return null;
+  const o = ro[1 - seat] != null ? String(ro[1 - seat]) : '';
+  if (!o || o === w) return null;
+  const sig = startSig(r0), vec = JSON.stringify(r0.d.slice(10, 12));
+  for (const r of g) {
+    if (String(r.steamID) !== w || (r.d[5] | 0) !== seat || (r.dispCode | 0) !== 0) return null;   // (the match type is in the key)
+    if (startSig(r) !== sig || JSON.stringify(r.d.slice(10, 12)) !== vec || sanityFlags([r]).length) return null;
+  }
+  if (!((r0.d[10 + seat] | 0) > (r0.d[11 - seat] | 0))) return null;   // his record says he won (a tie or a loss counts nothing)
+  const own = pid(w) + '@' + seat + '#' + sig;
+  if (e.s.some((id) => id !== own)) return null;   // the starts read before the result: his, from that seat, naming that table
+  const op = pid(o);
+  if ((confState && confState[op + '|' + key]) || (confSeen && confSeen.has(op + '|' + key))) return null;   // he confessed: his own word, its own path
+  return { m: key, w, o, seat };
+}
+function lone1v1Verdicts(pending, groups, processed, now, maturityMs, confState, confSeen, readComplete) {
+  const out = [];
+  let held = 0;
+  for (const k of Object.keys(pending)) {
+    if (k.charAt(0) !== '~') continue;
+    const key = k.slice(1), e = pending[k];
+    if (pending[key] || processed.has(key) || !e || e.c || now - (e.t0 || 0) < maturityMs) continue;
+    const c = lone1v1Claim(e, key, groups[key], confState, confSeen);
+    if (!c) continue;
+    if (readComplete === false) { held += 1; continue; }   // his opponent's row may sit on the unread shard
+    processed.add(key);
+    delete pending[k];
+    out.push(c);
+  }
+  if (held) console.log('  lone-1v1: ' + held + ' matured verdict(s) held (incomplete shard read) (Q184)');
+  return out;
+}
+// claims: lone1v1Verdicts; sidOfPid(pid) -> a real sid read this run, or null. Mutates signals; returns the payments
+//   { pay: [{ sid, wp, op }], counted, queued, nosig, capped, dirty }.
+function lone1v1Count(claims, signals, now, sidOfPid) {
+  const res = { pay: [], counted: 0, queued: 0, nosig: 0, capped: 0, dirty: false };
+  const due = [];
+  for (const c of claims) {
+    const wp = pid(c.w), op = pid(c.o), so = signals.players[op];
+    if (!so) { res.nosig++; console.log('  lone-1v1 ' + c.m + ': ' + plog(c.w) + ' won, ' + plog(c.o) + ' wrote nothing -- no signals of his own, not counted, not paid (Q184)'); continue; }
+    so.l1 = (so.l1 | 0) + 1;
+    const ol = Array.isArray(so.l1o) ? so.l1o : (so.l1o = []);
+    if (ol.indexOf(wp) < 0 && ol.length < LONE1V1.OPP_CAP) ol.push(wp);
+    res.counted++; res.dirty = true;
+    const atGate = ol.length >= LONE1V1.GATE;
+    if (atGate) due.push({ sid: c.w, wp, op });
+    else {
+      const q = Array.isArray(so.l1q) ? so.l1q : (so.l1q = []);
+      if (q.length < LONE1V1.QUEUE_CAP) { q.push({ w: wp, t: now }); res.queued++; }
+    }
+    console.log('  lone-1v1 ' + c.m + ': ' + plog(c.w) + ' won, ' + plog(c.o) + ' wrote nothing -- counted on him (' + so.l1 + ' such match(es), '
+      + ol.length + ' different opponent(s)), nobody flagged; ' + (atGate ? 'winner paid' : 'payment waits for a second opponent\'s claim') + ' (Q184)');
+  }
+  // claims waiting on an entry that has reached the gate (this run's or an earlier one's): paid once their writer is named
+  for (const op of Object.keys(signals.players)) {
+    const so = signals.players[op];
+    if (!Array.isArray(so.l1q)) continue;
+    const live = so.l1q.filter((q) => q && now - (Number(q.t) || 0) <= LONE1V1.RETRO_MS);
+    const atGate = Array.isArray(so.l1o) && so.l1o.length >= LONE1V1.GATE;
+    const keep = [];
+    for (const q of live) { const sid = atGate ? sidOfPid(q.w) : null; if (sid) due.push({ sid: String(sid), wp: q.w, op }); else keep.push(q); }
+    if (keep.length !== so.l1q.length) res.dirty = true;
+    if (keep.length) so.l1q = keep; else delete so.l1q;
+  }
+  for (const p of due) {
+    const sw = sigPlayer(signals, p.wp, now);
+    const t = (Array.isArray(sw.l1t) ? sw.l1t : []).filter((x) => now - (Number(x) || 0) < LONE1V1.WEEK_MS);
+    res.dirty = true;
+    if (t.length >= LONE1V1.WEEK_CAP) {
+      sw.l1t = t; res.capped++;
+      console.log('  lone-1v1: ' + plog(p.sid) + ' already paid ' + t.length + ' time(s) in 7 days -- this one not paid (Q184)');
+      continue;
+    }
+    t.push(now); sw.l1t = t;
+    res.pay.push(p);
+  }
+  return res;
+}
 // ---- deterministic sanity bounds (B5 tier A: flag-don't-settle) ----
 // Catches the case consensus can't: colluding clients writing IDENTICAL impossible records.
 // Only calibration-free structural/physical bounds live here (generous by design -- a false
@@ -2155,6 +2268,7 @@ function writeRunSummary() {
       '| absent-seat holds (incomplete read / grace) | ' + s('absentHeld', 0) + ' |',
       '| groups waiting for a seat that started but has no result yet, until the match must be over (Q121) | ' + s('leaveWait', 0) + ' |',
       '| confessions seen/penalized/refunded | ' + s('confess', '0/0/0') + ' |',
+      '| ranked 1V1s only the winner wrote (Q184): counted on the silent seat / waiting for a second opponent / paid (points written) / not counted, no signals of his own / over the weekly cap | ' + s('lone1v1', '0 / 0 / 0 / 0 / 0') + ' (' + s('lone1v1Paid', 0) + ') |',
       '| reports seen / counted | ' + s('repSeen', 0) + ' / ' + s('repCounted', 0) + ' |',
       '| trust writes / deletes | ' + s('trustW', 0) + ' / ' + s('trustD', 0) + ' |',
       '| team-gamble lone / team dissent unsettled / settled | ' + s('t2ld', '0/0') + ' |',
@@ -4803,6 +4917,15 @@ async function main() {
   const startsRes = reconcileStarts(starts, groups, consistentKeys, processed, startsPending, leavers, nowMs, STARTS_MATURITY_MS, confState, shardsComplete, registeredEarly, seenKeys, noted);   // Q144: + seenKeys; Q64: + noted
   if (startsRes.registered || startsRes.convicted || startsRes.cleaned || Object.keys(startsPending).length)
     console.log('starts: ' + Object.keys(startsPending).length + ' pending (+' + startsRes.registered + ' new), ' + startsRes.convicted + ' exit-rate hits, ' + startsRes.cleaned + ' cleaned' + (startsRes.held ? ', ' + startsRes.held + ' matured verdict(s) held (incomplete shard read)' : ''));
+  // Q184: a ranked 1V1 only its winner wrote (lone1v1Verdicts) -- counted on the silent seat, the winner paid at the gate.
+  //   Counted and marked here, ahead of saveEarlyMarks; the payments are written after it (below the consolation).
+  const sidByPid = new Map();
+  for (const r of recs.concat(starts)) { const s = String(r.steamID); if (!sidByPid.has(pid(s))) sidByPid.set(pid(s), s); }
+  const l1Res = lone1v1Count(lone1v1Verdicts(startsPending, groups, processed, nowMs, STARTS_MATURITY_MS, confState, confSeen, shardsComplete),
+    signals, nowMs, (h) => sidByPid.get(h) || null);
+  if (l1Res.dirty) sigDirty = true;
+  RUN.lone1v1 = l1Res.counted + ' / ' + l1Res.queued + ' / ' + l1Res.pay.length + ' / ' + l1Res.nosig + ' / ' + l1Res.capped;
+  for (const p of l1Res.pay) if (startsRes.consoledSids.indexOf(p.sid) < 0) startsRes.consoledSids.push(p.sid);
   RUN.pending = Object.keys(startsPending).filter((m) => m.charAt(0) !== '~').length; RUN.convicted = startsRes.convicted;
   // R1-B2-03: the consolation XP and confession points writes below are relative ("board value now + delta") and
   // land long before this run's normal state save (early-return persistStartsSide / the main-path tail). Any exit
@@ -4821,6 +4944,8 @@ async function main() {
     if (processed.size !== processedN0) saveProcessed(processed);
   };
   saveEarlyMarks(startsRes.convicted > 0);
+  // Q184: the claims paid below leave the signals (l1t, the drained l1q) -- on disk before any payment is written
+  if (APPLY_MMR && l1Res.pay.length) saveSignals(signals, nowMs);
   // interrupted-match consolation: the matured-orphan verdict just identified survivors who stayed
   // to the forced settle of a match nobody could ever settle (lone records). Pay the flat credit
   // inline (same pre-early-return pattern as the confession LP writes -- the everyone-left scenario
@@ -4847,6 +4972,45 @@ async function main() {
     console.log('  consolation: XP_LB unset -> ' + startsRes.consoledSids.length + ' credits skipped');
   }
   RUN.consoled = consoledN;
+  // Q184: the 1V1 winners paid by lone1v1Count -- the points of a normal 1V1 win against the silent seat's pre-match rating,
+  //   one write per account (several payments add up in order). The consolation XP above was their XP. The base read follows
+  //   the settle path: this season's entry, else the previous season soft-reset, else the display-derived seed (no clamp).
+  if (l1Res.pay.length && !lpBoardId) console.log('  lone-1v1: no points board -> ' + l1Res.pay.length + ' payment(s) not written (Q184)');
+  else if (l1Res.pay.length) {
+    const skillL = loadSkill();
+    const bySid = new Map();
+    for (const p of l1Res.pay) { if (!bySid.has(p.sid)) bySid.set(p.sid, []); bySid.get(p.sid).push(p); }
+    for (const [sid, ps] of bySid) {
+      try {
+        const e = await readUserEntry(lpBoardId, sid, 'points');
+        let cur, seeded = false;
+        const sk = skillL[pid(sid)] || ts.DEFAULTS, mmr = ts.displayRating(sk.mu, sk.sigma);
+        if (e) cur = e.score | 0;
+        else {
+          const pe = prevLpId ? await readUserEntry(prevLpId, sid, 'prev points') : null;
+          cur = seasonSeedLp(pe ? (pe.score | 0) : null, mmr); seeded = true;
+        }
+        const was = cur;
+        for (const p of ps) {
+          const so = skillL[p.op] || ts.DEFAULTS;
+          const plan = reducedStakesPlan([{ steamID: sid, seat: 0, mmr, rank: 1, lp: cur }, { steamID: '~' + p.op, seat: 1, mmr: ts.displayRating(so.mu, so.sigma), rank: 2, lp: 0 }], 2, 0, 0);
+          const d0 = (plan && plan[sid]) ? plan[sid].adjDelta : lpDelta(cur, 1, 2);
+          const d = seeded ? d0 : crosslineDelta(cur, d0, true);
+          cur = Math.max(0, Math.min(LP_MAX, cur + d));
+          seeded = false;
+        }
+        if (!APPLY_MMR) { console.log('  (dry-run) lone-1v1 pts ' + plog(sid) + ' = ' + cur); continue; }
+        // an unread mismatch reveal survives, as on the confession path
+        const det = e ? decodeDetails(e.detailData) : null;
+        const keep = (det && det.length >= 6 && (det[0] & 0xff) === RS_MAGIC) ? det.slice(0, 6) : null;
+        const r = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: lpBoardId, steamid: sid, score: cur, scoremethod: 'ForceUpdate', format: 'json' }, keep);
+        if (r.ok && !(r.json && r.json.result && r.json.result.result && r.json.result.result !== 1)) {
+          RUN.lone1v1Paid = (RUN.lone1v1Paid | 0) + ps.length;
+          console.log('  lone-1v1 pts ' + plog(sid) + ' ' + was + ' -> ' + cur + ' (' + ps.length + ' win(s) nobody else wrote, Q184)');
+        } else ghWarn('lone-1v1 points write failed for ' + plog(sid) + ' -- forfeited (Q184)');
+      } catch (err) { ghWarn('lone-1v1 points error for ' + plog(sid) + ': ' + (err && err.message) + ' -- forfeited (Q184)'); }
+    }
+  }
   // abandon confessions: immediate authoritative leaver penalty without finisher consensus.
   // Runs before the early returns (the everyone-left scenario produces no settle groups at all).
   let confRes = { seen: 0, penalized: 0, exitHits: 0, refunded: 0, finalized: 0 };
@@ -7384,6 +7548,7 @@ Object.assign(module.exports, { rosterContestSeats, applyRosterContest, seatLayo
 Object.assign(module.exports, { registerStartRosters, startRosterSplit, rosterCanon, startRosterDisagrees, seatGateRoster, seatedOnRoster, applySeatGate });   // cloud audit Q80 seat gate
 Object.assign(module.exports, { seatlessPrivate, dropSeatlessPrivate });   // cloud audit Q123
 Object.assign(module.exports, { recTable, splitKey, splitMark, applyTableSplit });   // cloud audit Q214 / Q220 a held friends' room / bot match: each table on a key of its own
+Object.assign(module.exports, { LONE1V1, lone1v1Claim, lone1v1Verdicts, lone1v1Count });   // cloud audit Q184 a ranked 1V1 only its winner wrote
 Object.assign(module.exports, { startSig, lateStartSplit, START_CONFIRM_MS, START_CONFIRM_MIN_MS });   // cloud audit Q118 provisional start roster
 Object.assign(module.exports, { testimonyOf, recTestimony, noteTestimony, endlessRosterHold, endlessTestified });   // cloud audit Q113 endless testimony
 Object.assign(module.exports, { teamLossCounted });   // cloud audit Q136 the losing team must be somebody
