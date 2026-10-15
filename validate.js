@@ -1345,7 +1345,7 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
 // until real-traffic data exists. A flagged match is NOT settled and NOT marked processed:
 // if a bound turns out wrong and is loosened later, still-visible records self-heal.
 // Q109 (2026-10): a bound on ONE record's own fields (duration / seat / roster / a second record of the same account) drops
-// just that record and flags just its writer; the rest settles -- see sanitySplit.
+// just that record and flags just its writer (a roster reason flags nobody: SANITY_ROSTER_SLUGS); the rest settles -- see sanitySplit.
 const SANITY = {
   SCORE_CAP: Number(process.env.SANITY_SCORE_CAP || 450000),     // re-derived 2026-09-16 (client knife 3.9 second-stage wheel): see the NOTE block below
   SCORE_FLOOR: Number(process.env.SANITY_SCORE_FLOOR || -50000), // shop overdraft is legal (classic rule) but bounded by shop prices
@@ -1694,6 +1694,15 @@ function sanityFlags(g) {
 // writers-only outputs and its chain read every writer's tail -- resume tags -- so dropping one could change a chain verdict).
 // Returns { flags, drop: [{ sid, why, recs }], keep }: drop empty = the whole-group rule applies to `flags`.
 const SANITY_RECORD_SLUGS = ['duration', 'seat', 'self-seat', 'sid-range', 'dup-sid', 'dup-writer'];
+// Q109 rework 2 (+ cloud audit Q211): a roster reason drops the record and flags nobody. A settle record's roster is the host's
+//   seat map as the writer received it: a friends' room has no seal, so a modded host's table naming an account twice or a number
+//   outside the Steam id range lands in every honest joiner's record, and a cold rejoin adopts the receipt's table whole. The
+//   flag fell on the joiners who carried the table, never on the host. Dropping the record already takes what it could earn (no
+//   XP / CP, ranked at its seat like a clean one, no leaver either way), so a flag deterred nothing a clean roster would not give
+//   more of -- like a seat-gate drop (Q124) and a held key (Q114). Duration, seat range and a second record of one account are
+//   the writer's own fields and still flag him.
+const SANITY_ROSTER_SLUGS = ['self-seat', 'sid-range', 'dup-sid'];
+const sanityDropFlags = (x) => x.why.some((f) => SANITY_ROSTER_SLUGS.indexOf(f) < 0);
 // the per-record half of sanityFlags (same bounds, every reason of the record rather than the first)
 function recordSanityFlags(r, base, pc) {
   const out = [];
@@ -5951,7 +5960,8 @@ async function main() {
     // sanity gate (B5 tier A): a consistent-but-impossible match is flagged, not settled, and NOT
     // marked processed (self-heals if a bound is later loosened). Runs before XP/VOID so garbage
     // never feeds any ledger output or signal stats beyond the flag counter itself.
-    // Q109: a reason on one record's own fields (sanitySplit) drops that writer's record and flags him alone; the rest
+    // Q109: a reason on one record's own fields (sanitySplit) drops that writer's record and flags him alone (a roster reason
+    //   alone flags nobody, rework 2: SANITY_ROSTER_SLUGS); the rest
     //   settles when two or more writers are left (the bot lane: one), and the dropped writer keeps his consensus seat in
     //   the ranking (dropSeat below) -- no rating dodge by breaking one's own record -- but earns nothing from it (XP / CP
     //   read the records) and is no absent seat / leaver (he wrote one).
@@ -5966,20 +5976,36 @@ async function main() {
         ghWarn('match=' + c.m + ': sanity-flagged [' + sane.join(',') + '] -- not settled: ' + g.map(r => plog(r.steamID) + '@' + r.shard).join(' '));
         continue;
       }
-      if (recordFlag(signals, sp.drop.map(x => ({ steamID: x.sid })), c.m, nowMs)) sigDirty = true;
-      for (const x of sp.drop) trustTouched.add(x.sid);
+      const flagDrop = sp.drop.filter(sanityDropFlags);   // rework 2: a roster reason alone flags nobody (SANITY_ROSTER_SLUGS)
+      if (flagDrop.length && recordFlag(signals, flagDrop.map(x => ({ steamID: x.sid })), c.m, nowMs)) sigDirty = true;
+      for (const x of flagDrop) trustTouched.add(x.sid);
       const keepN = new Set(sp.keep.map(r => String(r.steamID))).size;
-      const enough = keepN >= 2 || (keepN >= 1 && isBotMt(matchType));
-      const who = sp.drop.map(x => plog(x.sid) + '[' + x.why.join(',') + ']').join(' ');
+      // rework 2: a dropped record written from the seat the registered start roster gives its writer (the seat gate let it in
+      //   on that) still agrees on the result with the kept ones (one consistent group) -- it is a second player's word on the
+      //   match and counts toward the two writers a settle needs; its writer is ranked at that seat, earns nothing and keeps
+      //   his flag if the reason was his own field. Without it a 1v1 loser who wrote his start and then a result with a bad
+      //   roster or a bad duration held the match for good with no leaver (a modded host's bad table on an honest opponent's
+      //   cold rejoin did the same). No registered roster = no seat checked: such a record counts for nothing (an outside
+      //   account could write it), and with no kept writer nothing settles.
+      const gro0 = seatGateRoster(startsPending[c.m]), pcW = g[0].d[8] | 0;
+      const witnessN = (keepN && gro0) ? sp.drop.filter((x) => x.recs.some((r) => { const s = r.d[5] | 0; return s >= 0 && s < pcW && gro0[s] === pid(x.sid); })).length : 0;
+      const enough = keepN + witnessN >= 2 || (keepN >= 1 && isBotMt(matchType));
+      const who = sp.drop.map(x => plog(x.sid) + '[' + x.why.join(',') + ']' + (sanityDropFlags(x) ? '' : ' (roster reason: not flagged)')).join(' ');
+      const flagWord = flagDrop.length === sp.drop.length ? 'its writer flagged' : flagDrop.length ? 'its writer flagged unless marked' : 'nobody flagged';
       if (!enough) {
         RUN.sanityDropHeld = (RUN.sanityDropHeld | 0) + 1;
-        ghWarn('match=' + c.m + ': sanity on ' + who + ' -- only that writer flagged; fewer than two writers left, not settled (Q109)');
+        ghWarn('match=' + c.m + ': sanity on ' + who + ' -- only that record dropped, ' + flagWord + '; fewer than two writers left, not settled (Q109)');
         continue;
       }
       RUN.sanityDrop = (RUN.sanityDrop | 0) + 1;
       g = sp.keep;
       c.void = voidByConsensus(g.map(r => r.dispCode)).isVoid;   // the dropped record's disp vote goes with it
       const ros = rosterConsensus(g), pc0 = g[0].d[8] | 0;
+      // rework 2: the bot lane pays one kept writer the full rate only when a dropped record stands beside him at a human seat
+      //   the kept records name its writer at (a second human of the match); a record from a seat they leave to a bot is an
+      //   outside copy (the Q148 drop keeps those out ahead of grouping) and no second human -- that settle takes the lone
+      //   lane's rate, as if the copy were not there, not the two-writer rate it would buy an alt account
+      if (isBotMt(matchType) && keepN < 2 && !sp.drop.some((x) => x.recs.some((r) => { const s = r.d[5] | 0; return ros[s] != null && String(ros[s]) === x.sid; }))) c.botLone = true;
       // Q109 rework: with a registered start roster (the Q80 seat gate) the dropped writer is seated where his own record was
       //   written from -- the gate let that record in only because the roster seats him there. The kept writers' roster
       //   majority would let two of them move him onto an empty seat (a leaver's) and its rank. Without one, Q75 has already
@@ -5992,11 +6018,16 @@ async function main() {
         else for (const k of Object.keys(ros)) if (String(ros[k]) === x.sid && (k | 0) < pc0) seat = k | 0;
         dropSeat.set(x.sid, seat);
       }
-      ghWarn('match=' + c.m + ': sanity on ' + who + ' -- only that record dropped and its writer flagged, the other ' + keepN + ' writer(s) settle'
+      ghWarn('match=' + c.m + ': sanity on ' + who + ' -- only that record dropped, ' + flagWord + ', the other ' + keepN + ' writer(s) settle'
+        + ((keepN < 2 && witnessN) ? ' with ' + witnessN + ' dropped at a start-roster seat as witness' : '')
         + ' (dropped: ' + sp.drop.map(x => plog(x.sid) + (dropSeat.get(x.sid) >= 0 ? ' consensus seat ' + dropSeat.get(x.sid) + (gro ? ' (start roster)' : '') : ' no consensus seat')).join(', ') + ') (Q109)');
     }
     const dropped = (sid) => !!(dropSeat && dropSeat.has(String(sid)));
     const writerSids = [...new Set(g.map(r => String(r.steamID)))];
+    // Q109 review 2: a dropped writer is still ranked (dropSeat), so he queues with the writers for the one-match-at-a-time
+    //   claim below and counts in the per-day settle signal -- else one account breaks his own record in parallel matches
+    //   (each with its own pair of writers) and is ranked in all of them at once
+    const pacedSids = dropSeat ? writerSids.concat([...dropSeat.keys()].filter((s) => writerSids.indexOf(s) < 0)) : writerSids;
     // O124 seedcap veto (knife-9): the seed-replay auditor proved the AGREED score vector
     // exceeds this seed's mathematical cap (causal impossibility, every uncertain branch
     // maxed) -> same flag-don't-settle shape as sanityFlags: not settled, not processed,
@@ -6447,7 +6478,7 @@ async function main() {
       continue;
     }
     // one match at a time per account; the private and bot lanes apply it after their own level-scaled floor below
-    if (!isPrivateMt(matchType) && !isBotMt(matchType) && writerPaced(c.m, writerSids, pend.t0, SANITY.MIN_START_AGE_MS)) continue;
+    if (!isPrivateMt(matchType) && !isBotMt(matchType) && writerPaced(c.m, pacedSids, pend.t0, SANITY.MIN_START_AGE_MS)) continue;
     // per-UTC-day settle counts are recorded as a pure SIGNAL (no gate): the future judgment
     // layer marks "suspiciously many matches per day" against real-traffic baselines. VOID
     // matches count too -- they still credit innocent-participation XP. Counted where a group
@@ -6455,7 +6486,7 @@ async function main() {
     // own floor (a deferred group used to be counted again on every run it waited).
     const countDay = () => {
       const day = sigDay(signals, nowMs);
-      for (const sid of writerSids) day.n[pid(sid)] = (day.n[pid(sid)] || 0) + 1;
+      for (const sid of pacedSids) day.n[pid(sid)] = (day.n[pid(sid)] || 0) + 1;
       sigDirty = true;
     };
     if (!isPrivateMt(matchType) && !isBotMt(matchType)) countDay();
@@ -7328,7 +7359,7 @@ async function main() {
 if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
-module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CHAT_MUTE: chatMute.CHAT_MUTE, CHAT_MUTE_FILE, CHAT_MUTE_LB, CHAT_REPORT_LB, isVoidDisp, voidByConsensus, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, RS_SOLO_VS_TRIO, RS_TRIO_WIN, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, CONFESS_MAGIC, NOTE_MAGIC, NOTE_DISP, reconcileConfessions, SANITY, sanityFlags, sanitySplit, recordSanityFlags, SANITY_RECORD_SLUGS, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan, postForm, postFormDetails, findOrCreateBoard, isTestBoardName, sandboxOn, ghWarn, ghErr, PT_MODE, PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, ACTIVE_MATCH_LB, ptSeedCp, ptBoardPlan, PRIVATE_XP, isPrivateMt, privateProgressOf, creditXpPrivate, BOT_XP, isBotMt, botTierOf, botTierMult, botSeatSplit, botRanksOf, botRankEffOf, botXpGain, botProgressOf, creditXpBot, DEMO_APPID, ENDLESS_XP, computeXpEndless, creditXpEndless, CAMPAIGN_LB, SEEDCAP_REJECT_LADDER_MIN, seedcapRejectWindowMin, seedcapRejectUntilMin, seedcapRejectActive,
+module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CHAT_MUTE: chatMute.CHAT_MUTE, CHAT_MUTE_FILE, CHAT_MUTE_LB, CHAT_REPORT_LB, isVoidDisp, voidByConsensus, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, RS_SOLO_VS_TRIO, RS_TRIO_WIN, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, CONFESS_MAGIC, NOTE_MAGIC, NOTE_DISP, reconcileConfessions, SANITY, sanityFlags, sanitySplit, recordSanityFlags, SANITY_RECORD_SLUGS, SANITY_ROSTER_SLUGS, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan, postForm, postFormDetails, findOrCreateBoard, isTestBoardName, sandboxOn, ghWarn, ghErr, PT_MODE, PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, ACTIVE_MATCH_LB, ptSeedCp, ptBoardPlan, PRIVATE_XP, isPrivateMt, privateProgressOf, creditXpPrivate, BOT_XP, isBotMt, botTierOf, botTierMult, botSeatSplit, botRanksOf, botRankEffOf, botXpGain, botProgressOf, creditXpBot, DEMO_APPID, ENDLESS_XP, computeXpEndless, creditXpEndless, CAMPAIGN_LB, SEEDCAP_REJECT_LADDER_MIN, seedcapRejectWindowMin, seedcapRejectUntilMin, seedcapRejectActive,
   ENDLESS_COMP_LB, SAVE_BOX_LB, SOLO_FILE, COMP, soloSanity, soloChainPlan, rerollChain, soloMilestones, soloAdvance, soloRunKey, soloStartAttested, loadSolo, saveSolo, segOrderOf, segStartOf, freshOrder, freshOrderPaced, writerReadyAt, writerClaim,
   ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, SAVE_BOX_LB_DUO, SAVE_BOX_LB_TRIO, teamRunKey, soloMsSlot, groupRecords,
   ENDLESS_COMP_LB_QUAD, SAVE_BOX_LB_QUAD, ENDLESS_LB_QUAD, ENDLESS_MAX_PC, compFamKeyOf,   // client knife 3.7a (O178 four seats)

@@ -343,7 +343,7 @@ console.log('-- [10] wiring pins --');
   const iHold = SRC.indexOf('const absHold = absenceHold(absentNow, pend, nowMs, shardsComplete, ABSENT_GRACE_MS);');
   const iPace = SRC.indexOf('if (pacingDefer(pend, nowMs, SANITY.MIN_START_AGE_MS))');
   const iGate = SRC.indexOf('if (absHold.hold) {');
-  const iWriter = SRC.indexOf('if (!isPrivateMt(matchType) && !isBotMt(matchType) && writerPaced(c.m, writerSids, pend.t0, SANITY.MIN_START_AGE_MS)) continue;');
+  const iWriter = SRC.indexOf('if (!isPrivateMt(matchType) && !isBotMt(matchType) && writerPaced(c.m, pacedSids, pend.t0, SANITY.MIN_START_AGE_MS)) continue;');
   const iPriv = SRC.indexOf('if (isPrivateMt(matchType)) {', iWriter), iBot = SRC.indexOf('if (isBotMt(matchType)) {', iWriter);
   T('[10] gap stamped before the start floor, judged after it, before the one-match claim and every lane', iHold > 0 && iHold < iPace && iPace < iGate && iGate < iWriter && iWriter < iPriv && iWriter < iBot);
   T('[10] the absent list skips writers seen agreeing earlier', /const absentNow = absentRosterSeats\(g\)\.filter\(\(x\) => agreed\.indexOf\(pid\(String\(x\.steamID\)\)\) < 0\);/.test(SRC));

@@ -448,7 +448,7 @@ for (const [tag, build] of [['[10b] A2 ranked FFA, seats 0 / 1 blanked', BLANK_F
 // ---- [11] wiring pins ----
 {
   const iAbs = SRC.indexOf('    if (absHold.hold) {'), iLc = SRC.indexOf('    const lcHold = leaveConfirmHold(lcAbsent, pend, nowMs, LEAVE_CONFIRM_MS, (h) => resultBy.has(h), ');
-  const iPace = SRC.indexOf('if (!isPrivateMt(matchType) && !isBotMt(matchType) && writerPaced(c.m, writerSids, pend.t0, SANITY.MIN_START_AGE_MS)) continue;');
+  const iPace = SRC.indexOf('if (!isPrivateMt(matchType) && !isBotMt(matchType) && writerPaced(c.m, pacedSids, pend.t0, SANITY.MIN_START_AGE_MS)) continue;');
   const iEnd = SRC.indexOf("console.log('  endless settle ' + c.m");
   T('[11] the hold sits after the endless lane and the absence grace, before the one-match-at-a-time claim and every other lane',
     iEnd > 0 && iAbs > iEnd && iLc > iAbs && iPace > iLc && SRC.split('    if (lcHold.hold) {').length === 2, [iEnd, iAbs, iLc, iPace].join(' '));
