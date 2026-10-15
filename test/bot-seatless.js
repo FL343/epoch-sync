@@ -17,9 +17,11 @@
 //       result of their own there a minute in, the players' real result twelve minutes in: the players settle, the outside
 //       accounts earn nothing, nobody is flagged; mutant (bot matches back out of the drop) -> the players get nothing
 //   [3] B2c: two players and two bots; an outside account starts from a bot seat and copies the real result there: the
-//       players settle, nobody is flagged; mutant -> the players are flagged and get nothing
+//       players settle, nobody is flagged; mutant -> the copy joins their group and the cloud audit Q109 per-record sanity
+//       split drops just it (self-seat, a roster reason: nobody flagged), so the players still settle with the same XP
+//       (before Q109 the whole group was flagged and got nothing; [2] is the mutant that still proves the Q148 drop)
 //   [4] B1L: one player and three bots (the lone lane); the same copy: the player settles (lone lane), nobody is flagged;
-//       mutant -> the player is flagged and gets nothing
+//       mutant -> the same Q109 drop of the copy: the player still settles with the same XP, nobody flagged
 //   [5] honest bot matches (two players starts first / one player / a tier nibble / the result seen first): settle,
 //       nothing dropped, nobody flagged
 //   [6] wiring pins: the bot term in seatlessPrivate, the Q148 log line and summary row, the friends'-room count unchanged
@@ -245,8 +247,12 @@ function b2c(script) {
   const mut = noBot();
   if (mut) {
     const m = b2c(mut);
-    T('[3] mutant: the players are flagged and get nothing (the copy joins their group, self-seat)', allOk(m.rs, 8) && xpOf(m.rs, P0) === 0 && xpOf(m.rs, P1) === 0 && fOf(last(m.rs), P0) > 0 && fOf(last(m.rs), P1) > 0,
-      'xp ' + xpOf(m.rs, P0) + '/' + xpOf(m.rs, P1) + ' f ' + fOf(last(m.rs), P0) + '/' + fOf(last(m.rs), P1));
+    // Q109 (per-record sanity split) drops just the copy (self-seat is a roster reason: nobody flagged), so the players settle
+    //   as without the copy -- the Q148 drop is the first line here, Q109 the second (before Q109: flagged, nothing)
+    T('[3] mutant: the copy joins their group and Q109 drops just it -- the players settle with the same XP, nobody flagged, the copy nothing', allOk(m.rs, 8)
+      && xpOf(m.rs, P0) === xpOf(rs, P0) && xpOf(m.rs, P1) === xpOf(rs, P1) && xpOf(m.rs, X) === 0 && [P0, P1, X].every((s) => fOf(last(m.rs), s) === 0)
+      && /\[self-seat\] \(roster reason: not flagged\) -- only that record dropped, nobody flagged/.test(outOf(m.rs)),
+      'xp ' + xpOf(m.rs, P0) + '/' + xpOf(m.rs, P1) + '/' + xpOf(m.rs, X) + ' f ' + [P0, P1, X].map((s) => fOf(last(m.rs), s)).join('/'));
   }
 }
 
@@ -270,7 +276,9 @@ function b1l(script, withX) {
   const mut = noBot();
   if (mut) {
     const m = b1l(mut, true);
-    T('[4] mutant: the lone player is flagged and gets nothing', allOk(m.rs, 8) && xpOf(m.rs, P0) === 0 && fOf(last(m.rs), P0) > 0, 'xp ' + xpOf(m.rs, P0) + ' f ' + fOf(last(m.rs), P0));
+    T('[4] mutant: Q109 drops just the copy -- the lone player settles with the same XP, nobody flagged', allOk(m.rs, 8) && xpOf(m.rs, P0) === xpOf(honest.rs, P0) && xpOf(m.rs, X) === 0
+      && fOf(last(m.rs), P0) === 0 && fOf(last(m.rs), X) === 0 && /\[self-seat\] \(roster reason: not flagged\) -- only that record dropped, nobody flagged/.test(outOf(m.rs)),
+      'xp ' + xpOf(m.rs, P0) + ' honest ' + xpOf(honest.rs, P0) + ' f ' + fOf(last(m.rs), P0) + '/' + fOf(last(m.rs), X));
   }
 }
 
