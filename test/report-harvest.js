@@ -4,7 +4,12 @@
 process.env.REPORT_DAILY_CAP = '3';   // small cap so the anti-bombing path is testable
 process.env.STATE_SALT = process.env.STATE_SALT || 'test-salt';
 const path = require('path');
-const { harvestReports, pruneSignals, sigPlayer, pid, REPORT_MAGIC } = require(path.join(__dirname, '..', 'validate.js'));
+const { harvestReports, pruneSignals, sigPlayer, pid, REPORT_MAGIC, REP_KEYS } = require(path.join(__dirname, '..', 'validate.js'));
+// Q190: edges are keyed by the lane's own pseudonyms (reporter BY, target OF), never by pid; the per-pid counters
+// players[].ri / .ro are gone -- the received / filed counts are the edge sums below.
+const BY = REP_KEYS.by, OF = REP_KEYS.of;
+const received = (s, sid) => Object.keys(s.rep).filter(k => k.endsWith('>' + OF(sid))).reduce((a, k) => a + s.rep[k].n, 0);
+const filed = (s, sid) => Object.keys(s.rep).filter(k => k.startsWith(BY(sid) + '>')).reduce((a, k) => a + s.rep[k].n, 0);
 
 let failN = 0;
 const ok = (m) => console.log('  ok    ' + m);
@@ -31,10 +36,14 @@ console.log('=== report harvest (record-only) ===');
   const s = fresh();
   const res = harvestReports([{ steamID: R1, d: pack([{ t: T1, r: 2, m: 111 }, { t: T2, r: 1, m: 111 }]) }], s, 1000);
   eq('seen/counted', [res.seen, res.counted, res.capped, res.bad], [2, 2, 0, 0]);
-  const e1 = s.rep[pid(R1) + '>' + pid(T1)];
+  const e1 = s.rep[BY(R1) + '>' + OF(T1)];
   eq('edge R1>T1 n=1 reason-mask has bit2', [e1.n, (e1.m >> 2) & 1], [1, 1]);
-  eq('T1 ri=1 (received)', s.players[pid(T1)].ri | 0, 1);
-  eq('R1 ro=2 (filed)', s.players[pid(R1)].ro | 0, 2);
+  eq('T1 received 1 (edge sum)', received(s, T1), 1);
+  eq('R1 filed 2 (edge sum)', filed(s, R1), 2);
+  eq('Q190: no per-pid report counters', Object.keys(s.players).length, 0);
+  const blob = JSON.stringify(s);
+  eq('Q190: no pid of reporter or target anywhere in the state', [R1, T1, T2].filter(x => blob.includes(pid(x))), []);
+  eq('Q190: edge carries the keyed pair token', e1.pk, REP_KEYS.pair(R1, T1));
 }
 
 { // idempotent re-upload: same rolling queue harvested twice = no double count
@@ -43,14 +52,14 @@ console.log('=== report harvest (record-only) ===');
   harvestReports([ent], s, 1000);
   const res2 = harvestReports([ent], s, 2000);
   eq('re-upload dedup (rseen)', [res2.seen, res2.counted], [0, 0]);
-  eq('edge still n=1', s.rep[pid(R1) + '>' + pid(T1)].n, 1);
+  eq('edge still n=1', s.rep[BY(R1) + '>' + OF(T1)].n, 1);
 }
 
 { // same pair different reason / different match = distinct reports
   const s = fresh();
   harvestReports([{ steamID: R1, d: pack([{ t: T1, r: 2, m: 111 }]) }], s, 1000);
   harvestReports([{ steamID: R1, d: pack([{ t: T1, r: 3, m: 111 }, { t: T1, r: 2, m: 222 }]) }], s, 2000);
-  const e = s.rep[pid(R1) + '>' + pid(T1)];
+  const e = s.rep[BY(R1) + '>' + OF(T1)];
   eq('edge n=3 (reason/match distinct)', e.n, 3);
   eq('reason mask bits 2+3', [(e.m >> 2) & 1, (e.m >> 3) & 1], [1, 1]);
 }
@@ -61,7 +70,7 @@ console.log('=== report harvest (record-only) ===');
   for (let i = 0; i < 5; i++) reports.push({ t: T1, r: 1, m: 1000 + i });
   const res = harvestReports([{ steamID: R1, d: pack(reports) }], s, 1000);
   eq('cap: 5 seen, 3 counted, 2 capped', [res.seen, res.counted, res.capped], [5, 3, 2]);
-  eq('T1 ri respects cap', s.players[pid(T1)].ri | 0, 3);
+  eq('T1 received respects cap', received(s, T1), 3);
   // next UTC day: counter resets
   const res2 = harvestReports([{ steamID: R1, d: pack([{ t: T2, r: 1, m: 9 }]) }], s, 1000 + DAY);
   eq('next day counted again', res2.counted, 1);
@@ -85,9 +94,9 @@ console.log('=== report harvest (record-only) ===');
     { steamID: R1, d: pack([{ t: T1, r: 2, m: 5 }]) },
     { steamID: R2, d: pack([{ t: T1, r: 2, m: 5 }]) },
   ], s, 1000);
-  const edges = Object.keys(s.rep).filter(k => k.endsWith('>' + pid(T1)));
+  const edges = Object.keys(s.rep).filter(k => k.endsWith('>' + OF(T1)));
   eq('distinct reporters = distinct edges', edges.length, 2);
-  eq('T1 ri=2', s.players[pid(T1)].ri | 0, 2);
+  eq('T1 received 2', received(s, T1), 2);
 }
 
 { // pruning: rep edges + rseen fall out of the 45d window

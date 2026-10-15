@@ -199,7 +199,7 @@ console.log('=== chat-report-privacy [3] mail channel, digest already sent today
   const sent = { seen: {}, rep: {}, auto: {}, digest: { day: '2026-11-20', at: Math.floor(DAY1 / 60000) - 120 } };
   const r1 = runCron(world(rowsBase), { CHAT_MUTE_FILE: sent }, MAIL);
   T('[3] run 1: no mail (already sent today), three keyed entries queued', r1.mails.length === 0 && pendN(r1) === 3, JSON.stringify(r1.chat.pend));
-  T('[3] run 1: queue entries are 16-hex keyed digests, keyed by reporter pid', Object.keys(r1.chat.pend || {}).every(k => /^[0-9a-f]{16}$/.test(k) && /^[0-9a-f]{16}$/.test(r1.chat.pend[k])) && (r1.chat.pend || {})[v.pid(R1)] !== undefined);
+  T('[3] run 1: queue entries are 16-hex keyed digests, keyed by the reporter\'s lane key (Q190: not his pid)', Object.keys(r1.chat.pend || {}).every(k => /^[0-9a-f]{16}$/.test(k) && /^[0-9a-f]{16}$/.test(r1.chat.pend[k])) && (r1.chat.pend || {})[v.CHAT_KEYS.by(R1)] !== undefined && (r1.chat.pend || {})[v.pid(R1)] === undefined);
   T('[3] run 1: files + log clean', clean(r1).length === 0, clean(r1).join(' | '));
   // next day, the board unchanged, no new report: the queue still goes out (read back from the report box)
   const r2 = runCron(world(rowsBase), { CHAT_MUTE_FILE: r1.chat }, Object.assign({ FAKE_NOW: String(DAY2) }, MAIL));
@@ -248,7 +248,7 @@ console.log('=== chat-report-privacy [7] helpers ===');
   const st = { seen: { a: 1 }, rep: {}, auto: {}, pendingMail: [{ reporterSid: R1, text: DM }], foo: R1, pend: { x: 'y' } };
   const pub = cm.publicState(st);
   T('[7] publicState keeps the whitelisted keys only (drops pendingMail and anything unknown)', JSON.stringify(pub) === JSON.stringify({ seen: { a: 1 }, rep: {}, auto: {}, pend: { x: 'y' } }), JSON.stringify(pub));
-  T('[7] whitelist pinned', JSON.stringify(cm.PUBLIC_KEYS) === JSON.stringify(['seen', 'sig', 'rep', 'auto', 'digest', 'pend', 'pendLost']));
+  T('[7] whitelist pinned', JSON.stringify(cm.PUBLIC_KEYS) === JSON.stringify(['seen', 'sig', 'rep', 'auto', 'digest', 'pend', 'pendLost', 'kv']));
   T('[7] untouched state serializes exactly as before (no spurious commit of the live files)', JSON.stringify(cm.publicState({ seen: {}, rep: {}, auto: {} })) === '{"seen":{},"rep":{},"auto":{}}');
   const f = { reporterSid: R1, target: T1, scope: 3, tsMin: 7, text: DM };
   T('[7] mailSig is keyed: the same row under another salt gives another digest', cm.mailSig(f, v.pid) !== cm.mailSig(f, (s) => require('crypto').createHmac('sha256', 'other').update(String(s)).digest('hex').slice(0, 16)));
@@ -275,8 +275,8 @@ console.log('=== chat-report-privacy [8] source pins ===');
 {
   T('[8] saveChatMute writes publicState only', /function saveChatMute\(st\)[^\n]*JSON\.stringify\(chatMute\.publicState\(st\)\)/.test(SRC));
   T('[8] nothing assigns a raw row queue to the state any more', !/st\.pendingMail\s*=/.test(SRC) && !/pendingMail\b[^\n]*concat/.test(SRC));
-  T('[8] the digest reads the rows back from the report box and only after a complete read', /chatMute\.pendingRows\(st, rows, pid\)/.test(SRC) && /rb\.complete && \(dg\.day !== day/.test(SRC));
-  T('[8] legacy raw queue scrubbed on every run before the mail branch', /chatMute\.scrubLegacy\(st, pid, mailOn\);\s*\n\s*if \(!mailOn\) \{ delete st\.pend; delete st\.pendLost; \}/.test(SRC));
+  T('[8] the digest reads the rows back from the report box and only after a complete read', /chatMute\.pendingRows\(st, rows, CHAT_KEYS\.by\)/.test(SRC) && /rb\.complete && \(dg\.day !== day/.test(SRC));
+  T('[8] legacy raw queue scrubbed on every run before the mail branch', /chatMute\.scrubLegacy\(st, CHAT_KEYS\.by, mailOn\);\s*\n\s*if \(!mailOn\) \{ delete st\.pend; delete st\.pendLost; \}/.test(SRC));
 }
 
 console.log(failN ? ('\nFAIL ' + failN) : '\nchat-report-privacy: ALL PASS');

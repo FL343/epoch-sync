@@ -82,6 +82,7 @@ async function boxTexts(st) {
 
 async function dataPayload() {
   const st = loadJson(STATE, { items: {}, votes: {}, boards: {} });
+  const votes = st.vv || st.votes || {};   // Q190: votes on voter keys are stored as vv
   const mod = loadModFile();
   const nowMin = fb.nowTsMin();
   st.items = st.items || {};
@@ -92,14 +93,14 @@ async function dataPayload() {
   }
   const items = Object.keys(st.items || {}).map(id => {
     const it = st.items[id];
-    const t = fb.tallyVotes((st.votes || {})[id], it.ap);
+    const t = fb.tallyVotes(votes[id], it.ap);
     const clearAt = (mod.clear[id] != null) ? (mod.clear[id] | 0) : -1;
     return {
       id, cat: fb.FB_CATS[it.cat | 0] || String(it.cat), lang: it.lang, ts: it.ts | 0,
       oc: it.oc != null ? (fb.FB_CATS[it.oc | 0] || String(it.oc)) : null,              // author's pick, when moved
       mv: mod.recat[id] != null ? (fb.FB_CATS[mod.recat[id] | 0] || String(mod.recat[id])) : null, // move in the mod file
       ageMin: Math.max(0, nowMin - (it.ts | 0)), st: it.st, ha: it.ha | 0,
-      up: t.up, down: t.down, rep: fb.reportsSince((st.votes || {})[id], it.ap, clearAt),
+      up: t.up, down: t.down, rep: fb.reportsSince(votes[id], it.ap, clearAt),
       repAll: t.rep, text: it.text != null ? it.text : null,
       gone: it.text != null ? '' : (fill.ok ? 'replaced' : fill.why), goneMsg: it.text != null || fill.ok ? '' : (fill.msg || ''),
     };

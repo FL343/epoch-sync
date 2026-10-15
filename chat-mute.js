@@ -61,7 +61,9 @@ function sidPlausible(sid) { return /^\d{15,20}$/.test(String(sid || '')); }
 //             correctly after a rollback; for reporters with no sig yet (state of the previous harvest) a row whose
 //             tsMin equals seen is the one already harvested, any other tsMin is new.
 function rowKey(rep) { return 'chat-row|' + rep.ver + '|' + rep.scope + '|' + rep.enc + '|' + rep.len + '|' + rep.target + '|' + rep.hash + '|' + rep.tsMin; }
-function harvest(st, rows, pidOf, nowUnixMin) {
+// pidOf keys the reporter side (st.seen / st.sig / st.rep entries), tpidOf the target side (st.rep keys; default pidOf) --
+// validate.js passes the lane's two pseudonyms (CHAT_KEYS, Q190), see rekeyLegacy.
+function harvest(st, rows, pidOf, nowUnixMin, tpidOf) {
   st.seen = st.seen || {}; st.sig = st.sig || {}; st.rep = st.rep || {}; st.auto = st.auto || {};
   const fresh = [];
   let skipped = 0, clamped = 0;
@@ -75,7 +77,7 @@ function harvest(st, rows, pidOf, nowUnixMin) {
     let at = tsMinToUnixMin(rep.tsMin);
     if (at > nowUnixMin) { at = nowUnixMin; clamped++; }
     st.seen[rp] = rep.tsMin; st.sig[rp] = sig;
-    const tp = pidOf(rep.target);
+    const tp = (tpidOf || pidOf)(rep.target);
     const list = st.rep[tp] || (st.rep[tp] = []);
     if (!list.some(x => x[0] === rp)) list.push([rp, at]); else { const i = list.findIndex(x => x[0] === rp); list[i] = [rp, at]; }
     while (list.length > CHAT_MUTE.MAX_PER_TARGET) list.shift();
@@ -183,11 +185,70 @@ function scrubLegacy(st, pidOf, mailOn) {
 }
 // The only keys that reach the committed file. A new state field has to be added here on purpose -- and must hold
 // keyed pseudonyms, counts or times only. (sig: keyed digest of a reporter's last harvested row, where present.)
-const PUBLIC_KEYS = Object.freeze(['seen', 'sig', 'rep', 'auto', 'digest', 'pend', 'pendLost']);
+const PUBLIC_KEYS = Object.freeze(['seen', 'sig', 'rep', 'auto', 'digest', 'pend', 'pendLost', 'kv']);
 function publicState(st) {
   const o = {};
   for (const k of PUBLIC_KEYS) if (st && st[k] !== undefined) o[k] = st[k];
   return o;
 }
+// ---- lane keys (Q190, cloud audit 2026-10) ----
+// The state is committed to a public repository. It used to key reporters and targets alike with validate.js pid, the
+// pseudonym every state file shares -- and public boards tie a pid back to a SteamID, so the public history told who
+// reported whom. validate.js now passes the lane's own keys (CHAT_KEYS: one domain for reporters -- seen / sig / pend /
+// the entries of rep --, another for targets -- the keys of rep and auto): a target is identifiable once the mute board
+// shows his automatic mute, and that must not reveal the reports he filed himself. st.kv marks a state on those keys
+// (written only while the state holds entries, so the untouched empty state stays byte-identical).
+const KEYS_VER = 1;
+const KEYED = ['seen', 'sig', 'rep', 'auto', 'pend'];
+function hasEntries(st) { return KEYED.some(k => !!st && !!st[k] && Object.keys(st[k]).length > 0); }
+function keysReady(st) { return !!st && (st.kv === KEYS_VER || !hasEntries(st)); }
+function markKeys(st) { if (hasEntries(st)) st.kv = KEYS_VER; else delete st.kv; }
+// One-time move of a state written under oldOf (validate.js pid) onto byOf / ofOf, from a COMPLETE read of the report box
+// (rows as for harvest; validate.js calls it only then). Every reporter still on the box and every target of a row on it
+// resolves (old key -> sid); what no longer resolves is dropped -- that can only lower a count, and a resolved automatic
+// mute keeps its recorded expiry, so nobody is muted longer for the move. A queued digest entry moves only while it still
+// matches the reporter's row (re-signed under byOf), otherwise it is counted in pendLost like any row replaced before the
+// digest. st.sig (row digests under the old key) is dropped: harvest then takes a reporter's row as the one already
+// harvested when its stamp equals st.seen, the rule it keeps for state of an older version. Returns { kept, dropped }.
+function rekeyLegacy(st, rows, oldOf, byOf, ofOf) {
+  const sidOf = new Map(), cur = new Map();
+  for (const r of rows || []) {
+    if (!sidPlausible(r.reporterSid)) continue;
+    const sid = String(r.reporterSid);
+    sidOf.set(oldOf(sid), sid);
+    const rep = decodeReport(r.det);
+    if (!rep || !sidPlausible(rep.target)) continue;
+    sidOf.set(oldOf(rep.target), String(rep.target));
+    cur.set(sid, { reporterSid: sid, target: rep.target, scope: rep.scope, tsMin: rep.tsMin, text: rep.text });
+  }
+  const res = { kept: 0, dropped: 0 };
+  const move = (o, keyOf) => {
+    const n = {};
+    for (const k of Object.keys(o || {})) { const sid = sidOf.get(k); if (sid) { n[keyOf(sid)] = o[k]; res.kept++; } else res.dropped++; }
+    return n;
+  };
+  st.seen = move(st.seen, byOf);
+  st.auto = move(st.auto, ofOf);
+  const rep = {};
+  for (const tk of Object.keys(st.rep || {})) {
+    const list = st.rep[tk] || [], tsid = sidOf.get(tk);
+    const kept = tsid ? list.filter(x => sidOf.has(x[0])).map(x => [byOf(sidOf.get(x[0])), x[1]]) : [];
+    res.kept += kept.length; res.dropped += list.length - kept.length;
+    if (kept.length) rep[ofOf(tsid)] = kept;
+  }
+  st.rep = rep;
+  if (st.pend) {
+    const pend = {};
+    for (const k of Object.keys(st.pend)) {
+      const sid = sidOf.get(k), f = sid && cur.get(sid);
+      if (f && st.pend[k] === mailSig(f, oldOf)) { pend[byOf(sid)] = mailSig(f, byOf); res.kept++; }
+      else { st.pendLost = (st.pendLost | 0) + 1; res.dropped++; }
+    }
+    if (Object.keys(pend).length) st.pend = pend; else delete st.pend;
+  }
+  delete st.sig;
+  st.kv = KEYS_VER;
+  return res;
+}
 module.exports = { CHAT_MUTE, decodeReport, tsMinToUnixMin, harvest, prune, reporterCount, plan, digestLines, sidPlausible,
-  PEND_MAX, PUBLIC_KEYS, mailSig, queueMail, pendingRows, scrubLegacy, publicState };
+  PEND_MAX, PUBLIC_KEYS, mailSig, queueMail, pendingRows, scrubLegacy, publicState, KEYS_VER, hasEntries, keysReady, markKeys, rekeyLegacy };

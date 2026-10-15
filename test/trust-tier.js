@@ -4,7 +4,7 @@
 // harvest targets plumbing.
 process.env.STATE_SALT = process.env.STATE_SALT || 'test-salt';
 const path = require('path');
-const { trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, harvestReports, pairKey, pid, REPORT_MAGIC } = require(path.join(__dirname, '..', 'validate.js'));
+const { trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, harvestReports, pairKey, pid, REPORT_MAGIC, REP_KEYS, REP_KEYS_VER } = require(path.join(__dirname, '..', 'validate.js'));
 
 let failN = 0;
 const ok = (m) => console.log('  ok    ' + m);
@@ -28,16 +28,32 @@ console.log('=== trust tier (sort-only soft-avoid) ===');
 }
 
 { // verified unique reporters: co-presence required (report-bombing by strangers = 0)
-  const s = fresh();
+  // Q190: edges are on the lane keys (s.rkv) and carry the keyed pair token; verifiedUniqueReporters takes the sid
+  const s = fresh(); s.rkv = REP_KEYS_VER;
   const tp = pid(T);
   // A and B reported T; only A ever played with T (pairs co-presence)
+  s.rep[REP_KEYS.by(A) + '>' + REP_KEYS.of(T)] = { n: 3, m: 4, at: 1, pk: REP_KEYS.pair(A, T) };
+  s.rep[REP_KEYS.by(B) + '>' + REP_KEYS.of(T)] = { n: 5, m: 4, at: 1, pk: REP_KEYS.pair(B, T) };
+  s.pairs[pairKey(pid(A), tp)] = { n: 2, t: 0, x: 1, at: 1 };
+  eq('vur counts only co-present reporters', verifiedUniqueReporters(s, T), 1);
+  s.pairs[pairKey(pid(B), tp)] = { n: 1, t: 0, x: 0, at: 1 };
+  eq('vur grows when second reporter verified', verifiedUniqueReporters(s, T), 2);
+  eq('repeat reports from one verified reporter still count once', verifiedUniqueReporters(s, T), 2);
+  s.pairs[pairKey(pid(A), pid(C))] = { n: 1, t: 0, x: 0, at: 1 };
+  eq('a pair with someone else verifies nothing', verifiedUniqueReporters(s, T), 2);
+  s.rep[REP_KEYS.by(C) + '>' + REP_KEYS.of(T)] = { n: 1, m: 4, at: 1, pk: REP_KEYS.pair(C, T) };
+  eq('unverified third reporter (never played T) = 0', verifiedUniqueReporters(s, T), 2);
+  eq('edges for another target do not leak in', verifiedUniqueReporters(s, A), 0);
+}
+
+{ // Q190: state still on pid keys (s.rkv unset; its move waits for a complete read) is read the old way -- no flapping
+  const s = fresh();
+  const tp = pid(T);
   s.rep[pid(A) + '>' + tp] = { n: 3, m: 4, at: 1 };
   s.rep[pid(B) + '>' + tp] = { n: 5, m: 4, at: 1 };
   s.pairs[pairKey(pid(A), tp)] = { n: 2, t: 0, x: 1, at: 1 };
-  eq('vur counts only co-present reporters', verifiedUniqueReporters(s, tp), 1);
   s.pairs[pairKey(pid(B), tp)] = { n: 1, t: 0, x: 0, at: 1 };
-  eq('vur grows when second reporter verified', verifiedUniqueReporters(s, tp), 2);
-  eq('repeat reports from one verified reporter still count once', verifiedUniqueReporters(s, tp), 2);
+  eq('legacy pid edges: same count as before the change', verifiedUniqueReporters(s, T), 2);
 }
 
 { // trustPlan: writes on tier change, deletes on decay, no-ops otherwise

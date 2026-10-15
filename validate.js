@@ -71,6 +71,16 @@ const LEAVE_CONFIRM_MS = Math.max(LEAVE_CONFIRM_MIN_MS, Number(process.env.LEAVE
 
 const pid = (s) => crypto.createHmac('sha256', String(SALT || '')).update(String(s)).digest('hex').slice(0, 16);
 const plog = (s) => pid(s).slice(0, 8);
+// Q190 (cloud audit 2026-10): the report lanes keep their own pseudonyms. pid() is shared by every state file, and public
+//   boards tie a pid back to its SteamID (the voice board pairs author SteamIDs with item ids whose state records the author
+//   as a pid; several pid-keyed counters equal public scores), so report state keyed by pid told the public history of this
+//   repo who reported whom. Each lane hashes with its own domain prefix under the same salt -- that matches no pid and no
+//   other lane -- and the reporter and target sides use different domains: a target becomes identifiable once a public
+//   board shows the outcome (an automatic chat mute, a trust tier), which must not reveal the reports he filed himself.
+const laneKey = (domain) => (s) => pid(domain + '|' + s);
+const repPairTok = (k) => pid('rep-pair|' + k);   // k = pairKey of two pids (signals.pairs)
+const REP_KEYS = Object.freeze({ by: laneKey('rep-by'), of: laneKey('rep-of'), pair: (a, b) => repPairTok(pairKey(pid(a), pid(b))) });
+const CHAT_KEYS = Object.freeze({ by: laneKey('chat-by'), of: laneKey('chat-of') });
 
 const START_MAGIC = 0xB2;   // start-attestation record (settle records stay 0xB1; lockstep with the client writer)
 // Abandon-confession record: a voluntarily-leaving (or idle-kicked) client writes a self-signed
@@ -2051,11 +2061,64 @@ const UNMATCHED_LB = process.env.UNMATCHED_LB || 'unmatched_box';
 const ACTIVE_MATCH_LB = process.env.ACTIVE_MATCH_LB || 'active_match_box';
 const REPORT_REASON_MIN = 1, REPORT_REASON_MAX = 4;
 const REPORT_DAILY_CAP = Number(process.env.REPORT_DAILY_CAP || 20);
-// entries = [{steamID, d}] (d = decoded details ints). Returns {seen, counted, capped, bad}.
+// Report state (s.rep edges, s.rseen dedup keys, s.day.r daily counts) is keyed by the lane's own pseudonyms (REP_KEYS,
+// Q190): reporter = REP_KEYS.by, target = REP_KEYS.of, and each edge carries pk = REP_KEYS.pair(reporter, target), the
+// keyed token of the pid pair that verifiedUniqueReporters looks up in signals.pairs. s.rkv marks state on these keys.
+// Per-pid report counters (players[].ri / .ro) are not kept: the edges hold the same counts, and a pid-keyed counter
+// that moves in the same commit as a new edge names the reporter. State written before (pid keys) moves over once
+// in rekeyReports; harvestReports never mixes the two (it defers until the move is done).
+const REP_KEYS_VER = 1;
+function repKeysReady(s) {
+  if (s.rkv === REP_KEYS_VER) return true;
+  const legacy = Object.keys(s.rep || {}).length || Object.keys(s.rseen || {}).length || Object.keys((s.day && s.day.r) || {}).length ||
+    Object.keys(s.players || {}).some(h => s.players[h].ri != null || s.players[h].ro != null);
+  if (legacy) return false;
+  s.rkv = REP_KEYS_VER;   // nothing to move
+  return true;
+}
+// One-time move of pid-keyed report state onto REP_KEYS, from a COMPLETE read of the report box (entries as for
+// harvestReports): every reporter still on the box and every target in his queue resolves (old pid -> sid); edges,
+// dedup keys and daily counts that no longer resolve are dropped -- that only lowers counts (nobody is reported
+// more for it), and a dropped dedup key whose report is still queued mints again under the new keys without being
+// counted twice (its edge was dropped with it). Returns { kept, dropped }.
+function rekeyReports(entries, s) {
+  const sidOf = new Map();
+  for (const e of (entries || [])) {
+    const rp = String(e.steamID || ''), d = e.d || [];
+    if (rp) sidOf.set(pid(rp), rp);
+    if (d[0] !== REPORT_MAGIC || d.length < 2) continue;
+    for (let i = 0, count = d[1] & 0xFF; i < count && d.length >= 6 + i * 4; i++) {
+      const t = decodeSid(d[2 + i * 4] | 0, d[3 + i * 4] | 0);
+      if (t !== '0') sidOf.set(pid(t), t);
+    }
+  }
+  const res = { kept: 0, dropped: 0 };
+  const rep = {}, rseen = {};
+  for (const k of Object.keys(s.rep || {})) {
+    const i = k.indexOf('>'), a = i > 0 && sidOf.get(k.slice(0, i)), b = i > 0 && sidOf.get(k.slice(i + 1));
+    if (!a || !b) { res.dropped++; continue; }
+    rep[REP_KEYS.by(a) + '>' + REP_KEYS.of(b)] = Object.assign({}, s.rep[k], { pk: REP_KEYS.pair(a, b) });
+    res.kept++;
+  }
+  for (const k of Object.keys(s.rseen || {})) {
+    const p = k.split('|'), a = p.length === 4 && sidOf.get(p[0]), b = p.length === 4 && sidOf.get(p[1]);
+    if (a && b) rseen[REP_KEYS.by(a) + '|' + REP_KEYS.of(b) + '|' + p[2] + '|' + p[3]] = s.rseen[k];
+  }
+  if (s.day && s.day.r) {
+    const r = {};
+    for (const k of Object.keys(s.day.r)) { const a = sidOf.get(k); if (a) r[REP_KEYS.by(a)] = s.day.r[k]; }
+    s.day.r = r;
+  }
+  for (const h of Object.keys(s.players || {})) { delete s.players[h].ri; delete s.players[h].ro; }
+  s.rep = rep; s.rseen = rseen; s.rkv = REP_KEYS_VER;
+  return res;
+}
+// entries = [{steamID, d}] (d = decoded details ints). Returns {seen, counted, capped, bad, targets, deferred}.
 function harvestReports(entries, s, now) {
+  const res = { seen: 0, counted: 0, capped: 0, bad: 0, targets: [], deferred: false };
+  if (!repKeysReady(s)) { res.deferred = true; return res; }   // pid-keyed state not moved yet (rekeyReports)
   const day = sigDay(s, now);
   day.r = day.r || {};
-  const res = { seen: 0, counted: 0, capped: 0, bad: 0, targets: [] };
   for (const e of (entries || [])) {
     const rp = String(e.steamID || '');
     const d = e.d || [];
@@ -2068,7 +2131,7 @@ function harvestReports(entries, s, now) {
       const reason = d[off + 2] | 0;
       const mh = d[off + 3] | 0;
       if (target === '0' || target === rp || reason < REPORT_REASON_MIN || reason > REPORT_REASON_MAX) { res.bad++; continue; }
-      const rk = pid(rp), tk = pid(target);
+      const rk = REP_KEYS.by(rp), tk = REP_KEYS.of(target);
       const seenKey = rk + '|' + tk + '|' + reason + '|' + mh;
       if (s.rseen[seenKey]) continue;          // idempotent re-upload of the rolling queue
       res.targets.push(target);                // real sid -> trust-tier candidate this run
@@ -2083,9 +2146,7 @@ function harvestReports(entries, s, now) {
       day.r[rk] = dayN + 1;
       const ek = rk + '>' + tk;
       const edge = s.rep[ek] || (s.rep[ek] = { n: 0, m: 0, at: 0 });
-      edge.n += 1; edge.m |= (1 << reason); edge.at = now;
-      const tp = sigPlayer(s, tk, now); tp.ri = (tp.ri | 0) + 1;   // reports received
-      const rpp = sigPlayer(s, rk, now); rpp.ro = (rpp.ro | 0) + 1; // reports filed
+      edge.n += 1; edge.m |= (1 << reason); edge.at = now; edge.pk = REP_KEYS.pair(rp, target);
       res.counted++;
     }
   }
@@ -2114,13 +2175,32 @@ function pairKey(a, b) { return a < b ? a + '|' + b : b + '|' + a; }
 const TRUST_LB = process.env.TRUST_LB || 'trust_tier';
 const TRUST_T = { F1: 3, F2: 8, VUR1: 4, VUR2: 10,
   HD1: Math.max(1, Number(process.env.TRUST_HD1 || 3)), HD2: Math.max(1, Number(process.env.TRUST_HD2 || 8)) };
-function verifiedUniqueReporters(s, tp) {
+// sid = the target's SteamID (Q190: was his pid). Edges name reporter and target by lane keys only, so co-presence is
+// checked through the keyed pair token each edge carries: the tokens of the target's current pairs are recomputed here
+// from signals.pairs (pid-keyed) and an edge counts when its token is among them. State still on pid keys (its move
+// waits for a complete read of the report box, see repKeysReady) is read the old way, so tiers do not flap meanwhile.
+// idx (optional, trustIndex) lets trustPlan group pairs and edges once per run instead of once per player.
+function trustIndex(s) {
+  const pairsOf = new Map(), edgesOf = new Map();
+  const add = (m, k, x) => { const a = m.get(k); if (a) a.push(x); else m.set(k, [x]); };
+  for (const k of Object.keys(s.pairs || {})) { const i = k.indexOf('|'); add(pairsOf, k.slice(0, i), k); add(pairsOf, k.slice(i + 1), k); }
+  for (const k of Object.keys(s.rep || {})) { const i = k.indexOf('>'); if (i > 0) add(edgesOf, k.slice(i + 1), s.rep[k]); }
+  return { pairsOf, edgesOf };
+}
+function verifiedUniqueReporters(s, sid, idx) {
+  const tp = pid(sid), pairs = s.pairs || {};
   let n = 0;
-  for (const k of Object.keys(s.rep || {})) {
-    const i = k.indexOf('>');
-    if (i < 0 || k.slice(i + 1) !== tp) continue;
-    if ((s.pairs || {})[pairKey(k.slice(0, i), tp)]) n++;
+  if (s.rkv !== REP_KEYS_VER) {
+    for (const k of Object.keys(s.rep || {})) {
+      const i = k.indexOf('>');
+      if (i < 0 || k.slice(i + 1) !== tp) continue;
+      if (pairs[pairKey(k.slice(0, i), tp)]) n++;
+    }
+    return n;
   }
+  const ix = idx || trustIndex(s);
+  const met = new Set((ix.pairsOf.get(tp) || []).map(repPairTok));
+  for (const e of ix.edgesOf.get(REP_KEYS.of(sid)) || []) if (met.has(e.pk)) n++;   // one edge per reporter
   return n;
 }
 function trustTierOf(f, vur, hd) {
@@ -2137,9 +2217,10 @@ function trustTierOf(f, vur, hd) {
 function trustPlan(s, existing, touched, now) {
   const writes = [], deletes = [];
   const all = new Set([...Object.keys(existing || {}), ...touched]);
+  const idx = s.rkv === REP_KEYS_VER ? trustIndex(s) : null;
   for (const sid of all) {
     const p = pid(sid);
-    const tier = trustTierOf(flagsInWindow((s.players || {})[p], now), verifiedUniqueReporters(s, p),
+    const tier = trustTierOf(flagsInWindow((s.players || {})[p], now), verifiedUniqueReporters(s, sid, idx),
       hostDissentCount((s.t2lh || {})[p], now == null ? Date.now() : now));
     const cur = (existing || {})[sid];
     if (tier > 0 && tier !== (cur | 0)) writes.push({ sid, tier });
@@ -3515,7 +3596,8 @@ function loadSupporters() { try { return JSON.parse(fs.readFileSync(SUPPORTERS_F
 function saveSupporters(s) { try { writeStateFile(SUPPORTERS_FILE, JSON.stringify(s, null, 0)); } catch (e) { ghWarn('write ' + SUPPORTERS_FILE + ' failed: ' + (e && e.message)); } }
 const SUPPORTER_WALL_LB = process.env.SUPPORTER_WALL_LB || supporters.SUPPORTER.WALL_LB;
 const SUPPORTER_OPTOUT_LB = process.env.SUPPORTER_OPTOUT_LB || supporters.SUPPORTER.OPTOUT_LB;
-// chat moderation lane state (HMAC pid keyed: reporter watermarks + per-target reporter sets + automatic mute expiries; never text or raw ids)
+// chat moderation lane state (HMAC keyed by the lane's own pseudonyms CHAT_KEYS, Q190: reporter watermarks + per-target reporter sets +
+//   automatic mute expiries; never text or raw ids)
 const CHAT_MUTE_FILE = process.env.CHAT_MUTE_FILE || 'chat-mute.json';
 const CHAT_MUTE_LB = process.env.CHAT_MUTE_LB || chatMute.CHAT_MUTE.MUTE_LB;
 const CHAT_REPORT_LB = process.env.CHAT_REPORT_LB || chatMute.CHAT_MUTE.REPORT_LB;
@@ -5153,7 +5235,16 @@ async function main() {
   if (repLb && (repLb.entries | 0) > 0) {
     try {
       const rb = await readBoardAll(repLb.id || repLb.ID, 'report box');
-      const rres = harvestReports(rb.ents.map(e => ({ steamID: e.steamID, d: decodeDetails(e.detailData) })), signals, nowMs);
+      const repEnts = rb.ents.map(e => ({ steamID: e.steamID, d: decodeDetails(e.detailData) }));
+      // Q190: pid-keyed report state moves onto the lane keys once, and only from a complete read (a partial one would
+      //   drop what the unread pages still resolve); until then nothing is harvested (no mixing of the two key sets)
+      if (!repKeysReady(signals) && rb.complete) {
+        const mv = rekeyReports(repEnts, signals);
+        sigDirty = true;
+        console.log('reports: report state moved onto lane keys (Q190): ' + mv.kept + ' edge(s) kept, ' + mv.dropped + ' no longer on the report box dropped');
+      }
+      const rres = harvestReports(repEnts, signals, nowMs);
+      if (rres.deferred) console.log('reports: partial read of the report box with pid-keyed report state -- harvest deferred until a complete read moves it (Q190)');
       RUN.repSeen = rres.seen; RUN.repCounted = rres.counted;
       if (rres.seen || rres.bad) {
         if (rres.counted) sigDirty = true;
@@ -5568,18 +5659,25 @@ async function main() {
       if (!repId || !muteId) { ghWarn('chat-mute: boards unavailable (report=' + !!repId + ' mute=' + !!muteId + ') -- lane skipped'); return; }
       const rb = await readBoardAll(repId, 'chat report box');
       const rows = rb.ents.map(e => ({ reporterSid: String(e.steamID), det: decodeDetails(e.detailData) }));
-      const h = chatMute.harvest(st, rows, pid, nowUnixMin);
+      // Q190: reporters and targets are keyed by the lane's own pseudonyms (CHAT_KEYS); a state still on pid keys moves
+      //   over once, from a complete read of the report box -- until then the lane waits (no mixing of the two key sets)
+      if (!chatMute.keysReady(st)) {
+        if (!rb.complete) { console.log('chat-mute: partial read of the report box with pid-keyed state -- lane deferred until a complete read moves it (Q190)'); return; }
+        const mv = chatMute.rekeyLegacy(st, rows, pid, CHAT_KEYS.by, CHAT_KEYS.of);
+        console.log('chat-mute: state moved onto lane keys (Q190): ' + mv.kept + ' entr(ies) kept, ' + mv.dropped + ' no longer on the report box dropped');
+      }
+      const h = chatMute.harvest(st, rows, CHAT_KEYS.by, nowUnixMin, CHAT_KEYS.of);
       chatMute.prune(st, nowUnixMin);
       const mb = await readBoardAll(muteId, 'chat mute board');
       const boardRows = mb.ents.map(e => ({ sid: String(e.steamID), until: e.score | 0 }));
       const targets = Array.from(new Set(h.fresh.map(f => f.target)));
-      const p = chatMute.plan(st, boardRows, targets, pid, nowUnixMin);
+      const p = chatMute.plan(st, boardRows, targets, CHAT_KEYS.of, nowUnixMin);
       let nW = 0, nD = 0;
       if (APPLY_MMR) {
         for (const w of p.writes) {
           const r = await postForm('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: muteId, steamid: w.sid, score: w.until, scoremethod: 'ForceUpdate', format: 'json' });
           const okW = r.ok && !(r.json && r.json.result && r.json.result.result && r.json.result.result !== 1);
-          if (okW) { st.auto[pid(w.sid)] = w.until; nW++; console.log('chat-mute: auto mute ' + plog(w.sid) + ' until=' + w.until + ' (' + w.why + ')'); }
+          if (okW) { st.auto[CHAT_KEYS.of(w.sid)] = w.until; nW++; console.log('chat-mute: auto mute ' + plog(w.sid) + ' until=' + w.until + ' (' + w.why + ')'); }
           else ghWarn('chat-mute: write failed ' + plog(w.sid) + ' HTTP ' + r.status);
         }
         for (const d of p.deletes) {
@@ -5592,14 +5690,14 @@ async function main() {
       // report text and raw ids are read back from the report box when the mail goes out, so they exist only on Steam
       // and in the private inbox. Without a mail channel nothing is queued.
       const mailOn = !!(process.env.FB_DIGEST_TO && process.env.RESEND_API_KEY) && !PT_MODE_MAIL_OFF;
-      chatMute.scrubLegacy(st, pid, mailOn);
+      chatMute.scrubLegacy(st, CHAT_KEYS.by, mailOn);
       if (!mailOn) { delete st.pend; delete st.pendLost; }
       else {
-        if (h.fresh.length) chatMute.queueMail(st, h.fresh, pid);
+        if (h.fresh.length) chatMute.queueMail(st, h.fresh, CHAT_KEYS.by);
         const day = new Date(nowMs).toISOString().slice(0, 10);
         const dg = st.digest || { day: '', at: 0 };
         if (st.pend && Object.keys(st.pend).length && rb.complete && (dg.day !== day || process.env.FB_DIGEST_FORCE)) {
-          const q = chatMute.pendingRows(st, rows, pid);
+          const q = chatMute.pendingRows(st, rows, CHAT_KEYS.by);
           const lost = (st.pendLost | 0) + q.missing;
           const lines = chatMute.digestLines(q.found, plog);
           const res = await fetch('https://api.resend.com/emails', {
@@ -5616,6 +5714,7 @@ async function main() {
         console.log('chat-mute: reports +' + h.fresh.length + ' (skipped ' + h.skipped + ') targets ' + targets.length + ' auto +' + nW + ' expired -' + nD + (APPLY_MMR ? '' : ' [dry-run]'));
         RUN.chatMute = '+' + h.fresh.length + 'r' + (nW ? '/+' + nW + 'm' : '') + (nD ? '/-' + nD + 'x' : '');
       }
+      chatMute.markKeys(st);
       saveChatMute(st);
     } catch (e) { ghWarn('chat-mute lane failed: ' + (e && e.message)); }
   };
@@ -7594,7 +7693,7 @@ async function main() {
 if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
-module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CHAT_MUTE: chatMute.CHAT_MUTE, CHAT_MUTE_FILE, CHAT_MUTE_LB, CHAT_REPORT_LB, isVoidDisp, voidByConsensus, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, RS_SOLO_VS_TRIO, RS_TRIO_WIN, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, CONFESS_MAGIC, NOTE_MAGIC, NOTE_DISP, reconcileConfessions, SANITY, sanityFlags, sanitySplit, recordSanityFlags, SANITY_RECORD_SLUGS, SANITY_ROSTER_SLUGS, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan, postForm, postFormDetails, findOrCreateBoard, isTestBoardName, sandboxOn, ghWarn, ghErr, PT_MODE, PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, ACTIVE_MATCH_LB, ptSeedCp, ptBoardPlan, PRIVATE_XP, isPrivateMt, privateProgressOf, creditXpPrivate, BOT_XP, isBotMt, botTierOf, botTierMult, botSeatSplit, botRanksOf, botRankEffOf, botXpGain, botProgressOf, creditXpBot, DEMO_APPID, ENDLESS_XP, computeXpEndless, creditXpEndless, CAMPAIGN_LB, SEEDCAP_REJECT_LADDER_MIN, seedcapRejectWindowMin, seedcapRejectUntilMin, seedcapRejectActive,
+module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CHAT_MUTE: chatMute.CHAT_MUTE, CHAT_MUTE_FILE, CHAT_MUTE_LB, CHAT_REPORT_LB, isVoidDisp, voidByConsensus, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, RS_SOLO_VS_TRIO, RS_TRIO_WIN, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, CONFESS_MAGIC, NOTE_MAGIC, NOTE_DISP, reconcileConfessions, SANITY, sanityFlags, sanitySplit, recordSanityFlags, SANITY_RECORD_SLUGS, SANITY_ROSTER_SLUGS, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, rekeyReports, repKeysReady, REP_KEYS, REP_KEYS_VER, CHAT_KEYS, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, trustIndex, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan, postForm, postFormDetails, findOrCreateBoard, isTestBoardName, sandboxOn, ghWarn, ghErr, PT_MODE, PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, ACTIVE_MATCH_LB, ptSeedCp, ptBoardPlan, PRIVATE_XP, isPrivateMt, privateProgressOf, creditXpPrivate, BOT_XP, isBotMt, botTierOf, botTierMult, botSeatSplit, botRanksOf, botRankEffOf, botXpGain, botProgressOf, creditXpBot, DEMO_APPID, ENDLESS_XP, computeXpEndless, creditXpEndless, CAMPAIGN_LB, SEEDCAP_REJECT_LADDER_MIN, seedcapRejectWindowMin, seedcapRejectUntilMin, seedcapRejectActive,
   ENDLESS_COMP_LB, SAVE_BOX_LB, SOLO_FILE, COMP, soloSanity, soloChainPlan, rerollChain, soloMilestones, soloAdvance, soloRunKey, soloStartAttested, loadSolo, saveSolo, segOrderOf, segStartOf, freshOrder, freshOrderPaced, writerReadyAt, writerClaim,
   ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, SAVE_BOX_LB_DUO, SAVE_BOX_LB_TRIO, teamRunKey, soloMsSlot, groupRecords,
   ENDLESS_COMP_LB_QUAD, SAVE_BOX_LB_QUAD, ENDLESS_LB_QUAD, ENDLESS_MAX_PC, compFamKeyOf,   // client knife 3.7a (O178 four seats)
