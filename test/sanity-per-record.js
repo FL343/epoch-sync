@@ -7,12 +7,19 @@
 //   [1] unit: sanitySplit / recordSanityFlags (who is dropped, what falls back to the whole-group rule)
 //   [2] ranked FFA 3P, one record's duration out of bounds: the other two settle, only he is flagged, he is ranked 3rd and
 //       loses the same points as with a clean record; the other two get exactly the clean-record points; no XP for him
-//   [3] the same with a seat out of range / a roster naming someone else at his seat / a second record of his
+//   [3] the same with a seat out of range / a roster naming someone else at his seat / a second record of his; with the
+//       players' start records (the Q80 seat gate on, the usual case) for the duration and the roster cases, and the roster
+//       case without them pinned to the Q75 hold that runs first (the records name two accounts for his seat)
 //   [4] 1v1: one record bad -> one writer left: not settled, not processed, only the bad writer flagged
 //   [5] a shared-field reason (score over the cap) keeps the old rule: nobody settles, everyone flagged
 //   [6] team 2v2: the dropped writer is rated with his team, his teammate's and the opponents' points are unchanged
 //   [7] private room 3P / bot match with two humans: the rest settles, no XP for the dropped writer
 //   [8] wiring pins
+//   [10] (Q109 rework) a dropped writer under the seat gate is seated by the start roster, not by the kept writers'
+//        rosters: two of them moving him onto a leaver's empty seat do not move his rank; without start records the same
+//        rosters are a Q75 hold. (The guard that a dropped writer never takes a kept writer's seat has no reachable case
+//        any more -- under the gate every kept writer sits at his own roster seat, without it Q75 holds any key where two
+//        accounts are named for a seat -- so only the [8] pin holds it.)
 // End-to-end over the REAL validate.js main() against an offline stateful board stub (the harness of test/leaver-own-record.js).
 const { spawnSync } = require('child_process');
 const fs = require('fs'), path = require('path'), os = require('os');
@@ -112,6 +119,15 @@ function rec(mt, hash, seat, ros, scores, o) {
   return d;
 }
 const keyOf = (d) => d[3] + '_' + d[4] + '_' + d[2];
+// start attestation (magic 0xB2) of the same key: seat + the host's roster, no result (test/seat-gate.js ffaStart)
+function startRec(mt, hash, seat, ros) {
+  const d = [0xB2, 3, mt, hash | 0, 1234, seat, 0, 0, ros.length, 0];
+  for (let i = 0; i < ros.length; i++) d.push(0);
+  d.push(0);
+  for (const s of ros) { const p = sidPair(s); d.push(p[0], p[1]); }
+  return d;
+}
+const startsOf = (mt, h, ros) => ros.map((s, i) => ({ sid: s, d: startRec(mt, h, i, ros) }));
 function boardsWith(recs) {   // recs: [{ sid, d }] spread over distinct shard rows (one account = one entry per shard)
   const boards = [];
   for (let i = 0; i < 50; i++) boards.push({ id: 1000 + i, name: 'shard_' + i, entries: [] });
@@ -126,6 +142,14 @@ function twoRuns(recs) {
   const r1 = runCron(boardsWith(recs));
   const r2 = runCron(boardsWith(recs), advance(r1.state, FLOOR + 1000));
   return { r1, r2 };
+}
+// a third run an hour on: past the absent-seat grace (ABSENT_GRACE_MS above) and, where the tree has it, the cloud audit
+//   Q121 leave confirmation (a seat that wrote its own start and no result waits until the match must be over, 60 min
+//   from that start) -- a seat that started and wrote no result is judged there
+function threeRuns(recs) {
+  const { r1, r2 } = twoRuns(recs);
+  const r3 = runCron(boardsWith(recs), advance(r2.state, 3600000 + 60000));
+  return { r1, r2, r3 };
 }
 
 console.log('=== one bad record drops that record, not the match (Q109) ===');
@@ -185,10 +209,18 @@ T('[2] reference: the clean match settles', ref.code === 0 && processedOf(ref).h
 const refPts = [A, B, C].map(s => scoreWrittenFor(ref, POINTS, s));
 const refXp = [A, B, C].map(s => scoreWrittenFor(ref, XP, s));
 T('[2] reference: all three get points and XP', refPts.every(x => x != null) && refXp.every(x => x != null), JSON.stringify({ refPts, refXp }));
-function badCase(tag, h, mutC, extra) {
+// with start records the seat gate is on; the clean reference settles the same either way
+{
+  const refS = twoRuns(clean3(0x10911).concat(startsOf(2, 0x10911, ROS3))).r2;
+  const pS = [A, B, C].map(s => scoreWrittenFor(refS, POINTS, s)), xS = [A, B, C].map(s => scoreWrittenFor(refS, XP, s));
+  T('[2] reference with start records: settles with the same points and XP', processedOf(refS).has(keyOf(rec(2, 0x10911, 0, ROS3, SC3))) && JSON.stringify(pS) === JSON.stringify(refPts) && JSON.stringify(xS) === JSON.stringify(refXp),
+    JSON.stringify({ pS, xS, refPts, refXp }) + refS.out.slice(-400));
+}
+function badCase(tag, h, mutC, extra, withStarts) {
   const recs = clean3(h);
   mutC(recs);
   if (extra) recs.push(...extra(h));
+  if (withStarts) recs.push(...startsOf(2, h, ROS3));
   const { r1, r2 } = twoRuns(recs);
   const key = keyOf(rec(2, h, 0, ROS3, SC3));
   T(tag + ': both runs exit 0', r1.code === 0 && r2.code === 0, r2.out.slice(-800));
@@ -200,15 +232,29 @@ function badCase(tag, h, mutC, extra) {
   const xp = [A, B, C].map(s => scoreWrittenFor(r2, XP, s));
   T(tag + ': A and B get their XP, C none', xp[0] === refXp[0] && xp[1] === refXp[1] && xp[2] == null, JSON.stringify({ xp, refXp }));
   T(tag + ': C is no leaver', leavesOf(r2, C) === 0 && !/leaver LP /.test(r2.out), 'leaves=' + leavesOf(r2, C));
-  T(tag + ': logged (dropped, consensus seat 2, not a leaver)', /only that record dropped and its writer flagged/.test(r2.out) && /consensus seat 2/.test(r2.out) && /sanity dropped -- played, not a leaver \(Q109\)/.test(r2.out));
+  T(tag + ': logged (dropped, consensus seat 2' + (withStarts ? ' from the start roster' : '') + ', not a leaver)', /only that record dropped and its writer flagged/.test(r2.out)
+    && (withStarts ? /consensus seat 2 \(start roster\)/ : /consensus seat 2(?! \()/).test(r2.out) && /sanity dropped -- played, not a leaver \(Q109\)/.test(r2.out));
   T(tag + ': summary row counts it', /\| sanity on one record only: dropped, rest settles \/ too few writers left \(Q109\) \| 1 \/ 0 \|/.test(r2.summary), r2.summary.split('\n').filter(l => /Q109|sanity/.test(l)).join(' / '));
   return r2;
 }
 badCase('[2] duration 90000 on C', 0x10902, (recs) => { recs[2].d[9] = 90000; });
+badCase('[2s] duration 90000 on C, with start records', 0x10912, (recs) => { recs[2].d[9] = 90000; }, null, true);
 
 // ---- [3] the other per-record reasons ----
 badCase('[3a] C seat out of range', 0x10903, (recs) => { recs[2].d[5] = 5; });
-badCase('[3b] C roster names A at his seat', 0x10904, (recs) => { recs[2].d = rec(2, 0x10904, 2, ROS3, SC3, { ros: [A, B, A] }); });
+badCase('[3b] C roster names A at his seat, with start records', 0x10904, (recs) => { recs[2].d = rec(2, 0x10904, 2, ROS3, SC3, { ros: [A, B, A] }); }, null, true);
+{
+  // the same records without start records: no seat gate, and C's roster names a second account (A) for seat 2 -- the Q75
+  //   roster contest holds the whole key before the sanity gate is reached (every writer flagged, nobody rated), as before
+  const h = 0x10914, recs = clean3(h);
+  recs[2].d = rec(2, h, 2, ROS3, SC3, { ros: [A, B, A] });
+  const { r2 } = twoRuns(recs);
+  //   (Q75 flags every writer on today's main; with the Q114 review it flags nobody -- either way the same for all three:
+  //   no split ran, C is not singled out)
+  T('[3b0] no start records: the Q75 roster contest holds it first -- not processed, no points, the three flagged alike', !processedOf(r2).has(keyOf(rec(2, h, 0, ROS3, SC3)))
+    && flagsOf(r2, A) === flagsOf(r2, C) && flagsOf(r2, B) === flagsOf(r2, C) && postsTo(r2, POINTS).length === 0 && /roster contest, not settled \(Q75\)/.test(r2.out) && !/\(Q109\)$/m.test(r2.out),
+    'f A/B/C = ' + [A, B, C].map(s => flagsOf(r2, s)).join('/') + r2.out.slice(-600));
+}
 badCase('[3c] C writes the key twice', 0x10905, () => {}, (h) => [{ sid: C, d: rec(2, h, 2, ROS3, SC3, { dur: 721 }) }]);
 
 // ---- [4] 1v1: one writer left ----
@@ -269,15 +315,30 @@ badCase('[3c] C writes the key twice', 0x10905, () => {}, (h) => [{ sid: C, d: r
     && scoreWrittenFor(r2, POINTS, A) != null && scoreWrittenFor(r2, POINTS, B) != null, r2.out.split('\n').filter(l => /VOID|settle /.test(l)).join(' | '));
 }
 
-// ---- [10] a dropped writer never takes a kept writer's seat ----
+// ---- [10] (rework) under the seat gate the start roster seats a dropped writer, not the kept writers' rosters ----
 {
-  // 4P FFA: B's record claims seat 2 (his roster puts him there), while A and D (the majority) seat C at 2 and B at 1;
-  //   C's record is dropped (bad duration). C's consensus seat is taken by B's record -> C is not ranked, B keeps seat 2
-  const h = 0x1090D, ros = [A, B, C, D], sc = [4000, 3000, 2000, 1000];
-  const recs = [{ sid: A, d: rec(2, h, 0, ros, sc) }, { sid: B, d: rec(2, h, 2, [A, C, B, D], sc) }, { sid: C, d: rec(2, h, 2, ros, sc, { dur: 90000 }) }, { sid: D, d: rec(2, h, 3, ros, sc) }];
-  const { r2 } = twoRuns(recs);
-  T('[10] settles; B is rated (not displaced by C), C is not, only C flagged', processedOf(r2).has(keyOf(rec(2, h, 0, ros, sc))) && scoreWrittenFor(r2, POINTS, B) != null && scoreWrittenFor(r2, POINTS, C) == null
-    && flagsOf(r2, C) === 1 && [A, B, D].every(s => flagsOf(r2, s) === 0) && leavesOf(r2, C) === 0, JSON.stringify([A, B, C, D].map(s => scoreWrittenFor(r2, POINTS, s))) + r2.out.slice(-600));
+  // 4P FFA, A B C D at seats 0..3 (9000 / 6000 / 4000 / 1000), all four write their start (roster registered, seat gate on).
+  //   A drops out while leading and writes no result. B and C swap A and D in their result rosters (seat 0 = D, seat 3 = A):
+  //   no sanity reason (each names himself at his own seat) and the gate checks only the writer's own seat. D writes from
+  //   his seat 3 with a bad duration. Seated by the kept rosters' majority D took A's empty seat 0 and its rank (first
+  //   place, review-q109.js S5b); seated by the start roster he stays 4th, exactly like the same match with honest rosters.
+  const ros = [A, B, C, D], swap = [D, B, C, A], sc = [9000, 6000, 4000, 1000];
+  const mk = (h, kept) => [{ sid: B, d: rec(2, h, 1, kept, sc) }, { sid: C, d: rec(2, h, 2, kept, sc) }, { sid: D, d: rec(2, h, 3, ros, sc, { dur: 90000 }) }];
+  const hc = 0x10915, hs = 0x10916, hn = 0x10917;
+  const honest = threeRuns(mk(hc, ros).concat(startsOf(2, hc, ros))).r3;
+  const moved = threeRuns(mk(hs, swap).concat(startsOf(2, hs, ros))).r3;
+  const pc = [A, B, C, D].map(s => scoreWrittenFor(honest, POINTS, s)), pm = [A, B, C, D].map(s => scoreWrittenFor(moved, POINTS, s));
+  T('[10] reference (honest rosters, D dropped): settles, D ranked 4th (loses), only D flagged, A the leaver', processedOf(honest).has(keyOf(rec(2, hc, 0, ros, sc)))
+    && pc.every(x => x != null) && pc[3] < 2500 && flagsOf(honest, D) === 1 && [B, C].every(s => flagsOf(honest, s) === 0) && leavesOf(honest, A) === 1 && leavesOf(honest, D) === 0,
+    JSON.stringify(pc) + ' f=' + [A, B, C, D].map(s => flagsOf(honest, s)).join('/') + ' leaves A/D=' + leavesOf(honest, A) + '/' + leavesOf(honest, D) + honest.out.slice(-600));
+  T('[10] B and C move D onto A\'s seat in their rosters: settles with every point write equal to the reference (D still 4th, not 1st)', processedOf(moved).has(keyOf(rec(2, hs, 0, ros, sc)))
+    && JSON.stringify(pm) === JSON.stringify(pc), JSON.stringify({ pc, pm }) + moved.out.slice(-600));
+  T('[10] logged from the start roster (seat 3)', /consensus seat 3 \(start roster\)/.test(moved.out), moved.out.split('\n').filter(l => /Q109/.test(l)).join(' | '));
+  // the same records without start records: the rosters name two accounts for seats 0 and 3 -- Q75 holds the key first
+  const { r2 } = twoRuns(mk(hn, swap));
+  T('[10b] no start records: the Q75 roster contest holds it -- not processed, no points, B C D flagged alike', !processedOf(r2).has(keyOf(rec(2, hn, 0, ros, sc)))
+    && flagsOf(r2, B) === flagsOf(r2, D) && flagsOf(r2, C) === flagsOf(r2, D) && postsTo(r2, POINTS).length === 0 && /roster contest, not settled \(Q75\)/.test(r2.out) && !/\(Q109\)$/m.test(r2.out),
+    'f B/C/D = ' + [B, C, D].map(s => flagsOf(r2, s)).join('/') + r2.out.slice(-600));
 }
 
 // ---- [11] a dropped writer inside a seedcap reject window still has his own settlement discarded ----
@@ -302,6 +363,7 @@ badCase('[3c] C writes the key twice', 0x10905, () => {}, (h) => [{ sid: C, d: r
   T('[8] absent-seat hold skips a dropped writer', /const absentNow = absentRosterSeats\(g\)\.filter\(\(x\) => agreed\.indexOf\(pid\(String\(x\.steamID\)\)\) < 0\);\n\s+if \(dropSeat\) for \(let i = absentNow\.length - 1; i >= 0; i--\) if \(dropped\(absentNow\[i\]\.steamID\)\) absentNow\.splice\(i, 1\);/.test(SRC));
   T('[8] the leaver filter skips a dropped writer first', /const leavers0 = detectLeavers\(g\)\.filter\(\(x\) => \{\n\s+if \(dropped\(x\.steamID\)\)/.test(SRC));
   T('[8] a dropped writer is ranked at his consensus seat', /if \(dropSeat\) for \(const \[sid, seat\] of dropSeat\) if \(seat >= 0 && seatToId\[seat\] == null\) seatToId\[seat\] = sid;/.test(SRC));
+  T('[8] (rework) a registered start roster seats a dropped writer ahead of the kept rosters\' majority', /const gro = seatGateRoster\(startsPending\[c\.m\]\);\n[\s\S]{0,120}for \(const x of sp\.drop\) \{\n\s+let seat = -1;\n\s+if \(gro\) \{ for \(const r of x\.recs\) \{ const s = r\.d\[5\] \| 0; if \(seat < 0 && s >= 0 && s < pc0 && gro\[s\] === pid\(x\.sid\)\) seat = s; \} \}\n\s+else for \(const k of Object\.keys\(ros\)\)/.test(SRC));
   T('[8] exports', typeof v.sanitySplit === 'function' && typeof v.recordSanityFlags === 'function');
 }
 

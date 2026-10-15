@@ -5980,14 +5980,20 @@ async function main() {
       g = sp.keep;
       c.void = voidByConsensus(g.map(r => r.dispCode)).isVoid;   // the dropped record's disp vote goes with it
       const ros = rosterConsensus(g), pc0 = g[0].d[8] | 0;
+      // Q109 rework: with a registered start roster (the Q80 seat gate) the dropped writer is seated where his own record was
+      //   written from -- the gate let that record in only because the roster seats him there. The kept writers' roster
+      //   majority would let two of them move him onto an empty seat (a leaver's) and its rank. Without one, Q75 has already
+      //   held every key whose records name two accounts for a seat, so the majority is his own seat.
+      const gro = seatGateRoster(startsPending[c.m]);
       dropSeat = new Map();
       for (const x of sp.drop) {
         let seat = -1;
-        for (const k of Object.keys(ros)) if (String(ros[k]) === x.sid && (k | 0) < pc0) seat = k | 0;
+        if (gro) { for (const r of x.recs) { const s = r.d[5] | 0; if (seat < 0 && s >= 0 && s < pc0 && gro[s] === pid(x.sid)) seat = s; } }
+        else for (const k of Object.keys(ros)) if (String(ros[k]) === x.sid && (k | 0) < pc0) seat = k | 0;
         dropSeat.set(x.sid, seat);
       }
       ghWarn('match=' + c.m + ': sanity on ' + who + ' -- only that record dropped and its writer flagged, the other ' + keepN + ' writer(s) settle'
-        + ' (dropped: ' + sp.drop.map(x => plog(x.sid) + (dropSeat.get(x.sid) >= 0 ? ' consensus seat ' + dropSeat.get(x.sid) : ' no consensus seat')).join(', ') + ') (Q109)');
+        + ' (dropped: ' + sp.drop.map(x => plog(x.sid) + (dropSeat.get(x.sid) >= 0 ? ' consensus seat ' + dropSeat.get(x.sid) + (gro ? ' (start roster)' : '') : ' no consensus seat')).join(', ') + ') (Q109)');
     }
     const dropped = (sid) => !!(dropSeat && dropSeat.has(String(sid)));
     const writerSids = [...new Set(g.map(r => String(r.steamID)))];
