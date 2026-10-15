@@ -394,7 +394,8 @@ console.log('=== report-keys [7] votes: fold without a full read, after a rollba
 console.log('=== report-keys [8] source pins ===');
 {
   T('[8] player reports keyed by the lane keys in harvestReports', /const rk = REP_KEYS\.by\(rp\), tk = REP_KEYS\.of\(target\);/.test(SRC) && !/sigPlayer\(s, rk, now\)/.test(SRC) && !/\.ri = \(/.test(SRC));
-  T('[8] trust counts co-presence through the pair token', /if \(met\.has\(e\.pk\)\) n\+\+;/.test(SRC) && /verifiedUniqueReporters\(s, sid, idx\)\);/.test(SRC));
+  T('[8] trust counts co-presence through the pair token', /if \(met\.has\(e\.pk\)\) n\+\+;/.test(SRC) && /verifiedUniqueReporters\(s, sid, idx\),\s*hostDissentCount\(/.test(SRC));
+  //   (Q190 restack: on today's main the tier line carries Q57's host charges as a third argument after this call)
   T('[8] chat lane passes the two lane keys (harvest / plan / auto / queue)', /chatMute\.harvest\(st, rows, CHAT_KEYS\.by, nowUnixMin, CHAT_KEYS\.of\)/.test(SRC) && /chatMute\.plan\(st, boardRows, targets, CHAT_KEYS\.of, nowUnixMin\)/.test(SRC) &&
     /st\.auto\[CHAT_KEYS\.of\(w\.sid\)\]/.test(SRC) && /chatMute\.queueMail\(st, h\.fresh, CHAT_KEYS\.by\)/.test(SRC) && /chatMute\.rekeyLegacy\(st, rows, CHAT_KEYS\.by\)/.test(SRC) && !/chatMute\.[a-zA-Z]+\([^)]*\bpid\b[^)]*\)/.test(SRC));
   T('[8] chat harvest keys targets with the target-side function, skips the rows marked at the drop', /const tp = \(tpidOf \|\| pidOf\)\(rep\.target\);/.test(CM_SRC) && /'kv', 'pre'\]\);/.test(CM_SRC) &&
