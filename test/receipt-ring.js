@@ -211,7 +211,7 @@ const queuedOf = (r, sid) => { const e = ((r.state.PENDING_WRITES_FILE || {})[v.
 {
   const now = 5e12, H6 = 6 * 3600 * 1000;
   const s = { a: { rc: [[1, 0, 32, 0, now - H6 - 1], [2, 0, 32, 0, now - 1000]] }, b: { rc: [[3, 0, 32, 0, now - H6 - 5]] }, c: { rc: [] }, d: {} };
-  const dropped = v.prunePendingWrites(s, now);
+  const dropped = v.prunePendingWrites(s, now).receipts;
   T('[16] past RECEIPT_HOLD_MS (6 h) a queued receipt is dropped, an empty entry goes', dropped === 2 && J(s) === J({ a: { rc: [[2, 0, 32, 0, now - 1000]] } }), J(s));
   const many = { a: { rc: new Array(11).fill(0).map((_, i) => [i, 0, 32, 0, now]) } };
   v.prunePendingWrites(many, now);

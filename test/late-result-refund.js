@@ -16,12 +16,14 @@
 //   [4] past LATE_RESULT_MS: nothing given back, the entry closed
 //   [5] his late record with other scores / from another seat / saying he abandoned: nothing given back
 //   [6] quick FFA (exit only), on a run with nothing fresh to settle: the exit retraction reaches leavers.json
-//   [7] the conviction's points write failed: nothing was taken, the late result retracts the exit, his -17 stays unpaid
+//   [7] the conviction's points write failed (O480: it waits for its retry, the entry keeps the fine): the late result retracts
+//       the exit and gives +83 back on the fine that waited (2483, as when the write landed at once)
 //   [8] start-orphan verdict (ranked 1V1, the winner's result alone at maturity): not covered, the exit stands
 //   [9] control: no late result -> the conviction stands, the entry closes after LATE_RESULT_MS
 //   [13] he placed 1st of 3 solo: +138 back (2538); the stranger who moved up by his absence is not charged
 //   [14] a premade pair 1st and 4th of 4, the 4th convicted: his partner took +38 alone where the pair took +3 each:
-//        +68 back (2468), the pair together where staying would have put it; [14b] the partner's write failed: +103
+//        +68 back (2468), the pair together where staying would have put it; [14b] the partner's write failed: it waits for
+//        its retry and lands the next run (2538), so his gain counts and the same +68 comes back
 //   [15] ranked 2V2, his team lost, his teammate shielded (-2): +93 back (2493), the teammate not charged
 //   [16] the cap (LATE_CAP_N=1): a second late result of the same account inside the week: the leave stands
 //   [10] units: reconcileConfessions on a conviction's entry (seat, scores tag, window, abandoner, board, cap, floor)
@@ -269,10 +271,12 @@ const abandoned = (mt, h, P) => (S, R) => S.concat(R, [settle(mt, h, P, 2, 3, fa
   const c = A(20 * MIN), p2 = c.P[2];
   c.steps[4] = [c.steps[4][0], c.steps[4][1], { STUB_POST_FAIL: JSON.stringify([p2]) }];
   const rs = timeline(c.steps, c.P);
-  T('[7] the fine\'s write failed: nothing taken (the board still 2500), the entry keeps no fine',
-    allOk(rs, 6) && leavesOf(rs[4], p2) === 1 && pointsOf(rs[4], p2).length === 0 && entryOf(rs[4], p2, c.key).ded === 0, JSON.stringify(entryOf(rs[4], p2, c.key)));
-  T('[7] his result later: the exit retracted, no points written (0 - 17 gives nothing back; his finish is not charged either)',
-    leavesOf(rs[5], p2) === 0 && pointPosts(rs[5]).length === 0 && LATE.test(rs[5].out) && /nothing to give back/.test(rs[5].out), rs[5].out.slice(-500));
+  const waitingOf = (r, sid) => { const e = ((r.state.PENDING_WRITES_FILE || {})[v.pid(sid)]) || {}; return e.w ? e.w.v : null; };
+  T('[7] the fine\'s write failed: the board still 2500 this run, the fine waits for its retry (O480), the entry keeps it',
+    allOk(rs, 6) && leavesOf(rs[4], p2) === 1 && pointsOf(rs[4], p2).length === 0 && entryOf(rs[4], p2, c.key).ded === 100 && waitingOf(rs[4], p2) === 2400,
+    JSON.stringify(entryOf(rs[4], p2, c.key)) + ' ' + JSON.stringify(rs[4].state.PENDING_WRITES_FILE));
+  T('[7] his result later: the exit retracted, +83 back on the fine that waited (2400 + 100 - 17 = 2483, as when the write landed at once)',
+    leavesOf(rs[5], p2) === 0 && JSON.stringify(pointsOf(rs[5], p2)) === '[2483]' && LATE.test(rs[5].out) && waitingOf(rs[5], p2) === null, rs[5].out.slice(-500));
 }
 
 // ---- [8] start-orphan verdict: ranked 1V1, only the winner's result at maturity -- not covered ----
@@ -327,9 +331,9 @@ const pairGame = (lateMs) => { const P = ids(4); return game(MT_PAIR, 0x9e00 + n
   const c = pairGame(20 * MIN), p2 = c.P[2], p3 = c.P[3];
   c.steps[4] = [c.steps[4][0], c.steps[4][1], { STUB_POST_FAIL: JSON.stringify([p2]) }];
   const rs = timeline(c.steps, c.P);
-  T('[14b] the partner\'s points write failed: his gain never landed, nothing charged (g 0), +103 back (2503)',
-    allOk(rs, 6) && pointsOf(rs[4], p2).length === 0 && entryOf(rs[4], p3, c.key).g === 0 && JSON.stringify(pointsOf(rs[5], p3)) === '[2503]',
-    JSON.stringify(entryOf(rs[4], p3, c.key)) + ' ' + JSON.stringify(pointsOf(rs[5], p3)));
+  T('[14b] the partner\'s points write failed: it waits for its retry and lands the next run (2538), his gain counts (g 35), +68 back (2468)',
+    allOk(rs, 6) && pointsOf(rs[4], p2).length === 0 && entryOf(rs[4], p3, c.key).g === 35 && JSON.stringify(pointsOf(rs[5], p2)) === '[2538]' && JSON.stringify(pointsOf(rs[5], p3)) === '[2468]',
+    JSON.stringify(entryOf(rs[4], p3, c.key)) + ' ' + JSON.stringify([pointsOf(rs[5], p2), pointsOf(rs[5], p3)]));
 }
 
 // ---- [15] ranked 2V2 (mt 6), his team lost, his teammate shielded ----
@@ -518,17 +522,17 @@ const U = {};
       const c = topGame(20 * MIN), rs = timeline(c.steps, c.P, script);   // [13] +103: the stranger's +35 charged to him
       return allOk(rs, 6) && JSON.stringify(pointsOf(rs[5], c.P[2])) === '[2503]';
     }],
-    ['the partner\'s gain counted when his write failed', '      st.g = gains.reduce((a, y) => a + (lpOk.has(y[0]) ? y[1] : 0), 0);', '', (script) => {
-      const c = pairGame(20 * MIN), p2 = c.P[2], p3 = c.P[3];
+    ['a failed settle points write forfeited again (no retry, O480)', '    const w = await writeLpRow(sid, changedLp[sid], lpDet[sid], rv, [], { retry: true });', '    const w = await writeLpRow(sid, changedLp[sid], lpDet[sid], rv, []);', (script) => {
+      const c = pairGame(20 * MIN), p2 = c.P[2];
       c.steps[4] = [c.steps[4][0], c.steps[4][1], { STUB_POST_FAIL: JSON.stringify([p2]) }];
-      const rs = timeline(c.steps, c.P, script);   // [14b] +68: charged for a gain that never landed
-      return allOk(rs, 6) && JSON.stringify(pointsOf(rs[5], p3)) === '[2468]';
+      const rs = timeline(c.steps, c.P, script);   // [14b] the partner's +38 never lands
+      return allOk(rs, 6) && pointsOf(rs[5], p2).length === 0;
     }],
-    ['failed write keeps its fine', '      if (!lpOk.has(sid)) st.ded = 0;\n', '', (script) => {
+    ['a write waiting for its retry not counted as landing (O480)', '|| lpWaiting(sid)));', '));', (script) => {
       const c = A(20 * MIN), p2 = c.P[2];
       c.steps[4] = [c.steps[4][0], c.steps[4][1], { STUB_POST_FAIL: JSON.stringify([p2]) }];
-      const rs = timeline(c.steps, c.P, script);   // [7] a fine never taken given back (2500 -> 2583)
-      return allOk(rs, 6) && JSON.stringify(pointsOf(rs[5], p2)) === '[2583]';
+      const rs = timeline(c.steps, c.P, script);   // [7] the fine lands on the retry, the forgiven late result gives nothing back (2400)
+      return allOk(rs, 6) && JSON.stringify(pointsOf(rs[5], p2)) === '[2400]';
     }],
     ['the board not checked', "    const sameBoard = !st.cv || (st.b != null && opts.lpBoard != null && String(st.b) === String(opts.lpBoard));", '    const sameBoard = true;', async (script) => {
       const r = await U.run(U.base, [U.own(2, SC3)], false, null, require(script), { lpBoard: 90001 });   // [10] written on a new season's board
