@@ -83,6 +83,12 @@ jobs:
           SKILL_FILE: demo-skill.json
           GROUPS_FILE: demo-groups.json
           STRICT_BOARDS: '1'
+          # M194 / W57 (2026-10-15, user ruling under architecture decision 10): through the Steam Next Fest a demo
+          # leave is recorded (demo-leavers.json exactly as before) but does not discount demo XP until this instant
+          # (validate.js leaverXpRecordOnlyUntil: demo channel only, strict ISO-8601 UTC, at most 31 days ahead). After
+          # it the discount comes back by itself -- this line needs no removal. Demo only: test/channel-workflows.js
+          # allows this one key on the demo twin and nowhere else.
+          LEAVER_XP_RECORD_ONLY_UNTIL: '2026-10-27T00:00:00Z'
         run: node validate.js
       - name: persist
         id: persist

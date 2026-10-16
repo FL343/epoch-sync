@@ -56,8 +56,17 @@ console.log('-- reconcile twins --');
   T('playtest job env parsed', !!ePt && Object.keys(ePt).length > 10);
   T('demo job env parsed', !!eDm && Object.keys(eDm).length > 10);
   if (ePt && eDm) {
-    const kPt = Object.keys(ePt).sort(), kDm = Object.keys(eDm).sort();
-    T('same env key set', JSON.stringify(kPt) === JSON.stringify(kDm), 'pt=' + kPt.join(',') + ' dm=' + kDm.join(','));
+    // deliberate demo-only knobs (each with its pin below); everything else must match the playtest template key for key
+    //   M194 / W57 LEAVER_XP_RECORD_ONLY_UNTIL: the Next Fest record-only leaver window (validate.js honors it on the demo
+    //   channel only) -- a strict ISO-8601 UTC instant, and on no other workflow
+    const DEMO_ONLY = { LEAVER_XP_RECORD_ONLY_UNTIL: (v) => /^'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?Z'$/.test(v) };
+    const kPt = Object.keys(ePt).sort(), kDm = Object.keys(eDm).filter((k) => !(k in DEMO_ONLY)).sort();
+    T('same env key set (demo-only knobs aside)', JSON.stringify(kPt) === JSON.stringify(kDm), 'pt=' + kPt.join(',') + ' dm=' + kDm.join(','));
+    for (const [k, valid] of Object.entries(DEMO_ONLY)) {
+      if (k in eDm) T('demo-only env ' + k + ' is a quoted strict UTC instant', valid(eDm[k]), eDm[k]);
+      const elsewhere = fs.readdirSync(WF).filter((f) => /\.ya?ml$/.test(f) && f !== 'demo.yml' && read(f).indexOf(k) >= 0);
+      T('demo-only env ' + k + ' on no other workflow', elsewhere.length === 0, elsewhere.join(','));
+    }
     T('APPID secrets: PLAYTEST_APPID / DEMO_APPID', ePt.APPID === SECRET('PLAYTEST_APPID') && eDm.APPID === SECRET('DEMO_APPID'));
     T('both PT_MODE=1 (restricted channel semantics)', ePt.PT_MODE === "'1'" && eDm.PT_MODE === "'1'");
     for (const k of kPt) {

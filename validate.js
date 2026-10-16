@@ -3812,6 +3812,38 @@ function effectiveLeaverFactor(leaves, games) {
   for (const t of LEAVER_XP.tiers) if (rate <= t.maxRate) return t.factor;
   return LEAVER_XP.tiers[LEAVER_XP.tiers.length - 1].factor;
 }
+// M194 / W57 (2026-10-15, user ruling under architecture decision 10 -- when anti-cheat and not hurting honest players
+//   collide, do not hurt them): during the Steam Next Fest the DEMO channel records leaves but does not discount XP for
+//   them. A client bug can drop an honest player out of a running match (cloud audit Q268 / Q269: a quick-match lobby
+//   that re-elects its host can strand the elected host the moment the original queue host leaves), demo points never
+//   carry into the full game, and a halved XP rate costs an innocent player more than it deters a quitter. Switch =
+//   LEAVER_XP_RECORD_ONLY_UNTIL (strict ISO-8601 UTC, e.g. '2026-10-27T00:00:00Z'), set in demo.yml only and honored on
+//   the demo channel only (KEY_CHANNEL === 'demo'): before that instant creditXp credits every record with the leaver
+//   factor pinned at 1.0; leaves keep counting in the leaver state (demo-leavers.json) exactly as before, so the
+//   discount comes back on its own -- with the leaves counted meanwhile -- once the instant passes. Unset, unparsable,
+//   more than LEAVER_XP_RECORD_ONLY_MAX_MS ahead (a typo'd year would switch the discount off for good) or any other
+//   channel = the normal discount (fail-safe to the status quo). effectiveLeaverFactor itself is untouched (it is the
+//   client's lockstep mirror; the client's optimistic value just reads lower until the boot read-back corrects it).
+//   The per-match abandoner class (dispClassOf 5 / 7 = 0 points) stays: a real client never writes a settle record with
+//   those codes (user-quit / kicked go to the menu without one), so only a hand-made record ever carries them.
+const LEAVER_XP_RECORD_ONLY_MAX_MS = 31 * 24 * 3600 * 1000;
+// -> the window's end (ms) while the switch is on for this channel at nowMs, else 0
+function leaverXpRecordOnlyUntil(channel, raw, nowMs) {
+  if (channel !== 'demo') return 0;
+  const s = String(raw == null ? '' : raw).trim();
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?Z$/.test(s)) return 0;
+  const t = Date.parse(s), now = Number(nowMs);
+  if (!Number.isFinite(t) || !Number.isFinite(now) || !(t > now) || t - now > LEAVER_XP_RECORD_ONLY_MAX_MS) return 0;
+  return t;
+}
+const LEAVER_XP_RECORD_ONLY = leaverXpRecordOnlyUntil(KEY_CHANNEL, process.env.LEAVER_XP_RECORD_ONLY_UNTIL, Date.now());
+{
+  const raw = String(process.env.LEAVER_XP_RECORD_ONLY_UNTIL || '').trim();
+  if (LEAVER_XP_RECORD_ONLY) console.log('leaver xp: record-only on the demo channel until ' + new Date(LEAVER_XP_RECORD_ONLY).toISOString() + ' (leaves counted, XP not discounted)');
+  else if (raw && KEY_CHANNEL !== 'demo') ghWarn('LEAVER_XP_RECORD_ONLY_UNTIL is set on the ' + (KEY_CHANNEL || 'unknown') + ' channel -- ignored (demo only)');
+  else if (raw && !(Date.parse(raw) <= Date.now())) ghWarn('LEAVER_XP_RECORD_ONLY_UNTIL=' + JSON.stringify(raw) + ' not honored (strict ISO-8601 UTC, at most ' + (LEAVER_XP_RECORD_ONLY_MAX_MS / 86400000) + ' days ahead) -- leaver XP discount stays on');
+  else if (raw) console.log('leaver xp: record-only window ended at ' + raw + ' -- leaver XP discount back on');
+}
 // per-record point gain, mirroring the client per-game formula + credit rules. rank0 = 0-based; factor = repeat-leaver discount.
 //   valid = full (rank + money + ranked x + daily-first); innocent = base only; abandoner = 0.
 //   boostMult = permanent level boost, applied as the LAST step inside the per-game formula
@@ -3844,7 +3876,8 @@ function creditXp(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers,
     const r = recBySeat[seatKey], seat = seatKey | 0, sid = r.steamID, p = pid(sid);
     const cls = dispClassOf(r.dispCode);
     const st = xpState[p] = xpState[p] || { lastWinDay: 0, games: 0 };
-    const factor = effectiveLeaverFactor((leavers[p] && leavers[p].leaves) || 0, st.games);
+    const lf = effectiveLeaverFactor((leavers[p] && leavers[p].leaves) || 0, st.games);
+    const factor = LEAVER_XP_RECORD_ONLY ? 1 : lf;   // M194 / W57: demo Next Fest window = leaves recorded, not discounted
     const rank0 = ((rankOf[sid] || 1) | 0) - 1;   // 0-based for rankBonus index (group rank is 1-based)
     let firstWin = false;
     // daily-first qualification (2026-07-19 audit M7) = the same "won" predicate as the career
@@ -3863,7 +3896,7 @@ function creditXp(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers,
     if (cls === 'valid' || cls === 'innocent') st.cg = (st.cg | 0) + 1;
     if (cls === 'valid') { if (careerWon(matchType, rankOf[sid])) st.cw = (st.cw | 0) + 1; else st.cl = (st.cl | 0) + 1; }
     if (careerDet && cls !== 'abandoner') careerDet[sid] = [CAREER_MAGIC, CAREER_VER, st.cg | 0, st.cw | 0, st.cl | 0];
-    console.log('  xp ' + plog(sid) + ' ' + cls + ' rank' + (rank0 + 1) + (firstWin ? ' dailyWin' : '') + ' x' + factor + (pf !== 1 ? ' prog x' + pf : '') + (bm !== 1 ? ' boost x' + bm : '') + ' +' + gain + ' -> ' + (xp[sid] | 0) + ' career ' + (st.cg | 0) + 'g/' + (st.cw | 0) + 'w/' + (st.cl | 0) + 'l');
+    console.log('  xp ' + plog(sid) + ' ' + cls + ' rank' + (rank0 + 1) + (firstWin ? ' dailyWin' : '') + ' x' + factor + (factor !== lf ? ' (record-only, would be x' + lf + ')' : '') + (pf !== 1 ? ' prog x' + pf : '') + (bm !== 1 ? ' boost x' + bm : '') + ' +' + gain + ' -> ' + (xp[sid] | 0) + ' career ' + (st.cg | 0) + 'g/' + (st.cw | 0) + 'w/' + (st.cl | 0) + 'l');
   }
 }
 // ===== endless progress XP (match type 7) -- 2026-09-05 =====
@@ -8283,6 +8316,7 @@ module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CHAT_MUTE: 
 Object.assign(module.exports, { KEY_CHANNEL, loadJobPubTable, soloKeyHeld, soloRunHasHeld });   // cloud audit R1-A5-07 per-channel key policy (test/playtest-key-policy.js)
 Object.assign(module.exports, { flagPlayer, flagsInWindow, stampLegacyFlags, TRUST_F_WINDOW_MS, SIG_FLAG_KEYS_CAP });   // cloud audit Q98 forgery flags age out of the trust tier (test/trust-decay.js)
 Object.assign(module.exports, { noteOwnStarts, hasOwnStart, OWN_START_CAP });   // cloud audit Q69 own-record evidence for leaver verdicts
+Object.assign(module.exports, { leaverXpRecordOnlyUntil, LEAVER_XP_RECORD_ONLY, LEAVER_XP_RECORD_ONLY_MAX_MS });   // M194 / W57 demo Next Fest: leaves recorded, XP not discounted
 Object.assign(module.exports, { NL_OPP_CAP, NL_REPEAT });   // cloud audit Q161 named-only losing seats counted on the account
 Object.assign(module.exports, { ffaPlaceOf, ffaLowerHalf });   // cloud audit Q174 named-only lower-half FFA seats counted on the account
 Object.assign(module.exports, { leaveConfirmHold, startRosterGaps, LEAVE_CONFIRM_MS, LEAVE_CONFIRM_MIN_MS });   // cloud audit Q121 leave confirmation
