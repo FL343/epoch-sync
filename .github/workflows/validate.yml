@@ -122,7 +122,7 @@ jobs:
           RUN_OUTCOME: ${{ steps.run.outcome }}
         run: |
           state_files=""
-          for f in processed.json skill.json leavers.json xp.json starts.json signals.json groups.json confessions.json unmatched.json supporters.json endless-solo.json campaign-endless.json chat-mute.json; do
+          for f in processed.json skill.json leavers.json xp.json starts.json signals.json groups.json confessions.json unmatched.json supporters.json endless-solo.json campaign-endless.json chat-mute.json pending-writes.json; do
             [ -f "$f" ] && state_files="$state_files $f"
           done
           if [ -n "$state_files" ] && [ -n "$(git status --porcelain -- $state_files)" ]; then

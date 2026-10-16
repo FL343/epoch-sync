@@ -19,7 +19,57 @@ const PP_OVERRIDES = pointsPlan.configure({ RS_THRESHOLD: process.env.RS_THRESHO
 const { RULES_VER, LP_MAX, LP_SEG, lpSeg, LP_SEED, seedLp, SOFT_RESET, softResetLp, seasonSeedLp, lpDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND,
   boundaryOf, crosslineDelta, matchPlan, settleLine, baseMt, premadeMaskOf, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, appliesLp, isTeamMt, leaverLpPenalty,
   RS_MAGIC, reducedStakesPlan, teamLpPlan, RS_THRESHOLD, RS_UPSET_BONUS, RS_STRONG_UPSET_LOSS, RS_SOLO_VS_TRIO, RS_TRIO_WIN, LEAVER_LP_PENALTY,
-  ratingDetails } = pointsPlan;
+  ratingDetails, RECEIPT_F, lpDetailsOf, lpDetails, receiptPush } = pointsPlan;
+// O480 points receipts: the details of every points-board write = the RS reveal slot (rv = this run's flagged outcome { matchHash,
+//   seed, flag, adjDelta, normalDelta }, else the unread reveal already on the row, kept as before) + the receipt ring (the row's
+//   ring with this run's events of the player applied in order: { mh, change, set, clear }, see points-plan.js receiptPush). Every
+//   writer of the points board goes through here, so a write that does not concern one part never drops it. test/receipt-ring.js
+function lpWriteDetails(prevDet, rv, events) {
+  const cur = lpDetailsOf(prevDet);
+  let ring = cur.ring;
+  for (const ev of (events || [])) ring = receiptPush(ring, ev.mh, ev.change, ev.set, ev.clear);
+  return lpDetails(rv ? [RS_MAGIC, rv.matchHash, rv.seed, rv.flag, rv.adjDelta, rv.normalDelta] : cur.rs, ring);
+}
+const mhOfKey = (m) => parseInt(String(m), 10) | 0;   // a match key starts with its records' matchHash (d[3]_d[4]_d[2])
+// ---- O480 points-row backlog (PENDING_WRITES_FILE; test/receipt-ring.js) ----
+// pid -> { rc: [[mh, change, set, clear, t]] }: points receipts of a player whose row this job did not write in the run they
+//   happened -- a void moves nobody's points and so writes nobody's row (an invariant the void / contest tests pin). They ride
+//   his next points write, whichever writer it is (oldest first), within RECEIPT_HOLD_MS: the time his client waits for a receipt
+//   before it rolls the match back on its own; past it they are dropped. De-identified like every state file (pid keys); a
+//   matchHash is the key the start rosters in starts.json carry already.
+const PENDING_WRITES_FILE = process.env.PENDING_WRITES_FILE || 'pending-writes.json';
+const RECEIPT_HOLD_MS = Math.max(0, Number(process.env.RECEIPT_HOLD_MS || 6 * 3600 * 1000));
+const RECEIPT_QUEUE_CAP = 8;   // per player, as many as a ring holds (the newest kept)
+function loadPendingWrites() {
+  try { const o = JSON.parse(fs.readFileSync(PENDING_WRITES_FILE, 'utf8')); return (o && typeof o === 'object' && !Array.isArray(o)) ? o : {}; } catch (e) { return {}; }
+}
+// pure: drop queued receipts past the hold (and beyond the cap), then empty entries; returns how many receipts were dropped
+function prunePendingWrites(s, now) {
+  let dropped = 0;
+  for (const k of Object.keys(s)) {
+    const e = s[k];
+    if (e && Array.isArray(e.rc)) {
+      const live = e.rc.filter((x) => Array.isArray(x) && x.length >= 5 && now - (Number(x[4]) || 0) <= RECEIPT_HOLD_MS);
+      const keep = live.slice(-RECEIPT_QUEUE_CAP);
+      dropped += e.rc.length - keep.length;
+      if (keep.length) e.rc = keep; else delete e.rc;
+    } else if (e && e.rc != null) delete e.rc;
+    if (!e || typeof e !== 'object' || !Object.keys(e).length) delete s[k];
+  }
+  return dropped;
+}
+function savePendingWrites(s, now) {
+  const dropped = prunePendingWrites(s, now);
+  if (dropped) console.log('receipts: ' + dropped + ' queued receipt(s) dropped (older than ' + Math.round(RECEIPT_HOLD_MS / 3600000) + ' h: the client has rolled those matches back)');
+  if (!Object.keys(s).length && !fs.existsSync(PENDING_WRITES_FILE)) return;   // nothing queued on a channel that never queued: no file
+  try { writeStateFile(PENDING_WRITES_FILE, JSON.stringify(s, null, 0)); } catch (e) { ghWarn('write ' + PENDING_WRITES_FILE + ' failed: ' + (e && e.message)); }
+}
+// the accounts of a settle group: every writer and every roster seat its records name
+function groupSids(g) {
+  const out = new Set();
+  for (const r of (g || [])) { if (r && r.steamID != null) out.add(String(r.steamID)); for (const s of Object.values((r && r.roster) || {})) if (s) out.add(String(s)); }
+  return [...out];
+}
 
 const APPID = Number(process.env.APPID);
 const PREFIX = process.env.LB_PREFIX;
@@ -1271,6 +1321,7 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
   const sg = {};
   for (const r of starts) { const m = r.d[3] + '_' + r.d[4] + '_' + r.d[2]; (sg[m] = sg[m] || []).push(r); }
   let convicted = 0, cleaned = 0, held = 0;
+  const voided = [];   // O480: keys this verdict processed without a settle ({ m, pids: the attested roster }) -> VOID receipts (main)
   const consoledSids = [];   // interrupted-match consolation: real sids of still-visible settle writers at verdict time (in-memory only, never persisted -- state stays HMAC-keyed)
   // 1) register new pending entries
   const registered = preRegistered == null ? registerStartRosters(starts, processed, pending, now, readComplete) : preRegistered;
@@ -1285,6 +1336,7 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
       //   only while the row stays up, the row could still be withdrawn once the note is gone and the match would count
       if (e.c && !pending[key] && !processed.has(key) && now - (e.t0 || 0) >= maturityMs) {
         processed.add(key);
+        voided.push({ m: key, pids: [] });
         RUN.contestVoid = (RUN.contestVoid | 0) + 1;
         const who = noteParties(e);   // Q143
         console.log('  contest-void ' + key + ': contested since ' + new Date(e.t0 || 0).toISOString() + ', no start roster -- void, nobody rated (Q127)'
@@ -1354,6 +1406,7 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
     convicted += hit.length;
     if (spared.length) RUN.exitNoteSpared = (RUN.exitNoteSpared | 0) + spared.length;
     processed.add(m);   // idempotent: a super-late settlement of a convicted key is skipped as stale
+    voided.push({ m, pids: Object.keys(p.roster).map((seat) => p.roster[seat]) });
     delete pending[m];
     const cn = pending['~' + m], wasContested = !!(cn && cn.c), who = wasContested ? noteParties(cn) : '';   // Q143: a contested key voids here
     if (wasContested) RUN.contestHeldVoid = (RUN.contestHeldVoid | 0) + 1;
@@ -1361,7 +1414,7 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
       + (spared.length ? ', ' + spared.length + ' spared (own exit note: ' + spared.join(',') + ', Q64)' : '')
       + (wasContested ? '; contested once (Q127), nobody rated' + (who ? ', contested by ' + who : '') + ' (Q143)' : ''));
   }
-  return { registered, convicted, cleaned, held, consoledSids };
+  return { registered, convicted, cleaned, held, consoledSids, voided };
 }
 // ---- a ranked 1V1 whose loser wrote nothing (cloud audit Q184) ----
 // A 1V1 key needs two start votes to register a roster and two writers to settle. A loser who writes nothing for the match
@@ -1443,10 +1496,10 @@ function lone1v1Count(claims, signals, now, sidOfPid) {
     if (ol.indexOf(wp) < 0 && ol.length < LONE1V1.OPP_CAP) ol.push(wp);
     res.counted++; res.dirty = true;
     const atGate = ol.length >= LONE1V1.GATE;
-    if (atGate) due.push({ sid: c.w, wp, op });
+    if (atGate) due.push({ sid: c.w, wp, op, m: c.m });   // m: the match key, for the payment's points receipt (O480)
     else {
       const q = Array.isArray(so.l1q) ? so.l1q : (so.l1q = []);
-      if (q.length < LONE1V1.QUEUE_CAP) { q.push({ w: wp, t: now }); res.queued++; }
+      if (q.length < LONE1V1.QUEUE_CAP) { q.push({ w: wp, t: now, m: c.m }); res.queued++; }
     }
     console.log('  lone-1v1 ' + c.m + ': ' + plog(c.w) + ' won, ' + plog(c.o) + ' wrote nothing -- counted on him (' + so.l1 + ' such match(es), '
       + ol.length + ' different opponent(s)), nobody flagged; ' + (atGate ? 'winner paid' : 'payment waits for a second opponent\'s claim') + ' (Q184)');
@@ -1458,7 +1511,7 @@ function lone1v1Count(claims, signals, now, sidOfPid) {
     const live = so.l1q.filter((q) => q && now - (Number(q.t) || 0) <= LONE1V1.RETRO_MS);
     const atGate = Array.isArray(so.l1o) && so.l1o.length >= LONE1V1.GATE;
     const keep = [];
-    for (const q of live) { const sid = atGate ? sidOfPid(q.w) : null; if (sid) due.push({ sid: String(sid), wp: q.w, op }); else keep.push(q); }
+    for (const q of live) { const sid = atGate ? sidOfPid(q.w) : null; if (sid) due.push({ sid: String(sid), wp: q.w, op, m: q.m }); else keep.push(q); }
     if (keep.length !== so.l1q.length) res.dirty = true;
     if (keep.length) so.l1q = keep; else delete so.l1q;
   }
@@ -2773,7 +2826,8 @@ async function reconcileConfessions(confs, groups, processed, confState, leavers
       const base = e ? (e.score | 0) : (opts.seedFor ? opts.seedFor(String(c.steamID)) : 0);
       const nv = leaverLpPenalty(base, opts.penalty);
       st.ded = base - nv;
-      const okW = await opts.writeLp(String(c.steamID), nv, e && e.details);
+      // O480: the fine's points receipt rides the write (a LEAVE entry with the fine; SEEDED when no row of this season stood)
+      const okW = await opts.writeLp(String(c.steamID), nv, e && e.details, { m: c.m, change: nv - base, kind: 'fine', seeded: !e || !!e.seeded });
       if (okW) res.penalized++; else { st.ded = 0; ghWarn('confession LP write failed ' + plog(String(c.steamID))); }
       if (opts.checkpoint) opts.checkpoint();   // R1-B2-03: the fine's marker (+ exit-rate hit) on disk before anything else can exit
       console.log('  confess ' + c.m + ': ' + plog(String(c.steamID)) + ' ' + dispName(c.dispCode) + ' pts ' + base + '-' + opts.penalty + '->' + nv + (e ? '' : ' (seeded base)'));
@@ -2823,7 +2877,7 @@ async function reconcileConfessions(confs, groups, processed, confState, leavers
           console.log(tag + m + ': ' + plog(sid) + ' settled after all, no points of his to move (Q228)');
         } else {
           const nv = Math.min(opts.lpMax, ((e ? e.score : 0) | 0) + back);
-          const okW = await opts.writeLp(sid, nv, e && e.details);
+          const okW = await opts.writeLp(sid, nv, e && e.details, { m, change: nv - ((e ? e.score : 0) | 0), kind: 'refund' });   // O480 receipt
           wrote = true;
           if (okW) res.refunded++;
           console.log(tag + m + ': ' + plog(sid) + ' settled after all, refund +' + back + ' -> ' + nv
@@ -4927,6 +4981,61 @@ async function main() {
     : null;
   const prevLpId = prevLpLb ? (prevLpLb.id || prevLpLb.ID) : null;
   if (seasonId > 0 && !PT_MODE) console.log('season ' + seasonId + ': points -> ' + lpCur.name + (prevLpId ? (' (soft-reset source ' + seasonBoardName(LP_LB, seasonId - 1) + ')') : ' (no previous-season board)'));
+  // ---- O480 points receipts of this run (test/receipt-ring.js) ----
+  //   receipts: sid -> the events of the player this run not yet on his row, in order ({ mh, change, set, clear }). They ride his
+  //   next points write (writeLpRow: whichever writer comes first this run -- a lone-1V1 payment, a confession fine or refund, the
+  //   settle); a player whose row this run does not write (a void moves nobody's points and writes nobody's row) keeps them in
+  //   the backlog (PENDING_WRITES_FILE, queueReceipts) for his next write. lpWritten: sid -> { score, det } of the points writes
+  //   that landed this run, so a later write of the same player this run builds on it, not on a board read that may not show it
+  //   yet (a confession fine, then the settle of another match of his).
+  const receipts = {}, lpWritten = {};
+  const lpBacklog = loadPendingWrites();
+  let backlogDirty = false;
+  const noteReceipt = (sid, mh, change, set, clear) => {
+    if (!lpBoardId) return;
+    (receipts[String(sid)] = receipts[String(sid)] || []).push({ mh: mh | 0, change: change | 0, set: set | 0, clear: clear | 0 });
+  };
+  // a player's points row as this run knows it: written this run, else read from the board (null = no row this season)
+  const lpRowOf = async (sid, label) => {
+    const w = lpWritten[String(sid)];
+    if (w) return { score: w.score, det: w.det };
+    const e = await readUserEntry(lpBoardId, String(sid), label || 'points');
+    return e ? { score: e.score | 0, det: decodeDetails(e.detailData) } : null;
+  };
+  // write a points row: the score + the details (reveal slot + ring with his queued receipts, this run's events, then the caller's
+  //   own); remembered when it lands, and the receipts it carried leave the queues
+  const writeLpRow = async (sid, score, prevDet, rv, events) => {
+    const k = pid(String(sid)), b = lpBacklog[k];
+    const queued = (b && Array.isArray(b.rc)) ? b.rc.map((x) => ({ mh: x[0] | 0, change: x[1] | 0, set: x[2] | 0, clear: x[3] | 0 })) : [];
+    const mine = receipts[String(sid)] || [];
+    const all = queued.concat(mine, events || []);
+    const det = lpWriteDetails(prevDet, rv, all);
+    const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: lpBoardId, steamid: String(sid), score, scoremethod: 'ForceUpdate', format: 'json' }, det);
+    const ok = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
+    if (ok) {
+      lpWritten[String(sid)] = { score, det };
+      delete receipts[String(sid)];
+      if (queued.length) { delete b.rc; if (!Object.keys(b).length) delete lpBacklog[k]; backlogDirty = true; }
+      RUN.receipts = (RUN.receipts | 0) + all.length;
+    }
+    return { ok, res, det, n: all.length, queued: queued.length };
+  };
+  // the receipts no write of this run carried -> the backlog: they ride the player's next points write in a later run, within
+  //   RECEIPT_HOLD_MS (see PENDING_WRITES_FILE)
+  const queueReceipts = () => {
+    let n = 0;
+    const t = Date.now();
+    for (const sid of Object.keys(receipts)) {
+      const ev = receipts[sid] || [];
+      delete receipts[sid];
+      if (!ev.length) continue;
+      const k = pid(sid), b = lpBacklog[k] = lpBacklog[k] || {};
+      b.rc = (Array.isArray(b.rc) ? b.rc : []).concat(ev.map((x) => [x.mh, x.change, x.set, x.clear, t]));
+      n += ev.length; backlogDirty = true;
+    }
+    if (n) { console.log('receipts: ' + n + ' queued for their player\'s next points write (no points write of his this run)'); RUN.receiptsQueued = (RUN.receiptsQueued | 0) + n; }
+    return n;
+  };
   const ALLOW_TEST = process.env.ALLOW_TEST === '1';
   const listedShards = ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).filter(x => { const n = String(x.name || x.Name); return n.indexOf(PREFIX) === 0 && (ALLOW_TEST || n.indexOf('test') < 0); });
   // R1-B2-04 / O348-3: the shard set is PREFIX+0..N-1, checked against the listing (shardPlan)
@@ -5146,6 +5255,19 @@ async function main() {
   //   Counted and marked here, ahead of saveEarlyMarks; the payments are written after it (below the consolation).
   const sidByPid = new Map();
   for (const r of recs.concat(starts)) { const s = String(r.steamID); if (!sidByPid.has(pid(s))) sidByPid.set(pid(s), s); }
+  // O480: a ranked key the verdict above voided (started, never settled; contested) -> a VOID receipt (delta 0) for every account
+  //   of it this run can name: the attested roster, the writers and roster seats of its records. Its client rolls its optimistic
+  //   points back instead of waiting for a settle that will not come. A void writes nobody's row: the receipt rides the player's
+  //   next points write (queued in the backlog meanwhile, see PENDING_WRITES_FILE).
+  for (const vk of (startsRes.voided || [])) {
+    if (!lpBoardId || !appliesLp(String(vk.m).split('_')[2] | 0)) continue;
+    const vs = new Set();
+    for (const h of (vk.pids || [])) { const s = sidByPid.get(h); if (s) vs.add(String(s)); }
+    for (const s of groupSids(groups[vk.m])) vs.add(s);
+    for (const s of groupSids(starts.filter((r) => (r.d[3] + '_' + r.d[4] + '_' + r.d[2]) === vk.m))) vs.add(s);
+    for (const s of vs) noteReceipt(s, mhOfKey(vk.m), 0, RECEIPT_F.VOID, 0);
+    if (vs.size) console.log('  receipt ' + vk.m + ': never settled -> VOID receipt for ' + vs.size + ' account(s)');
+  }
   const l1Res = lone1v1Count(lone1v1Verdicts(startsPending, groups, processed, nowMs, STARTS_MATURITY_MS, confState, confSeen, shardsComplete),
     signals, nowMs, (h) => sidByPid.get(h) || null);
   if (l1Res.dirty) sigDirty = true;
@@ -5207,7 +5329,7 @@ async function main() {
     for (const p of l1Res.pay) { if (!bySid.has(p.sid)) bySid.set(p.sid, []); bySid.get(p.sid).push(p); }
     for (const [sid, ps] of bySid) {
       try {
-        const e = await readUserEntry(lpBoardId, sid, 'points');
+        const e = await lpRowOf(sid, 'points');
         let cur, seeded = false;
         const sk = skillL[pid(sid)] || ts.DEFAULTS, mmr = ts.displayRating(sk.mu, sk.sigma);
         if (e) cur = e.score | 0;
@@ -5216,19 +5338,21 @@ async function main() {
           cur = seasonSeedLp(pe ? (pe.score | 0) : null, mmr); seeded = true;
         }
         const was = cur;
+        const evs = [];   // O480: one receipt per payment (its match key; a claim queued before O480 carries none)
         for (const p of ps) {
           const so = skillL[p.op] || ts.DEFAULTS;
           const plan = reducedStakesPlan([{ steamID: sid, seat: 0, mmr, rank: 1, lp: cur }, { steamID: '~' + p.op, seat: 1, mmr: ts.displayRating(so.mu, so.sigma), rank: 2, lp: 0 }], 2, 0, 0);
           const d0 = (plan && plan[sid]) ? plan[sid].adjDelta : lpDelta(cur, 1, 2);
           const d = seeded ? d0 : crosslineDelta(cur, d0, true);
+          const before = cur;
           cur = Math.max(0, Math.min(LP_MAX, cur + d));
+          if (p.m) evs.push({ mh: mhOfKey(p.m), change: cur - before, clear: 0xff,
+            set: ((plan && plan[sid]) ? (plan[sid].flag & RECEIPT_F.RS) : 0) | (d !== d0 ? RECEIPT_F.SERIES : 0) | (seeded ? RECEIPT_F.SEEDED : 0) });
           seeded = false;
         }
         if (!APPLY_MMR) { console.log('  (dry-run) lone-1v1 pts ' + plog(sid) + ' = ' + cur); continue; }
-        // an unread mismatch reveal survives, as on the confession path
-        const det = e ? decodeDetails(e.detailData) : null;
-        const keep = (det && det.length >= 6 && (det[0] & 0xff) === RS_MAGIC) ? det.slice(0, 6) : null;
-        const r = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: lpBoardId, steamid: sid, score: cur, scoremethod: 'ForceUpdate', format: 'json' }, keep);
+        // an unread mismatch reveal survives, as on the confession path; the receipts ride the same write (O480)
+        const r = (await writeLpRow(sid, cur, e ? e.det : null, null, evs)).res;
         if (r.ok && !(r.json && r.json.result && r.json.result.result && r.json.result.result !== 1)) {
           RUN.lone1v1Paid = (RUN.lone1v1Paid | 0) + ps.length;
           console.log('  lone-1v1 pts ' + plog(sid) + ' ' + was + ' -> ' + cur + ' (' + ps.length + ' win(s) nobody else wrote, Q184)');
@@ -5253,22 +5377,23 @@ async function main() {
       checkpoint: () => saveEarlyMarks(true),   // R1-B2-03: after every points write (fine or refund), before the next exit can happen
       seedFor: (sid) => { const sk = skill0[pid(sid)] || ts.DEFAULTS; return seedLp(ts.displayRating(sk.mu, sk.sigma)); },
       readLp: lpId0 ? (async (sid) => {
-        const e = await readUserEntry(lpId0, sid, 'points');
-        if (e) return { score: e.score | 0, details: decodeDetails(e.detailData) };
+        const e = await lpRowOf(sid, 'points');   // O480: a row this run already wrote reads as written
+        if (e) return { score: e.score | 0, details: e.det };
         // lazy season-seed parity with the settle path: absent from the current season board ->
         // a previous-season entry soft-resets into the penalty base; none -> null (seedFor applies).
         if (prevLpId) {
           const pe = await readUserEntry(prevLpId, sid, 'prev points');
-          if (pe) return { score: softResetLp(pe.score | 0), details: null };
+          if (pe) return { score: softResetLp(pe.score | 0), details: null, seeded: true };
         }
         return null;
       }) : null,
-      writeLp: async (sid, score, details) => {
+      // ev (O480): { m, change, kind: 'fine' | 'refund', seeded } -> the points receipt of the write (a fine sets LEAVE, its refund
+      //   clears it; both add up with the match's settle on one entry)
+      writeLp: async (sid, score, details, ev) => {
         if (!APPLY_MMR) { console.log('  (dry-run) confession pts ' + plog(sid) + ' = ' + score); return true; }
-        // preserve an unread mismatch reveal exactly like the settle-path points write does
-        const detailsArr = (details && details.length >= 6 && (details[0] & 0xff) === RS_MAGIC) ? details.slice(0, 6) : null;
-        const r = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: lpId0, steamid: sid, score, scoremethod: 'ForceUpdate', format: 'json' }, detailsArr);
-        return r.ok && !(r.json && r.json.result && r.json.result.result && r.json.result.result !== 1);
+        const evs = ev ? [{ mh: mhOfKey(ev.m), change: ev.change, set: ev.kind === 'fine' ? (RECEIPT_F.LEAVE | (ev.seeded ? RECEIPT_F.SEEDED : 0)) : 0, clear: ev.kind === 'refund' ? RECEIPT_F.LEAVE : 0 }] : [];
+        // preserve an unread mismatch reveal exactly like the settle-path points write does (and the receipt ring, O480)
+        return (await writeLpRow(sid, score, details, null, evs)).ok;
       },
     });
     if (confRes.seen || confRes.refunded || confRes.finalized)
@@ -5472,6 +5597,8 @@ async function main() {
     // re-register it from the still-visible 0xB2 records and judge it again -- the consolation XP
     // repeated every maturity window.
     if (processed.size !== processedN0) saveProcessed(processed);
+    queueReceipts();   // O480: this run's receipts no write carried (a void, a never-settled match) wait for their player's next write
+    if (backlogDirty || Object.keys(lpBacklog).length) savePendingWrites(lpBacklog, nowMs);   // (a non-empty backlog also ages out)
   };
   // ladder-floor gate for gated catalog items: met on THIS season's ladder, else on any
   // archived season ladder (found-only -- never creates archives; a soft-reset can park a
@@ -5883,6 +6010,9 @@ async function main() {
     const br = await readBoardAll(lpId, 'points board');
     lpComplete = br.complete;
     for (const e of br.ents) { lp[e.steamID] = e.score | 0; lpDet[e.steamID] = decodeDetails(e.detailData); }
+    // O480: rows this run already wrote (a confession fine / refund, a lone-1V1 payment) read as written: the bulk read may not show
+    //   a write of seconds ago, and a later settle of the same player must build on it (his points and his receipt ring)
+    for (const sid of Object.keys(lpWritten)) { lp[sid] = lpWritten[sid].score; lpDet[sid] = lpWritten[sid].det; }
   }
   // XP ladder is optional: skip the whole XP path (no board, no state) if XP_LB is unset or the board is missing.
   const xpLb = XP_LB ? ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).find(x => String(x.name || x.Name) === XP_LB) : null;
@@ -6198,7 +6328,7 @@ async function main() {
       compDuoBest: compFam.DUO.best[sid], compDuoSeasonBest: compFam.DUO.seasonBest[sid], changedCompDuo: changedCompDuo[sid], changedCompDuoSeason: changedCompDuoSeason[sid],   // team ladder pools
       compTrioBest: compFam.TRIO.best[sid], compTrioSeasonBest: compFam.TRIO.seasonBest[sid], changedCompTrio: changedCompTrio[sid], changedCompTrioSeason: changedCompTrioSeason[sid],
       compQuadBest: compFam.QUAD.best[sid], compQuadSeasonBest: compFam.QUAD.seasonBest[sid], changedCompQuad: changedCompQuad[sid], changedCompQuadSeason: changedCompQuadSeason[sid],
-      careerDet: careerDet[sid], reveal: reveal[sid] };
+      careerDet: careerDet[sid], reveal: reveal[sid], receipts: scCloneOf(receipts[sid]) };   // O480: this run's points receipts
   };
   const scPut = (map, key, val) => { if (val === undefined) delete map[key]; else map[key] = val; };
   const scRestore = (pend) => {
@@ -6223,7 +6353,7 @@ async function main() {
       scPut(compFam.DUO.best, sn.sid, sn.compDuoBest); scPut(compFam.DUO.seasonBest, sn.sid, sn.compDuoSeasonBest); scPut(changedCompDuo, sn.sid, sn.changedCompDuo); scPut(changedCompDuoSeason, sn.sid, sn.changedCompDuoSeason);
       scPut(compFam.TRIO.best, sn.sid, sn.compTrioBest); scPut(compFam.TRIO.seasonBest, sn.sid, sn.compTrioSeasonBest); scPut(changedCompTrio, sn.sid, sn.changedCompTrio); scPut(changedCompTrioSeason, sn.sid, sn.changedCompTrioSeason);
       scPut(compFam.QUAD.best, sn.sid, sn.compQuadBest); scPut(compFam.QUAD.seasonBest, sn.sid, sn.compQuadSeasonBest); scPut(changedCompQuad, sn.sid, sn.changedCompQuad); scPut(changedCompQuadSeason, sn.sid, sn.changedCompQuadSeason);
-      scPut(careerDet, sn.sid, sn.careerDet); scPut(reveal, sn.sid, sn.reveal);
+      scPut(careerDet, sn.sid, sn.careerDet); scPut(reveal, sn.sid, sn.reveal); scPut(receipts, sn.sid, sn.receipts);
       console.log('  seedcap reject ' + pend.m + ': ' + plog(sn.sid) + ' settlement discarded (state restored)');
     }
   };
@@ -7124,6 +7254,9 @@ async function main() {
     if (cpId) creditCp(g, matchType, rankOf, cp, changedCp);
     if (c.void) {
       recordMatchSignals(signals, g, parts, null, matchType, true, nowMs); sigDirty = true;   // co-presence + void counters (dodge-ring history)
+      // O480: every account of a voided ranked match gets a VOID receipt (delta 0): its client rolls the optimistic points back.
+      //   A void writes nobody's row: the receipt rides the player's next points write (the backlog keeps it meanwhile)
+      if (lpId && appliesLp(matchType)) for (const sid of groupSids(g)) noteReceipt(sid, g[0].d[3] | 0, 0, RECEIPT_F.VOID, 0);
       console.log('  VOID ' + c.m + ': consensus -> no MMR/points'); processed.add(c.m); voided++; continue;
     }
     if (parts.length < 2) { processed.add(c.m); continue; }
@@ -7303,6 +7436,7 @@ async function main() {
           + (rep ? ', repeated' : '') + (unw ? ', more lower places unwritten than written' : '') + '; counted, nobody flagged (Q174)');
       }
     }
+    let seededSet = null;   // O480: the players this settle seeded (seededNow below), for the leaver fine's points receipt
     // ===== playtest channel: no rating/points surface (lock layer 3) -- the TrueSkill update,
     // placement seeding, group-decay memory and every points write are skipped wholesale, so
     // skill.json/groups.json stay untouched and the changed/changedLp pools stay empty. The
@@ -7323,6 +7457,7 @@ async function main() {
       //   moved off rankedGamesPlayed===0 -- a VOID first match now seeds NEITHER end, keeping the
       //   crossline skip aligned settle for settle), so both ends skip the same settle.
       const seededNow = new Set();
+      seededSet = seededNow;
       if (lpId && appliesLp(matchType)) {
         // lazy season seed (first settle this season): previous-season entry soft-resets in, else
         // display-derived placement seed (seasonSeedLp priority). A prev-board read FAILURE aborts
@@ -7550,6 +7685,8 @@ async function main() {
           const sl = settleLine(cur, rs, rankOf[r.id], parts.length, seededNow.has(r.id));
           const d0 = sl.d0, wonLike = sl.won, d = sl.d, nv = sl.nv;
           lp[r.id] = nv; changedLp[r.id] = nv; lpMoved[r.id] = nv - cur;
+          // O480: the match's points receipt on his row (what this settle moved, why: reveal flag / series clamp / seeded)
+          noteReceipt(r.id, g[0].d[3] | 0, nv - cur, ((rs && rs.flag) & RECEIPT_F.RS) | (d !== d0 ? RECEIPT_F.SERIES : 0) | (seededNow.has(r.id) ? RECEIPT_F.SEEDED : 0), 0xff);
           if (rs && rs.flag) reveal[r.id] = { matchHash: g[0].d[3] | 0, seed: g[0].d[4] | 0, flag: rs.flag, adjDelta: d, normalDelta: rs.normalDelta };
           lpLine = ' | pts ' + cur + (d >= 0 ? '+' : '') + d + '->' + nv + (rs && rs.flag ? (' [' + (rs.flag === 1 ? 'UPSET' : 'PROTECTED') + ' normal ' + rs.normalDelta + ']') : '')
             + (d !== d0 ? (' [SERIES ' + (wonLike ? 'PROMOTED' : 'RELEGATED') + ' from ' + d0 + ']') : '');
@@ -7634,6 +7771,7 @@ async function main() {
         const cur = lp[x.steamID] == null ? 0 : lp[x.steamID];
         const nv = leaverLpPenalty(cur, LEAVER_LP_PENALTY);
         if (nv !== cur) { lp[x.steamID] = nv; changedLp[x.steamID] = nv; confState[cvKey].ded = cur - nv; }
+        noteReceipt(x.steamID, g[0].d[3] | 0, nv - cur, RECEIPT_F.LEAVE | (seededSet && seededSet.has(x.steamID) ? RECEIPT_F.SEEDED : 0), 0);   // O480
         console.log('  leaver LP ' + c.m + ': ' + plog(x.steamID) + ' pts ' + cur + '-' + LEAVER_LP_PENALTY + '->' + nv);
       }
     }
@@ -7717,18 +7855,22 @@ async function main() {
     else console.log('  ok rating ' + plog(sid) + ' = ' + disp + ' (mu=' + mu.toFixed(2) + ' sigma=' + sigma.toFixed(2) + ') plan ' + planRating);
     return okFlag;
   });
+  // points writes. O480: each carries the player's receipts (his queued ones, this run's: writeLpRow); a player whose points did
+  //   not move this run gets no write (his receipts wait in the backlog for his next one)
+  let receiptN = 0;
   const wPoints = await mapPool(Object.keys(changedLp), CONCURRENCY, async (sid) => {
     // reveal details: this run's flagged outcome if any, else preserve an existing unread reveal (don't clobber it with a normal-match LP write).
     const rv = reveal[sid];
-    const prev = lpDet[sid];
-    const detailsArr = rv ? [RS_MAGIC, rv.matchHash, rv.seed, rv.flag, rv.adjDelta, rv.normalDelta]
-      : (prev && prev.length >= 6 && (prev[0] & 0xff) === RS_MAGIC ? prev.slice(0, 6) : null);
-    const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: lpId, steamid: sid, score: changedLp[sid], scoremethod: 'ForceUpdate', format: 'json' }, detailsArr);
+    const w = await writeLpRow(sid, changedLp[sid], lpDet[sid], rv, []);
+    const res = w.res;
     const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
     if (!okFlag) ghWarn('write points ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
-    else console.log('  ok points ' + plog(sid) + ' = ' + changedLp[sid] + (rv ? (' [reveal ' + (rv.flag === 1 ? 'UPSET' : 'PROTECTED') + ']') : ''));
+    else { receiptN += w.n; console.log('  ok points ' + plog(sid) + ' = ' + changedLp[sid] + (rv ? (' [reveal ' + (rv.flag === 1 ? 'UPSET' : 'PROTECTED') + ']') : '') + (w.n ? (' [' + w.n + ' receipt' + (w.n > 1 ? 's' : '') + (w.queued ? ', ' + w.queued + ' queued before' : '') + ']') : '')); }
     return okFlag;
   });
+  if (receiptN) console.log('receipts: ' + receiptN + ' written on ' + Object.keys(changedLp).length + ' points row(s)');
+  queueReceipts();   // the rest (a void, a failed write) wait for their player's next points write
+  if (backlogDirty || Object.keys(lpBacklog).length) savePendingWrites(lpBacklog, nowMs);
   // Q228: a conviction's entry counts only what landed -- no fine when his points write failed, no gain of a player whose
   //   write failed
   if (lateCv.length) {
@@ -8050,3 +8192,4 @@ Object.assign(module.exports, { pruneFlagged, flagBaseKey, FLAG_PRUNE_WAIT_MS, b
 Object.assign(module.exports, { teamXpFloor, teamXpStarts, teamXpMark, teamRollbackPlan });   // cloud audit Q237 team competitive XP floors (test/team-comp-ghost-xp.js)
 Object.assign(module.exports, { RATING, RATING_FAMS, ENDLESS_RATING_LB_SOLO, ENDLESS_RATING_LB_DUO, ENDLESS_RATING_LB_TRIO, ENDLESS_RATING_LB_QUAD, ENDLESS_TIERCUT_LB, ratingFamOf, fnv32, ratingRunId, ratingHistKey,
   ratingHistUpsert, ratingHistRemove, ratingScoreOf, ratingPlan, ratingCutsOf, ratingTierOf, tiercutDay, tiercutEncode, tiercutDecode, tiercutDue, pruneRatingHist });   // O103 endless competitive rating (client knife 5.1a; test/endless-rating.js)
+Object.assign(module.exports, { lpWriteDetails, mhOfKey, groupSids, prunePendingWrites, PENDING_WRITES_FILE, RECEIPT_HOLD_MS });   // O480 points receipts + backlog (test/receipt-ring.js)

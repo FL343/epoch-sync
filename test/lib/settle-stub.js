@@ -107,8 +107,11 @@ function advance(state, ms) {
   if (gr) for (const k of Object.keys(gr)) if (gr[k] && gr[k].at) gr[k].at -= ms;
   const cf = files.CONFESSIONS_FILE;
   if (cf) for (const k of Object.keys(cf)) if (cf[k] && cf[k].t0) cf[k].t0 -= ms;
-  const pw = files.PENDING_WRITES_FILE;
-  if (pw) for (const k of Object.keys(pw)) if (pw[k] && pw[k].t) pw[k].t -= ms;
+  const pw = files.PENDING_WRITES_FILE;   // O480 points-row backlog: queued receipts [mh, change, set, clear, t], a failed write's w.t
+  if (pw) for (const k of Object.keys(pw)) {
+    if (pw[k] && Array.isArray(pw[k].rc)) for (const x of pw[k].rc) if (Array.isArray(x)) x[4] -= ms;
+    if (pw[k] && pw[k].w && pw[k].w.t) pw[k].w.t -= ms;
+  }
   return files;
 }
 const setPosts = (r, boardId) => r.posts.filter((p) => /SetLeaderboardScore/.test(p.url) && new RegExp('leaderboardid=' + boardId + '(&|$)').test(p.body));

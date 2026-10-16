@@ -275,7 +275,7 @@ console.log('-- [6] checkpoint contract --');
   pin('early marks honor the dry-run switch', /const saveEarlyMarks = \(leaversDirty\) => \{\s*\n\s*if \(!APPLY_MMR\) return;/);
   pin('early marks save starts, a COPY of confessions, leavers on demand, processed on growth', /if \(!APPLY_MMR\) return;\s*\n\s*saveStarts\(startsPending\);\s*\n\s*saveConfessions\(Object\.assign\(\{\}, confState\), nowMs, confLive\);\s*\n\s*if \(leaversDirty\) saveLeavers\(leavers\);\s*\n\s*if \(processed\.size !== processedN0\) saveProcessed\(processed\);/);
   pin('confession path gets the checkpoint', /checkpoint: \(\) => saveEarlyMarks\(true\),/);
-  pin('checkpoint after the fine write', /const okW = await opts\.writeLp\(String\(c\.steamID\), nv, e && e\.details\);\s*\n[^\n]*\n\s*if \(opts\.checkpoint\) opts\.checkpoint\(\);/);
+  pin('checkpoint after the fine write', /const okW = await opts\.writeLp\(String\(c\.steamID\), nv, e && e\.details(, \{[^\n]*\})?\);\s*\n[^\n]*\n\s*if \(opts\.checkpoint\) opts\.checkpoint\(\);/);   // O480: + the receipt argument
   pin('checkpoint after the refund write', /st\.refunded = 1;\s*\n\s*if \(wrote && opts\.checkpoint\) opts\.checkpoint\(\);/);
   pin('main-path tail save stays ahead of the trust / redeem upkeep (persist then keeps it on their exits)', /\n  saveProcessed\(processed\);\s*\n\s*saveSkill\(skill\);[\s\S]{0,600}?\n  await maintainTrust\(\);\s*\n[\s\S]{0,300}?await processRedeems\(cp\);/);
 

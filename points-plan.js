@@ -361,6 +361,56 @@
     if (!Array.isArray(det) || det.length < 3 || (det[0] & 0xff) !== RATING_MAGIC) return null;
     return { rating: det[1] | 0, rulesVer: det[2] | 0 };
   }
+  // ---- points receipts on the player's own points-board row (O480) ----
+  //   lp row details = [the RS reveal slot: 6 ints (an RS_MAGIC reveal, or six zeros)] + [RECEIPT_MAGIC, n, (matchHash, delta,
+  //   flags) x n]: the n <= RECEIPT_CAP newest matches that moved, or voided, the player's points on this board, newest first.
+  //   delta = the net change the match caused on this board while its entry stays in the ring (a fine, its refund and the settle
+  //   of the same match add up on one entry); flags: the low byte = RECEIPT_F bits, bits 8..23 = the RULES_VER of the job that
+  //   touched the entry last. A row from before O480 (no details, or the reveal alone) reads as an empty ring.
+  //   RECEIPT_F: RS = the settle's reveal flag (1 upset, 2 protected); LEAVE = a leaver fine is in delta; SERIES = the series clamp
+  //   moved the settle's delta; SEEDED = the settle seeded his points (delta counts from the seed, not from a row); VOID = the match
+  //   moved nobody's points (a consensus void, or never settled); RULES = the entry after it in the ring was written under
+  //   another RULES_VER (the first receipt after a rules change); COMP = a compensation (reserved).
+  const RECEIPT_MAGIC = 0xC6, RECEIPT_CAP = 8, RS_SLOT = 6;
+  const RECEIPT_F = Object.freeze({ RS: 3, LEAVE: 4, SERIES: 8, SEEDED: 16, VOID: 32, RULES: 64, COMP: 128 });
+  function receiptVer(flags) { return ((flags | 0) >>> 8) & 0xffff; }
+  // { rs: the 6-int reveal or null, ring: [{ mh, delta, flags }] newest first } of a row's details
+  function lpDetailsOf(det) {
+    const d = Array.isArray(det) ? det : [];
+    const rs = (d.length >= RS_SLOT && (d[0] & 0xff) === RS_MAGIC) ? d.slice(0, RS_SLOT).map((x) => x | 0) : null;
+    const ring = [];
+    if (d.length >= RS_SLOT + 2 && (d[RS_SLOT] & 0xff) === RECEIPT_MAGIC) {
+      const n = Math.min(RECEIPT_CAP, Math.max(0, d[RS_SLOT + 1] | 0));
+      for (let i = 0; i < n && RS_SLOT + 4 + 3 * i < d.length; i++) {
+        const o = RS_SLOT + 2 + 3 * i;
+        ring.push({ mh: d[o] | 0, delta: d[o + 1] | 0, flags: d[o + 2] | 0 });
+      }
+    }
+    return { rs, ring };
+  }
+  // the details a points write carries: the reveal slot (rs, or zeros) then the ring
+  function lpDetails(rs, ring) {
+    const r = (ring || []).slice(0, RECEIPT_CAP);
+    const out = (rs && rs.length >= RS_SLOT) ? rs.slice(0, RS_SLOT).map((x) => x | 0) : [0, 0, 0, 0, 0, 0];
+    out.push(RECEIPT_MAGIC, r.length);
+    for (const e of r) out.push(e.mh | 0, e.delta | 0, e.flags | 0);
+    return out;
+  }
+  // one event of match mh on the ring: change = the points it moved (0 for a void); set / clear = the RECEIPT_F bits it sets /
+  //   clears (a settle passes clear 0xff: its flags replace the entry's; a refund clears LEAVE). The entry moves to the front
+  //   carrying the net delta; past RECEIPT_CAP the oldest drops. Returns a new ring.
+  function receiptPush(ring, mh, change, set, clear) {
+    const r = Array.isArray(ring) ? ring : [];
+    const key = mh | 0;
+    const old = r.find((e) => (e.mh | 0) === key) || null;
+    const rest = r.filter((e) => (e.mh | 0) !== key);
+    let low = (((old ? (old.flags & 0xff) & ~(clear | 0) : 0) | (set | 0)) & 0xff) & ~RECEIPT_F.RULES;
+    if (rest.length && receiptVer(rest[0].flags) !== (RULES_VER & 0xffff)) low |= RECEIPT_F.RULES;
+    const e = { mh: key, delta: ((old ? old.delta | 0 : 0) + (change | 0)) | 0, flags: low | ((RULES_VER & 0xffff) << 8) };
+    return [e].concat(rest).slice(0, RECEIPT_CAP);
+  }
+  // the receipt of match mh on a row's details, or null
+  function receiptOf(det, mh) { return lpDetailsOf(det).ring.find((e) => e.mh === (mh | 0)) || null; }
   // configure({ NAME: value }): the job hands its environment overrides in here (validate.js passes process.env.<NAME>). A missing,
   //   null or empty value keeps the default, anything else reads as Number(value) -- the reading of the job's old
   //   `Number(process.env.NAME || default)`. Returns the names whose value now differs from the default.
@@ -379,6 +429,7 @@
     baseMt, premadeMaskOf, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, appliesLp, isTeamMt,
     leaverLpPenalty, RS_MAGIC, reducedStakesPlan, teamLpPlan,
     RATING_MAGIC, ratingDetails, ratingDetailsOf,
+    RECEIPT_MAGIC, RECEIPT_CAP, RS_SLOT, RECEIPT_F, receiptVer, lpDetailsOf, lpDetails, receiptPush, receiptOf,
   }, knobs());
   return api;
 });
