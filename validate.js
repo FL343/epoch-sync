@@ -19,7 +19,7 @@ const PP_OVERRIDES = pointsPlan.configure({ RS_THRESHOLD: process.env.RS_THRESHO
 const { RULES_VER, LP_MAX, LP_SEG, lpSeg, LP_SEED, seedLp, SOFT_RESET, softResetLp, seasonSeedLp, lpDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND,
   boundaryOf, crosslineDelta, matchPlan, settleLine, baseMt, premadeMaskOf, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, appliesLp, isTeamMt, leaverLpPenalty,
   RS_MAGIC, reducedStakesPlan, teamLpPlan, RS_THRESHOLD, RS_UPSET_BONUS, RS_STRONG_UPSET_LOSS, RS_SOLO_VS_TRIO, RS_TRIO_WIN, LEAVER_LP_PENALTY,
-  ratingDetails, RECEIPT_F, lpDetailsOf, lpDetails, receiptPush } = pointsPlan;
+  ratingDetails, RECEIPT_F, lpDetailsOf, lpDetails, receiptPush, pulseDetails } = pointsPlan;
 // O480 points receipts: the details of every points-board write = the RS reveal slot (rv = this run's flagged outcome { matchHash,
 //   seed, flag, adjDelta, normalDelta }, else the unread reveal already on the row, kept as before) + the receipt ring (the row's
 //   ring with this run's events of the player applied in order: { mh, change, set, clear }, see points-plan.js receiptPush). Every
@@ -38,6 +38,7 @@ const mhOfKey = (m) => parseInt(String(m), 10) | 0;   // a match key starts with
 //   before it rolls the match back on its own; past it they are dropped. De-identified like every state file (pid keys); a
 //   matchHash is the key the start rosters in starts.json carry already.
 const PENDING_WRITES_FILE = process.env.PENDING_WRITES_FILE || 'pending-writes.json';
+const CRON_PULSE_LB = process.env.CRON_PULSE_LB || '';   // O480 cron_pulse board name (unset: cron_pulse, cron_pulse_test in a sandbox run; see writePulse)
 const RECEIPT_HOLD_MS = Math.max(0, Number(process.env.RECEIPT_HOLD_MS || 6 * 3600 * 1000));
 const RECEIPT_QUEUE_CAP = 8;   // per player, as many as a ring holds (the newest kept)
 function loadPendingWrites() {
@@ -2475,6 +2476,7 @@ function writeRunSummary() {
       "| friends' room / bot match keys held past maturity by results on two tables: two tables or more, each on a key of its own / one table, on a key of its own, the others' results left out / no writer on one table, still held (Q214, Q220) | " + s('tableSplit', 0) + ' / ' + s('tableOne', 0) + ' / ' + s('tableHeld', 0) + ' |',
       '| campaign grants / campaign endless | ' + s('campaign', '-') + ' / ' + s('campaignEndless', '-') + ' |',
       '| page-cap hits | ' + RUN.cap + ' |',
+      '| points receipts written / queued for a later write; cron pulse (O480) | ' + s('receipts', 0) + ' / ' + s('receiptsQueued', 0) + '; ' + s('pulse', '-') + ' |',
       '| solo segments held by the key policy (other channel / retired key; new this run) | ' + s('keyHeld', 0) + ' (' + s('keyHeldNew', 0) + ') |',
       '| duration | ' + ((Date.now() - (RUN.t0 || Date.now())) / 1000).toFixed(1) + 's |',
       '',
@@ -5036,6 +5038,32 @@ async function main() {
     if (n) { console.log('receipts: ' + n + ' queued for their player\'s next points write (no points write of his this run)'); RUN.receiptsQueued = (RUN.receiptsQueued | 0) + n; }
     return n;
   };
+  // ---- O480 cron_pulse (test/cron-pulse.js) ----
+  //   One row on its own board per channel app id (a sandbox run: cron_pulse_test): score = the unix minute this run reached its
+  //   end -- every successful exit writes it, a run that fails before writes nothing -- and details [0xCE, RULES_VER]
+  //   (points-plan.js pulseDetails). The client reads it on idle screens: a pulse a few ticks old = the job is behind (points stay
+  //   "to be confirmed"), a RULES_VER other than its own = the rules moved since its build (the same). Carrier account: the
+  //   tier-cut rule -- TIERCUT_CARRIER_SID, else the account already on the row, else the one carrying this app's version_gate
+  //   row; with none nothing is written and no board is created.
+  const writePulse = async () => {
+    if (!APPLY_MMR) return;
+    const name = CRON_PULSE_LB || (sandboxOn() ? 'cron_pulse_test' : 'cron_pulse');
+    const list0 = (lr.json && lr.json.response && lr.json.response.leaderboards) || [];
+    const byName0 = (nm) => { const f = list0.find((x) => String(x.name || x.Name) === nm); return f ? (f.id || f.ID) : null; };
+    let id = byName0(name), carrier = TIERCUT_CARRIER_SID || null;
+    try {
+      if (!carrier && id) { const br = await readBoardAll(id, 'cron pulse board'); if (br.ents[0]) carrier = String(br.ents[0].steamID); }
+      if (!carrier) { const vg = byName0('version_gate'); if (vg) { const br = await readBoardAll(vg, 'version gate board'); if (br.ents[0]) carrier = String(br.ents[0].steamID); } }
+    } catch (e) { ghWarn('cron pulse: carrier read failed (' + (e && e.message) + ') -- not written this run'); RUN.pulse = 'read failed'; return; }
+    if (!carrier) { console.log('cron pulse: no carrier account (set TIERCUT_CARRIER_SID or provision version_gate) -- not written'); RUN.pulse = 'no carrier'; return; }
+    if (!id) { try { id = await findOrCreateBoard(name, true); } catch (e) { id = null; } }
+    if (!id) { ghWarn('cron pulse: board ' + name + ' unresolved -- not written'); RUN.pulse = 'no board'; return; }
+    const minute = Math.floor(Date.now() / 60000);
+    const r = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: id, steamid: carrier, score: minute, scoremethod: 'ForceUpdate', format: 'json' }, pulseDetails());
+    const ok = r.ok && !(r.json && r.json.result && r.json.result.result && r.json.result.result !== 1);
+    if (ok) { RUN.pulse = String(minute); console.log('cron pulse: ' + name + ' = minute ' + minute + ', rules ' + RULES_VER); }
+    else { RUN.pulse = 'write failed'; ghWarn('cron pulse: write failed HTTP ' + r.status + ' ' + String(r.text).slice(0, 140)); }
+  };
   const ALLOW_TEST = process.env.ALLOW_TEST === '1';
   const listedShards = ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).filter(x => { const n = String(x.name || x.Name); return n.indexOf(PREFIX) === 0 && (ALLOW_TEST || n.indexOf('test') < 0); });
   // R1-B2-04 / O348-3: the shard set is PREFIX+0..N-1, checked against the listing (shardPlan)
@@ -5989,11 +6017,11 @@ async function main() {
   const PT_MODE_MAIL_OFF = false;
 
   RUN.consistent = consistentMatches.length;
-  if (consistentMatches.length === 0) { console.log('no consistent matches'); persistStartsSide(); await maintainTrust(); await maintainRating(loadSolo(), new Set()); await processRedeems(null); await processCampaignGrants(); await processCampaignEndless(); await processChatMute(); await processSupporters(null, []); writeRunSummary(); return; }
+  if (consistentMatches.length === 0) { console.log('no consistent matches'); persistStartsSide(); await maintainTrust(); await maintainRating(loadSolo(), new Set()); await processRedeems(null); await processCampaignGrants(); await processCampaignEndless(); await processChatMute(); await writePulse(); await processSupporters(null, []); writeRunSummary(); return; }
   const fresh = consistentMatches.filter(c => !processed.has(c.m));
   RUN.fresh = fresh.length;
   console.log(consistentMatches.length + ' consistent, ' + fresh.length + ' fresh (settled ' + (consistentMatches.length - fresh.length) + ')');
-  if (fresh.length === 0) { console.log('no fresh matches, skip'); persistStartsSide(); await maintainTrust(); await maintainRating(loadSolo(), new Set()); await processRedeems(null); await processCampaignGrants(); await processCampaignEndless(); await processChatMute(); await processSupporters(null, []); writeRunSummary(); return; }
+  if (fresh.length === 0) { console.log('no fresh matches, skip'); persistStartsSide(); await maintainTrust(); await maintainRating(loadSolo(), new Set()); await processRedeems(null); await processCampaignGrants(); await processCampaignEndless(); await processChatMute(); await writePulse(); await processSupporters(null, []); writeRunSummary(); return; }
 
   // playtest channel: no rating board exists (and must not -- lock layer 3); the TrueSkill
   // update block below is skipped wholesale, so the id is never consulted.
@@ -8145,6 +8173,7 @@ async function main() {
   console.log('written: rating ' + rOk + '/' + wRating.length + ', points ' + pOk + '/' + wPoints.length + ', xp ' + xOk + '/' + wXp.length + ', cp ' + cOk + '/' + wCp.length + ', endless ' + eOk + '/' + wEndless.length + (wEndlessSeason.length ? (' (+season ' + esOk + '/' + wEndlessSeason.length + ')') : '') + (wEndlessTrio.length ? (' (+trio ' + etOk + '/' + wEndlessTrio.length + ')') : '') + (wEndlessTrioSeason.length ? (' (+trio-season ' + etsOk + '/' + wEndlessTrioSeason.length + ')') : '') + (wEndlessQuad.length ? (' (+quad ' + eqOk + '/' + wEndlessQuad.length + ')') : '') + (wEndlessQuadSeason.length ? (' (+quad-season ' + eqsOk + '/' + wEndlessQuadSeason.length + ')') : '') + (wEndlessSolo.length ? (' (+solo ' + esoOk + '/' + wEndlessSolo.length + ')') : '') + (wEndlessSoloSeason.length ? (' (+solo-season ' + esosOk + '/' + wEndlessSoloSeason.length + ')') : '') + ', state updated (idempotent)');
   RUN.writes = rOk + '/' + wRating.length + ' ' + pOk + '/' + wPoints.length + ' ' + xOk + '/' + wXp.length;
   RUN.writesEndless = cOk + '/' + wCp.length + ' ' + eOk + '/' + wEndless.length + (wEndlessSeason.length ? ('+' + esOk + '/' + wEndlessSeason.length) : '') + (wEndlessTrio.length ? ('+t' + etOk + '/' + wEndlessTrio.length) : '') + (wEndlessQuad.length ? ('+q' + eqOk + '/' + wEndlessQuad.length) : '') + (wEndlessSolo.length ? ('+s' + esoOk + '/' + wEndlessSolo.length) : '');
+  await writePulse();   // O480: the run reached its end
   writeRunSummary();
 }
 

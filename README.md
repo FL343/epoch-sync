@@ -163,6 +163,16 @@ absent, so a run is unaffected before it is provisioned.
   codes, mismatch UPSET / PROTECTED, the series clamp, seeds, the leaver fine, the board bounds) that
   both repos replay (`test/points-plan-fixtures.js` here); `tools/gen-points-fixtures.js` regenerates
   them with a rules change and prints the `FIXTURES_HASH` the module must carry.
+- Points receipts and the pulse (O480): every rating row carries `[0xCD, plan rating, RULES_VER, 0]`
+  (the rating the points plan reads for that player); every points row carries the RS reveal slot (6
+  ints, zeros when none) then a receipt ring `[0xC6, n, (matchHash, delta, flags) x n <= 8]`, newest first:
+  what each recent match did to the player's points (net delta; flags = reveal / leaver fine / series
+  clamp / seeded / void / first under new rules; bits 8..23 = RULES_VER). Every points-board write goes
+  through one writer, so neither part is ever dropped. A void writes nobody's row: its VOID receipt
+  waits in `pending-writes.json` (pid keys, at most 8 per account, 6 h) for the player's next points
+  write. One `cron_pulse` row per channel (score = the unix minute a run reached its end, details
+  `[0xCE, RULES_VER]`; carrier = the tier-cut carrier rule) tells a client the job is alive and which
+  rules it runs. Tests: `test/rating-details.js`, `test/receipt-ring.js`, `test/cron-pulse.js`.
 - `test/void-consensus.js`, `test/leaver-absence.js`, `test/lp-penalty.js`,
   `test/xp-ladder.js`, `test/reduced-stakes.js`, `test/team-rank.js`, `test/team-lp.js`,
   `test/start-orphan.js`, `test/sanity-bounds.js`, `test/signals-collect.js`,
@@ -225,7 +235,8 @@ flag dedup + daily settle counters), `groups.json` (per-player recent-opponents 
 the repeat-group rating decay — consecutive matches against mostly the same people update
 TrueSkill at x1/x0.5/x0.25/x0; TTL-scoped, points/XP untouched), `confessions.json`
 (pending abandon confessions: immediate leaver penalty at quit time, refunded if the
-confessor later settles the same match — amounts only, no identities). Player identifiers in
+confessor later settles the same match — amounts only, no identities), `pending-writes.json`
+(O480: points receipts waiting for their player's next points write). Player identifiers in
 state are stored as keyed hashes, never raw IDs.
 
 ## Configuration
@@ -250,6 +261,9 @@ between board read retries, default 8 s; tests set 0),
 (signal-collection state path, rolling windows, size fuse),
 `GROUPS_FILE` (repeat-group decay state path, default `groups.json`),
 `CONFESSIONS_FILE` (pending abandon-confession state path, default `confessions.json`),
+`PENDING_WRITES_FILE` / `RECEIPT_HOLD_MS` (O480 points-row backlog path, default `pending-writes.json`; how long a
+queued receipt waits, default 6 h), `CRON_PULSE_LB` (O480 pulse board, default `cron_pulse`, `cron_pulse_test` in a
+sandbox run),
 `T2LD_K` / `T2LD_K_HARD` / `T2LD_WINDOW_MS` (team-gamble lone dissent: strikes that convict, total
 strike cap whatever the host, rolling window; defaults 2 / 4 / 30 days),
 `T2LH_WINDOW_MS` / `TRUST_HD1` / `TRUST_HD2` (team-gamble host charges: rolling window, and the

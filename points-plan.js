@@ -411,6 +411,15 @@
   }
   // the receipt of match mh on a row's details, or null
   function receiptOf(det, mh) { return lpDetailsOf(det).ring.find((e) => e.mh === (mh | 0)) || null; }
+  // ---- the job's pulse (O480): one cron_pulse row per channel ----
+  //   score = the unix minute a run of the job reached its end; details = [PULSE_MAGIC, RULES_VER]. A client reads it on idle
+  //   screens: a pulse a few ticks old = the job is behind, a RULES_VER other than its own = the rules moved since its build.
+  const PULSE_MAGIC = 0xCE;
+  function pulseDetails() { return [PULSE_MAGIC, RULES_VER]; }
+  function pulseOf(score, det) {
+    if (!Array.isArray(det) || det.length < 2 || (det[0] & 0xff) !== PULSE_MAGIC) return null;
+    return { minute: score | 0, rulesVer: det[1] | 0 };
+  }
   // configure({ NAME: value }): the job hands its environment overrides in here (validate.js passes process.env.<NAME>). A missing,
   //   null or empty value keeps the default, anything else reads as Number(value) -- the reading of the job's old
   //   `Number(process.env.NAME || default)`. Returns the names whose value now differs from the default.
@@ -430,6 +439,7 @@
     leaverLpPenalty, RS_MAGIC, reducedStakesPlan, teamLpPlan,
     RATING_MAGIC, ratingDetails, ratingDetailsOf,
     RECEIPT_MAGIC, RECEIPT_CAP, RS_SLOT, RECEIPT_F, receiptVer, lpDetailsOf, lpDetails, receiptPush, receiptOf,
+    PULSE_MAGIC, pulseDetails, pulseOf,
   }, knobs());
   return api;
 });
