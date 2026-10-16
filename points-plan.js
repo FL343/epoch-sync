@@ -350,6 +350,17 @@
     const d = ((plan && plan.flag === 2) || seeded) ? d0 : crosslineDelta(cur, d0, won);
     return { d0, d, won, nv: Math.max(0, Math.min(LP_MAX, cur + d)) };
   }
+  // ---- the rating the points plan reads, on the player's rating-board row (O480) ----
+  //   rating-board details = [RATING_MAGIC, rating, RULES_VER, 0]: rating = the display rating the next ranked settle feeds this
+  //   player's mismatch check (his ranked rating; the stored one until he has one). The row's score stays the stored rating after
+  //   the repeat-group decay, a different number. A row written before O480 carries no details: ratingDetailsOf() gives null and
+  //   the reader falls back to the score.
+  const RATING_MAGIC = 0xCD;
+  function ratingDetails(rating) { return [RATING_MAGIC, rating | 0, RULES_VER, 0]; }
+  function ratingDetailsOf(det) {
+    if (!Array.isArray(det) || det.length < 3 || (det[0] & 0xff) !== RATING_MAGIC) return null;
+    return { rating: det[1] | 0, rulesVer: det[2] | 0 };
+  }
   // configure({ NAME: value }): the job hands its environment overrides in here (validate.js passes process.env.<NAME>). A missing,
   //   null or empty value keeps the default, anything else reads as Number(value) -- the reading of the job's old
   //   `Number(process.env.NAME || default)`. Returns the names whose value now differs from the default.
@@ -367,6 +378,7 @@
     BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, boundaryOf, crosslineDelta, matchPlan, settleLine,
     baseMt, premadeMaskOf, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, appliesLp, isTeamMt,
     leaverLpPenalty, RS_MAGIC, reducedStakesPlan, teamLpPlan,
+    RATING_MAGIC, ratingDetails, ratingDetailsOf,
   }, knobs());
   return api;
 });

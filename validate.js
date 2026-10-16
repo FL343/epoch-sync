@@ -18,7 +18,8 @@ const PP_OVERRIDES = pointsPlan.configure({ RS_THRESHOLD: process.env.RS_THRESHO
   LEAVER_LP_PENALTY: process.env.LEAVER_LP_PENALTY });
 const { RULES_VER, LP_MAX, LP_SEG, lpSeg, LP_SEED, seedLp, SOFT_RESET, softResetLp, seasonSeedLp, lpDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND,
   boundaryOf, crosslineDelta, matchPlan, settleLine, baseMt, premadeMaskOf, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, appliesLp, isTeamMt, leaverLpPenalty,
-  RS_MAGIC, reducedStakesPlan, teamLpPlan, RS_THRESHOLD, RS_UPSET_BONUS, RS_STRONG_UPSET_LOSS, RS_SOLO_VS_TRIO, RS_TRIO_WIN, LEAVER_LP_PENALTY } = pointsPlan;
+  RS_MAGIC, reducedStakesPlan, teamLpPlan, RS_THRESHOLD, RS_UPSET_BONUS, RS_STRONG_UPSET_LOSS, RS_SOLO_VS_TRIO, RS_TRIO_WIN, LEAVER_LP_PENALTY,
+  ratingDetails } = pointsPlan;
 
 const APPID = Number(process.env.APPID);
 const PREFIX = process.env.LB_PREFIX;
@@ -7701,13 +7702,19 @@ async function main() {
     }
     if (signals.seedcapApplied.length > 400) signals.seedcapApplied = signals.seedcapApplied.slice(-400);
   }
+  // O480: the rating row also carries the rating the next ranked settle's points plan reads for the player (his ranked rating, the
+  //   stored one until he has one; points-plan.js ratingDetails), so the client can run the same plan over its opponents.
+  //   Residual: a losing leaver whose ranked rating moved alone (Q167 rework: stored rating unchanged, no rating write) publishes
+  //   the new value at his next rated settle; until then his opponents' clients read the one before (a rare "corrected" result).
   const wRating = await mapPool(Object.keys(changed), CONCURRENCY, async (sid) => {
     const mu = changed[sid].mu, sigma = changed[sid].sigma;
     const disp = ts.displayRating(mu, sigma);
-    const res = await postForm('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: rankedId, steamid: sid, score: disp, scoremethod: 'ForceUpdate', format: 'json' });
+    const rr = rankedRatingOf(skill[pid(sid)]);
+    const planRating = rr ? ts.displayRating(rr.mu, rr.sigma) : disp;
+    const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: rankedId, steamid: sid, score: disp, scoremethod: 'ForceUpdate', format: 'json' }, ratingDetails(planRating));
     const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
     if (!okFlag) ghWarn('write rating ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
-    else console.log('  ok rating ' + plog(sid) + ' = ' + disp + ' (mu=' + mu.toFixed(2) + ' sigma=' + sigma.toFixed(2) + ')');
+    else console.log('  ok rating ' + plog(sid) + ' = ' + disp + ' (mu=' + mu.toFixed(2) + ' sigma=' + sigma.toFixed(2) + ') plan ' + planRating);
     return okFlag;
   });
   const wPoints = await mapPool(Object.keys(changedLp), CONCURRENCY, async (sid) => {
