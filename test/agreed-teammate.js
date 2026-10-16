@@ -188,7 +188,8 @@ console.log('=== a teammate seen agreeing whose record is gone, and a shielded l
   T('[0] the settle passes the agreed seats as finished, not as absent leavers, with points',
     /for \(const x of ghostLoss\) if \(!agreedIds\.has\(String\(x\.steamID\)\)\) absentIn\.push\(await planRow\(x, true\)\);/.test(SRC)
     && /for \(const x of agreedAbs\) finishedIn\.push\(await planRow\(x\)\);/.test(SRC)
-    && /teamLpPlan\(planIn, matchType, scores, [^\n]*, t2Win, absentIn, finishedIn\)/.test(SRC)
+    && /matchPlan\(planIn, matchType, \{ scores, leaverSeats: [^\n]*, winTeam: t2Win, absent: absentIn, finished: finishedIn \}\)/.test(SRC)
+    && /teamLpPlan\(parts, matchType, t\.scores, t\.leaverSeats, t\.winTeam, t\.absent, t\.finished\)/.test(SRC)
     && /return \{ seat: x\.seat \| 0, mmr: ts\.displayRating\(r\.mu, r\.sigma\), lp: lpx == null \? 0 : lpx \};/.test(SRC));
 }
 

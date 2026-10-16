@@ -238,7 +238,8 @@ console.log('=== a losing-side leaver counts at his pre-match rating for the win
     /for \(const o of full\) if \(gIds\.has\(o\.id\)\) ghostRanked\.push\(o\);/.test(SRC)
     && /skill\[k\] = Object\.assign\(\{\}, sk, \{ rm: o\.mu, rv: o\.sigma \}\);/.test(SRC));
   T('[0] only with the winners present (a whole absent winning team filled by Q62 does not count)', /if \(sides\[winTeam\]\.length && empty !== winTeam\) \{/.test(SRC));
-  T('[0] the points plan reads the leavers in the mismatch of an expected win only', /teamLpPlan\(planIn, matchType, scores, [^\n]*, t2Win, absentIn(, finishedIn)?\)/.test(SRC)
+  T('[0] the points plan reads the leavers in the mismatch of an expected win only', /matchPlan\(planIn, matchType, \{ scores, leaverSeats: [^\n]*, winTeam: t2Win, absent: absentIn(, finished: finishedIn)? \}\)/.test(SRC)
+    && /teamLpPlan\(parts, matchType, t\.scores, t\.leaverSeats, t\.winTeam, t\.absent, t\.finished\)/.test(SRC)
     && /\} else if \(\(mismatch && tAvgMmr > mean\) \|\| \(won && mismatchA && tAvgMmr > meanA\)\) \{/.test(SRC));
 }
 

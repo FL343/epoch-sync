@@ -23,7 +23,7 @@
   else if (root) root.POINTS_PLAN = api;
 })(typeof module === 'object' && !!module && typeof exports === 'object' && this === exports, typeof window !== 'undefined' ? window : null, function () {
   const RULES_VER = 1;
-  const FIXTURES_HASH = '';
+  const FIXTURES_HASH = '4dcc2726b3af67cf';
   // the knobs configure() can move (production runs these defaults)
   const DEFAULTS = Object.freeze({ RS_THRESHOLD: 400, RS_UPSET_BONUS: 1.0, RS_STRONG_UPSET_LOSS: 0.5, RS_SOLO_VS_TRIO: 0.6, RS_TRIO_WIN: 0.7, LEAVER_LP_PENALTY: 100 });
   const LP_MAX = 9999;
@@ -325,6 +325,18 @@
     }
     return out;
   }
+  // ---- the plan of one ranked match, as the settle calls it (O480: the settle, lateShadow and the client go through here) ----
+  //   parts: the rated players [{ steamID, seat, mmr, rank, lp }]; team (team codes only): { scores: the full frozen seat vector,
+  //   leaverSeats: the convicted / named absent seats (their teammates' shield), winTeam: the sub-score winner of a mode-2 code
+  //   (null = the money fallback of a mode-1 code), absent: the losing team's leavers at their pre-match rating and points (Q167),
+  //   finished: seats seen agreeing whose record is gone (Q183) }. An FFA code reads its own party bits. Returns the plan rows
+  //   ({ [steamID]: { adjDelta, flag, normalDelta, won } }) or null (no plan applies: the plain lpDelta at each own place).
+  function matchPlan(parts, matchType, team) {
+    const t = team || {};
+    return isTeamMt(matchType)
+      ? teamLpPlan(parts, matchType, t.scores, t.leaverSeats, t.winTeam, t.absent, t.finished)
+      : reducedStakesPlan(parts, matchType, premadeMaskOf(matchType), premadeTrioAtOf(matchType));
+  }
   // ---- the points line of one rated player at a ranked settle (O480: one composition for the settle, lateShadow and the client) ----
   //   cur: his points before the match; plan: his row of the match plan (reducedStakesPlan / teamLpPlan: { adjDelta, flag, won }),
   //   null / undefined when no plan applies (a fair all-solo match: the plain lpDelta at his own place); rank / pc: his place and the
@@ -352,7 +364,7 @@
   const api = Object.assign({
     RULES_VER, FIXTURES_HASH, DEFAULTS, configure,
     LP_MAX, LP_SEG, lpSeg, LP_SEED, seedLp, SOFT_RESET, softResetLp, seasonSeedLp, lpDelta,
-    BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, boundaryOf, crosslineDelta, settleLine,
+    BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, boundaryOf, crosslineDelta, matchPlan, settleLine,
     baseMt, premadeMaskOf, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, appliesLp, isTeamMt,
     leaverLpPenalty, RS_MAGIC, reducedStakesPlan, teamLpPlan,
   }, knobs());

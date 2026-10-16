@@ -193,7 +193,7 @@ for (const withStarts of [true, false]) {
 {
   const at = SRC.indexOf('const leavers0 = detectLeavers(g).filter((x) => {');
   T('[5] the leaver filter routes every absent seat through the own-record check', at > 0 && SRC.indexOf('return ownOrNamed(x);', at) > at && SRC.indexOf('return ownOrNamed(x);', at) < SRC.indexOf('});', at));
-  T('[5] named-only seats still shield their teammates', /teamLpPlan\(planIn, matchType, scores, leavers0\.concat\(namedOnly\)\.map\(x => x\.seat\), t2Win(, absentIn(, finishedIn)?)?\)/.test(SRC));   // Q167 added absentIn, Q183 finishedIn
+  T('[5] named-only seats still shield their teammates', /matchPlan\(planIn, matchType, \{ scores, leaverSeats: leavers0\.concat\(namedOnly\)\.map\(x => x\.seat\), winTeam: t2Win(, absent: absentIn(, finished: finishedIn)?)? \}\)/.test(SRC));   // Q167 added absentIn, Q183 finishedIn; O480 the call goes through matchPlan
   T('[5] the orphan path remembers own starts every run', /noteOwnStarts\(p, sg\[m\](, now)?\);/.test(SRC) && /if \(!hasOwnStart\(p, h\)\) continue;/.test(SRC));
   T('[5] the settle filter takes a confession as his own record', /if \(own\.has\(hx\) \|\| confSeen\.has\(hx \+ '\|' \+ c\.m\) \|\| confState\[hx \+ '\|' \+ c\.m\]\) return true;/.test(SRC));
   T('[5] run summary row', /s\('unattested', 0\)/.test(SRC));

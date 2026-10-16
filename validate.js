@@ -17,7 +17,7 @@ const PP_OVERRIDES = pointsPlan.configure({ RS_THRESHOLD: process.env.RS_THRESHO
   RS_STRONG_UPSET_LOSS: process.env.RS_STRONG_UPSET_LOSS, RS_SOLO_VS_TRIO: process.env.RS_SOLO_VS_TRIO, RS_TRIO_WIN: process.env.RS_TRIO_WIN,
   LEAVER_LP_PENALTY: process.env.LEAVER_LP_PENALTY });
 const { RULES_VER, LP_MAX, LP_SEG, lpSeg, LP_SEED, seedLp, SOFT_RESET, softResetLp, seasonSeedLp, lpDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND,
-  boundaryOf, crosslineDelta, settleLine, baseMt, premadeMaskOf, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, appliesLp, isTeamMt, leaverLpPenalty,
+  boundaryOf, crosslineDelta, matchPlan, settleLine, baseMt, premadeMaskOf, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, appliesLp, isTeamMt, leaverLpPenalty,
   RS_MAGIC, reducedStakesPlan, teamLpPlan, RS_THRESHOLD, RS_UPSET_BONUS, RS_STRONG_UPSET_LOSS, RS_SOLO_VS_TRIO, RS_TRIO_WIN, LEAVER_LP_PENALTY } = pointsPlan;
 
 const APPID = Number(process.env.APPID);
@@ -7515,9 +7515,8 @@ async function main() {
         if (finishedIn.length && lpId && appliesLp(matchType)) console.log('  agreed-gone ' + c.m + ': ' + agreedAbs.map((x) => 'seat ' + x.seat).join(', ')
           + ' read as finished member(s) of their team in the points plan (Q183)');
       }
-      const rsPlan = isTeamMt(matchType)
-        ? teamLpPlan(planIn, matchType, scores, leavers0.concat(namedOnly).map(x => x.seat), t2Win, absentIn, finishedIn)   // Q69: named-only seats still shield their teammates
-        : reducedStakesPlan(planIn, matchType, premadeMaskOf(matchType), premadeTrioAtOf(matchType));
+      // the match's points plan (points-plan.js matchPlan: the team planner for a team code, else the FFA planner on the code's party bits)
+      const rsPlan = matchPlan(planIn, matchType, { scores, leaverSeats: leavers0.concat(namedOnly).map(x => x.seat), winTeam: t2Win, absent: absentIn, finished: finishedIn });   // Q69: named-only seats still shield their teammates
       for (const r of tsOut) {
         // repeat-group decay: blend the update toward the pre-match rating by the streak weight
         //   (w=1 full, w=0 frozen). Blending sigma the same way keeps a frozen player's uncertainty
@@ -7585,9 +7584,8 @@ async function main() {
           const rk = rankWith(planIn.concat([xr]).map((q) => ({ steamID: q.steamID, seat: q.seat | 0, score: scores[q.seat | 0] | 0 })));
           const withRank = (q) => Object.assign({}, q, { rank: rk[q.steamID] });
           const xs = x.seat | 0;
-          lateSh[x.steamID] = lateShadow(planIn.map(withRank), withRank(xr), lpMoved, seededNow, (all) => isTeamMt(matchType)
-            ? teamLpPlan(all, matchType, scores, lSeats.filter((s) => (s | 0) !== xs), t2Win, absentIn.filter((a) => (a.seat | 0) !== xs), finishedIn)
-            : reducedStakesPlan(all, matchType, mask, t0 + 1), unitMates(xs));
+          lateSh[x.steamID] = lateShadow(planIn.map(withRank), withRank(xr), lpMoved, seededNow, (all) => matchPlan(all, matchType,
+            { scores, leaverSeats: lSeats.filter((s) => (s | 0) !== xs), winTeam: t2Win, absent: absentIn.filter((a) => (a.seat | 0) !== xs), finished: finishedIn }), unitMates(xs));
         }
       }
       // Q167 rework: the losing team's absent players the winners were rated against take the loss of the full team on their

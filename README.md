@@ -159,6 +159,10 @@ absent, so a run is unaffected before it is provisioned.
   the per-player points line (`settleLine`). Self-contained (no require, no environment: the knobs go in
   through `configure()`), so the companion client vendors a comment-stripped copy of this exact file and
   shows the points this job will settle. `RULES_VER` moves with any rule change.
+  `fixtures/points-plan/cases.json` holds golden cases (FFA 2-6 players, premade pair / trio, team
+  codes, mismatch UPSET / PROTECTED, the series clamp, seeds, the leaver fine, the board bounds) that
+  both repos replay (`test/points-plan-fixtures.js` here); `tools/gen-points-fixtures.js` regenerates
+  them with a rules change and prints the `FIXTURES_HASH` the module must carry.
 - `test/void-consensus.js`, `test/leaver-absence.js`, `test/lp-penalty.js`,
   `test/xp-ladder.js`, `test/reduced-stakes.js`, `test/team-rank.js`, `test/team-lp.js`,
   `test/start-orphan.js`, `test/sanity-bounds.js`, `test/signals-collect.js`,
