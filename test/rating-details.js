@@ -3,7 +3,7 @@
 // The mismatch check of a ranked settle reads the ranked rating (rm / rv in skill.json; the stored one until a player has one),
 // and the rating board's own score is the stored rating after the repeat-group decay -- another number. For the client to run
 // the same points plan over its opponents (points-plan.js), every rating write now carries details
-// [RATING_MAGIC 0xCD, plan rating, RULES_VER, 0]. A row from before carries none (the reader falls back to the score).
+// [RATING_MAGIC 0xCB, plan rating, RULES_VER, 0]. A row from before carries none (the reader falls back to the score).
 //   [1] codec: ratingDetails / ratingDetailsOf round trip; a row without details or with another magic decodes to null
 //   [2] ranked 1V1 over the REAL validate.js main() (offline board stub, test/lib/settle-stub.js): both rating writes carry the
 //       details, the plan rating = the display of the ranked rating the settle stored (what the next ranked settle reads)
@@ -30,10 +30,10 @@ const J = JSON.stringify;
 
 console.log('=== the rating row carries the rating the points plan reads (O480) ===');
 // ---- [1] codec ----
-T('[1] ratingDetails = [0xCD, rating, RULES_VER, 0]', J(PP.ratingDetails(1234)) === J([0xCD, 1234, PP.RULES_VER, 0]) && PP.RATING_MAGIC === 0xCD);
+T('[1] ratingDetails = [0xCB, rating, RULES_VER, 0]', J(PP.ratingDetails(1234)) === J([0xCB, 1234, PP.RULES_VER, 0]) && PP.RATING_MAGIC === 0xCB);
 T('[1] round trip', J(PP.ratingDetailsOf(PP.ratingDetails(987))) === J({ rating: 987, rulesVer: PP.RULES_VER }));
 T('[1] a row from before (no details) decodes to null', PP.ratingDetailsOf([]) === null && PP.ratingDetailsOf(null) === null && PP.ratingDetailsOf(undefined) === null);
-T('[1] another magic decodes to null', PP.ratingDetailsOf([0xC5, 1, 2, 3, 4, 5]) === null && PP.ratingDetailsOf([0xCD, 5]) === null);
+T('[1] another magic decodes to null', PP.ratingDetailsOf([0xC5, 1, 2, 3, 4, 5]) === null && PP.ratingDetailsOf([0xCB, 5]) === null && PP.ratingDetailsOf([0xCD, 1, 2, 3]) === null);
 
 // ---- a 1V1 played out: starts, then results, the job running every 6 minutes ----
 const MIN = 60000;
@@ -68,8 +68,8 @@ const A = H.SID(4801), B = H.SID(4802), C = H.SID(4803), D = H.SID(4804), E = H.
   T('[2] four runs exit 0 and the match settles', m.rs.every((r) => r.code === 0) && new Set(m.last.state.PROCESSED_FILE || []).has(m.key), m.last.out.slice(-600));
   for (const [sid, nm] of [[A, 'A'], [B, 'B']]) {
     const w = ratingWrites(m, sid), s = skillOf(m.last, sid);
-    T('[2] ' + nm + ': one rating write, score = his stored rating, details [0xCD, the plan rating, RULES_VER, 0]', w.length === 1
-      && w[0].score === disp(s.mu, s.sigma) && J(w[0].details) === J([0xCD, planOf(m.last, sid), PP.RULES_VER, 0]), J(w) + ' skill ' + J(s));
+    T('[2] ' + nm + ': one rating write, score = his stored rating, details [0xCB, the plan rating, RULES_VER, 0]', w.length === 1
+      && w[0].score === disp(s.mu, s.sigma) && J(w[0].details) === J([0xCB, planOf(m.last, sid), PP.RULES_VER, 0]), J(w) + ' skill ' + J(s));
     T('[2] ' + nm + ': the plan rating is his RANKED rating after the update (moved by this ranked settle)', Number.isFinite(s.rm) && w.length === 1 && w[0].details[1] === disp(s.rm, s.rv), J(s));
   }
   T('[2] A\'s published plan rating differs from his row score (the two numbers the client must not mix up)', ratingWrites(m, A)[0] && ratingWrites(m, A)[0].details[1] !== ratingWrites(m, A)[0].score, J(ratingWrites(m, A)));

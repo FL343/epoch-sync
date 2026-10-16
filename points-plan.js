@@ -355,7 +355,7 @@
   //   player's mismatch check (his ranked rating; the stored one until he has one). The row's score stays the stored rating after
   //   the repeat-group decay, a different number. A row written before O480 carries no details: ratingDetailsOf() gives null and
   //   the reader falls back to the score.
-  const RATING_MAGIC = 0xCD;
+  const RATING_MAGIC = 0xCB;   // (0xCD / 0xCE are taken: card_box claims / redeem_box wants; the companion repo keeps the magic registry)
   function ratingDetails(rating) { return [RATING_MAGIC, rating | 0, RULES_VER, 0]; }
   function ratingDetailsOf(det) {
     if (!Array.isArray(det) || det.length < 3 || (det[0] & 0xff) !== RATING_MAGIC) return null;
@@ -414,7 +414,7 @@
   // ---- the job's pulse (O480): one cron_pulse row per channel ----
   //   score = the unix minute a run of the job reached its end; details = [PULSE_MAGIC, RULES_VER]. A client reads it on idle
   //   screens: a pulse a few ticks old = the job is behind, a RULES_VER other than its own = the rules moved since its build.
-  const PULSE_MAGIC = 0xCE;
+  const PULSE_MAGIC = 0xCC;
   function pulseDetails() { return [PULSE_MAGIC, RULES_VER]; }
   function pulseOf(score, det) {
     if (!Array.isArray(det) || det.length < 2 || (det[0] & 0xff) !== PULSE_MAGIC) return null;

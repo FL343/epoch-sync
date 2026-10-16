@@ -163,7 +163,7 @@ absent, so a run is unaffected before it is provisioned.
   codes, mismatch UPSET / PROTECTED, the series clamp, seeds, the leaver fine, the board bounds) that
   both repos replay (`test/points-plan-fixtures.js` here); `tools/gen-points-fixtures.js` regenerates
   them with a rules change and prints the `FIXTURES_HASH` the module must carry.
-- Points receipts and the pulse (O480): every rating row carries `[0xCD, plan rating, RULES_VER, 0]`
+- Points receipts and the pulse (O480): every rating row carries `[0xCB, plan rating, RULES_VER, 0]`
   (the rating the points plan reads for that player); every points row carries the RS reveal slot (6
   ints, zeros when none) then a receipt ring `[0xC6, n, (matchHash, delta, flags) x n <= 8]`, newest first:
   what each recent match did to the player's points (net delta; flags = reveal / leaver fine / series
@@ -171,7 +171,7 @@ absent, so a run is unaffected before it is provisioned.
   through one writer, so neither part is ever dropped. A void writes nobody's row: its VOID receipt
   waits in `pending-writes.json` (pid keys, at most 8 per account, 6 h) for the player's next points
   write. One `cron_pulse` row per channel (score = the unix minute a run reached its end, details
-  `[0xCE, RULES_VER]`; carrier = the tier-cut carrier rule) tells a client the job is alive and which
+  `[0xCC, RULES_VER]`; carrier = the tier-cut carrier rule) tells a client the job is alive and which
   rules it runs. Tests: `test/rating-details.js`, `test/receipt-ring.js`, `test/cron-pulse.js`.
 - `test/void-consensus.js`, `test/leaver-absence.js`, `test/lp-penalty.js`,
   `test/xp-ladder.js`, `test/reduced-stakes.js`, `test/team-rank.js`, `test/team-lp.js`,

@@ -5106,7 +5106,7 @@ async function main() {
   };
   // ---- O480 cron_pulse (test/cron-pulse.js) ----
   //   One row on its own board per channel app id (a sandbox run: cron_pulse_test): score = the unix minute this run reached its
-  //   end -- every successful exit writes it, a run that fails before writes nothing -- and details [0xCE, RULES_VER]
+  //   end -- every successful exit writes it, a run that fails before writes nothing -- and details [0xCC, RULES_VER]
   //   (points-plan.js pulseDetails). The client reads it on idle screens: a pulse a few ticks old = the job is behind (points stay
   //   "to be confirmed"), a RULES_VER other than its own = the rules moved since its build (the same). Carrier account: the
   //   tier-cut rule -- TIERCUT_CARRIER_SID, else the account already on the row, else the one carrying this app's version_gate
