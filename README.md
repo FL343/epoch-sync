@@ -154,6 +154,11 @@ absent, so a run is unaffected before it is provisioned.
   consensus VOID, rating/points update, mismatch compensation (compress the strong side's swing,
   protect/reward the weak side) revealed back to the client via points-board detail bytes.
 - `trueskill.js` — TrueSkill (mu/sigma) update + display rating.
+- `points-plan.js` — the visible points (LP) rules of a ranked settle: tier table, placement seed, soft
+  reset, the promotion/relegation series clamp, the mismatch / premade / team plans, the leaver fine and
+  the per-player points line (`settleLine`). Self-contained (no require, no environment: the knobs go in
+  through `configure()`), so the companion client vendors a comment-stripped copy of this exact file and
+  shows the points this job will settle. `RULES_VER` moves with any rule change.
 - `test/void-consensus.js`, `test/leaver-absence.js`, `test/lp-penalty.js`,
   `test/xp-ladder.js`, `test/reduced-stakes.js`, `test/team-rank.js`, `test/team-lp.js`,
   `test/start-orphan.js`, `test/sanity-bounds.js`, `test/signals-collect.js`,

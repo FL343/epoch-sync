@@ -70,7 +70,8 @@ const bad = (m) => { failN++; console.log('  FAIL  ' + m); };
 const T = (label, cond, detail) => { if (cond) ok(label); else bad(label + (detail ? ' -- ' + detail : '')); };
 
 const VALIDATE = path.join(__dirname, '..', 'validate.js');
-const SRC = fs.readFileSync(VALIDATE, 'utf8');
+// the settle's source: validate.js and the points rules it requires (points-plan.js, O480)
+const SRC = fs.readFileSync(VALIDATE, 'utf8') + '\n' + fs.readFileSync(path.join(__dirname, '..', 'points-plan.js'), 'utf8');
 const FILE_VARS = Array.from(new Set(Array.from(SRC.matchAll(/process\.env\.([A-Z0-9_]+_FILE)\b/g), m => m[1])));
 const HAS_Q56 = /const t2ex = new Set\(/.test(SRC);   // the Q56 team-gamble dissent (excused dissenters) is merged
 const STUB = [
