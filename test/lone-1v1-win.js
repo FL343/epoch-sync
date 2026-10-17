@@ -246,7 +246,7 @@ console.log('=== a ranked 1V1 only its winner wrote: counted on the silent seat,
   const ro3 = [V, M], stX = S(v1start(h, 0, ro3), X);
   no('a writer the table he names does not seat (start and result from seat 0, V named there)', note([stX]), [R(v1settle(h, 0, ro3, 0), X)]);
   no('a second result of his naming another table', note([st]), [res, R(v1settle(h, 0, [O[0], V], 0))]);
-  no('another account\'s start read before the result', note([st, S(v1start(h, 1, [X, Y]), Y)]), [res]);
+  no('the silent seat\'s own start read before the result', note([st, S(v1start(h, 1, ro), M)]), [res]);   // (an account the table does not seat: test/lone-1v1-outside-start.js, Q254)
   no('the silent seat confessed (counted earlier)', note([st]), [res], { [v.pid(M) + '|' + key]: { t0: 1 } });
   no('the silent seat confessed (read this run)', note([st]), [res], {}, new Set([v.pid(M) + '|' + key]));
   no('a score past the sanity cap', note([st]), [R(rec(0xB1, 2, h, 0, 1, true, ro, [v.SANITY.SCORE_CAP + 1, 4000]))]);

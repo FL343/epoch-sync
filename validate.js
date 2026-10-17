@@ -901,6 +901,8 @@ function outvotedStarts(att, t, disputed) {
 //      already shows a result (the job stalled for a whole match) keeps every start, as before.
 //   c: the key was split or contested once (a seat claimed twice, a roster its voters split, a later start naming another
 //      roster, the roster contest) -- it stays held until it voids, whatever is withdrawn later.
+//   lo (Q254): a ranked 1V1's late starts whose writers wrote a result read in the same run (at most LONE1V1_LATE_CAP) --
+//      still left out of the run; only the lone 1V1 verdict reads them (keepLateOwn).
 // So an alt's start counts only if it was there before the result, and then for good: the loser has to choose before the
 // match is decided, and a held match he would have won is lost to him too. Friends' rooms, bot matches and endless runs
 // keep their own rules.
@@ -979,12 +981,36 @@ function startSeenId(r) { return pid(String(r.steamID)) + '@' + (r.d[5] | 0) + '
 //   its note does not hold; the note marks that one was seen (n), so the result still closes the note -- a loser who spent
 //   his room first cannot keep his after-the-result starts counting.
 const SEEN_PER_WRITER = 64;
+// ---- a ranked 1V1 winner's own late start, for the lone 1V1 verdict only (cloud audit Q254) ----
+// The note turns to "result read" (r) once a start was seen before the result: one in s, or one past its writer's room (n).
+// Neither says whose start it was, so an account that is not in the match could do it: it copies the key off the winner's
+// public start and writes a start of its own that a run reads before the result. When the winner's own start was then first
+// read in the run that read his result too (a stalled or partially read run in between), it was late and left out, and the
+// Q184 verdict paid nobody: s was empty (the outside start past its room, only n) or held the outside id -- an honest winner
+// whose loser wrote nothing lost his win to an account that never sat in the match. So a late start of a ranked 1V1 (match
+// type 2, two seats) whose own table seats its writer at the seat he writes from, and whose writer also has a result of the
+// key read in this same run, is remembered in the note's lo (at most LONE1V1_LATE_CAP ids, first come). It still counts
+// nowhere else -- no vote, no split, no contest, nobody's own start (Q127 / Q138 unchanged) -- and lone1v1Claim reads only
+// the ids of the two accounts the winner's table seats. Nothing gets lower: a verdict that pays nobody today may now pay the
+// winner the points of his win; the silent seat is only counted, as in Q184. An outside start that votes (it registers or
+// contests the key) is the start-proof plan's (O462), not this one's.
+const LONE1V1_LATE_CAP = 2;
+function keepLateOwn(e, r, id, resW) {
+  if ((r.d[2] | 0) !== 2 || (r.d[8] | 0) !== 2 || !resW) return false;
+  const w = id.split('@')[0], seat = r.d[5] | 0;
+  if (!resW.has(w) || String((r.roster || {})[seat]) !== String(r.steamID)) return false;
+  const lo = Array.isArray(e.lo) ? e.lo : (e.lo = []);
+  if (lo.indexOf(id) >= 0 || lo.length >= LONE1V1_LATE_CAP) return false;
+  lo.push(id);
+  return true;
+}
 function screenLateStarts(starts, recs, pending, processed, now, readComplete) {
   const keyOf = (r) => r.d[3] + '_' + r.d[4] + '_' + r.d[2];
-  const sg = {}, settled = new Set();
+  const sg = {}, settled = new Set(), resBy = {};   // resBy (Q254): key -> the accounts with a result of it read this run
   for (const r of starts || []) if (isMatchmadeMt(r.d[2] | 0)) { const m = keyOf(r); (sg[m] = sg[m] || []).push(r); }
-  for (const r of recs || []) if (isMatchmadeMt(r.d[2] | 0)) settled.add(keyOf(r));
+  for (const r of recs || []) if (isMatchmadeMt(r.d[2] | 0)) { const m = keyOf(r); settled.add(m); (resBy[m] = resBy[m] || new Set()).add(pid(String(r.steamID))); }
   const late = new Set();
+  let keptOwn = 0;
   const perW = {}, over = new Set();   // Q144 rework: ids per writer across every note (SEEN_PER_WRITER)
   for (const k of Object.keys(pending)) { const e = pending[k]; if (k.charAt(0) === '~' && e && Array.isArray(e.s)) for (const x of e.s) { const w = String(x).split('@')[0]; perW[w] = (perW[w] | 0) + 1; } }
   for (const m of new Set(Object.keys(sg).concat([...settled]))) {
@@ -998,7 +1024,7 @@ function screenLateStarts(starts, recs, pending, processed, now, readComplete) {
     for (const r of sg[m] || []) {
       const id = startSeenId(r);
       if (e.s.indexOf(id) >= 0) continue;
-      if (e.r) { late.add(r); continue; }
+      if (e.r) { late.add(r); if (keepLateOwn(e, r, id, resBy[m])) keptOwn++; continue; }   // Q254: lo, for the lone 1V1 verdict only
       const w = id.split('@')[0];
       if ((perW[w] | 0) >= SEEN_PER_WRITER) { e.n = 1; over.add(w); continue; }   // Q144 rework: past the writer's room
       e.s.push(id); perW[w] = (perW[w] | 0) + 1;
@@ -1016,6 +1042,7 @@ function screenLateStarts(starts, recs, pending, processed, now, readComplete) {
     console.log('  start-late: ' + late.size + ' start(s) first read after their match\'s result -- left out (Q127 / Q138): '
       + [...late].map((r) => keyOf(r) + ':' + plog(r.steamID) + '@' + (r.d[5] | 0)).join(' '));
   }
+  if (keptOwn) console.log('  start-late-own: ' + keptOwn + ' late ranked 1V1 start(s) whose writer\'s result was read with them -- noted for the lone 1V1 verdict only, no vote (Q254)');
   RUN.lateStarts = late.size;
   return late.size;
 }
@@ -1453,10 +1480,12 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
 // 1V1 that never happened naming anybody (Q69 / Q80). So the job pays the winner and only counts the loser.
 // lone1v1Verdicts: at the note's age STARTS_MATURITY_MS (the start-orphan verdict's), on a complete read, a key is decided
 // when lone1v1Claim holds -- a plain ranked 1V1 (match type 2, no party bits), no roster registered, never contested, and
-// every record of it is one account's: the starts read before the result (the note's s, Q127) are all his, from one seat,
-// naming one table, and his results are sanity-clean 'finished' records from that seat, naming that table, with his score
-// above the other seat's. The other seat's account wrote no start the job kept, no result and no abandon confession for
-// the key. The key is then processed (one verdict; the pair's later rows count nowhere). lone1v1Count, on the signals:
+// every record of it is one account's: the starts the two seated accounts wrote that were read before the result (the
+// note's s, Q127) are all his, from one seat, naming one table -- at least one, or his own start read late with his result
+// (the note's lo, Q254; an account the table does not seat counts nowhere here: when its start votes it registers or
+// contests the key, which ends this path anyway) -- and his results are sanity-clean 'finished' records from that seat,
+// naming that table, with his score above the other seat's. The other seat's account wrote no start the job kept, no
+// result and no abandon confession for the key. The key is then processed (one verdict; the pair's later rows count nowhere). lone1v1Count, on the signals:
 //   - counted on the silent seat's account only when it has signals of its own (a record of his this job kept within
 //     SIG_PLAYER_WINDOW_MS; a made-up account gets no entry, as in Q174): l1 += 1, l1o = the distinct claimants (at most
 //     OPP_CAP). His entry is not refreshed (it still expires 90 days after his own last record). Nobody is flagged.
@@ -1473,7 +1502,7 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
 // (saveEarlyMarks), a failed write is forfeited (as the consolation).
 const LONE1V1 = { GATE: 2, OPP_CAP: 8, QUEUE_CAP: 4, RETRO_MS: 14 * 86400000, WEEK_MS: 7 * 86400000, WEEK_CAP: 3 };
 function lone1v1Claim(e, key, g, confState, confSeen) {
-  if (!e || e.c || !Array.isArray(e.s) || !e.s.length || !g || !g.length) return null;
+  if (!e || e.c || !Array.isArray(e.s) || !g || !g.length) return null;
   const r0 = g[0];
   if ((r0.d[2] | 0) !== 2 || (r0.d[8] | 0) !== 2) return null;   // ranked brawl with two seats; quick, party bits and teams keep their rules
   const w = String(r0.steamID), seat = r0.d[5] | 0, ro = r0.roster || {};
@@ -1486,9 +1515,10 @@ function lone1v1Claim(e, key, g, confState, confSeen) {
     if (startSig(r) !== sig || JSON.stringify(r.d.slice(10, 12)) !== vec || sanityFlags([r]).length) return null;
   }
   if (!((r0.d[10 + seat] | 0) > (r0.d[11 - seat] | 0))) return null;   // his record says he won (a tie or a loss counts nothing)
-  const own = pid(w) + '@' + seat + '#' + sig;
-  if (e.s.some((id) => id !== own)) return null;   // the starts read before the result: his, from that seat, naming that table
-  const op = pid(o);
+  const own = pid(w) + '@' + seat + '#' + sig, wp = pid(w), op = pid(o);
+  const theirs = e.s.filter((id) => { const h = String(id).split('@')[0]; return h === wp || h === op; });   // Q254: the seated accounts' only
+  if (theirs.some((id) => id !== own)) return null;   // the starts read before the result: his, from that seat, naming that table
+  if (!theirs.length && !(Array.isArray(e.lo) && e.lo.indexOf(own) >= 0)) return null;   // Q254: or his own start, read late with his result
   if ((confState && confState[op + '|' + key]) || (confSeen && confSeen.has(op + '|' + key))) return null;   // he confessed: his own word, its own path
   return { m: key, w, o, seat };
 }
@@ -8348,6 +8378,7 @@ Object.assign(module.exports, { seatlessPrivate, dropSeatlessPrivate });   // cl
 Object.assign(module.exports, { recTable, splitKey, splitMark, applyTableSplit });   // cloud audit Q214 / Q220 a held friends' room / bot match: each table on a key of its own
 Object.assign(module.exports, { LONE1V1, lone1v1Claim, lone1v1Verdicts, lone1v1Count });   // cloud audit Q184 a ranked 1V1 only its winner wrote
 Object.assign(module.exports, { repUpgrade, sortKeys });   // cloud audit Q209 report state with no key that stays with one reporter
+Object.assign(module.exports, { LONE1V1_LATE_CAP, keepLateOwn });   // cloud audit Q254 a lone 1V1 winner's own start read late with his result
 Object.assign(module.exports, { startSig, lateStartSplit, START_CONFIRM_MS, START_CONFIRM_MIN_MS });   // cloud audit Q118 provisional start roster
 Object.assign(module.exports, { testimonyOf, recTestimony, noteTestimony, endlessRosterHold, endlessTestified });   // cloud audit Q113 endless testimony
 Object.assign(module.exports, { teamLossCounted });   // cloud audit Q136 the losing team must be somebody
