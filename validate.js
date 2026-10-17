@@ -1004,6 +1004,41 @@ function keepLateOwn(e, r, id, resW) {
   lo.push(id);
   return true;
 }
+// ---- a 1V1 whose result writer's own start was first read with his result (cloud audit Q261) ----
+// A 1V1 registers its roster from its two starts (two votes). When the other seat's start was read before the result (the
+// note's s) and the result writer's own start was first read in the run that read his result too (a stalled or partly read
+// run in between, or his start upload a run behind), his start was late and left out (Q127 / Q138): one vote, no roster,
+// no start-orphan verdict -- the result writer got not even the CONSOLATION_XP, and the other seat, who started and wrote no
+// result, no exit. Q184 rightly stays out: the other seat wrote a start of his own. Now, in the run whose result reading
+// turned the note (e.r set in this run), on a complete read, a quick or ranked 1V1 (match type 1 or 2 exactly, two seats)
+// with no entry yet, never contested and no start past its writer's room (n), registers the roster when:
+//   - the note's s holds exactly one id: the other seat's own start, from his seat, naming one table T;
+//   - a late start of this run names T and seats its writer at the seat he writes from (the other seat of T);
+//   - every result of the key read in this run is that writer's, from that seat, naming T.
+// The entry is the one the run that read both starts on time registers (roster T, provisional on T, the other seat's own
+// start noted), with t0 = this run. The start-orphan verdict then decides it as it decides those matches: the result writer
+// gets the CONSOLATION_XP, the other seat one exit -- unless his own result arrives (the two then settle as usual; he has
+// STARTS_MATURITY_MS from this run, a match's length more than the on-time case gives him), he confessed or he wrote an exit
+// note. The late start itself still counts nowhere else: no vote, no split, not its writer's own start.
+// Why this frames nobody (architecture decision 10): the exit rests on the other seat's own start record naming T, the very
+//   record the on-time path convicts on, and no more than one exit (no points, no rating). An account T does not seat cannot
+//   pass the s test, and the writer T seats could have had his start read on time anyway: he gets what that gives him. Nothing
+//   gets lower: such a key settles nobody today, and a key the other seat's result reaches settles as before.
+function lateWriterRoster(e, m, lateStarts, results, pending, processed, now, readComplete) {
+  if (readComplete === false || !e || !e.r || e.r !== now || e.c || e.n || !Array.isArray(e.s) || e.s.length !== 1) return null;
+  if (processed.has(m) || pending[m] || !results || !results.length) return null;
+  for (const r of lateStarts || []) {
+    const mt = r.d[2] | 0, seat = r.d[5] | 0, ro = r.roster || {};
+    if ((mt !== 1 && mt !== 2) || (r.d[8] | 0) !== 2 || (seat !== 0 && seat !== 1)) continue;
+    const w = String(r.steamID), l = ro[1 - seat] != null ? String(ro[1 - seat]) : '';
+    if (String(ro[seat]) !== w || !l || l === w) continue;
+    const sig = startSig(r), lp = pid(l);
+    if (e.s[0] !== lp + '@' + (1 - seat) + '#' + sig) continue;   // the other seat's own start, from his seat, naming T
+    if (!results.every((x) => String(x.steamID) === w && (x.d[5] | 0) === seat && startSig(x) === sig)) continue;
+    return { t0: now, mt, roster: { [seat]: pid(w), [1 - seat]: lp }, settled: [], prov: sig, started: [lp] };
+  }
+  return null;
+}
 function screenLateStarts(starts, recs, pending, processed, now, readComplete) {
   const keyOf = (r) => r.d[3] + '_' + r.d[4] + '_' + r.d[2];
   const sg = {}, settled = new Set(), resBy = {};   // resBy (Q254): key -> the accounts with a result of it read this run
@@ -1011,6 +1046,8 @@ function screenLateStarts(starts, recs, pending, processed, now, readComplete) {
   for (const r of recs || []) if (isMatchmadeMt(r.d[2] | 0)) { const m = keyOf(r); settled.add(m); (resBy[m] = resBy[m] || new Set()).add(pid(String(r.steamID))); }
   const late = new Set();
   let keptOwn = 0;
+  const resOf = {}, bridged = [];   // Q261: key -> its results read this run; the keys lateWriterRoster registered
+  for (const r of recs || []) if (isMatchmadeMt(r.d[2] | 0)) { const m = keyOf(r); (resOf[m] = resOf[m] || []).push(r); }
   const perW = {}, over = new Set();   // Q144 rework: ids per writer across every note (SEEN_PER_WRITER)
   for (const k of Object.keys(pending)) { const e = pending[k]; if (k.charAt(0) === '~' && e && Array.isArray(e.s)) for (const x of e.s) { const w = String(x).split('@')[0]; perW[w] = (perW[w] | 0) + 1; } }
   for (const m of new Set(Object.keys(sg).concat([...settled]))) {
@@ -1029,6 +1066,7 @@ function screenLateStarts(starts, recs, pending, processed, now, readComplete) {
       if ((perW[w] | 0) >= SEEN_PER_WRITER) { e.n = 1; over.add(w); continue; }   // Q144 rework: past the writer's room
       e.s.push(id); perW[w] = (perW[w] | 0) + 1;
     }
+    if (e.r === now) { const p = lateWriterRoster(e, m, (sg[m] || []).filter((r) => late.has(r)), resOf[m], pending, processed, now, readComplete); if (p) { pending[m] = p; bridged.push(m); } }   // Q261
   }
   if (over.size) {
     RUN.seenCapped = over.size;
@@ -1043,7 +1081,10 @@ function screenLateStarts(starts, recs, pending, processed, now, readComplete) {
       + [...late].map((r) => keyOf(r) + ':' + plog(r.steamID) + '@' + (r.d[5] | 0)).join(' '));
   }
   if (keptOwn) console.log('  start-late-own: ' + keptOwn + ' late ranked 1V1 start(s) whose writer\'s result was read with them -- noted for the lone 1V1 verdict only, no vote (Q254)');
+  if (bridged.length) console.log('  start-late-1v1: ' + bridged.length + ' 1V1(s) whose result writer\'s start was first read with his result, the other seat\'s own start before it'
+    + ' -- roster registered from the two, the start-orphan verdict decides as if both were read on time (Q261): ' + bridged.join(' '));
   RUN.lateStarts = late.size;
+  RUN.lateWriter = bridged.length;
   return late.size;
 }
 // ---- an outside account may hold up only a few matches a day (cloud audit Q208) ----
@@ -2540,6 +2581,7 @@ function writeRunSummary() {
       '| processed keys remembered / dropped past the cap (Q144) | ' + s('processedN', 0) + ' / ' + s('processedPruned', 0) + ' |',
       '| signed solo segments remembered while their key verifies / written back after they left the processed list (Q144) | ' + s('soloDone', 0) + ' / ' + s('soloReplay', 0) + ' |',
       '| accounts whose remembered starts across the notes are at the room (Q144) | ' + s('seenCapped', 0) + ' |',
+      '| 1V1s registered from the result writer\'s late start and the other seat\'s own start read before it (Q261) | ' + s('lateWriter', 0) + ' |',
       '| absent-seat holds (incomplete read / grace) | ' + s('absentHeld', 0) + ' |',
       '| groups waiting for a seat that started but has no result yet, until the match must be over (Q121) | ' + s('leaveWait', 0) + ' |',
       '| confessions seen/penalized/refunded | ' + s('confess', '0/0/0') + ' |',
@@ -8386,6 +8428,7 @@ Object.assign(module.exports, { contestParties, contestTable, noteContestParties
 Object.assign(module.exports, { completeTables, capContests, capLedger, CONTEST_CAP, CONTEST_CAP_MS, CONTEST_CAP_ACCOUNTS, CAP_NOTE });   // cloud audit Q208 an outside account may hold up only a few matches a day
 Object.assign(module.exports, { soloKeyGone, pruneSoloDone, soloDoneNote, SOLO_DONE_CAP, SEEN_PER_WRITER, screenLateStarts });   // cloud audit Q144 rework: processed solo segments remembered while their key verifies, a room per writer across the start-seen notes
 Object.assign(module.exports, { pruneFlagged, flagBaseKey, FLAG_PRUNE_WAIT_MS, blankSeen, BLANK_STARTS });   // cloud audit Q166 a signals flag goes once its key left the shards
+Object.assign(module.exports, { lateWriterRoster });   // cloud audit Q261 a 1V1 whose result writer's own start was first read with his result
 Object.assign(module.exports, { teamXpFloor, teamXpStarts, teamXpMark, teamRollbackPlan });   // cloud audit Q237 team competitive XP floors (test/team-comp-ghost-xp.js)
 Object.assign(module.exports, { RATING, RATING_FAMS, ENDLESS_RATING_LB_SOLO, ENDLESS_RATING_LB_DUO, ENDLESS_RATING_LB_TRIO, ENDLESS_RATING_LB_QUAD, ENDLESS_TIERCUT_LB, ratingFamOf, fnv32, ratingRunId, ratingHistKey,
   ratingHistUpsert, ratingHistRemove, ratingScoreOf, ratingPlan, ratingCutsOf, ratingTierOf, tiercutDay, tiercutEncode, tiercutDecode, tiercutDue, pruneRatingHist });   // O103 endless competitive rating (client knife 5.1a; test/endless-rating.js)
