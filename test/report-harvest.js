@@ -5,11 +5,15 @@ process.env.REPORT_DAILY_CAP = '3';   // small cap so the anti-bombing path is t
 process.env.STATE_SALT = process.env.STATE_SALT || 'test-salt';
 const path = require('path');
 const { harvestReports, pruneSignals, sigPlayer, pid, REPORT_MAGIC, REP_KEYS } = require(path.join(__dirname, '..', 'validate.js'));
-// Q190: edges are keyed by the lane's own pseudonyms (reporter BY, target OF), never by pid; the per-pid counters
-// players[].ri / .ro are gone -- the received / filed counts are the edge sums below.
-const BY = REP_KEYS.by, OF = REP_KEYS.of;
-const received = (s, sid) => Object.keys(s.rep).filter(k => k.endsWith('>' + OF(sid))).reduce((a, k) => a + s.rep[k].n, 0);
-const filed = (s, sid) => Object.keys(s.rep).filter(k => k.startsWith(BY(sid) + '>')).reduce((a, k) => a + s.rep[k].n, 0);
+// Q190: edges are keyed by keyed tokens, never by pid; the per-pid counters players[].ri / .ro are gone -- the received /
+// filed counts are the edge sums below. Q209: one edge per (reporter, target) under REP_KEYS.edge(pair token, target lane
+// key) -- nothing in the key names the reporter alone, so the sums go over the accounts this test uses.
+const OF = REP_KEYS.of;
+const EDGE = (r, t) => REP_KEYS.edge(REP_KEYS.pair(r, t), OF(t));
+const ALL = ['76561198000000001', '76561198000000002', '76561198000000003', '76561198000000004'];
+const n = (s, r, t) => (s.rep[EDGE(r, t)] || { n: 0 }).n;
+const received = (s, sid) => ALL.reduce((a, r) => a + (r === sid ? 0 : n(s, r, sid)), 0);
+const filed = (s, sid) => ALL.reduce((a, t) => a + (t === sid ? 0 : n(s, sid, t)), 0);
 
 let failN = 0;
 const ok = (m) => console.log('  ok    ' + m);
@@ -36,14 +40,17 @@ console.log('=== report harvest (record-only) ===');
   const s = fresh();
   const res = harvestReports([{ steamID: R1, d: pack([{ t: T1, r: 2, m: 111 }, { t: T2, r: 1, m: 111 }]) }], s, 1000);
   eq('seen/counted', [res.seen, res.counted, res.capped, res.bad], [2, 2, 0, 0]);
-  const e1 = s.rep[BY(R1) + '>' + OF(T1)];
+  const e1 = s.rep[EDGE(R1, T1)];
   eq('edge R1>T1 n=1 reason-mask has bit2', [e1.n, (e1.m >> 2) & 1], [1, 1]);
   eq('T1 received 1 (edge sum)', received(s, T1), 1);
   eq('R1 filed 2 (edge sum)', filed(s, R1), 2);
   eq('Q190: no per-pid report counters', Object.keys(s.players).length, 0);
   const blob = JSON.stringify(s);
   eq('Q190: no pid of reporter or target anywhere in the state', [R1, T1, T2].filter(x => blob.includes(pid(x))), []);
-  eq('Q190: edge carries the keyed pair token', e1.pk, REP_KEYS.pair(R1, T1));
+  eq('Q209: an edge carries no pair token (its key is built from it), only counts and a stamp', Object.keys(e1), ['n', 'm', 'at']);
+  eq('Q209: every report key a keyed token (no reporter key, no separator)', Object.keys(s.rep).concat(Object.keys(s.rseen), s.day.rt).filter(k => !/^[0-9a-f]{16}$/.test(k)), []);
+  eq('Q209: the day\'s count = R1\'s two slot tokens', s.day.rt.slice().sort(), [REP_KEYS.slot(0, REP_KEYS.by(R1), 0), REP_KEYS.slot(0, REP_KEYS.by(R1), 1)].sort());
+  eq('Q209: no per-reporter daily counter', s.day.r, undefined);
 }
 
 { // idempotent re-upload: same rolling queue harvested twice = no double count
@@ -52,14 +59,14 @@ console.log('=== report harvest (record-only) ===');
   harvestReports([ent], s, 1000);
   const res2 = harvestReports([ent], s, 2000);
   eq('re-upload dedup (rseen)', [res2.seen, res2.counted], [0, 0]);
-  eq('edge still n=1', s.rep[BY(R1) + '>' + OF(T1)].n, 1);
+  eq('edge still n=1', s.rep[EDGE(R1, T1)].n, 1);
 }
 
 { // same pair different reason / different match = distinct reports
   const s = fresh();
   harvestReports([{ steamID: R1, d: pack([{ t: T1, r: 2, m: 111 }]) }], s, 1000);
   harvestReports([{ steamID: R1, d: pack([{ t: T1, r: 3, m: 111 }, { t: T1, r: 2, m: 222 }]) }], s, 2000);
-  const e = s.rep[BY(R1) + '>' + OF(T1)];
+  const e = s.rep[EDGE(R1, T1)];
   eq('edge n=3 (reason/match distinct)', e.n, 3);
   eq('reason mask bits 2+3', [(e.m >> 2) & 1, (e.m >> 3) & 1], [1, 1]);
 }
@@ -74,6 +81,7 @@ console.log('=== report harvest (record-only) ===');
   // next UTC day: counter resets
   const res2 = harvestReports([{ steamID: R1, d: pack([{ t: T2, r: 1, m: 9 }]) }], s, 1000 + DAY);
   eq('next day counted again', res2.counted, 1);
+  eq('Q209: the new day holds only its own slot', s.day.rt, [REP_KEYS.slot(1, REP_KEYS.by(R1), 0)]);
 }
 
 { // rejects: self-report, bad reason, bad magic, short payload
@@ -94,8 +102,7 @@ console.log('=== report harvest (record-only) ===');
     { steamID: R1, d: pack([{ t: T1, r: 2, m: 5 }]) },
     { steamID: R2, d: pack([{ t: T1, r: 2, m: 5 }]) },
   ], s, 1000);
-  const edges = Object.keys(s.rep).filter(k => k.endsWith('>' + OF(T1)));
-  eq('distinct reporters = distinct edges', edges.length, 2);
+  eq('distinct reporters = distinct edges', [Object.keys(s.rep).length, n(s, R1, T1), n(s, R2, T1)], [2, 1, 1]);
   eq('T1 received 2', received(s, T1), 2);
 }
 

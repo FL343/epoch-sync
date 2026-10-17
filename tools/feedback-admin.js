@@ -82,7 +82,7 @@ async function boxTexts(st) {
 
 async function dataPayload() {
   const st = loadJson(STATE, { items: {}, votes: {}, boards: {} });
-  const votes = st.vv || st.votes || {};   // Q190: votes on voter keys are stored as vv
+  const votes = fb.storedVotes(st) || st.votes || {};   // Q190 / Q209: votes on voter / item tokens are stored as vt + vv
   const mod = loadModFile();
   const nowMin = fb.nowTsMin();
   st.items = st.items || {};

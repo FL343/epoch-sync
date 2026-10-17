@@ -4,7 +4,7 @@
 // harvest targets plumbing.
 process.env.STATE_SALT = process.env.STATE_SALT || 'test-salt';
 const path = require('path');
-const { trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, harvestReports, pairKey, pid, REPORT_MAGIC, REP_KEYS, REP_KEYS_VER } = require(path.join(__dirname, '..', 'validate.js'));
+const { trustTierOf, trustPlan, verifiedUniqueReporters, TRUST_T, harvestReports, pairKey, pid, REPORT_MAGIC, REP_KEYS, REP_KEYS_VER, repUpgrade } = require(path.join(__dirname, '..', 'validate.js'));
 
 let failN = 0;
 const ok = (m) => console.log('  ok    ' + m);
@@ -28,12 +28,13 @@ console.log('=== trust tier (sort-only soft-avoid) ===');
 }
 
 { // verified unique reporters: co-presence required (report-bombing by strangers = 0)
-  // Q190: edges are on the lane keys (s.rkv) and carry the keyed pair token; verifiedUniqueReporters takes the sid
+  // Q209: one edge per (reporter, target) under REP_KEYS.edge(pair token, target lane key); verifiedUniqueReporters takes the sid
   const s = fresh(); s.rkv = REP_KEYS_VER;
   const tp = pid(T);
+  const edge = (r, t) => REP_KEYS.edge(REP_KEYS.pair(r, t), REP_KEYS.of(t));
   // A and B reported T; only A ever played with T (pairs co-presence)
-  s.rep[REP_KEYS.by(A) + '>' + REP_KEYS.of(T)] = { n: 3, m: 4, at: 1, pk: REP_KEYS.pair(A, T) };
-  s.rep[REP_KEYS.by(B) + '>' + REP_KEYS.of(T)] = { n: 5, m: 4, at: 1, pk: REP_KEYS.pair(B, T) };
+  s.rep[edge(A, T)] = { n: 3, m: 4, at: 1 };
+  s.rep[edge(B, T)] = { n: 5, m: 4, at: 1 };
   s.pairs[pairKey(pid(A), tp)] = { n: 2, t: 0, x: 1, at: 1 };
   eq('vur counts only co-present reporters', verifiedUniqueReporters(s, T), 1);
   s.pairs[pairKey(pid(B), tp)] = { n: 1, t: 0, x: 0, at: 1 };
@@ -41,9 +42,27 @@ console.log('=== trust tier (sort-only soft-avoid) ===');
   eq('repeat reports from one verified reporter still count once', verifiedUniqueReporters(s, T), 2);
   s.pairs[pairKey(pid(A), pid(C))] = { n: 1, t: 0, x: 0, at: 1 };
   eq('a pair with someone else verifies nothing', verifiedUniqueReporters(s, T), 2);
-  s.rep[REP_KEYS.by(C) + '>' + REP_KEYS.of(T)] = { n: 1, m: 4, at: 1, pk: REP_KEYS.pair(C, T) };
+  s.rep[edge(C, T)] = { n: 1, m: 4, at: 1 };
   eq('unverified third reporter (never played T) = 0', verifiedUniqueReporters(s, T), 2);
   eq('edges for another target do not leak in', verifiedUniqueReporters(s, A), 0);
+  s.rep[edge(T, A)] = { n: 1, m: 4, at: 1 };   // T reported A (they played together): counts for A, not for T
+  eq('an edge the target filed himself does not count for him', verifiedUniqueReporters(s, T), 2);
+  eq('... and counts for the one he reported', verifiedUniqueReporters(s, A), 1);
+}
+
+{ // Q190 layout (s.rkv 1: by > of edges carrying pk) still read the Q190 way, and moved in place to the same count
+  const s = fresh(); s.rkv = 1;
+  const tp = pid(T);
+  s.rep[REP_KEYS.by(A) + '>' + REP_KEYS.of(T)] = { n: 3, m: 4, at: 1, pk: REP_KEYS.pair(A, T) };
+  s.rep[REP_KEYS.by(B) + '>' + REP_KEYS.of(T)] = { n: 5, m: 4, at: 1, pk: REP_KEYS.pair(B, T) };
+  s.rep[REP_KEYS.by(C) + '>' + REP_KEYS.of(T)] = { n: 1, m: 4, at: 1, pk: REP_KEYS.pair(C, T) };
+  s.pairs[pairKey(pid(A), tp)] = { n: 2, t: 0, x: 1, at: 1 };
+  s.pairs[pairKey(pid(B), tp)] = { n: 1, t: 0, x: 0, at: 1 };
+  eq('Q190 edges: same count as before the change', verifiedUniqueReporters(s, T), 2);
+  eq('Q190 edges through trustPlan', trustPlan(s, {}, new Set([T]), 1), { writes: [], deletes: [] });
+  const up = repUpgrade(s);
+  eq('moved in place: every edge, no daily count', up, { edges: 3, slots: 0 });
+  eq('after the move: the same count', [s.rkv, verifiedUniqueReporters(s, T)], [REP_KEYS_VER, 2]);
 }
 
 { // Q190: state still on pid keys (s.rkv unset; its move waits for a complete read) is read the old way -- no flapping

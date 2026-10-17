@@ -12,6 +12,8 @@ const fnv1a32 = (s) => { let h = 0x811c9dc5 >>> 0; s = String(s); for (let i = 0
 // keyed pseudonym like validate.js pid (HMAC-SHA256, 16 hex)
 const keyedPid = (salt) => (s) => crypto.createHmac('sha256', salt).update(String(s)).digest('hex').slice(0, 16);
 const pidOf = keyedPid('test-salt');
+// Q209: a target's reporter set holds one pair token per (reporter, target), not the reporter's key
+const PT = (r, t) => cm.pairTok(pidOf, pidOf(r), pidOf(t));
 
 // client chat-report packReport mirror (utf8)
 function packReport(text, targetSid, scope, tsMin) {
@@ -35,7 +37,7 @@ console.log('=== chat-mute-clock-skew [1] a fast reporter clock is clamped, not 
   const h = cm.harvest(st, [{ reporterSid: R1, det: packReport('fast clock', T1, 1, TS + 16 * 60) }], pidOf, NOW);
   ok('reporter 16 h fast: harvested (digest) and counted', h.fresh.length === 1 && cm.reporterCount(st, pidOf(T1), NOW) === 1, JSON.stringify([h.fresh.length, h.skipped]));
   ok('clamped count reported', h.clamped === 1, h.clamped);
-  ok('window starts at this harvest (stored stamp = now)', JSON.stringify(st.rep[pidOf(T1)]) === JSON.stringify([[pidOf(R1), NOW]]), JSON.stringify(st.rep[pidOf(T1)]));
+  ok('window starts at this harvest (stored stamp = now)', JSON.stringify(st.rep[pidOf(T1)]) === JSON.stringify([[PT(R1, T1), NOW]]), JSON.stringify(st.rep[pidOf(T1)]));
   cm.prune(st, NOW + WIN + 1);
   ok('and it ages out 24 h after the harvest', cm.reporterCount(st, pidOf(T1), NOW + WIN + 1) === 0);
 }
@@ -60,32 +62,42 @@ console.log('=== chat-mute-clock-skew [3] two reports inside one minute (30 s cl
   ok('same tsMin, different row -> both harvested', a.fresh.length === 1 && b.fresh.length === 1, JSON.stringify([a.fresh.length, b.fresh.length]));
 }
 
-console.log('=== chat-mute-clock-skew [4] state written by the previous harvest (seen only, no sig) ===');
+console.log('=== chat-mute-clock-skew [4] a Q190 state (per-reporter watermark + last-row digest) moves in place (Q209) ===');
 {
+  // Q190 (kv 1) kept, per reporter key, the stamp (seen) and keyed digest (sig) of his last harvested row; Q209 keeps one
+  // token per row instead. The move needs no board read: the row harvested before stays harvested.
   const cur = packReport('already mailed', T1, 1, TS - 30);
-  const lost = packReport('lost before', T2, 1, TS - 20);
-  const st = { seen: { [pidOf(R4)]: TS - 30, [pidOf(R5)]: TS + 40 }, rep: {}, auto: {} };
-  const h = cm.harvest(st, [
-    { reporterSid: R4, det: cur },     // tsMin === seen -> the row already harvested
-    { reporterSid: R5, det: lost },    // tsMin < seen -> skipped by the previous rule, never mailed
-  ], pidOf, NOW);
-  ok('row equal to seen = not re-harvested', !h.fresh.some(f => f.reporterSid === R4));
-  ok('row the previous rule skipped (stamp below seen) = harvested now', h.fresh.length === 1 && h.fresh[0].reporterSid === R5, JSON.stringify(h.fresh.map(f => f.reporterSid)));
-  ok('both reporters now carry a row signature', !!st.sig[pidOf(R4)] && !!st.sig[pidOf(R5)]);
-  const again = cm.harvest(st, [{ reporterSid: R4, det: cur }, { reporterSid: R5, det: lost }], pidOf, NOW + 5);
+  const nxt = packReport('newer report', T2, 1, TS - 20);
+  const rk4 = pidOf(R4), rk5 = pidOf(R5);
+  const st = { kv: 1, seen: { [rk4]: TS - 30, [rk5]: TS - 50 }, sig: { [rk4]: pidOf(cm.rowKey(cm.decodeReport(cur))), [rk5]: pidOf('chat-row|an older row') },
+    rep: { [pidOf(T1)]: [[rk4, NOW - 30]] }, auto: {} };
+  const up = cm.upgrade(st, pidOf, NOW);
+  ok('moved: two row tokens, one reporter entry, the watermark gone', !!up && up.rows === 2 && up.reports === 1 && st.seen === undefined && st.kv === cm.KEYS_VER, JSON.stringify(up));
+  ok('a row token is stamped no earlier than its row, never earlier than the move', Object.values(st.sig).every(x => x === NOW), JSON.stringify(st.sig));
+  const h = cm.harvest(st, [{ reporterSid: R4, det: cur }, { reporterSid: R5, det: nxt }], pidOf, NOW);
+  ok('the row harvested before the move is not harvested again', !h.fresh.some(f => f.reporterSid === R4));
+  ok('the other reporter\'s newer row is harvested', h.fresh.length === 1 && h.fresh[0].reporterSid === R5, JSON.stringify(h.fresh.map(f => f.reporterSid)));
+  ok('reporter sets hold pair tokens: R4 keeps his time on T1, R5 counted on T2', JSON.stringify(st.rep[pidOf(T1)]) === JSON.stringify([[PT(R4, T1), NOW - 30]]) &&
+    JSON.stringify(st.rep[pidOf(T2)]) === JSON.stringify([[PT(R5, T2), NOW - 20]]), JSON.stringify(st.rep));
+  ok('no reporter key left in the state', ![rk4, rk5].some(k => JSON.stringify(st).includes(k)));
+  const again = cm.harvest(st, [{ reporterSid: R4, det: cur }, { reporterSid: R5, det: nxt }], pidOf, NOW + 5);
   ok('next run: nothing re-harvested', again.fresh.length === 0, again.fresh.length);
+  ok('a state not on kv 1 is not moved', cm.upgrade(st, pidOf, NOW) === null && cm.upgrade({ seen: { a: 1 } }, pidOf, NOW) === null);
 }
 
-console.log('=== chat-mute-clock-skew [5] rollback: the previous harvest reads the new state correctly ===');
+console.log('=== chat-mute-clock-skew [5] rollback: the Q190 version does not take this state for its own ===');
 {
-  // previous rule: fresh only while tsMin > seen. After any new harvest seen = the current row's tsMin,
-  // so a rolled-back job treats the current rows as harvested and later rows as new.
+  // Q190 reads a state as its own only on kv 1 (or with no entries at all); anything else it drops on a complete read of
+  // the report box and marks the rows then on the box as taken (only fewer reports count). This state must not look like
+  // a kv 1 state: harvest writes no watermark and no per-reporter entry, and the marker is 2.
   const st = {};
   const rows = [{ reporterSid: R1, det: packReport('fast', T1, 1, TS + 600) }, { reporterSid: R2, det: packReport('slow', T1, 1, TS - 600) }];
   cm.harvest(st, rows, pidOf, NOW);
-  const prevRuleFresh = rows.filter(r => !((st.seen[pidOf(r.reporterSid)] | 0) >= cm.decodeReport(r.det).tsMin)).length;
-  ok('previous rule sees no fresh row in the new state', prevRuleFresh === 0, prevRuleFresh);
-  ok('seen keeps the row stamp (not the clamped one)', st.seen[pidOf(R1)] === TS + 600 && st.seen[pidOf(R2)] === TS - 600);
+  cm.markKeys(st);
+  const q190Ready = (x) => x.kv === 1 || !['seen', 'sig', 'rep', 'auto', 'pend', 'pre'].some(k => !!x[k] && Object.keys(x[k]).length > 0);
+  ok('marked kv 2 with entries: the Q190 version drops it instead of reading it', st.kv === 2 && !q190Ready(st));
+  ok('no watermark written (the field the pre-Q190 rule read)', st.seen === undefined);
+  ok('both rows counted once each, on their own row tokens', Object.keys(st.sig).length === 2 && cm.reporterCount(st, pidOf(T1), NOW) === 2);
 }
 
 console.log('=== chat-mute-clock-skew [6] a forged far-future stamp gains nothing ===');
@@ -103,7 +115,7 @@ console.log('=== chat-mute-clock-skew [7] the row signature is keyed and carries
   const s1 = {}, s2 = {};
   cm.harvest(s1, row, keyedPid('salt-a'), NOW);
   cm.harvest(s2, row, keyedPid('salt-b'), NOW);
-  const sigA = Object.values(s1.sig || {})[0], sigB = Object.values(s2.sig || {})[0];
+  const sigA = Object.keys(s1.sig || {})[0], sigB = Object.keys(s2.sig || {})[0];
   ok('signature depends on the pseudonym key', !!sigA && !!sigB && sigA !== sigB, sigA + ' / ' + sigB);
   const js = JSON.stringify(s1);
   ok('state has no raw sid and no text', !js.includes(T1) && !js.includes(R1) && !js.includes('private'));
@@ -122,7 +134,7 @@ console.log('=== chat-mute-clock-skew [8] the same words reported again the next
   const c = cm.harvest(st, row, pidOf, NOW + LATER + 5);
   ok('first report harvested', a.fresh.length === 1);
   ok('next day, same reporter / target / words: harvested again (digest)', b.fresh.length === 1 && b.fresh[0].tsMin === TS + LATER, JSON.stringify(b.fresh.map(f => f.tsMin)));
-  ok('and counted again, from the new report', cm.reporterCount(st, pidOf(T1), NOW + LATER) === 1 && JSON.stringify(st.rep[pidOf(T1)]) === JSON.stringify([[pidOf(R1), NOW + LATER]]), JSON.stringify(st.rep[pidOf(T1)]));
+  ok('and counted again, from the new report', cm.reporterCount(st, pidOf(T1), NOW + LATER) === 1 && JSON.stringify(st.rep[pidOf(T1)]) === JSON.stringify([[PT(R1, T1), NOW + LATER]]), JSON.stringify(st.rep[pidOf(T1)]));
   ok('the run after that does not harvest it again', c.fresh.length === 0, c.fresh.length);
 }
 

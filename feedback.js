@@ -420,16 +420,18 @@ function decodeVoteEntry(words) {
   return out;
 }
 
-// Merge decoded vote windows into state.votes: per (voterPid,itemId) the latest
+// Merge decoded vote windows into state.votes: per (voter, itemId) the latest
 // ts wins (re-vote / un-vote / report are all just the newest direction).
+// voterPid: the voter's key, or a function of the item key giving it (Q209: one token per voter and item, voteTok).
 function mergeVotes(votes, voterPid, decoded) {
   let dirty = false;
   for (const vt of decoded) {
     const key = String(vt.itemId);
     const slot = votes[key] || (votes[key] = {});
-    const cur = slot[voterPid];
+    const vk = typeof voterPid === 'function' ? voterPid(key) : voterPid;
+    const cur = slot[vk];
     if (!cur || vt.ts > cur[1] || (vt.ts === cur[1] && vt.dir !== cur[0])) {
-      slot[voterPid] = [vt.dir, vt.ts];
+      slot[vk] = [vt.dir, vt.ts];
       dirty = true;
     }
   }
@@ -443,8 +445,14 @@ function mergeVotes(votes, voterPid, decoded) {
 // comparing the key to item.ap, which a voter key never equals), nor is a vote for an item the state does not hold
 // (clients only see items this job admitted and published; the voter's rolling window still carries it next run).
 // st.vkv marks votes on voter keys.
-const FB_VOTER_KEYS = 1;
+// Q209: a voter key stayed with the voter across every item he voted on or reported, so once one of his votes was tied to
+// him (a report on a post only he had seen, a vote cast right after he joined a match) every other one was too. Votes are
+// now stored under voteTok -- one token per (voter, item), nothing in it shared by two items -- written as vt (the folded
+// pid votes '~0', '~1', ... stay in vv, the field the Q190 version reads, so a rollback keeps them). A Q190 table (vv
+// holding voter keys) moves onto the tokens when it is read (storedVotes); st.vkv 2 marks a table on the tokens.
+const FB_VOTER_KEYS = 2;
 function voterKey(sid) { return v.pid('fb-vote|' + sid); }
+function voteTok(vk, itemKey) { return v.pid('fb-vt|' + vk + '|' + itemKey); }
 // st.vpre: keyed tokens of the (voter, item) pairs that had a vote on pid keys when those votes were folded (rekeyVotes);
 // no account in them, fixed from then on. Such a voter's later votes on that item are not taken (see rekeyVotes).
 function preVoteTok(voterPid, itemKey) { return v.pid('fb-pre|' + voterPid + '|' + itemKey); }
@@ -539,12 +547,49 @@ function packFeedDetails(item, up, down) {
   return [FB_MAGIC | 0, w1 | 0, packLang(item.lang), item.itemId | 0, item.ts | 0, up | 0, down | 0].concat(pick.p.words);
 }
 
+// Q209: the vote table of a state file (the tokens vt + the folded votes and any Q190 voter keys in vv), or null when the file
+// holds no voter-keyed table. A voter key in vv (a Q190 version wrote it; vt is then gone, that version keeps no field it
+// does not know) becomes the voter's token on that item; were a token already there, the later vote wins. vv's numbered
+// keys are taken, vt's are not (they are only ever written to vv), so no folded vote counts twice.
+function storedVotes(s) {
+  const vt = (s && s.vt && typeof s.vt === 'object') ? s.vt : null, vv = (s && s.vv && typeof s.vv === 'object') ? s.vv : null;
+  if (!vt && !vv) return null;
+  const out = {};
+  for (const key of Object.keys(vt || {})) {
+    const slot = vt[key] || {}, to = {};
+    for (const k of Object.keys(slot)) if (k.charAt(0) !== '~') to[k] = slot[k];
+    if (Object.keys(to).length) out[key] = to;
+  }
+  for (const key of Object.keys(vv || {})) {
+    const slot = vv[key] || {};
+    for (const k of Object.keys(slot)) {
+      const rec = slot[k];
+      if (!Array.isArray(rec)) continue;
+      const to = out[key] || (out[key] = {});
+      if (k.charAt(0) === '~') { to[k] = rec; continue; }
+      const t = voteTok(k, key), cur = to[t];
+      if (!cur || (rec[1] | 0) > (cur[1] | 0)) to[t] = rec;
+    }
+  }
+  return out;
+}
+// how many votes of a state file sit on Q190 voter keys (vv entries that are not a folded '~n' vote)
+function q190Votes(s) {
+  let n = 0;
+  const vv = (s && s.vv && typeof s.vv === 'object') ? s.vv : {};
+  for (const key of Object.keys(vv)) for (const k of Object.keys(vv[key] || {})) if (k.charAt(0) !== '~' && Array.isArray(vv[key][k])) n++;
+  return n;
+}
 function loadState() {
   try {
     const s = JSON.parse(fs.readFileSync(FB_STATE_FILE, 'utf8'));
     const o = { boards: s.boards || {}, items: s.items || {}, votes: s.votes || {}, digest: s.digest || { day: '', at: 0 } };
     // Q190: votes on voter keys are stored as vv (see storedState); votes on disk is then an older version's pid-keyed table
-    if (s.vv && typeof s.vv === 'object') { o.pidVotes = o.votes; o.votes = s.vv; o.vkv = FB_VOTER_KEYS; }
+    // Q209: and those on voter / item tokens as vt (storedVotes reads both)
+    const sv = storedVotes(s);
+    if (sv) { o.pidVotes = o.votes; o.votes = sv; o.vkv = FB_VOTER_KEYS; }
+    const vmove = q190Votes(s);   // Q209: a Q190 table moves onto the tokens with this run's write (main), not with a later vote
+    if (vmove) o.vmove = vmove;
     if (Array.isArray(s.vpre) && s.vpre.length) o.vpre = s.vpre;
     return o;
   } catch (e) { return { boards: {}, items: {}, votes: {}, digest: { day: '', at: 0 } }; }
@@ -563,10 +608,24 @@ function saveState(st) { fs.writeFileSync(FB_STATE_FILE, asciiJson(publicState(s
 // job reads -- is left empty (or holds that version's pid-keyed leftovers until they are folded). A rollback then rebuilds
 // its pid-keyed table from the vote board windows instead of counting every voter twice (once per key); it keeps only the
 // fields it knows (vv and vpre are gone after it), and the next run of this version folds that table again (rekeyVotes).
+// Q209: the votes on voter / item tokens go to vt, each item's tokens in key order (in insertion order the tokens one voter
+// added in a run would sit in the same place on every item); vv keeps the folded votes ('~0', '~1', ...), so a rollback to
+// the Q190 version still counts them and rebuilds the rest from the vote board windows under its voter keys (votes that
+// left the windows are lost: only fewer votes count, and a held post stays held -- only an admin clearance releases it).
 function storedState(st) {
   const o = Object.assign({}, st);
-  delete o.vkv; delete o.pidVotes;
-  if (st.vkv === FB_VOTER_KEYS) { o.vv = st.votes; o.votes = st.pidVotes || {}; }
+  delete o.vkv; delete o.pidVotes; delete o.vmove;
+  if (st.vkv === FB_VOTER_KEYS) {
+    const vv = {}, vt = {};
+    for (const key of Object.keys(st.votes || {})) {
+      const slot = st.votes[key] || {};
+      const folded = Object.keys(slot).filter(k => k.charAt(0) === '~'), toks = Object.keys(slot).filter(k => k.charAt(0) !== '~').sort();
+      if (folded.length) { const f = vv[key] = {}; for (const k of folded) f[k] = slot[k]; }
+      if (toks.length) { const t = vt[key] = {}; for (const k of toks) t[k] = slot[k]; }
+    }
+    o.vv = vv; o.votes = st.pidVotes || {};
+    if (Object.keys(vt).length) o.vt = vt; else delete o.vt;
+  }
   return o;
 }
 
@@ -750,6 +809,11 @@ async function main() {
       console.log('feedback: pid-keyed votes folded for the voter keys (Q190): ' + mv.kept + ' kept on their items without a voter, ' + mv.dropped + ' dropped, ' + mv.pre + ' voter/item pair(s) marked as voted');
     }
   }
+  if (st.vmove) {
+    dirty = true;
+    console.log('feedback: votes moved onto one token per voter and item (Q209): ' + st.vmove + ' vote(s)');
+    delete st.vmove;
+  }
   let voteEnts = 0;
   if (voteId) {
     const vb = await v.readBoardAll(voteId, 'feedback votes');
@@ -758,7 +822,8 @@ async function main() {
       const decoded = decodeVoteEntry(v.decodeDetails(e.detailData));
       if (!decoded.length) continue;
       voteEnts++;
-      if (mergeVotes(st.votes, voterKey(String(e.steamID)), storableVotes(st.items, e.steamID, decoded, pre))) dirty = true;
+      const vk = voterKey(String(e.steamID));
+      if (mergeVotes(st.votes, (key) => voteTok(vk, key), storableVotes(st.items, e.steamID, decoded, pre))) dirty = true;
     }
   }
 
@@ -888,7 +953,7 @@ module.exports = {
   FB_DAILY_CAP, FB_REPORT_HOLD, FB_WORDLIST_FILE, FB_MOD_FILE,
   feedBoardName, packLang, unpackLang, fnv1a32, unpackText, packText, sanitizeText,
   nowTsMin, decodeBoxEntry, foreignBoxRow, decodeVoteEntry, mergeVotes, tallyVotes, hotScoreOf, packFeedDetails,
-  FB_VOTER_KEYS, voterKey, preVoteTok, storableVotes, rekeyVotes, pidVoteTable, storedState,
+  FB_VOTER_KEYS, voterKey, voteTok, storedVotes, preVoteTok, storableVotes, rekeyVotes, pidVoteTable, storedState,
   dayOfTs, loadWordlist, adSurfaces, adReason, filterReason, countAuthorDay,
   loadMod, reportsSince, trustPenaltyOf, governItems, maybeSendDigest,
   wlHash, wlSubHit, wlWordHit, foldForWordlist, asciiJson,

@@ -24,7 +24,9 @@ function pack(text, targetSid, scope, tsMin, enc) {
   return words;
 }
 const T1 = '76561198000000011', R1 = '76561198000000001', R2 = '76561198000000002';
-const pidOf = (s) => 'p' + String(s).slice(-4);
+// a keyed pseudonym stand-in with no collisions (Q209: the lane derives row / pair tokens through it, a lossy stand-in would
+// merge two reporters' pair tokens)
+const pidOf = (s) => 'p' + require('crypto').createHash('sha256').update(String(s)).digest('hex').slice(0, 15);
 
 console.log('=== chat-mute [1] constants (client lockstep) ===');
 eq('boards / magic / thresholds pinned', [CHAT_MUTE.MUTE_LB, CHAT_MUTE.REPORT_LB, CHAT_MUTE.MAGIC, CHAT_MUTE.VER, CHAT_MUTE.BODY_MAX, CHAT_MUTE.AUTO_REPORTERS, CHAT_MUTE.WINDOW_MIN, CHAT_MUTE.AUTO_MUTE_MIN],
@@ -65,6 +67,9 @@ console.log('=== chat-mute [3] harvest: fresh vs already-seen vs forged ===');
   const r3 = harvest(st, [{ reporterSid: R1, det: pack('again', T1, 1, ts - 5, 0) }], pidOf, now + 10);
   eq('earlier-stamped new row from the same reporter = fresh', r3.fresh.length, 1);
   assert('state carries pids only (no raw sid, no text)', !JSON.stringify(st).includes(T1) && !JSON.stringify(st).includes('spam'));
+  eq('Q209: one row token per harvested row (R1 two rows, R2 one), no watermark', [Object.keys(st.sig).length, st.seen], [3, undefined]);
+  assert('Q209: no reporter key anywhere in the state (row / pair tokens only)', ![R1, R2].some(x => JSON.stringify(st).includes(pidOf(x))));
+  eq('Q209: R1\'s two rows: still one entry under T1 for him (one pair token), two reporters in all', reporterCount(st, pidOf(T1), now + 10), 2);
 }
 
 console.log('=== chat-mute [4] plan: threshold / longer manual row respected / expiry sweep / idempotent ===');
