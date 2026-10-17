@@ -249,12 +249,20 @@ console.log('=== a 1V1 whose winner\'s start was first read with his result ends
     no('his result naming another table', { results: [R(resultOf(2, h, [Wn, P], 0, 0))] });
     no('no late start', { late: [] });
     no('the late start\'s table seats somebody else where its writer writes from', { late: [S(Object.assign(startOf(2, h, ro, 0), { sid: X }))] });
+    // Q261 review: the two guards no case above pins alone (each of those is also kept out by another guard): the late start's
+    //   writer must be the account the table seats where he writes from, and every result must come from that seat
+    const xs = S(Object.assign(startOf(2, h, ro, 0), { sid: X })), xr = R(Object.assign(resultOf(2, h, ro, 0, 0), { sid: X }));
+    no('an outside account\'s late start AND result from the winner\'s seat of this table (the table seats somebody else there)', { late: [xs], results: [xr] });
+    no('his result from the loser\'s seat of this very table (same table, his seat is the other one)', { results: [R(Object.assign(resultOf(2, h, ro, 1, 0), { sid: Wn }))] });
     no('the late start leaves the other seat empty', { late: [S({ sid: Wn, d: startOf(2, h, ro, 0).d.slice(0, 13).concat(sidPair(Wn), [0, 0]) })] });
     const tw = (mt, pc) => { const ros = pc === 4 ? [Wn, L, X, P] : ro, d = (x) => Object.assign({}, x, { d: x.d.map((y, i) => i === 2 ? mt : y) });
       const a = S(d(startOf(2, h, ros, 0))), b = S(d(startOf(2, h, ros, 1))), c = R(d(resultOf(2, h, ros, 0, 0)));
       return { e: note({ s: [idOf(b)] }), key: keyOf(a.d), late: [a], results: [c] }; };
     no('party bits on the match type', tw(0x12, 2));
     no('a ranked 2V2', tw(6, 4));
+    // Q261 review: quick and ranked are also 3-6 seat free-for-alls -- only the two-seat ones are a 1V1
+    no('a four-seat quick match (match type 1)', tw(1, 4));
+    no('a four-seat ranked match (match type 2)', tw(2, 4));
     no('a friends\' room 1V1 (match type 10)', tw(10, 2));
     no('a bot match (match type 11)', tw(11, 2));
     no('an endless run (match type 7)', tw(7, 2));
