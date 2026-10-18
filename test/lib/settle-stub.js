@@ -15,7 +15,7 @@ const FILE_VARS = Array.from(new Set(Array.from(SRC.matchAll(/process\.env\.([A-
 const SCRUB = ['PT_MODE', 'STRICT_BOARDS', 'APPLY_MMR', 'ALLOW_TEST', 'DEMO_APPID', 'RANKED_LB', 'LP_LB', 'XP_LB', 'STARTS_MATURITY_MS', 'CONFESS_PRUNE_MS',
   'SEEDCAP_ENFORCE', 'SEEDCAP_REJECT', 'GITHUB_STEP_SUMMARY', 'LEDGER_SHARDS', 'PT_SHARD_COUNT', 'ABSENT_GRACE_MS', 'READ_RETRY_MS', 'SANITY_MIN_START_AGE_MS',
   'SHARD_STRICT_BODY', 'CP_LB', 'TRUST_LB', 'REPORT_LB', 'START_CONFIRM_MS', 'SIG_PAIR_WINDOW_MS', 'RS_THRESHOLD', 'RS_UPSET_BONUS', 'RS_STRONG_UPSET_LOSS',
-  'RS_SOLO_VS_TRIO', 'RS_TRIO_WIN', 'LEAVER_LP_PENALTY', 'CRON_PULSE_LB', 'TIERCUT_CARRIER_SID', 'LEAVER_XP_RECORD_ONLY_UNTIL'];
+  'RS_SOLO_VS_TRIO', 'RS_TRIO_WIN', 'LEAVER_LP_PENALTY', 'CRON_PULSE_LB', 'TIERCUT_CARRIER_SID', 'LEAVER_XP_RECORD_ONLY_UNTIL', 'LP_LAST_HOLD_MS'];
 const STUB = [
   "const fs = require('fs');",
   "const FX = JSON.parse(fs.readFileSync(process.env.STUB_FIXTURE, 'utf8'));",
@@ -107,10 +107,11 @@ function advance(state, ms) {
   if (gr) for (const k of Object.keys(gr)) if (gr[k] && gr[k].at) gr[k].at -= ms;
   const cf = files.CONFESSIONS_FILE;
   if (cf) for (const k of Object.keys(cf)) if (cf[k] && cf[k].t0) cf[k].t0 -= ms;
-  const pw = files.PENDING_WRITES_FILE;   // O480 points-row backlog: queued receipts [mh, change, set, clear, t], a failed write's w.t
-  if (pw) for (const k of Object.keys(pw)) {
+  const pw = files.PENDING_WRITES_FILE;   // O480 points-row backlog: queued receipts [mh, change, set, clear, t], a failed write's w.t,
+  if (pw) for (const k of Object.keys(pw)) {   //   the last write's l.t (O481)
     if (pw[k] && Array.isArray(pw[k].rc)) for (const x of pw[k].rc) if (Array.isArray(x)) x[4] -= ms;
     if (pw[k] && pw[k].w && pw[k].w.t) pw[k].w.t -= ms;
+    if (pw[k] && pw[k].l && pw[k].l.t) pw[k].l.t -= ms;
   }
   return files;
 }

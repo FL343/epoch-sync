@@ -31,9 +31,9 @@ function lpWriteDetails(prevDet, rv, events) {
   return lpDetails(rv ? [RS_MAGIC, rv.matchHash, rv.seed, rv.flag, rv.adjDelta, rv.normalDelta] : cur.rs, ring);
 }
 const mhOfKey = (m) => parseInt(String(m), 10) | 0;   // a match key starts with its records' matchHash (d[3]_d[4]_d[2])
-// ---- O480 points-row backlog (PENDING_WRITES_FILE; test/receipt-ring.js, test/pending-writes.js) ----
-// pid -> { rc, w }, de-identified like every state file (pid keys; a matchHash is the key the start rosters in starts.json carry
-//   already):
+// ---- O480 points-row backlog (PENDING_WRITES_FILE; test/receipt-ring.js, test/pending-writes.js, test/stale-lp-read.js) ----
+// pid -> { rc, w, l }, de-identified like every state file (pid keys; a matchHash is the key the start rosters in starts.json carry
+//   already; the score and details in w / l are the ones his public points row shows):
 //   rc: [[mh, change, set, clear, t]] -- points receipts of a player whose row this job did not write in the run they happened
 //     (a void moves nobody's points and so writes nobody's row, an invariant the void / contest tests pin). They ride his next
 //     points write, whichever writer it is (oldest first), within RECEIPT_HOLD_MS -- the time his client waits for a receipt
@@ -44,16 +44,50 @@ const mhOfKey = (m) => parseInt(String(m), 10) | 0;   // a match key starts with
 //     the next run writes it again (ForceUpdate of an absolute value: idempotent) -- the settle path when he settles again, a
 //     retry of its own otherwise. Any points write of his that lands supersedes it. Past PENDING_W_MAX_MS it is dropped (warned):
 //     a fuse, not a schedule. Before O480 such a write was forfeited and the match was processed all the same.
+//   l: { b, v, d, t } -- the last points write of this job that landed (O481): the board name, the score and the details it
+//     carried, when. Steam answers a read from one of several copies of a board, and one can be minutes behind a write: a read
+//     of his row that does not show this write (lpReadStale) takes it as his row instead, counted and logged ([stale-read]).
+//     Before, the next settle counted from the older row and its ForceUpdate wrote over the newer one -- the points of the match
+//     in between and its receipt were lost. Kept LP_LAST_HOLD_MS (30 min: six runs, past any lag seen), then dropped quietly;
+//     on disk at the early checkpoints too, ahead of the confession's marker (saveEarlyMarks: a run that dies after a fine or a
+//     refund leaves that write as l; one killed between the two saves makes that write again, as it did before O481).
+//     A later write of his whose outcome is unknown (answered failed, or cut off before any answer) drops it: Steam may have
+//     taken that write, and if it was of l's match (a refund after its fine, the settle after either) the row it left would
+//     not show l's receipt as it was (writeLpRow, lpLastDrop). So does a write made once (the lone-1V1 payment: its marker is
+//     on disk before it) that would leave such a row, ahead of the write and on disk: a run that dies once Steam took it
+//     leaves the next run no l to read that row as behind (writeLpRow opt.once).
+//     LP_LAST_HOLD_MS=0 turns it off (nothing kept, nothing taken: the job of before O481).
 const PENDING_WRITES_FILE = process.env.PENDING_WRITES_FILE || 'pending-writes.json';
 const CRON_PULSE_LB = process.env.CRON_PULSE_LB || '';   // O480 cron_pulse board name (unset: cron_pulse, cron_pulse_test in a sandbox run; see writePulse)
 const RECEIPT_HOLD_MS = Math.max(0, Number(process.env.RECEIPT_HOLD_MS || 6 * 3600 * 1000));
 const RECEIPT_QUEUE_CAP = 8;   // per player, as many as a ring holds (the newest kept)
 const PENDING_W_MAX_MS = 7 * 86400000;
+const LP_LAST_HOLD_MS = Math.max(0, Number(process.env.LP_LAST_HOLD_MS || 30 * 60000));
+// O481 (pure): is a points row read from the board (row = { score, det } or null: none) behind last = the l of the backlog? The
+//   receipt ring orders the writes: the newest receipt of the last write (its ring head) is on every row written after it --
+//   pushed down the ring; a later write of the same match merges into it, and only this job writes the board, moving l along (a
+//   write of his it cannot confirm takes l away instead: lpLastDrop) -- and on no row before it (the head is the event that
+//   write added, or the merge it made). So a row without that exact receipt (match, change, flags), or no row at all, is a copy
+//   behind the last write. A last write that carried no receipt at all (a claim queued before O480) orders nothing: only a
+//   missing row counts as behind, any other row is taken as read (as before).
+function lpReadStale(row, last) {
+  if (!last) return false;
+  if (!row) return true;
+  const head = lpDetailsOf(last.d).ring[0];
+  if (!head) return false;
+  return !lpDetailsOf(row.det).ring.some((e) => e.mh === head.mh && e.delta === head.delta && e.flags === head.flags);
+}
+// a backlog l still usable at `now`: well formed, its time within LP_LAST_HOLD_MS of now on either side (the save of a run prunes
+//   with the run's start time, its own writes come later)
+function lpLastLive(l, now) {
+  if (!l || typeof l !== 'object' || typeof l.b !== 'string' || !Number.isFinite(Number(l.v)) || !Array.isArray(l.d)) return false;
+  return LP_LAST_HOLD_MS > 0 && Math.abs(now - (Number(l.t) || 0)) <= LP_LAST_HOLD_MS;
+}
 function loadPendingWrites() {
   try { const o = JSON.parse(fs.readFileSync(PENDING_WRITES_FILE, 'utf8')); return (o && typeof o === 'object' && !Array.isArray(o)) ? o : {}; } catch (e) { return {}; }
 }
-// pure: drop queued receipts past the hold (and beyond the cap), failed writes past the fuse, then empty entries;
-//   returns { receipts, writes } dropped
+// pure: drop queued receipts past the hold (and beyond the cap), failed writes past the fuse, a last write past its hold (quietly:
+//   its job is done), then empty entries; returns { receipts, writes } dropped
 function prunePendingWrites(s, now) {
   let dropped = 0, droppedW = 0;
   for (const k of Object.keys(s)) {
@@ -72,13 +106,14 @@ function prunePendingWrites(s, now) {
         delete e.w;
       }
     }
+    if (e && e.l != null && !lpLastLive(e.l, now)) delete e.l;
     if (!e || typeof e !== 'object' || !Object.keys(e).length) delete s[k];
   }
   return { receipts: dropped, writes: droppedW };
 }
-function savePendingWrites(s, now) {
+function savePendingWrites(s, now, quiet) {
   const dropped = prunePendingWrites(s, now).receipts;
-  if (dropped) console.log('receipts: ' + dropped + ' queued receipt(s) dropped (older than ' + Math.round(RECEIPT_HOLD_MS / 3600000) + ' h: the client has rolled those matches back)');
+  if (dropped && !quiet) console.log('receipts: ' + dropped + ' queued receipt(s) dropped (older than ' + Math.round(RECEIPT_HOLD_MS / 3600000) + ' h: the client has rolled those matches back)');
   if (!Object.keys(s).length && !fs.existsSync(PENDING_WRITES_FILE)) return;   // nothing queued on a channel that never queued: no file
   try { writeStateFile(PENDING_WRITES_FILE, JSON.stringify(s, null, 0)); } catch (e) { ghWarn('write ' + PENDING_WRITES_FILE + ' failed: ' + (e && e.message)); }
 }
@@ -2628,6 +2663,7 @@ function writeRunSummary() {
       '| campaign grants / campaign endless | ' + s('campaign', '-') + ' / ' + s('campaignEndless', '-') + ' |',
       '| page-cap hits | ' + RUN.cap + ' |',
       '| points receipts written / queued for a later write; cron pulse (O480) | ' + s('receipts', 0) + ' / ' + s('receiptsQueued', 0) + '; ' + s('pulse', '-') + ' |',
+      '| points rows read without the last write of this job, that write taken instead ([stale-read], O481) | ' + s('staleRead', 0) + ' |',
       '| solo segments held by the key policy (other channel / retired key; new this run) | ' + s('keyHeld', 0) + ' (' + s('keyHeldNew', 0) + ') |',
       '| duration | ' + ((Date.now() - (RUN.t0 || Date.now())) / 1000).toFixed(1) + 's |',
       '',
@@ -5169,28 +5205,81 @@ async function main() {
     }
     return out;
   };
+  // O481: the last points write of this job for the player (backlog l), on this season's board and within its hold; or null
+  const lpLast = (sid) => { const e = lpBacklog[pid(String(sid))], l = e && e.l; return (l && lpBoardId && l.b === lpCur.name && lpLastLive(l, Date.now())) ? l : null; };
+  // O481: the players with such a last write this run can name: the board rows given, the records / starts read this run (sidByPid),
+  //   the accounts of the settle groups given (a roster seat that wrote no record)
+  const lpLastSids = (rowSids, groupList) => {
+    const want = new Set(Object.keys(lpBacklog).filter((k) => lpBacklog[k] && lpBacklog[k].l));
+    const out = new Set();
+    if (!want.size) return [];
+    const take = (s) => { if (want.has(pid(String(s))) && lpLast(s)) out.add(String(s)); };
+    for (const s of (rowSids || [])) take(s);
+    for (const s of sidByPid.values()) take(s);
+    for (const c of (groupList || [])) for (const s of groupSids(c.g)) take(s);
+    return [...out];
+  };
+  // O481: a points row read from the board (or null: none), checked against the player's last write (lpLast): a read behind it
+  //   (lpReadStale: a copy of the board that does not show it yet) gives way to that write -- its score and details -- counted and
+  //   logged; any other read is returned as it came
+  const lpFresh = (sid, row, label) => {
+    const l = lpLast(sid);
+    if (!l || !lpReadStale(row, l)) return row;
+    RUN.staleRead = (RUN.staleRead | 0) + 1;
+    console.log('  [stale-read] points ' + plog(sid) + ' (' + (label || 'points') + '): read ' + (row ? row.score : 'no row') + ' without the last write of this job ('
+      + (l.v | 0) + ', ' + Math.round((Date.now() - Number(l.t)) / 1000) + ' s ago) -> that write is his row');
+    return { score: l.v | 0, det: l.d.slice() };
+  };
   // a player's points row as this run knows it: written this run, else a failed write waiting for its retry (his row on the board
-  //   is what it was before it), else read from the board (null = no row this season)
+  //   is what it was before it), else read from the board (null = no row this season) unless the read is behind the last write of
+  //   this job (lpFresh, O481)
   const lpRowOf = async (sid, label) => {
     const w = lpWritten[String(sid)];
     if (w) return { score: w.score, det: w.det };
     const pw = lpWaiting(sid);
     if (pw) return { score: pw.v | 0, det: Array.isArray(pw.d) ? pw.d : [] };
     const e = await readUserEntry(lpBoardId, String(sid), label || 'points');
-    return e ? { score: e.score | 0, det: decodeDetails(e.detailData) } : null;
+    return lpFresh(sid, e ? { score: e.score | 0, det: decodeDetails(e.detailData) } : null, label || 'points');
+  };
+  // O481: a points write of his whose outcome is unknown -- Steam may have taken it, nothing says it landed -- takes his kept write
+  //   (l) away. If it landed as one entry with the kept write's newest receipt (the same match: a refund after its fine, the
+  //   settle after either), his row no longer shows that receipt as it was and would read as a copy behind the kept write: the
+  //   kept write would eat the newer row. Without it his reads go by the board, as before O481, until a write of his lands again.
+  const lpLastDrop = (sid, why) => {
+    const k = pid(String(sid)), e = lpBacklog[k];
+    if (!e || !e.l) return;
+    delete e.l; if (!Object.keys(e).length) delete lpBacklog[k]; backlogDirty = true;
+    console.log('  points write of ' + plog(sid) + ' ' + (why || 'not confirmed') + ' -- his last write of this job no longer stands in for a read (O481)');
   };
   // write a points row: the score + the details (reveal slot + ring with his queued receipts, this run's events, then the caller's
-  //   own); remembered when it lands, and the receipts it carried leave the queues, as does a failed write it supersedes.
+  //   own); remembered when it lands (this run: lpWritten; the next runs: the backlog's l, O481), and the receipts it carried leave
+  //   the queues, as does a failed write it supersedes.
   //   opt.retry (the settle's points writes): a write that fails waits in the backlog (w: this absolute value + these details,
   //   receipts included) for the next run; other writers keep their documented forfeit (their markers are already saved).
+  //   O481: a write of unknown outcome drops the kept write (lpLastDrop): one answered failed (a gateway error can come after
+  //   Steam took the write) or cut off before any answer. A confession write cut off ends the run before anything is saved:
+  //   on disk the kept write stays, and the next run makes that write again. A refund right after its fine (the kept write)
+  //   then lands once whether the first try landed or not (a row it left reads as behind the fine, which the refund is made
+  //   again from); any other write leaves the kept write's receipt on the row it left, so a first try that landed lands
+  //   twice, as before O481.
+  //   opt.once (the lone-1V1 payment: a write no run makes again, its marker on disk before it) is the saver of the backlog. If
+  //   the row it leaves would read as behind his kept write (the payment merges into its newest receipt: the fine of that
+  //   match), it takes the kept write away first and saves: a run that dies once Steam took the payment leaves the next run no
+  //   kept write to eat that row -- his reads go by the board, as before O481. Saved again once answered (a payment that landed
+  //   is his kept write on disk).
   const writeLpRow = async (sid, score, prevDet, rv, events, opt) => {
     const k = pid(String(sid)), b = lpBacklog[k];
     const queued = (b && Array.isArray(b.rc)) ? b.rc.map((x) => ({ mh: x[0] | 0, change: x[1] | 0, set: x[2] | 0, clear: x[3] | 0 })) : [];
     const mine = receipts[String(sid)] || [];
     const all = queued.concat(mine, events || []);
     const det = lpWriteDetails(prevDet, rv, all);
-    const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: lpBoardId, steamid: String(sid), score, scoremethod: 'ForceUpdate', format: 'json' }, det);
+    const once = opt && opt.once;
+    if (once && lpReadStale({ score, det }, lpLast(sid))) { lpLastDrop(sid, '(one-shot) would leave a row that reads as behind his last write'); once(); }
+    let res;
+    try { res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: lpBoardId, steamid: String(sid), score, scoremethod: 'ForceUpdate', format: 'json' }, det); }
+    catch (err) { lpLastDrop(sid); throw err; }
     const ok = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
+    if (!ok) lpLastDrop(sid);
     if (ok) {
       lpWritten[String(sid)] = { score, det };
       delete receipts[String(sid)];
@@ -5198,6 +5287,8 @@ async function main() {
         if (b.w) { RUN.pendingRetried = (RUN.pendingRetried | 0) + 1; console.log('  points write of ' + plog(sid) + ' that failed before (' + ((b.w.n) | 0) + ' tries) landed: ' + score); }
         delete b.rc; delete b.w; if (!Object.keys(b).length) delete lpBacklog[k]; backlogDirty = true;
       }
+      // O481: a run of the next LP_LAST_HOLD_MS that reads his row without this write takes this instead (lpFresh)
+      if (LP_LAST_HOLD_MS > 0) { (lpBacklog[k] = lpBacklog[k] || {}).l = { b: lpCur.name, v: score | 0, d: det, t: Date.now() }; backlogDirty = true; }
       RUN.receipts = (RUN.receipts | 0) + all.length;
     } else if (opt && opt.retry) {
       const e = lpBacklog[k] = lpBacklog[k] || {};
@@ -5206,6 +5297,7 @@ async function main() {
       backlogDirty = true; RUN.pendingQueued = (RUN.pendingQueued | 0) + 1;
       console.log('  points write of ' + plog(sid) + ' failed -- ' + score + ' waits for the next run (try ' + e.w.n + ')');
     }
+    if (once) once();
     return { ok, res, det, n: all.length, queued: queued.length };
   };
   // the receipts no write of this run carried -> the backlog: they ride the player's next points write in a later run, within
@@ -5509,8 +5601,17 @@ async function main() {
   // Consolation is written ahead (at most once: a run killed mid-loop forfeits the unpaid credits, which is the
   // documented failed-write behavior); each confession write is followed by its marker (reconcileConfessions).
   // Writes a pruned COPY of confState: pruning the live object would delete entries the upkeep loop still visits.
+  // O481: the points-row backlog too (a pruned copy, quietly: the live one is pruned and reported by the save of the run), so a
+  //   run that dies after a fine or a refund landed leaves the next run that write as his last one (l), not the one before it:
+  //   a read showing the newer row would look behind the older l (the same match's receipt changed) and give way to it.
+  //   Saved first, ahead of the marker: a run killed between the two saves leaves the write's l without its marker, and the next
+  //   run makes that write again (a fine or a refund twice, as before O481); the other order would leave the marker with the
+  //   older l -- the refund's row then reads as behind the fine and the refund is lost. (The lone-1V1 payments below, made once
+  //   with their marker saved ahead, save it around their own write: writeLpRow opt.once.)
+  const saveBacklogEarly = () => { if (APPLY_MMR && LP_LAST_HOLD_MS > 0 && backlogDirty) savePendingWrites(JSON.parse(JSON.stringify(lpBacklog)), nowMs, true); };
   const saveEarlyMarks = (leaversDirty) => {
     if (!APPLY_MMR) return;
+    saveBacklogEarly();   // O481, see above
     saveStarts(startsPending);
     saveConfessions(Object.assign({}, confState), nowMs, confLive);
     if (leaversDirty) saveLeavers(leavers);
@@ -5577,8 +5678,9 @@ async function main() {
           seeded = false;
         }
         if (!APPLY_MMR) { console.log('  (dry-run) lone-1v1 pts ' + plog(sid) + ' = ' + cur); continue; }
-        // an unread mismatch reveal survives, as on the confession path; the receipts ride the same write (O480)
-        const r = (await writeLpRow(sid, cur, e ? e.det : null, null, evs)).res;
+        // an unread mismatch reveal survives, as on the confession path; the receipts ride the same write (O480); made once,
+        //   the backlog saved around it (O481)
+        const r = (await writeLpRow(sid, cur, e ? e.det : null, null, evs, { once: saveBacklogEarly })).res;
         if (r.ok && !(r.json && r.json.result && r.json.result.result && r.json.result.result !== 1)) {
           RUN.lone1v1Paid = (RUN.lone1v1Paid | 0) + ps.length;
           console.log('  lone-1v1 pts ' + plog(sid) + ' ' + was + ' -> ' + cur + ' (' + ps.length + ' win(s) nobody else wrote, Q184)');
@@ -6241,6 +6343,14 @@ async function main() {
     const br = await readBoardAll(lpId, 'points board');
     lpComplete = br.complete;
     for (const e of br.ents) { lp[e.steamID] = e.score | 0; lpDet[e.steamID] = decodeDetails(e.detailData); }
+    // O481: a row this read shows behind the player's last points write of this job (lpFresh) is that write. A player with no row
+    //   in the read counts as behind it only when the read is complete; on an incomplete one the on-demand read below checks him.
+    //   Written this run / a failed write waiting: their overlays below decide.
+    for (const sid of lpLastSids(Object.keys(lp), fresh)) {
+      if (lpWritten[sid] || lpWaiting(sid) || (lp[sid] == null && !lpComplete)) continue;
+      const row = lpFresh(sid, lp[sid] == null ? null : { score: lp[sid], det: lpDet[sid] }, 'points board');
+      if (row) { lp[sid] = row.score; lpDet[sid] = row.det; }
+    }
     // O480: rows this run already wrote (a confession fine / refund, a lone-1V1 payment) read as written: the bulk read may not show
     //   a write of seconds ago, and a later settle of the same player must build on it (his points and his receipt ring)
     for (const sid of Object.keys(lpWritten)) { lp[sid] = lpWritten[sid].score; lpDet[sid] = lpWritten[sid].det; }
@@ -6453,7 +6563,8 @@ async function main() {
     const fetched = await mapPool([...need], CONCURRENCY, async (sid) => {
       if (lpId && !lpComplete && lp[sid] == null) {
         const e = await readUserEntry(lpId, sid, 'points');
-        if (e) { lp[sid] = e.score | 0; lpDet[sid] = decodeDetails(e.detailData); }
+        const row = lpFresh(sid, e ? { score: e.score | 0, det: decodeDetails(e.detailData) } : null, 'points');   // O481
+        if (row) { lp[sid] = row.score; lpDet[sid] = row.det; }
       }
       if (xpId && !xpComplete && xp[sid] == null) {
         const e = await readUserEntry(xpId, sid, 'xp');
@@ -8433,3 +8544,4 @@ Object.assign(module.exports, { teamXpFloor, teamXpStarts, teamXpMark, teamRollb
 Object.assign(module.exports, { RATING, RATING_FAMS, ENDLESS_RATING_LB_SOLO, ENDLESS_RATING_LB_DUO, ENDLESS_RATING_LB_TRIO, ENDLESS_RATING_LB_QUAD, ENDLESS_TIERCUT_LB, ratingFamOf, fnv32, ratingRunId, ratingHistKey,
   ratingHistUpsert, ratingHistRemove, ratingScoreOf, ratingPlan, ratingCutsOf, ratingTierOf, tiercutDay, tiercutEncode, tiercutDecode, tiercutDue, pruneRatingHist });   // O103 endless competitive rating (client knife 5.1a; test/endless-rating.js)
 Object.assign(module.exports, { lpWriteDetails, mhOfKey, groupSids, prunePendingWrites, PENDING_WRITES_FILE, RECEIPT_HOLD_MS });   // O480 points receipts + backlog (test/receipt-ring.js)
+Object.assign(module.exports, { lpReadStale, lpLastLive, LP_LAST_HOLD_MS });   // O481 the backlog's last write against a lagging read (test/stale-lp-read.js)

@@ -29,8 +29,10 @@
 //       normal finish does
 //   [9] (Q207) the teammate who left quit with a confession, fined on the board before the settle run: his points read
 //       as at his leave (the fine added back), so the loser who stayed again takes the normal-finish points
-//   [10] (Q207) the same, but this season's board shows no row for him at the settle (the fine is not on it): the settle
-//       seeds him, and the seed is read as it stands (adding the fine on top of it would read him 100 points too high)
+//   [10] (Q207) the same, but this season's board shows no row for him at the settle, six minutes after his fine (a copy of the
+//       board behind it): the settle takes the fine this job wrote as his row (O481) and adds it back as in [9], it neither seeds
+//       him again nor writes over the fine; with the kept write past its hold (or before O481) the settle seeds him, and the
+//       seed is read as it stands (adding the fine on top of it would read him 100 points too high)
 //   [11] (Q207) the fine is added back once, not more: a teammate just below a tier line reads at his points as at his
 //       leave, so the loser who stayed takes the normal finish, not the softer loss of a team read a tier higher
 // State isolation is structural (every *_FILE var scanned and redirected, cwd = temp dir), like test/leaver-ghost.js.
@@ -38,7 +40,8 @@ const { spawnSync } = require('child_process');
 const fs = require('fs'), path = require('path'), os = require('os');
 const SCRUB = ['PT_MODE', 'STRICT_BOARDS', 'APPLY_MMR', 'ALLOW_TEST', 'DEMO_APPID', 'RANKED_LB', 'LP_LB', 'XP_LB', 'STARTS_MATURITY_MS', 'CONFESS_PRUNE_MS',
   'SEEDCAP_ENFORCE', 'SEEDCAP_REJECT', 'GITHUB_STEP_SUMMARY', 'LEDGER_SHARDS', 'PT_SHARD_COUNT', 'ABSENT_GRACE_MS', 'READ_RETRY_MS', 'SANITY_MIN_START_AGE_MS',
-  'SHARD_STRICT_BODY', 'CP_LB', 'TRUST_LB', 'REPORT_LB', 'START_CONFIRM_MS', 'SIG_PAIR_WINDOW_MS', 'RS_THRESHOLD', 'RS_UPSET_BONUS', 'RS_STRONG_UPSET_LOSS'];
+  'SHARD_STRICT_BODY', 'CP_LB', 'TRUST_LB', 'REPORT_LB', 'START_CONFIRM_MS', 'SIG_PAIR_WINDOW_MS', 'RS_THRESHOLD', 'RS_UPSET_BONUS', 'RS_STRONG_UPSET_LOSS',
+  'LP_LAST_HOLD_MS'];
 for (const k of SCRUB) delete process.env[k];
 process.env.STATE_SALT = 's';
 const v = require(path.join(__dirname, '..', 'validate.js'));
@@ -80,7 +83,7 @@ const STUB = [
 ].join('\n');
 const hexLE = (arr) => arr.map(n => { const b = ((n | 0) >>> 0).toString(16).padStart(8, '0'); return b.slice(6, 8) + b.slice(4, 6) + b.slice(2, 4) + b.slice(0, 2); }).join('');
 
-function runCron(boards, files) {
+function runCron(boards, files, env) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'q183-'));
   try {
     const stub = path.join(dir, 'stub.js'); fs.writeFileSync(stub, STUB);
@@ -96,7 +99,7 @@ function runCron(boards, files) {
       STEAM_PUBLISHER_KEY: 'k', APPID: '1', LB_PREFIX: 'shard_', RANKED_LB: 'rating', LP_LB: 'points', XP_LB: 'progress', STATE_SALT: 's',
       STUB_FIXTURE: fxPath, STUB_LOG: logPath, CONCURRENCY: '1', STRICT_BOARDS: '0', READ_RETRY_MS: '0',
       SEASON_NOW: '2026-10-01T00:00:00Z',   // pinned season clock (points writes go to the base board), as in test/leaver-ghost.js
-    }, stateEnv);
+    }, stateEnv, env || {});
     const r = spawnSync(process.execPath, ['-r', stub, VALIDATE], { env: e, encoding: 'utf8', cwd: dir, timeout: 120000 });
     const posts = fs.readFileSync(logPath, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l));
     const state = {};
@@ -149,10 +152,10 @@ function boardsWith(recs, pts) {
 const MIN = 60000, HOUR = 3600 * 1000;
 const GRACE = (v.ABSENT_GRACE_MS || 0) + MIN;
 const LEAVE = v.LEAVE_CONFIRM_MS + MIN;
-function runSteps(steps, pts, skill0) {
+function runSteps(steps, pts, skill0, env) {
   const rs = []; let state = null;
   for (const [ms, recs] of steps) {
-    const r = runCron(boardsWith(recs, pts), state ? advance(state, ms) : { SKILL_FILE: skill0 || {} });
+    const r = runCron(boardsWith(recs, pts), state ? advance(state, ms) : { SKILL_FILE: skill0 || {} }, env);
     rs.push(r); state = r.state;
     if (r.code !== 0) break;
   }
@@ -368,9 +371,12 @@ const HIGH = { mu: 30, sigma: 2 };   // display 1960; a fresh account (no row) r
 }
 // ---- [10] (Q207) a gold loser's teammate with no points row quits with a confession: the confession path seeds him
 //   (display 1775 -> 3100) and fines him 100 (written: 3000), but this season's board still shows no row for him at the
-//   settle (the stub keeps no writes and the step passes none: the case of a fine that is not on the board read). The
-//   settle seeds him again at 3100, and that is his points as at his leave: team average 2975 (gold), -2 as in the normal
-//   finish. Adding the recorded fine on top of the seed would read 3200 (team average 3025, platinum) and give -1 ----
+//   settle six minutes later (the stub keeps no writes and the step passes none: a copy of the board behind the fine).
+//   O481: the settle takes the fine this job wrote as his row ([stale-read]) and adds it back as in [9]: 3100, his points as
+//   at his leave, team average 2975 (gold), -2 as in the normal finish; it no longer seeds him again and writes that seed
+//   (3100) over his fine. With the hold off (the job before O481; a kept write past its hold) the settle seeds him again at
+//   3100, read as it stands: the same plan. Adding the recorded fine on top of the seed would read 3200 (team average 3025,
+//   platinum) and give -1 ----
 {
   const W = { mu: 31, sigma: 2 }, L = { mu: 16, sigma: 2 }, F = { mu: 25.375, sigma: 2 };   // displays 2000 / 1400 / 1775
   const sk0 = { [v.pid(X)]: W, [v.pid(Y)]: W, [v.pid(Z0)]: L, [v.pid(Z1)]: F };
@@ -381,13 +387,19 @@ const HIGH = { mu: 30, sigma: 2 };   // display 1960; a fresh account (no row) r
   const all = S.concat([0, 1, 2].map((i) => ({ sid: ros[i], d: settle(mt, hash, i, ros) })), [{ sid: Z1, d: conf() }]);
   const steps = [[0, S], [5 * MIN, all], [GRACE, all], [LEAVE, all], [3 * HOUR, all]];
   const m = runSteps(steps, pts0, sk0);
+  const o = runSteps(steps, pts0, sk0, { LP_LAST_HOLD_MS: '0' });
   const n = match(0xE1A1, ros, pts0, sk0, null);
-  T('[10] both settle; Z1 fined from his seed by his confession (3100 -> 3000), seeded again at the settle, not convicted again',
+  const staleZ1 = new RegExp('\\[stale-read\\] points ' + v.pid(Z1).slice(0, 8) + ' \\(points board\\): read no row without the last write of this job \\(3000, ');
+  T('[10] both settle; Z1 fined from his seed by his confession (3100 -> 3000); the read without the fine takes it (O481): not seeded again, the fine not written over, not convicted again',
     m.rs.every(r => r.code === 0) && n.rs.every(r => r.code === 0) && processedOf(m.last).has(keyOf(S[0].d)) && leavesOf(m.last, Z1) === 1
-    && /pts 3100-100->3000 \(seeded base\)/.test(m.out) && /leaver, first settle this season, display 1775 -> pts 3100/.test(m.out)
-    && /already confessed -- consensus conviction skipped/.test(m.out), m.out.slice(-1500));
-  T('[10] the loser who stayed takes the normal-finish points (-2; the fine added on top of the seed: -1)', lastPts(n, Z0) === 2848 && lastPts(m, Z0) === lastPts(n, Z0),
-    JSON.stringify([lastPts(m, Z0), lastPts(n, Z0)]));
+    && /pts 3100-100->3000 \(seeded base\)/.test(m.out) && staleZ1.test(m.out) && !/leaver, first settle this season/.test(m.out)
+    && JSON.stringify(writesTo(m.rs, POINTS, Z1)) === '[3000]' && /already confessed -- consensus conviction skipped/.test(m.out), m.out.slice(-1500));
+  T('[10] the hold off (the job before O481): seeded again at the settle (3100, written over his fine), not convicted again',
+    o.rs.every(r => r.code === 0) && processedOf(o.last).has(keyOf(S[0].d)) && leavesOf(o.last, Z1) === 1 && !/\[stale-read\]/.test(o.out)
+    && /leaver, first settle this season, display 1775 -> pts 3100/.test(o.out) && JSON.stringify(writesTo(o.rs, POINTS, Z1)) === '[3000,3100]'
+    && /already confessed -- consensus conviction skipped/.test(o.out), o.out.slice(-1500));
+  T('[10] the loser who stayed takes the normal-finish points, hold on or off (-2; the fine added on top of the seed: -1)',
+    lastPts(n, Z0) === 2848 && lastPts(m, Z0) === lastPts(n, Z0) && lastPts(o, Z0) === lastPts(n, Z0), JSON.stringify([lastPts(m, Z0), lastPts(o, Z0), lastPts(n, Z0)]));
 }
 // ---- [11] (Q207) the gold loser's teammate (3950, just below the platinum line) quits with a confession: fined to 3850 at
 //   first sight. Read as at his leave (3950: team average 2975, gold) the loser who stayed takes the normal finish, -2.

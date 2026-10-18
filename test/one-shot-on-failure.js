@@ -25,7 +25,8 @@
 const { spawnSync } = require('child_process');
 const fs = require('fs'), path = require('path'), os = require('os');
 const SCRUB = ['PT_MODE', 'STRICT_BOARDS', 'APPLY_MMR', 'ALLOW_TEST', 'DEMO_APPID', 'RANKED_LB', 'LP_LB', 'XP_LB', 'STARTS_MATURITY_MS', 'CONFESS_PRUNE_MS', 'CONSOLATION_XP', 'REPORT_LB', 'TRUST_LB', 'SEEDCAP_ENFORCE', 'SEEDCAP_REJECT', 'GITHUB_STEP_SUMMARY',
-  'LEDGER_SHARDS', 'PT_SHARD_COUNT', 'ABSENT_GRACE_MS', 'READ_RETRY_MS', 'SHARD_STRICT_BODY'];
+  'LEDGER_SHARDS', 'PT_SHARD_COUNT', 'ABSENT_GRACE_MS', 'READ_RETRY_MS', 'SHARD_STRICT_BODY',
+  'LP_LAST_HOLD_MS'];   // O481: [4] counts the refund from the kept fine; its rollback switch set job-wide must not turn this red (a red test skips the settle)
 for (const k of SCRUB) delete process.env[k];
 process.env.STATE_SALT = 's';   // same salt as the child runs below, so v.pid() addresses their state rows
 const v = require(path.join(__dirname, '..', 'validate.js'));
@@ -220,7 +221,10 @@ console.log('-- [4] refund, then a failing exit --');
   const r0 = runCron(world([conf], extra), null, MAIN);
   T('[4] run 0 (healthy): fined at quit time', r0.code === 0 && writesTo(r0, 7, C).length === 1 && (confOf(r0, C, key) || {}).ded === 100, tail(r0));
   const r1 = runCron(world([conf].concat(settles), extra), advance(r0.state, 10 * MIN), env(MAIN, STRICT));
-  T('[4] run 1 refunds once, then fails', r1.code === 1 && REPORT_EXIT.test(r1.out) && refunds(r1) === 1 && /score=2100(&|$)/.test(writesTo(r1, 7, C)[0] ? writesTo(r1, 7, C)[0].body : ''), tail(r1));
+  // O481: the board still shows C at 2000 in run 1, ten minutes after run 0 wrote his fine (1900): a copy of the board behind that
+  //   write. The refund adds the fine back to the row the job wrote (1900 -> 2000, his points before he quit), not to the lagging
+  //   read (2000 -> 2100: 100 points he never had)
+  T('[4] run 1 refunds once (onto the fine it wrote), then fails', r1.code === 1 && REPORT_EXIT.test(r1.out) && refunds(r1) === 1 && /score=2000(&|$)/.test(writesTo(r1, 7, C)[0] ? writesTo(r1, 7, C)[0].body : ''), tail(r1));
   T('[4] run 1: the refund\'s marker is on disk, exit signal retracted', (confOf(r1, C, key) || {}).refunded === 1 && leavesOf(r1, C) === 0, JSON.stringify(r1.state.CONFESSIONS_FILE));
   const r2 = runCron(world([conf].concat(settles), extra), advance(r1.state, 10 * MIN), env(MAIN, STRICT));
   T('[4] run 2 (still failing): no second refund', r2.code === 1 && refunds(r2) === 0, tail(r2));
@@ -271,9 +275,11 @@ console.log('-- [6] checkpoint contract --');
   pin('atomic state write helper (temp file + rename)', /function writeStateFile\(file, text\) \{ const tmp = file \+ '\.tmp'; fs\.writeFileSync\(tmp, text\); fs\.renameSync\(tmp, file\); \}/);
   const direct = Array.from(SRC.matchAll(/fs\.writeFileSync\(\s*([A-Za-z0-9_.]+)/g), m => m[1]).filter(a => a !== 'tmp');
   T('[7] pin: no state file written in place (every *_FILE goes through writeStateFile)', direct.length === 0, direct.join(','));
-  pin('early marks saved right after the starts verdict, before any consolation write', /RUN\.pending = Object\.keys\(startsPending\)\.filter\(\(m\) => m\.charAt\(0\) !== '~'\)\.length; RUN\.convicted = startsRes\.convicted;\s*\n(?:\s*\/\/[^\n]*\n)*\s*const saveEarlyMarks = \(leaversDirty\) => \{[\s\S]{0,400}?\};\s*\n\s*saveEarlyMarks\(startsRes\.convicted > 0\);[\s\S]{0,1200}?let consoledN = 0;/);
+  pin('early marks saved right after the starts verdict, before any consolation write', /RUN\.pending = Object\.keys\(startsPending\)\.filter\(\(m\) => m\.charAt\(0\) !== '~'\)\.length; RUN\.convicted = startsRes\.convicted;\s*\n(?:\s*\/\/[^\n]*\n)*(?:\s*const saveBacklogEarly = [^\n]*\n)?\s*const saveEarlyMarks = \(leaversDirty\) => \{[\s\S]{0,400}?\};\s*\n\s*saveEarlyMarks\(startsRes\.convicted > 0\);[\s\S]{0,1200}?let consoledN = 0;/);
   pin('early marks honor the dry-run switch', /const saveEarlyMarks = \(leaversDirty\) => \{\s*\n\s*if \(!APPLY_MMR\) return;/);
-  pin('early marks save starts, a COPY of confessions, leavers on demand, processed on growth', /if \(!APPLY_MMR\) return;\s*\n\s*saveStarts\(startsPending\);\s*\n\s*saveConfessions\(Object\.assign\(\{\}, confState\), nowMs, confLive\);\s*\n\s*if \(leaversDirty\) saveLeavers\(leavers\);\s*\n\s*if \(processed\.size !== processedN0\) saveProcessed\(processed\);/);
+  //   (O481: the backlog with his last write goes to disk first, saveBacklogEarly, ahead of the marker; stale-lp-read.js [12e] pins
+  //   that order)
+  pin('early marks save starts, a COPY of confessions, leavers on demand, processed on growth', /if \(!APPLY_MMR\) return;\s*\n(?:\s*saveBacklogEarly\(\);[^\n]*\n)?\s*saveStarts\(startsPending\);\s*\n\s*saveConfessions\(Object\.assign\(\{\}, confState\), nowMs, confLive\);\s*\n\s*if \(leaversDirty\) saveLeavers\(leavers\);\s*\n\s*if \(processed\.size !== processedN0\) saveProcessed\(processed\);/);
   pin('confession path gets the checkpoint', /checkpoint: \(\) => saveEarlyMarks\(true\),/);
   pin('checkpoint after the fine write', /const okW = await opts\.writeLp\(String\(c\.steamID\), nv, e && e\.details(, \{[^\n]*\})?\);\s*\n[^\n]*\n\s*if \(opts\.checkpoint\) opts\.checkpoint\(\);/);   // O480: + the receipt argument
   pin('checkpoint after the refund write', /st\.refunded = 1;\s*\n\s*if \(wrote && opts\.checkpoint\) opts\.checkpoint\(\);/);
