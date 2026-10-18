@@ -19,12 +19,15 @@
 const fs = require('fs');
 const { readBoardAll, pid, decodeDetails, getJson, BASE, TRUST_LB, REPORT_LB, START_MAGIC, REPORT_MAGIC, CP_LB, ENDLESS_LB, REDEEM_LB, GRANT_LB,
   ENDLESS_LB_SOLO, ENDLESS_LB_TRIO, ENDLESS_LB_QUAD, ENDLESS_LB_OVERALL, ENDLESS_COMP_LB, ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, ENDLESS_COMP_LB_QUAD, ENDLESS_COMP_LB_OVERALL,
-  ENDLESS_LB_CLASSIC_SOLO, ENDLESS_LB_CLASSIC_DUO, ENDLESS_LB_CLASSIC_TRIO, ENDLESS_LB_CLASSIC_QUAD, ENDLESS_LB_CLASSIC_OVERALL } = require('./validate.js');
+  ENDLESS_LB_CLASSIC_SOLO, ENDLESS_LB_CLASSIC_DUO, ENDLESS_LB_CLASSIC_TRIO, ENDLESS_LB_CLASSIC_QUAD, ENDLESS_LB_CLASSIC_OVERALL, ENDLESS_CUP_HONOR_LB } = require('./validate.js');
 // O276 (client knife 5.1b, 2026-10-18): every cron-written endless ladder is a trusted board like endless_board (the closure once held only
 //   endless_board and its season twins). Their names are this repo's public defaults (the jobs never override them), and every writer of
 //   one of them enters the state the closure reads (recordEndlessSignals for every own-record seat, xp for every endless settle).
 const ENDLESS_TRUSTED = [ENDLESS_LB_SOLO, ENDLESS_LB_TRIO, ENDLESS_LB_QUAD, ENDLESS_LB_OVERALL, ENDLESS_COMP_LB, ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, ENDLESS_COMP_LB_QUAD,
-  ENDLESS_COMP_LB_OVERALL, ENDLESS_LB_CLASSIC_SOLO, ENDLESS_LB_CLASSIC_DUO, ENDLESS_LB_CLASSIC_TRIO, ENDLESS_LB_CLASSIC_QUAD, ENDLESS_LB_CLASSIC_OVERALL];
+  ENDLESS_COMP_LB_OVERALL, ENDLESS_LB_CLASSIC_SOLO, ENDLESS_LB_CLASSIC_DUO, ENDLESS_LB_CLASSIC_TRIO, ENDLESS_LB_CLASSIC_QUAD, ENDLESS_LB_CLASSIC_OVERALL,
+  ENDLESS_CUP_HONOR_LB];   // O180 (client knife 5.1c-1): the cup honor board -- a winner is an own-record competitive writer of that week (in signals); a
+//   foreign row here = its trusted-writes flag regressed = a self-written name mark. The weekly boards (<comp ladder>_w<YYYYWW>) rotate and are
+//   not in the closure (seasonTwinOf takes _s<N> only); the carrier row sits on the ops carrier account (not a player) and is left out too.
 // season twins (`<base>_s<N>`) of the base board and the season-twinned families (classic ladders are lifetime only)
 const ENDLESS_SEASONED = [ENDLESS_LB, ENDLESS_LB_SOLO, ENDLESS_LB_TRIO, ENDLESS_LB_QUAD, ENDLESS_LB_OVERALL, ENDLESS_COMP_LB, ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, ENDLESS_COMP_LB_QUAD, ENDLESS_COMP_LB_OVERALL];
 function seasonTwinOf(name) {

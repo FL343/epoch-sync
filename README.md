@@ -226,6 +226,17 @@ absent, so a run is unaffected before it is provisioned.
   (prior depth floors blending into the live percentile as the field grows; details = magic, season, then
   N + six cuts per family). The carrier account is `TIERCUT_CARRIER_SID` or, unset, the account already
   carrying the app's `version_gate` row. Board names: `ENDLESS_RATING_LB_*`, `ENDLESS_TIERCUT_LB`.
+- Gold Rush Cup (client knife 5.1c-1, 2026-10-18; `test/endless-cup.js`): every competitive endless settle
+  on the EA app id also keeps the player's best of the week on `<competitive ladder>_w<YYYYWW>` (ISO week,
+  Monday 00:00 UTC; the week the settle runs in; team rows carry the team block; created at the week's
+  first write, never deleted). Week 2026-W47 is edition 1. The first run after a week ends settles it: a
+  family is held with 40 solo players / 15 teams (a team = a roster set), and its top three places
+  (a tie shares the place) win a name mark on `endless_cup_honor` (one row per winner: score = the week,
+  details = magic, week, size << 8 | place per family) worn until the next settle; a seedcap conviction of
+  the winning run revokes the mark, the place is not re-awarded. A carrier row on `endless_cup` (same
+  carrier account as the tier cuts) carries this week, the thresholds, the entrants per family and which
+  editions were held. Verdicts live in `endless-solo.json` (`cup`). Board names: `ENDLESS_CUP_LB`,
+  `ENDLESS_CUP_HONOR_LB`.
 
 State files committed back each run (idempotency): `processed.json`, `skill.json`,
 `leavers.json`, `xp.json` (per-player `{ lastWinDay, games }` for the daily-first bonus

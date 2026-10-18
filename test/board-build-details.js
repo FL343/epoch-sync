@@ -31,7 +31,7 @@ assert('casual co-op (2P / trio) lifetime + season pools carry build (t.build = 
 const writes = (src.match(/postFormDetails\('\/ISteamLeaderboards\/SetLeaderboardScore\/v1\/'[^\n]*\);/g) || []);
 // O207 (knife 5.1b): every endless ladder write goes through one writer, ladderDetails(w) = [w.ts | 0, w.build | 0] + the team block of a team row
 const withBuild = writes.filter(l => /\}, ladderDetails\(w\)\);/.test(l));
-assert('13 endless ladder writes send ladderDetails(w) (11 [ts, build] + 2 classic; found ' + withBuild.length + ' of ' + writes.length + ' SetLeaderboardScore details writes)', withBuild.length === 13);
+assert('14 endless ladder writes send ladderDetails(w) (11 [ts, build] + 2 classic + 1 weekly cup board [O180]; found ' + withBuild.length + ' of ' + writes.length + ' SetLeaderboardScore details writes)', withBuild.length === 14);
 assert('no endless ladder write builds its details inline any more (one writer: ladderDetails)', !writes.some(l => /\}, \[w\.ts \| 0, (w\.build \| 0|0)\]\);/.test(l)));
 assert('ladderDetails = [w.ts | 0, w.build | 0] + the team block when the entry has a roster and the rollout gate is open', /function ladderDetails\(w\) \{ return \[w\.ts \| 0, w\.build \| 0\]\.concat\(w\.team && V51B \? teamBlock\(w\.team\) : \[\]\); \}/.test(src));
 assert('no endless ladder write still sends the 1-int details [w.ts | 0]', !/\}, \[w\.ts \| 0\]\);/.test(src));

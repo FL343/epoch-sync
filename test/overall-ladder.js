@@ -65,7 +65,7 @@ eq('rollout gate closed on the playtest / demo jobs (flip on 10-27, after Next F
 console.log('== [3] wiring pins (validate.js) ==');
 assert('gate: V51B = !PT_MODE || V51B_PT (one constant; the EA job runs the new rule now)', /const V51B_PT = false;\nconst V51B = !PT_MODE \|\| V51B_PT;/.test(src));
 assert('provisioned up-front with the solo/team ladders (trusted) [+ casual solo ladder / casual save box, client knife 3.7a]', /\[ENDLESS_COMP_LB_OVERALL, true\], \[ENDLESS_LB_SOLO, true\], \[SAVE_BOX_LB_CASUAL, false\],\s*\n\s*\[ENDLESS_LB_CLASSIC_SOLO, true\]/.test(src));   // classic surface continues the list (client knife 3.9b N3)
-assert('O276: the EA list provisions the casual + classic composites at its tail (trusted)', /\[ENDLESS_TIERCUT_LB, true\],\n      \[ENDLESS_LB_OVERALL, true\], \[ENDLESS_LB_CLASSIC_OVERALL, true\]\]\) \{/.test(src));
+assert('O276: the EA list provisions the casual + classic composites at its tail (trusted)', /\[ENDLESS_TIERCUT_LB, true\],\n      \[ENDLESS_LB_OVERALL, true\], \[ENDLESS_LB_CLASSIC_OVERALL, true\],[^\n]*\n      \[ENDLESS_CUP_LB, true\], \[ENDLESS_CUP_HONOR_LB, true\]\]\) \{/.test(src));   // O180 (knife 5.1c-1): the cup boards after them
 assert('playtest board plan adds the overall ladder (trusted); the casual / classic composites only once the gate flips',
   /add\(cfg\.compOverallLb, 1\);/.test(src) && /compOverallLb: ENDLESS_COMP_LB_OVERALL,/.test(src)
   && /casualOverallLb: V51B_PT \? ENDLESS_LB_OVERALL : null, classicOverallLb: V51B_PT \? ENDLESS_LB_CLASSIC_OVERALL : null,/.test(src) && /add\(cfg\.casualOverallLb, 1\); add\(cfg\.classicOverallLb, 1\);/.test(src));

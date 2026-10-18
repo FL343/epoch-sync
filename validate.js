@@ -2626,6 +2626,7 @@ function writeRunSummary() {
       '| reports seen / counted | ' + s('repSeen', 0) + ' / ' + s('repCounted', 0) + ' |',
       '| trust writes / deletes | ' + s('trustW', 0) + ' / ' + s('trustD', 0) + ' |',
       '| endless rating rows written / deleted / tier cuts (O103) | ' + s('ratingW', 0) + ' / ' + s('ratingD', 0) + ' / ' + s('tiercut', '-') + ' |',
+      '| Gold Rush Cup (O180): settled / honor rows written / deleted / carrier | ' + s('cup', '-') + ' / ' + s('cupHonorW', 0) + ' / ' + s('cupHonorD', 0) + ' / ' + s('cupCarrier', '-') + ' |',
       '| team-gamble lone / team dissent unsettled / settled | ' + s('t2ld', '0/0') + ' |',
       '| board writes rating/points/xp | ' + s('writes', '0/0 0/0 0/0') + ' |',
       '| endless settles / cp+board writes | ' + s('endless', 0) + ' (+' + s('endlessComp', 0) + ' team comp, +' + s('solo', 0) + ' solo) / ' + s('writesEndless', '0/0 0/0') + ' |',
@@ -4119,6 +4120,183 @@ function pruneRatingHist(st, seasonId) {
   for (const k of Object.keys(st.hist)) { const s = Number(k.slice(k.lastIndexOf('|') + 1)); if (!(s >= (seasonId | 0) - (RATING.HIST_SEASONS - 1))) { delete st.hist[k]; n++; } }
   return n;
 }
+// ===== O180 Gold Rush Cup (client knife 5.1c-1, user calls 2026-10-18 KNIFE_51 §0c #14-#19): the competitive weekly board =====
+//   - weekly boards: every competitive endless settle (solo + duo / trio / quad, EA app id only) also KeepBest-writes a third twin
+//     <ladder>_w<YYYYWW> (ISO week, Monday 00:00 UTC) of the week the SETTLE runs in; team rows carry the team block like the season
+//     twin. Old weeks are never deleted (the client browses past editions).
+//   - edition: week FIRST_WEEK is edition 1 (the EA week; Tue 2026-11-17 opens it, a short first week still counts); earlier weeks
+//     hold nothing. An edition of a family is HELD when it drew THR_SOLO players (solo) / THR_TEAM teams (a team = a roster set) --
+//     thresholds live here and ship in the carrier, so they move without a client build.
+//   - settle: the first run after a week ends settles it (every finished week in order, each once): per held family the top PODIUM
+//     places (competition ranking: a tie shares the place, the next place skips) win a name mark until the next settle; for a team
+//     every roster member holding a row on that week's board gets it (a named-only seat never does). The verdicts live in the chain
+//     memory (endless-solo.json `cup`, no new state file).
+//   - honor board (endless_cup_honor, one row per winner): score = the settled week; details [magic | ver << 8, week,
+//     (pc << 8 | place) x <= 4]. Rows of an older week are deleted when the next week settles; a row is written once per week (a
+//     row moved off the board elsewhere -- a sanction exile -- is not written back). A seedcap conviction of the run that set a
+//     winner's row revokes that winner's mark the next run; the places are NOT re-awarded (architecture rule 10: a player
+//     promoted into a mark could be the next one to lose it).
+//   - carrier (endless_cup, one row on the tier-cut / version_gate carrier account): score = this week; details [magic | ver << 8,
+//     week, thrSolo, thrTeam, podium, entrants x 4 (this week: solo players / duo, trio, quad teams), held x 4 (bit k = the edition
+//     k + 1 weeks back was held), last settled week]; written only when it changes.
+//   Companion repo mirror: RANKED_CONFIG.ENDLESS.CUP (FIRST_WEEK / magics / board names, lockstep-pinned) + the same week math.
+const ENDLESS_CUP_LB = process.env.ENDLESS_CUP_LB || 'endless_cup';
+const ENDLESS_CUP_HONOR_LB = process.env.ENDLESS_CUP_HONOR_LB || 'endless_cup_honor';
+const CUP = {
+  FIRST_WEEK: 202647,                          // lockstep: ISO week of edition 1
+  CARRIER_MAGIC: 0xD5, HONOR_MAGIC: 0xD6, VER: 1,   // lockstep: carrier / honor row details[0] low byte + version
+  THR_SOLO: 40, THR_TEAM: 15,                 // cron-only (shipped in the carrier): solo players / teams for an edition to be held
+  PODIUM: 3,                                  // cron-only (shipped): places that win a mark (champion / runner-up / third)
+  PODIUM_STEPS: [],                           // cron-only knob, OFF (user call 10-18 #17: fixed top three): [[minEntrants, places], ...] widens the
+                                              //   podium of a big edition (e.g. [[300, 10]]); the client names places 1-3 only, so turn it on with a client build
+  MAX_ENTRIES: 10,                            // cron-only: podium entries per family at most (a tie storm cannot hand out dozens)
+  KEEP_WEEKS: 14,                             // cron-only: settled weeks kept in the chain memory (the client looks back 12)
+  CHECK_BACK: 2,                              // cron-only: earlier weekly boards a conviction is looked up on (this week + 2)
+};
+const CUP_WEEK_MS = 7 * 86400000;
+const CUP_FAMS = [[1, ENDLESS_COMP_LB], [2, ENDLESS_COMP_LB_DUO], [3, ENDLESS_COMP_LB_TRIO], [4, ENDLESS_COMP_LB_QUAD]];   // pc -> the ladder whose weekly twin it is
+// ISO week id YYYYWW of a UTC instant (weeks start Monday 00:00 UTC; week 1 holds the year's first Thursday)
+function cupWeekId(ms) {
+  const d = new Date(ms), wd = (d.getUTCDay() + 6) % 7;
+  const thu = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - wd + 3);
+  const y = new Date(thu).getUTCFullYear();
+  return y * 100 + Math.floor((thu - Date.UTC(y, 0, 1)) / 86400000 / 7) + 1;
+}
+// Monday 00:00 UTC of a week id
+function cupWeekStart(week) {
+  const y = Math.floor((week | 0) / 100), n = (week | 0) % 100;
+  const jan4 = Date.UTC(y, 0, 4), wd = (new Date(jan4).getUTCDay() + 6) % 7;
+  return jan4 - wd * 86400000 + (n - 1) * CUP_WEEK_MS;
+}
+function cupWeekBack(week, k) { return cupWeekId(cupWeekStart(week) - (k | 0) * CUP_WEEK_MS); }
+function cupNextWeek(week) { return cupWeekId(cupWeekStart(week) + CUP_WEEK_MS); }
+// edition number of a week (1 = FIRST_WEEK); 0 = before the cup existed
+function cupEdition(week) { const k = Math.round((cupWeekStart(week) - cupWeekStart(CUP.FIRST_WEEK)) / CUP_WEEK_MS) + 1; return k >= 1 ? k : 0; }
+function cupWeekBoardName(base, week) { return String(base) + '_w' + (week | 0); }
+// the roster of a team-ladder row's team block (seat order), or null (no block / malformed)
+function teamBlockSids(det) {
+  if (!Array.isArray(det) || det.length < 3) return null;
+  const h = det[2] | 0, pc = (h >>> 16) & 0xff;
+  if ((h & 0xff) !== TEAM_MAGIC || ((h >>> 8) & 0xff) < 1 || pc < 2 || pc > 4 || det.length < 3 + 2 * pc) return null;
+  const out = [];
+  for (let i = 0; i < pc; i++) out.push(String((BigInt((det[4 + 2 * i] | 0) >>> 0) << 32n) | BigInt((det[3 + 2 * i] | 0) >>> 0)));
+  return out;
+}
+// standings of one weekly board: rows [{ sid, score, det }] -> { n, groups } best first. Solo: a group per player. Team (pc >= 2): a
+//   group per roster set (its score = the best row of that roster); its sids = the roster members holding a row on this board. A row
+//   with no usable team block is a group of its own (none expected: the EA job always writes the block).
+function cupStandings(rows, pc) {
+  const list = (rows || []).filter((r) => r && r.sid != null && (r.score | 0) > 0);
+  const onBoard = new Set(list.map((r) => String(r.sid)));
+  const by = new Map();
+  for (const r of list) {
+    const sid = String(r.sid);
+    let roster = (pc | 0) >= 2 ? teamBlockSids(r.det) : null;
+    if (!roster || roster.indexOf(sid) < 0) roster = [sid];
+    const key = roster.slice().sort().join(',');
+    const g = by.get(key) || { key, score: 0, roster };
+    if ((r.score | 0) > g.score) g.score = r.score | 0;
+    by.set(key, g);
+  }
+  const groups = [...by.values()].map((g) => ({ key: g.key, score: g.score, sids: g.roster.filter((s) => onBoard.has(s)) }))
+    .sort((a, b) => (b.score - a.score) || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  return { n: groups.length, groups };
+}
+// podium of sorted groups: competition ranking (a tie shares the place, the next place skips), places <= podium, <= max entries
+function cupPodium(groups, podium, max) {
+  const out = [];
+  let place = 0;
+  for (let i = 0; i < (groups || []).length && out.length < (max | 0); i++) {
+    if (i === 0 || groups[i].score !== groups[i - 1].score) place = i + 1;
+    if (place > (podium | 0)) break;
+    if (groups[i].sids.length) out.push({ place, score: groups[i].score, sids: groups[i].sids.slice() });
+  }
+  return out;
+}
+// places that win a mark in an edition of n entrants (PODIUM_STEPS off = PODIUM)
+function cupPodiumFor(n, base) { let p = base | 0; for (const [minN, places] of (CUP.PODIUM_STEPS || [])) if ((n | 0) >= (minN | 0) && (places | 0) > p) p = places | 0; return p; }
+// one week's verdict from its four boards' rows ({ pc: rows | undefined }); thresholds from CUP
+function cupVerdict(rowsByPc, thr) {
+  const v = { n: [0, 0, 0, 0], h: [0, 0, 0, 0], pod: {} };
+  for (let pc = 1; pc <= 4; pc++) {
+    const rows = rowsByPc && rowsByPc[pc];
+    if (!rows) continue;
+    const st = cupStandings(rows, pc);
+    v.n[pc - 1] = st.n;
+    if (st.n >= (pc === 1 ? thr.solo : thr.team)) { v.h[pc - 1] = 1; v.pod[pc] = cupPodium(st.groups, cupPodiumFor(st.n, thr.podium), Math.max(CUP.MAX_ENTRIES, cupPodiumFor(st.n, thr.podium))).map((e) => [e.place, e.score, e.sids]); }
+  }
+  return v;
+}
+// marks of one settled verdict: { sid: [{ pc, place }] } (best place per family, by family), revoked sids left out
+function cupMarksOf(v, revoked) {
+  const out = {}, rv = new Set((revoked || []).map(String));
+  for (let pc = 1; pc <= 4; pc++) for (const [place, , sids] of ((v && v.pod && v.pod[pc]) || [])) for (const sid0 of sids) {
+    const sid = String(sid0);
+    if (rv.has(sid)) continue;
+    const m = out[sid] || (out[sid] = []);
+    const cur = m.find((x) => x.pc === pc);
+    if (!cur) m.push({ pc, place: place | 0 }); else if ((place | 0) < cur.place) cur.place = place | 0;
+  }
+  for (const sid of Object.keys(out)) out[sid].sort((a, b) => a.pc - b.pc);
+  return out;
+}
+function cupHonorEncode(week, marks) { return [CUP.HONOR_MAGIC | (CUP.VER << 8), week | 0].concat((marks || []).slice(0, 4).map((m) => ((m.pc & 0xff) << 8) | (m.place & 0xff))); }
+function cupHonorDecode(score, det) {
+  if (!Array.isArray(det) || det.length < 2 || ((det[0] | 0) & 0xff) !== CUP.HONOR_MAGIC || (((det[0] | 0) >>> 8) & 0xff) < 1) return null;
+  const marks = [];
+  for (let i = 2; i < Math.min(det.length, 6); i++) { const x = det[i] | 0, pc = (x >>> 8) & 0xff, place = x & 0xff; if (pc >= 1 && pc <= 4 && place >= 1) marks.push({ pc, place }); }
+  return { week: det[1] | 0, marks };
+}
+// honor board upkeep: existing { sid: { s, det } }, want = cupMarksOf(settled), landed { sid: 1 } (rows written for this week) ->
+//   writes = winners whose row is absent / differs and was not yet written this week; deletes = rows of another week or no winner
+function cupHonorPlan(existing, want, week, landed) {
+  const writes = [], deletes = [], keep = [];
+  for (const sid of Object.keys(existing || {})) {
+    const h = cupHonorDecode(existing[sid].s, existing[sid].det);
+    if (!h || h.week !== (week | 0) || !want[sid]) deletes.push(sid);
+  }
+  for (const sid of Object.keys(want || {})) {
+    const det = cupHonorEncode(week, want[sid]), cur = (existing || {})[sid];
+    if (cur && (cur.s | 0) === (week | 0) && JSON.stringify((cur.det || []).map((x) => x | 0)) === JSON.stringify(det)) keep.push(sid);
+    else if (!(landed && landed[sid])) writes.push({ sid, score: week | 0, details: det });
+  }
+  return { writes, deletes, keep };
+}
+// held masks of the four families relative to `week` (bit k = the week k + 1 back was held)
+function cupHeldMasks(cup, week) {
+  const out = [0, 0, 0, 0];
+  for (let k = 0; k < 31; k++) { const v = cup && cup.w && cup.w[cupWeekBack(week, k + 1)]; if (v) for (let i = 0; i < 4; i++) if (v.h && v.h[i]) out[i] |= (1 << k); }
+  return out;
+}
+function cupCarrierEncode(c) {
+  const n = c.n || [], h = c.held || [];
+  return [CUP.CARRIER_MAGIC | (CUP.VER << 8), c.week | 0, c.thrSolo | 0, c.thrTeam | 0, c.podium | 0, n[0] | 0, n[1] | 0, n[2] | 0, n[3] | 0, h[0] | 0, h[1] | 0, h[2] | 0, h[3] | 0, c.settled | 0];
+}
+function cupCarrierDecode(score, det) {
+  if (!Array.isArray(det) || det.length < 14 || ((det[0] | 0) & 0xff) !== CUP.CARRIER_MAGIC || (((det[0] | 0) >>> 8) & 0xff) < 1) return null;
+  return { score: score | 0, week: det[1] | 0, thrSolo: det[2] | 0, thrTeam: det[3] | 0, podium: det[4] | 0, n: det.slice(5, 9).map((x) => x | 0), held: det.slice(9, 13).map((x) => x | 0), settled: det[13] | 0 };
+}
+// a conviction of a run with board score `packed` in family pc: the winners among `sids` whose podium entry carries exactly that
+//   score lose the mark (revoked; the place is not re-awarded). Returns the [week, sid] pairs revoked now.
+function cupRevoke(cup, pc, packed, sids) {
+  const out = [], set = new Set((sids || []).map(String));
+  for (const wk of Object.keys((cup && cup.w) || {})) {
+    const v = cup.w[wk];
+    for (const [, score, ws] of ((v.pod && v.pod[pc]) || [])) {
+      if ((score | 0) !== (packed | 0)) continue;
+      for (const sid0 of ws) { const sid = String(sid0); if (set.has(sid) && (v.rv || []).indexOf(sid) < 0) { (v.rv = v.rv || []).push(sid); out.push([Number(wk), sid]); } }
+    }
+  }
+  return out;
+}
+function pruneCup(cup, week) {
+  if (!cup || !cup.w) return 0;
+  const floor = cupWeekBack(week, CUP.KEEP_WEEKS);
+  let n = 0;
+  for (const wk of Object.keys(cup.w)) if (Number(wk) < floor) { delete cup.w[wk]; n++; }
+  for (const wk of Object.keys(cup.wb || {})) if (Number(wk) < floor) delete cup.wb[wk];
+  return n;
+}
 function loadSolo() { try { const st = JSON.parse(fs.readFileSync(SOLO_FILE, 'utf8')) || {}; st.runs = st.runs || {}; st.wait = st.wait || {}; st.ms = st.ms || {}; st.held = st.held || {}; st.hist = st.hist || {}; return st; } catch (e) { return { runs: {}, wait: {}, ms: {}, held: {}, hist: {} }; } }
 function pruneSolo(st, nowMs) {
   for (const k of Object.keys(st.runs)) if (nowMs - (st.runs[k].t || 0) > COMP.RUN_TTL_MS) delete st.runs[k];
@@ -5200,7 +5378,8 @@ async function main() {
     for (const [nm, trusted] of [[ENDLESS_COMP_LB, true], [SAVE_BOX_LB, false], [ENDLESS_COMP_LB_DUO, true], [SAVE_BOX_LB_DUO, false], [ENDLESS_COMP_LB_TRIO, true], [SAVE_BOX_LB_TRIO, false], [ENDLESS_COMP_LB_QUAD, true], [SAVE_BOX_LB_QUAD, false], [ENDLESS_COMP_LB_OVERALL, true], [ENDLESS_LB_SOLO, true], [SAVE_BOX_LB_CASUAL, false],
       [ENDLESS_LB_CLASSIC_SOLO, true], [SAVE_BOX_LB_CLASSIC, false], [ENDLESS_LB_CLASSIC_DUO, true], [SAVE_BOX_LB_CLASSIC_DUO, false], [ENDLESS_LB_CLASSIC_TRIO, true], [SAVE_BOX_LB_CLASSIC_TRIO, false], [ENDLESS_LB_CLASSIC_QUAD, true], [SAVE_BOX_LB_CLASSIC_QUAD, false],   // O216/N3 classic surface (lifetime ladders + guard-row save boxes)
       [ENDLESS_RATING_LB_SOLO, true], [ENDLESS_RATING_LB_DUO, true], [ENDLESS_RATING_LB_TRIO, true], [ENDLESS_RATING_LB_QUAD, true], [ENDLESS_TIERCUT_LB, true],
-      [ENDLESS_LB_OVERALL, true], [ENDLESS_LB_CLASSIC_OVERALL, true]]) {   // O103 rating ladders (season 0 = base name; twins via resolveSeasonBoard) + tier-cut carrier (trusted, cron-only)
+      [ENDLESS_LB_OVERALL, true], [ENDLESS_LB_CLASSIC_OVERALL, true],   // O103 rating ladders (season 0 = base name; twins via resolveSeasonBoard) + tier-cut carrier (trusted, cron-only)
+      [ENDLESS_CUP_LB, true], [ENDLESS_CUP_HONOR_LB, true]]) {   // O180 Gold Rush Cup carrier + honor board (trusted, cron-only; the weekly boards are created at their week's first write)
       if (names0.indexOf(nm) >= 0) continue;
       const id0 = await findOrCreateBoard(nm, trusted);
       if (id0) console.log('solo boards: provisioned ' + nm + (trusted ? ' (trusted)' : ' (client-writable)'));
@@ -5960,6 +6139,91 @@ async function main() {
     if (okTc) { RUN.tiercut = 'published ' + day; console.log('tiercut: published day ' + day + ' season ' + seasonId + (published ? ' (was day ' + published.day + ' season ' + published.season + ')' : ' (first)')); }
     else ghWarn('tiercut: write failed HTTP ' + r.status + ' ' + String(r.text).slice(0, 140));
   };
+  // O180 Gold Rush Cup upkeep (client knife 5.1c-1): settle every week that ended (each once, in order), keep the honor board on the
+  //   latest settled week, publish the carrier. Every exit path (a Monday with no fresh match must still settle). EA app id only.
+  //   st = the chain memory (cup verdicts + this week's board ids live there), counts = this week's entrants per family from the
+  //   settle (null = not known this run: the published numbers stay). Returns true when st changed (the caller saves it).
+  const maintainCup = async (st, counts) => {
+    if (PT_MODE || !st) return false;
+    const list0 = (lr.json && lr.json.response && lr.json.response.leaderboards) || [];
+    const byName0 = (name) => { const f = list0.find((x) => String(x.name || x.Name) === name); return f ? (f.id || f.ID) : null; };
+    const week = cupWeekId(seasonNowMs()), prev = cupWeekBack(week, 1);
+    const cup = st.cup = st.cup || {};
+    cup.w = cup.w || {};
+    let dirty = false;
+    if (cup.s == null) { cup.s = cupWeekBack(week, 2); dirty = true; }   // first run: the week before this one is settled next
+    while (cup.s < prev) {
+      const wk = cupNextWeek(cup.s);
+      let v = { n: [0, 0, 0, 0], h: [0, 0, 0, 0], pod: {} };
+      if (cupEdition(wk) >= 1) {
+        const rowsByPc = {};
+        try {
+          for (const [pc, base] of CUP_FAMS) {
+            const bid = ((cup.wb || {})[wk] || {})[pc] || byName0(cupWeekBoardName(base, wk));
+            if (!bid) continue;   // no row was written that week
+            const br = await readBoardAll(bid, 'cup week ' + wk + ' size ' + pc);
+            rowsByPc[pc] = br.ents.map((e) => ({ sid: String(e.steamID), score: e.score | 0, det: decodeDetails(e.detailData) }));
+          }
+        } catch (e) { ghWarn('cup: week ' + wk + ' read failed (' + (e && e.message) + ') -- settled next run'); break; }
+        v = cupVerdict(rowsByPc, { solo: CUP.THR_SOLO, team: CUP.THR_TEAM, podium: CUP.PODIUM });
+      }
+      cup.w[wk] = v; cup.s = wk; dirty = true;
+      RUN.cup = String(wk);
+      console.log('cup: settled week ' + wk + ' (edition ' + cupEdition(wk) + '): entrants ' + v.n.join('/') + ', held ' + v.h.join('') + Object.keys(v.pod).map((pc) => ' | size ' + pc + ' ' + v.pod[pc].map((e) => '#' + e[0] + ' ' + e[2].map(plog).join('+')).join(' ')).join(''));
+    }
+    if (pruneCup(cup, week)) dirty = true;
+    // honor board: the latest settled week's winners (minus revoked marks); older rows deleted
+    let honorId = null;
+    try { honorId = byName0(ENDLESS_CUP_HONOR_LB) || await findOrCreateBoard(ENDLESS_CUP_HONOR_LB, true); } catch (e) { honorId = null; }
+    if (!honorId) ghWarn('cup: honor board ' + ENDLESS_CUP_HONOR_LB + ' unresolved -- marks not written this run');
+    else {
+      try {
+        const existing = {};
+        const br = await readBoardAll(honorId, 'cup honor board');
+        for (const e of br.ents) existing[String(e.steamID)] = { s: e.score | 0, det: decodeDetails(e.detailData) };
+        if (!cup.hw || (cup.hw.w | 0) !== (cup.s | 0)) { cup.hw = { w: cup.s, ok: {} }; dirty = true; }
+        const vS = cup.w[cup.s];
+        const plan = cupHonorPlan(existing, vS ? cupMarksOf(vS, vS.rv) : {}, cup.s, cup.hw.ok);
+        for (const sid of plan.keep) if (!cup.hw.ok[sid]) { cup.hw.ok[sid] = 1; dirty = true; }
+        if (plan.writes.length || plan.deletes.length) console.log('cup honor: ' + plan.writes.length + ' writes [' + plan.writes.map((w) => plog(w.sid) + '=' + w.details.slice(2).map((x) => (x >> 8) + ':' + (x & 0xff)).join(',')).join(' ') + '], ' + plan.deletes.length + ' deletes [' + plan.deletes.map(plog).join(' ') + ']');
+        if (APPLY_MMR) {
+          for (const w of plan.writes) {
+            const r = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: honorId, steamid: w.sid, score: w.score, scoremethod: 'ForceUpdate', format: 'json' }, w.details);
+            const okW = r.ok && !(r.json && r.json.result && r.json.result.result && r.json.result.result !== 1);
+            if (okW) { cup.hw.ok[w.sid] = 1; dirty = true; RUN.cupHonorW = (RUN.cupHonorW | 0) + 1; } else ghWarn('cup honor write failed ' + plog(w.sid) + ': HTTP ' + r.status);
+          }
+          for (const sid of plan.deletes) {
+            const r = await postForm('/ISteamLeaderboards/DeleteLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: honorId, steamid: sid, format: 'json' });
+            if (r.ok) RUN.cupHonorD = (RUN.cupHonorD | 0) + 1; else ghWarn('cup honor delete failed ' + plog(sid) + ': HTTP ' + r.status);
+          }
+        }
+      } catch (e) { ghWarn('cup: honor board read failed (' + (e && e.message) + ') -- nothing written or deleted this run'); }
+    }
+    // carrier: this week + thresholds + entrants + held editions + the last settled week; written only when it changes
+    let cId = null;
+    try { cId = byName0(ENDLESS_CUP_LB) || await findOrCreateBoard(ENDLESS_CUP_LB, true); } catch (e) { cId = null; }
+    if (!cId) { ghWarn('cup: carrier board ' + ENDLESS_CUP_LB + ' unresolved -- not published'); return dirty; }
+    let published = null, publishedDet = null, carrierOnBoard = null;
+    try {
+      const br = await readBoardAll(cId, 'cup carrier board');
+      const top = br.ents[0];
+      if (top) { publishedDet = decodeDetails(top.detailData); published = cupCarrierDecode(top.score | 0, publishedDet); carrierOnBoard = String(top.steamID); }
+    } catch (e) { ghWarn('cup: carrier read failed (' + (e && e.message) + ') -- not published this run'); return dirty; }
+    const n = [0, 1, 2, 3].map((i) => (counts && counts[i] != null ? counts[i] | 0 : (published && published.week === week ? published.n[i] | 0 : 0)));
+    const det = cupCarrierEncode({ week, thrSolo: CUP.THR_SOLO, thrTeam: CUP.THR_TEAM, podium: CUP.PODIUM, n, held: cupHeldMasks(cup, week), settled: cup.s });
+    if (published && published.score === week && JSON.stringify((publishedDet || []).slice(0, det.length).map((x) => x | 0)) === JSON.stringify(det)) { RUN.cupCarrier = 'current'; return dirty; }
+    let carrier = TIERCUT_CARRIER_SID || carrierOnBoard;
+    if (!carrier) {   // the account carrying this app's version_gate row (ops-provisioned, read by every client)
+      try { const vg = byName0('version_gate'); if (vg) { const br = await readBoardAll(vg, 'version gate board'); if (br.ents[0]) carrier = String(br.ents[0].steamID); } } catch (e) { carrier = null; }
+    }
+    if (!carrier) { console.log('cup: no carrier account (set TIERCUT_CARRIER_SID or provision version_gate) -- not published'); RUN.cupCarrier = 'no carrier'; return dirty; }
+    console.log('cup carrier: week ' + week + ' (edition ' + cupEdition(week) + ') entrants ' + n.join('/') + ' held ' + det.slice(9, 13).join('/') + ' settled ' + cup.s);
+    if (!APPLY_MMR) { console.log('cup: dry-run, carrier untouched'); return dirty; }
+    const r = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: cId, steamid: carrier, score: week, scoremethod: 'ForceUpdate', format: 'json' }, det);
+    const okC = r.ok && !(r.json && r.json.result && r.json.result.result && r.json.result.result !== 1);
+    if (okC) RUN.cupCarrier = 'published ' + week; else ghWarn('cup: carrier write failed HTTP ' + r.status + ' ' + String(r.text).slice(0, 140));
+    return dirty;
+  };
   const persistStartsSide = () => {
     if (!APPLY_MMR) { console.log('APPLY_MMR=0 dry-run, nothing written'); return; }
     saveStarts(startsPending);
@@ -6368,11 +6632,11 @@ async function main() {
   const PT_MODE_MAIL_OFF = false;
 
   RUN.consistent = consistentMatches.length;
-  if (consistentMatches.length === 0) { console.log('no consistent matches'); await lpRetry(); persistStartsSide(); await maintainTrust(); await maintainRating(loadSolo(), new Set()); await processRedeems(null); await processCampaignGrants(); await processCampaignEndless(); await processChatMute(); await writePulse(); await processSupporters(null, []); writeRunSummary(); return; }
+  if (consistentMatches.length === 0) { console.log('no consistent matches'); await lpRetry(); persistStartsSide(); await maintainTrust(); { const st0 = loadSolo(); await maintainRating(st0, new Set()); if (await maintainCup(st0, null) && APPLY_MMR) saveSolo(st0, nowMs); } await processRedeems(null); await processCampaignGrants(); await processCampaignEndless(); await processChatMute(); await writePulse(); await processSupporters(null, []); writeRunSummary(); return; }
   const fresh = consistentMatches.filter(c => !processed.has(c.m));
   RUN.fresh = fresh.length;
   console.log(consistentMatches.length + ' consistent, ' + fresh.length + ' fresh (settled ' + (consistentMatches.length - fresh.length) + ')');
-  if (fresh.length === 0) { console.log('no fresh matches, skip'); await lpRetry(); persistStartsSide(); await maintainTrust(); await maintainRating(loadSolo(), new Set()); await processRedeems(null); await processCampaignGrants(); await processCampaignEndless(); await processChatMute(); await writePulse(); await processSupporters(null, []); writeRunSummary(); return; }
+  if (fresh.length === 0) { console.log('no fresh matches, skip'); await lpRetry(); persistStartsSide(); await maintainTrust(); { const st0 = loadSolo(); await maintainRating(st0, new Set()); if (await maintainCup(st0, null) && APPLY_MMR) saveSolo(st0, nowMs); } await processRedeems(null); await processCampaignGrants(); await processCampaignEndless(); await processChatMute(); await writePulse(); await processSupporters(null, []); writeRunSummary(); return; }
 
   // playtest channel: no rating board exists (and must not -- lock layer 3); the TrueSkill
   // update block below is skipped wholesale, so the id is never consulted.
@@ -6586,7 +6850,7 @@ async function main() {
     let sbId = byNameLb(sbName);
     if (!sbId) sbId = await findOrCreateBoard(sbName, false);
     if (!sbId) ghWarn('save box board not found (' + sbName + ', client-writable) -> guard team saves fail until it exists');
-    compFam[fam] = { fam, low, name: lbName, id, seasonId: season.id, best, seasonBest, det, seasonDet, complete, seasonComplete, saveBoxId: sbId, changed: null, seasonChanged: null };
+    compFam[fam] = { fam, low, name: lbName, id, seasonId: season.id, best, seasonBest, det, seasonDet, complete, seasonComplete, saveBoxId: sbId, changed: null, seasonChanged: null, pc: fam === 'QUAD' ? 4 : fam === 'TRIO' ? 3 : 2 };
   }
   // composite ("overall") competitive ladder (knife 3.5d): lifetime + season twin, trusted, cron-only; rows recomputed below for every
   //   player whose solo / duo / trio best moved this tick (no records of its own, nothing to settle -> a missing board only skips the rows)
@@ -6698,6 +6962,17 @@ async function main() {
   compFam.DUO.changed = changedCompDuo; compFam.DUO.seasonChanged = changedCompDuoSeason;
   compFam.TRIO.changed = changedCompTrio; compFam.TRIO.seasonChanged = changedCompTrioSeason;
   compFam.QUAD.changed = changedCompQuad; compFam.QUAD.seasonChanged = changedCompQuadSeason;
+  // O180 Gold Rush Cup (client knife 5.1c-1): this week's competitive boards (third twin, EA app id only). The write pools live here
+  //   so the reject-window snapshot covers them; the best maps are filled once the chain memory (it holds the week's board ids) loads.
+  const compWeekBest = {};   // solo: sid -> packed best of this week (team families: f.weekBest + f.weekTeam = sid -> roster of that row)
+  const changedCompWeek = {};
+  const changedCompDuoWeek = {};
+  const changedCompTrioWeek = {};
+  const changedCompQuadWeek = {};
+  compFam.DUO.weekChanged = changedCompDuoWeek; compFam.TRIO.weekChanged = changedCompTrioWeek; compFam.QUAD.weekChanged = changedCompQuadWeek;
+  for (const f of Object.values(compFam)) { f.weekBest = {}; f.weekTeam = {}; f.weekId = null; }
+  let cupWeekOk = false;   // this week's boards read (or known absent): weekly KeepBest may write; false = weekly rows skipped this run
+  const cupWeekNow = cupWeekId(seasonNowMs());
   // casual (co-op) endless ladder pair by seat count: 2 = the historical base board, 3 = trio, 4 = quad (client knife 3.7a).
   //   Every board-shaped dependency of a co-op settle (gate / chain memory / best map / write pool) picks this pair.
   //   1 = the casual SOLO pair (O218: guard-signed SEG_CASUAL segments settle through the solo lane, which picks this pair too).
@@ -6735,6 +7010,10 @@ async function main() {
       compDuoBest: compFam.DUO.best[sid], compDuoSeasonBest: compFam.DUO.seasonBest[sid], changedCompDuo: changedCompDuo[sid], changedCompDuoSeason: changedCompDuoSeason[sid],   // team ladder pools
       compTrioBest: compFam.TRIO.best[sid], compTrioSeasonBest: compFam.TRIO.seasonBest[sid], changedCompTrio: changedCompTrio[sid], changedCompTrioSeason: changedCompTrioSeason[sid],
       compQuadBest: compFam.QUAD.best[sid], compQuadSeasonBest: compFam.QUAD.seasonBest[sid], changedCompQuad: changedCompQuad[sid], changedCompQuadSeason: changedCompQuadSeason[sid],
+      compWeekBest: compWeekBest[sid], changedCompWeek: changedCompWeek[sid],   // O180 weekly boards (cup)
+      compDuoWeekBest: compFam.DUO.weekBest[sid], compDuoWeekTeam: scCloneOf(compFam.DUO.weekTeam[sid]), changedCompDuoWeek: changedCompDuoWeek[sid],
+      compTrioWeekBest: compFam.TRIO.weekBest[sid], compTrioWeekTeam: scCloneOf(compFam.TRIO.weekTeam[sid]), changedCompTrioWeek: changedCompTrioWeek[sid],
+      compQuadWeekBest: compFam.QUAD.weekBest[sid], compQuadWeekTeam: scCloneOf(compFam.QUAD.weekTeam[sid]), changedCompQuadWeek: changedCompQuadWeek[sid],
       careerDet: careerDet[sid], reveal: reveal[sid], receipts: scCloneOf(receipts[sid]) };   // O480: this run's points receipts
   };
   const scPut = (map, key, val) => { if (val === undefined) delete map[key]; else map[key] = val; };
@@ -6760,6 +7039,10 @@ async function main() {
       scPut(compFam.DUO.best, sn.sid, sn.compDuoBest); scPut(compFam.DUO.seasonBest, sn.sid, sn.compDuoSeasonBest); scPut(changedCompDuo, sn.sid, sn.changedCompDuo); scPut(changedCompDuoSeason, sn.sid, sn.changedCompDuoSeason);
       scPut(compFam.TRIO.best, sn.sid, sn.compTrioBest); scPut(compFam.TRIO.seasonBest, sn.sid, sn.compTrioSeasonBest); scPut(changedCompTrio, sn.sid, sn.changedCompTrio); scPut(changedCompTrioSeason, sn.sid, sn.changedCompTrioSeason);
       scPut(compFam.QUAD.best, sn.sid, sn.compQuadBest); scPut(compFam.QUAD.seasonBest, sn.sid, sn.compQuadSeasonBest); scPut(changedCompQuad, sn.sid, sn.changedCompQuad); scPut(changedCompQuadSeason, sn.sid, sn.changedCompQuadSeason);
+      scPut(compWeekBest, sn.sid, sn.compWeekBest); scPut(changedCompWeek, sn.sid, sn.changedCompWeek);   // O180 weekly boards (cup)
+      scPut(compFam.DUO.weekBest, sn.sid, sn.compDuoWeekBest); scPut(compFam.DUO.weekTeam, sn.sid, sn.compDuoWeekTeam); scPut(changedCompDuoWeek, sn.sid, sn.changedCompDuoWeek);
+      scPut(compFam.TRIO.weekBest, sn.sid, sn.compTrioWeekBest); scPut(compFam.TRIO.weekTeam, sn.sid, sn.compTrioWeekTeam); scPut(changedCompTrioWeek, sn.sid, sn.changedCompTrioWeek);
+      scPut(compFam.QUAD.weekBest, sn.sid, sn.compQuadWeekBest); scPut(compFam.QUAD.weekTeam, sn.sid, sn.compQuadWeekTeam); scPut(changedCompQuadWeek, sn.sid, sn.changedCompQuadWeek);
       scPut(careerDet, sn.sid, sn.careerDet); scPut(reveal, sn.sid, sn.reveal); scPut(receipts, sn.sid, sn.receipts);
       console.log('  seedcap reject ' + pend.m + ': ' + plog(sn.sid) + ' settlement discarded (state restored)');
     }
@@ -6780,6 +7063,34 @@ async function main() {
   // ===== O93 solo competitive segment settle (COMP block above) =====
   const soloState = loadSolo();
   const ratingTouched = new Set();   // O103: sids whose competitive run history moved this run (settled segment / conviction) -> their rating row is redone in maintainRating
+  // O180 (client knife 5.1c-1): this week's boards -- the id from the chain memory (kept when the week's first write created the
+  //   board; the listing can lag behind a fresh board) or the listing; neither = no row this week yet (created at the first write).
+  //   A read failure leaves cupWeekOk false: weekly rows are skipped this run (a KeepBest against an unread board could overwrite a
+  //   deeper row with a shallower one); the lifetime / season settle is untouched.
+  let compWeekId = null;
+  const cupWeekPartial = new Set();   // families whose weekly board read stopped at the page cap: a player outside it is not written (unknown best)
+  if (!PT_MODE && cupEdition(cupWeekNow) >= 1) {   // no weekly board before edition 1 (the cup opens with the EA week)
+    try {
+      const wb = ((soloState.cup || {}).wb || {})[cupWeekNow] || {};
+      compWeekId = wb[1] || byNameLb(cupWeekBoardName(ENDLESS_COMP_LB, cupWeekNow)) || null;
+      if (compWeekId) { const br = await readBoardAll(compWeekId, 'weekly solo comp board'); if (br.complete === false) cupWeekPartial.add(0); for (const e of br.ents) compWeekBest[e.steamID] = e.score | 0; }
+      for (const [pc, f] of [[2, compFam.DUO], [3, compFam.TRIO], [4, compFam.QUAD]]) {
+        f.weekId = wb[pc] || byNameLb(cupWeekBoardName(f.name, cupWeekNow)) || null;
+        if (f.weekId) { const br = await readBoardAll(f.weekId, 'weekly ' + f.low + ' comp board'); if (br.complete === false) cupWeekPartial.add(pc); for (const e of br.ents) { f.weekBest[e.steamID] = e.score | 0; f.weekTeam[e.steamID] = teamBlockSids(decodeDetails(e.detailData)); } }
+      }
+      cupWeekOk = true;
+    } catch (e) { ghWarn('weekly comp boards: read failed (' + (e && e.message) + ') -- weekly rows skipped this run'); }
+  }
+  // O180: KeepBest into this week's board of one family (solo: pool / best map of the solo ladder; team: the family record)
+  const cupWeekPut = (f, sid, packed, w) => {
+    if (!cupWeekOk || PT_MODE) return;
+    const best = f ? f.weekBest : compWeekBest, pool = f ? f.weekChanged : changedCompWeek;
+    if (best[sid] != null && packed <= best[sid]) return;
+    if (best[sid] == null && cupWeekPartial.has(f ? f.pc : 0)) { console.log('  weekly best (' + (f ? f.low : 'solo') + '): ' + plog(sid) + ' outside the read window -- skipped'); return; }
+    best[sid] = packed; pool[sid] = w;
+    if (f) f.weekTeam[sid] = w.team ? w.team.map(String) : null;
+    console.log('  weekly best (' + (f ? f.low : 'solo') + ', ' + cupWeekNow + '): ' + plog(sid) + ' -> board ' + packed);
+  };
   const soloPub = loadJobPubTable(nowMs) || {};
   const soloPubRec = recCfg ? (loadJobPubTable(nowMs, recCfg.keys) || {}) : soloPub;   // R1-A5-07: only RECOVERED segments (demo, until the file's date) keep the recovery keys
   const soloAllowDev = /_test$/.test(ENDLESS_COMP_LB);   // dev-key records only ever land on a *_test ladder
@@ -6965,6 +7276,7 @@ async function main() {
       const packed = packEndlessScore(f.endDepth, f.score);
       if (compBest[sid] == null || packed > compBest[sid]) { compBest[sid] = packed; changedComp[sid] = { s: packed, ts: f.score | 0, build: f.build >>> 0 }; console.log('  solo best ' + m + ': ' + plog(sid) + ' depth ' + f.endDepth + ' bank ' + f.score + ' -> board ' + packed); }
       if (compSeasonId && (f.seasonId | 0) === (seasonId | 0) && (compSeasonBest[sid] == null || packed > compSeasonBest[sid])) { compSeasonBest[sid] = packed; changedCompSeason[sid] = { s: packed, ts: f.score | 0, build: f.build >>> 0 }; console.log('  solo season best ' + m + ': ' + plog(sid) + ' depth ' + f.endDepth + ' -> board ' + packed); }
+      if ((f.seasonId | 0) === (seasonId | 0)) cupWeekPut(null, sid, packed, { s: packed, ts: f.score | 0, build: f.build >>> 0 });   // O180 this week's board (cup)
     }
     // O103 rating history (client knife 5.1a): every settled competitive segment enters / raises its run (depth reached, FINAL or not)
     if (!PT_MODE) { ratingHistUpsert(soloState, p, 'solo', f.seasonId, ratingRunId(key), f.endDepth, nowMs); ratingTouched.add(sid); }
@@ -7318,6 +7630,7 @@ async function main() {
             const packed = packEndlessScore(f.endDepth, teamT);
             if (fam.best[sid] == null || packed > fam.best[sid]) { fam.best[sid] = packed; fam.changed[sid] = { s: packed, ts: teamT, build: f.build >>> 0, team: rosterSids }; console.log('  endless-comp best (' + fam.low + ') ' + c.m + ': ' + plog(sid) + ' depth ' + f.endDepth + ' team ' + teamT + ' -> board ' + packed); }
             if (fam.seasonId && (t.seasonId | 0) === (seasonId | 0) && (fam.seasonBest[sid] == null || packed > fam.seasonBest[sid])) { fam.seasonBest[sid] = packed; fam.seasonChanged[sid] = { s: packed, ts: teamT, build: f.build >>> 0, team: rosterSids }; console.log('  endless-comp season best (' + fam.low + ') ' + c.m + ': ' + plog(sid) + ' -> board ' + packed); }
+            if ((t.seasonId | 0) === (seasonId | 0)) cupWeekPut(fam, sid, packed, { s: packed, ts: teamT, build: f.build >>> 0, team: rosterSids });   // O180 this week's board (cup)
           }
           // O103 rating history (client knife 5.1a): each writer's run in the family history (depth reached; a catch-up only for the writers behind)
           if (!PT_MODE) { ratingHistUpsert(soloState, pid(sid), fam.low, t.seasonId, ratingRunId(key), f.endDepth, nowMs); ratingTouched.add(sid); }
@@ -8218,9 +8531,9 @@ async function main() {
       const famC = ((tC.flags | 0) & attest.SEG_COMP) ? compFam[compFamKeyOf(pcC)] : null;   // team competitive segment: its family pair
       const targets = clsC ? (pcC === 1 ? [[enClassicSoloId, endlessClassicSoloBest, 'solo-classic']] : [[classicLadderOf(pcC).id, classicLadderOf(pcC).best, classicLadderOf(pcC).low + '-classic']])
       : pcC === 1 ? [   // O93 solo competitive segment: its ladder pair
-        [compId, compBest, 'solo-comp'], [compSeasonId, compSeasonBest, 'solo-comp-season'],
+        [compId, compBest, 'solo-comp'], [compSeasonId, compSeasonBest, 'solo-comp-season'], [compWeekId, compWeekBest, 'solo-comp-week'],
       ] : famC ? [
-        [famC.id, famC.best, famC.low + '-comp'], [famC.seasonId, famC.seasonBest, famC.low + '-comp-season'],
+        [famC.id, famC.best, famC.low + '-comp'], [famC.seasonId, famC.seasonBest, famC.low + '-comp-season'], [famC.weekId, famC.weekBest, famC.low + '-comp-week'],
       ] : [
         [casC.id, casC.best, casC.tag],
         [casC.seasonId, casC.seasonBest, 'endless-season'],
@@ -8241,6 +8554,25 @@ async function main() {
           if (resC.ok) { delete bestMapC[sidC]; console.log('  seedcap correction ' + cor.id + ': deleted ' + labelC + ' entry ' + plog(sidC) + ' (packed ' + packedC + ')'); }
           else ghWarn('seedcap correction ' + cor.id + ': delete ' + labelC + ' ' + plog(sidC) + ' HTTP ' + resC.status);
         }
+      }
+      // O180 (client knife 5.1c-1): a competitive run's row on an EARLIER weekly board (it settled in a week since closed) leaves it
+      //   too, and a cup mark that run won is revoked (the place is not re-awarded: architecture rule 10)
+      if (!PT_MODE && famR) {
+        const sidsC = (cor.seats || []).map((seat) => (rosterC[seat] != null ? String(rosterC[seat]) : null)).filter(Boolean);
+        const baseC = pcC === 1 ? ENDLESS_COMP_LB : famC.name;
+        for (let k = 1; k <= CUP.CHECK_BACK; k++) {
+          const wk = cupWeekBack(cupWeekNow, k);
+          const wbId = (((soloState.cup || {}).wb || {})[wk] || {})[pcC] || byNameLb(cupWeekBoardName(baseC, wk));
+          if (!wbId) continue;
+          for (const sidC of sidsC) {
+            const e = await readUserEntry(wbId, sidC, 'weekly ' + wk);
+            if (!e || (e.score | 0) !== packedC) continue;
+            const resW = await postForm('/ISteamLeaderboards/DeleteLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: wbId, steamid: sidC, format: 'json' });
+            if (resW.ok) console.log('  seedcap correction ' + cor.id + ': deleted week ' + wk + ' entry ' + plog(sidC) + ' (packed ' + packedC + ')');
+            else ghWarn('seedcap correction ' + cor.id + ': delete week ' + wk + ' ' + plog(sidC) + ' HTTP ' + resW.status);
+          }
+        }
+        for (const [wk, sidR] of cupRevoke(soloState.cup, pcC, packedC, sidsC)) console.log('  seedcap correction ' + cor.id + ': cup mark of week ' + wk + ' revoked for ' + plog(sidR) + ' (not re-awarded)');
       }
       markApplied();
       RUN.seedcapFix = (RUN.seedcapFix | 0) + 1;
@@ -8459,6 +8791,35 @@ async function main() {
       console.log(label + ' writes: ' + wr.filter(x => x.status === 'fulfilled' && x.value).length + '/' + sids.length);
     }
   }
+  // O180 (client knife 5.1c-1) this week's boards (cup): created at the week's first write, the id kept in the chain memory
+  //   (saved below) so the next run reads the board even while the listing lags behind it
+  for (const [pc, pool, base, fam] of [[1, changedCompWeek, ENDLESS_COMP_LB, null], [2, changedCompDuoWeek, ENDLESS_COMP_LB_DUO, compFam.DUO], [3, changedCompTrioWeek, ENDLESS_COMP_LB_TRIO, compFam.TRIO], [4, changedCompQuadWeek, ENDLESS_COMP_LB_QUAD, compFam.QUAD]]) {
+    const sids = Object.keys(pool);
+    if (!sids.length) continue;
+    let bid = pc === 1 ? compWeekId : fam.weekId;
+    const name = cupWeekBoardName(base, cupWeekNow);
+    if (!bid) { bid = await findOrCreateBoard(name, true); if (bid) console.log('weekly board created: ' + name + ' id=' + bid); }
+    if (!bid) { ghWarn('write weekly ' + name + ': board unresolved, ' + sids.length + ' row(s) dropped'); continue; }
+    if (pc === 1) compWeekId = bid; else fam.weekId = bid;
+    soloState.cup = soloState.cup || {}; soloState.cup.wb = soloState.cup.wb || {};
+    (soloState.cup.wb[cupWeekNow] = soloState.cup.wb[cupWeekNow] || {})[pc] = bid;
+    const wr = await mapPool(sids, CONCURRENCY, async (sid) => {
+      const w = pool[sid];
+      const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: bid, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, ladderDetails(w));
+      const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
+      if (!okFlag) ghWarn('write ' + name + ' ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
+      else console.log('  ok ' + name + ' ' + plog(sid) + ' = ' + w.s);
+      return okFlag;
+    });
+    console.log(name + ' writes: ' + wr.filter(x => x.status === 'fulfilled' && x.value).length + '/' + sids.length);
+  }
+  // this week's entrants per family for the cup carrier (solo players / teams = roster sets), from the read rows + this run's writes
+  const cupCounts = !cupWeekOk ? null : [1, 2, 3, 4].map((pc) => {
+    if (cupWeekPartial.has(pc === 1 ? 0 : pc)) return null;
+    const fam = pc === 1 ? null : (pc === 2 ? compFam.DUO : pc === 3 ? compFam.TRIO : compFam.QUAD);
+    const best = fam ? fam.weekBest : compWeekBest;
+    return cupStandings(Object.keys(best).map((sid) => ({ sid, score: best[sid], det: fam && fam.weekTeam[sid] ? [0, 0].concat(teamBlock(fam.weekTeam[sid])) : null })), pc).n;
+  });
   // save box past-season prune: a row whose plaintext header season is behind the current season can never
   //   be resumed (the client refuses; a resumed segment would chain into a season that no longer exists), so
   //   the publisher key deletes it and a stale row never shows as a save. Capped per run; nothing else
@@ -8568,6 +8929,7 @@ async function main() {
   if (sigDirty) saveSignals(signals, nowMs);
   if (xpId) saveXp(xpState);
   await maintainRating(soloState, ratingTouched);   // O103: rating rows + the daily tier-cut carrier (history saved above)
+  if (await maintainCup(soloState, cupCounts)) saveSolo(soloState, nowMs);   // O180: cup settle / honor board / carrier (weekly board ids + verdicts saved again)
   await maintainTrust();
   // redeem channel last: wallet debits base on the in-memory post-settle balances just written
   // above (passing the map avoids re-reading scores that global reads may still serve stale).
@@ -8628,6 +8990,8 @@ Object.assign(module.exports, { pruneFlagged, flagBaseKey, FLAG_PRUNE_WAIT_MS, b
 Object.assign(module.exports, { lateWriterRoster });   // cloud audit Q261 a 1V1 whose result writer's own start was first read with his result
 Object.assign(module.exports, { teamXpFloor, teamXpStarts, teamXpMark, teamRollbackPlan });   // cloud audit Q237 team competitive XP floors (test/team-comp-ghost-xp.js)
 Object.assign(module.exports, { RATING, RATING_FAMS, ENDLESS_RATING_LB_SOLO, ENDLESS_RATING_LB_DUO, ENDLESS_RATING_LB_TRIO, ENDLESS_RATING_LB_QUAD, ENDLESS_TIERCUT_LB, ratingFamOf, fnv32, ratingRunId, ratingHistKey,
-  ratingHistUpsert, ratingHistRemove, ratingScoreOf, ratingPlan, ratingCutsOf, ratingTierOf, tiercutDay, tiercutEncode, tiercutDecode, tiercutDue, pruneRatingHist });   // O103 endless competitive rating (client knife 5.1a; test/endless-rating.js)
+  ratingHistUpsert, ratingHistRemove, ratingScoreOf, ratingPlan, ratingCutsOf, ratingTierOf, tiercutDay, tiercutEncode, tiercutDecode, tiercutDue, pruneRatingHist });
+Object.assign(module.exports, { CUP, CUP_FAMS, ENDLESS_CUP_LB, ENDLESS_CUP_HONOR_LB, cupWeekId, cupWeekStart, cupWeekBack, cupNextWeek, cupEdition, cupWeekBoardName, teamBlockSids,
+  cupStandings, cupPodium, cupPodiumFor, cupVerdict, cupMarksOf, cupHonorEncode, cupHonorDecode, cupHonorPlan, cupHeldMasks, cupCarrierEncode, cupCarrierDecode, cupRevoke, pruneCup });   // O180 Gold Rush Cup (client knife 5.1c-1; test/endless-cup.js)   // O103 endless competitive rating (client knife 5.1a; test/endless-rating.js)
 Object.assign(module.exports, { lpWriteDetails, mhOfKey, groupSids, prunePendingWrites, PENDING_WRITES_FILE, RECEIPT_HOLD_MS });   // O480 points receipts + backlog (test/receipt-ring.js)
 Object.assign(module.exports, { lpReadStale, lpLastLive, LP_LAST_HOLD_MS });   // O481 the backlog's last write against a lagging read (test/stale-lp-read.js)

@@ -283,7 +283,7 @@ console.log('-- [6] checkpoint contract --');
   pin('confession path gets the checkpoint', /checkpoint: \(\) => saveEarlyMarks\(true\),/);
   pin('checkpoint after the fine write', /const okW = await opts\.writeLp\(String\(c\.steamID\), nv, e && e\.details(, \{[^\n]*\})?\);\s*\n[^\n]*\n\s*if \(opts\.checkpoint\) opts\.checkpoint\(\);/);   // O480: + the receipt argument
   pin('checkpoint after the refund write', /st\.refunded = 1;\s*\n\s*if \(wrote && opts\.checkpoint\) opts\.checkpoint\(\);/);
-  pin('main-path tail save stays ahead of the trust / redeem upkeep (persist then keeps it on their exits)', /\n  saveProcessed\(processed\);\s*\n\s*saveSkill\(skill\);[\s\S]{0,600}?\n  await maintainTrust\(\);\s*\n[\s\S]{0,300}?await processRedeems\(cp\);/);
+  pin('main-path tail save stays ahead of the trust / redeem upkeep (persist then keeps it on their exits)', /\n  saveProcessed\(processed\);\s*\n\s*saveSkill\(skill\);[\s\S]{0,900}?\n  await maintainTrust\(\);\s*\n[\s\S]{0,300}?await processRedeems\(cp\);/);
 
   // ---- [8] workflow pins ----
   console.log('-- [8] workflow pins --');
