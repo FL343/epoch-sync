@@ -4153,6 +4153,12 @@ const CUP = {
   KEEP_WEEKS: 14,                             // cron-only: settled weeks kept in the chain memory (the client looks back 12)
   CHECK_BACK: 2,                              // cron-only: earlier weekly boards a conviction is looked up on (this week + 2)
 };
+// local end-to-end runs only: a real 40-player edition cannot be staged on the test twins, so CUP_THR_SOLO / CUP_THR_TEAM lower the
+//   thresholds when (and only when) the cup boards are the *_test twins; the production names ignore them
+if (/_test$/.test(ENDLESS_CUP_LB) && /_test$/.test(ENDLESS_CUP_HONOR_LB)) {
+  if (process.env.CUP_THR_SOLO) CUP.THR_SOLO = Math.max(1, process.env.CUP_THR_SOLO | 0);
+  if (process.env.CUP_THR_TEAM) CUP.THR_TEAM = Math.max(1, process.env.CUP_THR_TEAM | 0);
+}
 const CUP_WEEK_MS = 7 * 86400000;
 const CUP_FAMS = [[1, ENDLESS_COMP_LB], [2, ENDLESS_COMP_LB_DUO], [3, ENDLESS_COMP_LB_TRIO], [4, ENDLESS_COMP_LB_QUAD]];   // pc -> the ladder whose weekly twin it is
 // ISO week id YYYYWW of a UTC instant (weeks start Monday 00:00 UTC; week 1 holds the year's first Thursday)

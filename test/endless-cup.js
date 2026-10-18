@@ -144,6 +144,7 @@ const SRC = fs.readFileSync(path.join(__dirname, '..', 'validate.js'), 'utf8');
   T('[6] a conviction deletes this week\'s row (correction targets) and earlier weeks\' rows, and revokes the mark', /\[compWeekId, compWeekBest, 'solo-comp-week'\]/.test(SRC) && /\[famC\.weekId, famC\.weekBest, famC\.low \+ '-comp-week'\]/.test(SRC) && /for \(const \[wk, sidR\] of cupRevoke\(soloState\.cup, pcC, packedC, sidsC\)\)/.test(SRC));
   T('[6] the weekly board id is kept in the chain memory when the week\'s first write creates it', /\(soloState\.cup\.wb\[cupWeekNow\] = soloState\.cup\.wb\[cupWeekNow\] \|\| \{\}\)\[pc\] = bid;/.test(SRC));
   T('[6] run summary row', /Gold Rush Cup \(O180\): settled \/ honor rows written \/ deleted \/ carrier/.test(SRC));
+  T('[6] the threshold override is honoured only with the _test cup boards (local end-to-end)', /if \(\/_test\$\/\.test\(ENDLESS_CUP_LB\) && \/_test\$\/\.test\(ENDLESS_CUP_HONOR_LB\)\) \{\n  if \(process\.env\.CUP_THR_SOLO\)/.test(SRC) && C.THR_SOLO === 40 && C.THR_TEAM === 15);
   T('[6] board names keep the env-default form the client lockstep reads', /const ENDLESS_CUP_LB = process\.env\.ENDLESS_CUP_LB \|\| 'endless_cup';/.test(SRC) && /const ENDLESS_CUP_HONOR_LB = process\.env\.ENDLESS_CUP_HONOR_LB \|\| 'endless_cup_honor';/.test(SRC));
 }
 
