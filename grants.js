@@ -28,6 +28,8 @@
 //   GRANTS_EA_END         end of early access, ISO (unset = still early access: the veteran badge is open)
 //   GRANTS_LIVE           '1' = every candidate; otherwise only the GRANTS_ALLOW list (comma-separated ids)
 //   GRANTS_DRY            '1' = plan and log, never write
+//   GRANTS_SIDS           comma-separated account ids to look at INSTEAD of the mirror board (smoke tests / a manual
+//                         backfill); the GRANTS_LIVE / GRANTS_ALLOW gate still applies
 // Logs carry counts and HMAC pseudonyms only (pid), never a raw account id.
 const crypto = require('crypto');
 const path = require('path');
@@ -209,10 +211,15 @@ async function run(opts) {
 
   const boards = await A.boards(appid);
   const idOf = (name) => { const b = boards.find((x) => String(x.name || x.Name) === name); return b ? (b.id || b.ID) : null; };
-  const mirrorId = idOf(GRANTS.MIRROR_LB);
-  if (!mirrorId) { log('grants: mirror board missing -- nothing to scan'); return stat; }
   const window = mode === 'full' ? null : GRANTS.WINDOW_MIN[mode];
-  let cands = candidatesOf(await A.entries(appid, mirrorId), nowMs, window, v.decodeDetails);
+  let cands;
+  const only = String(env.GRANTS_SIDS || '').split(',').map((s) => s.trim()).filter((s) => /^\d{17}$/.test(s));
+  if (only.length) cands = [...new Set(only)];
+  else {
+    const mirrorId = idOf(GRANTS.MIRROR_LB);
+    if (!mirrorId) { log('grants: mirror board missing -- nothing to scan'); return stat; }
+    cands = candidatesOf(await A.entries(appid, mirrorId), nowMs, window, v.decodeDetails);
+  }
   if (!live) cands = cands.filter((s) => allow.has(s));
   stat.candidates = cands.length;
   cands = cands.slice(0, GRANTS.MAX_PLAYERS_PER_RUN);

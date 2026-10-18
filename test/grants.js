@@ -173,6 +173,14 @@ function world0() {
   assert('dry run: no AddItem / AddPromoItem call', !fk.calls.some((c) => /AddItem|AddPromoItem/.test(c.path)));
   assert('dry run: the plan is still counted', (st4.wouldGrant[401] | 0) === 3);
 
+  // explicit account list instead of the mirror board (smoke / backfill), still behind the allow gate
+  w = world0(); fk = fakeSteam(w);
+  const st5 = await g.run({ v, env: Object.assign({}, ENV, { GRANTS_SIDS: S4 + ',' + S4 + ',bogus' }), nowMs: NOW, mode: 'daily', fetch: fk.fetch, log: () => {} });
+  assert('GRANTS_SIDS: only the listed account is looked at (old mirror row does not matter)', st5.looked === 1 && !fk.calls.some((c) => c.path.endsWith('/GetLeaderboardEntries/v1/') && c.q.leaderboardid === String(1000 + Object.keys(w.boards).indexOf('mirror_box'))));
+  w = world0(); fk = fakeSteam(w);
+  const st6 = await g.run({ v, env: Object.assign({}, ENV, { GRANTS_SIDS: S1, GRANTS_LIVE: '', GRANTS_ALLOW: S3 }), nowMs: NOW, mode: 'daily', fetch: fk.fetch, log: () => {} });
+  assert('GRANTS_SIDS: the allow gate still applies when not live', st6.looked === 0 && !w.inv[S1]);
+
   console.log('=== grants [7] mutation proofs ===');
   // a granter that sends the promo sweep with a fixed request id would freeze later lamps -- the run test above must catch it
   const src = fs.readFileSync(path.join(__dirname, '..', 'grants.js'), 'utf8');
