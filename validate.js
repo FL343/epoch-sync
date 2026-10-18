@@ -5180,8 +5180,9 @@ function endlessTestified(pend, keyStarts, roster0, pc, writerSids) {
   return ok;
 }
 // authoritative CP earn for one consistent MATCHMADE group (settled or consensus-VOID -- innocent
-// participation earns like XP does). Endless records are the SPEND side and never pass through
-// here; their debits happen on the endless settle branch.
+// participation earns like XP does). Endless records never pass through here: the endless settle
+// branches do their own CP (continue / resume debits, competitive milestone credits) and their own
+// progress XP (creditXpEndless).
 function creditCp(g, matchType, rankOf, cp, changedCp) {
   const isRanked = appliesLp(matchType);
   const recBySeat = {};
@@ -7394,7 +7395,10 @@ async function main() {
     // the flagged account's state is restored to its pre-match snapshot before anything is
     // written (scPendingRestore, applied at the top of the next iteration / after the loop).
     // Roster-only suspects (no record = leaver) are not touched: they earn nothing here anyway
-    // and their penalties must stand. Nothing is deferred: the match is processed.
+    // and their penalties must stand. Nothing is deferred: the match is processed. The snapshot
+    // also puts back this match's continue / resume debits (the solo branch returns before them):
+    // a suspect may be an auditor false positive, so the match counts as not played rather than
+    // costs-without-gains (architecture decision 10).
     if (SEEDCAP_REJECT && seedcap && seedcap.suspects) {
       const nowMin = Math.floor(nowMs / 60000);
       const dropSids = writerSids.concat(dropSeat ? [...dropSeat.keys()] : []).filter(sid => seedcapRejectActive(seedcap.suspects[pid(sid)], nowMin));   // Q109: a sanity-dropped writer is still ranked
@@ -7408,10 +7412,11 @@ async function main() {
         }
       }
     }
-    // ===== endless (type 7): own settle authority -- depth board + CP debit, nothing else. =====
-    // TrueSkill/XP/LP/leaver conviction never see a type-7 group (PvE track, zero career
-    // spillover -- mirrors the client's own isolation). Sits before the generic pacing gate:
-    // endless uses its depth-scaled bound instead of the flat matchmade minimum.
+    // ===== endless (type 7): own settle authority -- depth boards, CP (continue / resume debits,
+    // competitive milestone credits) and progress XP (creditXpEndless, record writers only). =====
+    // TrueSkill / LP / leaver conviction and the matchmade XP / CP formulas never see a type-7 group
+    // (PvE track, zero career spillover -- mirrors the client's own isolation). Sits before the generic
+    // pacing gate: endless uses its depth-scaled bound instead of the flat matchmade minimum.
     if (isEndlessMt(matchType)) {
       // knife-B (2026-08-13): 2 or 3 seats. Trio runs rank on their own ladder (3 diggers
       // structurally outscore 2 -- a mixed board would be dominated), so every board-shaped
@@ -8525,7 +8530,13 @@ async function main() {
   // entries iff they still carry exactly the flagged match's packed score (an honest later
   // improvement is never touched). Applied ids land in signals.seedcapApplied so the auditor
   // prunes its queue; unactionable ids (records rotated off the shards) are marked too so the
-  // queue can never wedge. CP needs no reversal (endless settle only DEBITS; gains are matchmade).
+  // queue can never wedge. Only the ladder entries are reversed: the segment's progress XP
+  // (creditXpEndless) and competitive milestone CP (soloMilestones, once per player x season x
+  // family) stand on purpose -- both are bounded (depth pacing gate / milestone bitmap), the
+  // SEEDCAP_REJECT window already discards the offender's next settlements, and taking XP or CP
+  // back would hit honest players on an auditor false positive (architecture decision 10).
+  // Continue / resume debits are not refunded either. Matchmade keys never get here (the
+  // auditor queues endless corrections only).
   if (SEEDCAP_ENFORCE && seedcap && Array.isArray(seedcap.corrections) && seedcap.corrections.length) {
     signals.seedcapApplied = signals.seedcapApplied || [];
     const scApplied = new Set(signals.seedcapApplied);

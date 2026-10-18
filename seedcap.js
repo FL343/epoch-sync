@@ -40,7 +40,8 @@
 //                        settlement is discarded, other seats settle; past it the
 //                        account settles again with no ops action (never permanent).
 //   state.corrections[]  already-settled over-cap endless matches -> reconcile
-//                        reverses the flagged seats' CP credit / board entry
+//                        deletes the flagged seats' board entries (only while they still
+//                        carry that match's score); XP, milestone CP and debits stand
 //   state.chain[pid:pc:runSeed]  audited endless progress per RUN (endDepth -> cumulative cap)
 //                        = the startBank bound for continuation sessions of that same run; only a seat
 //                        whose own account wrote the record extends its chain (knife 3.5c2a-A, 2026-09-30:
