@@ -7147,10 +7147,20 @@ async function main() {
         }
       }
       if (gate.pending) { console.log('  solo ' + m + ': ' + plog(sid) + ' pending (' + gate.reason + ')'); return false; }
-      recordFlag(signals, c.g, m, nowMs); sigDirty = true; trustTouched.add(sid);
-      RUN.soloRej = (RUN.soloRej | 0) + 1;
-      ghWarn('match=' + m + ': solo segment ' + plog(sid) + ' REJECTED (' + gate.reason + ') -- not settled');
-      processed.add(m);   // a bad signature / foreign owner never heals
+      // cloud audit W41 (2026-10): a failed check never closes the key. processed is shared by every lane, and the key is
+      //   in every public start record: an account outside the match wrote one start naming another roster (the key splits,
+      //   no seat gate) and one malformed pc=1 record under a co-op endless key, or under the next segment key of a
+      //   single-player run (its start is written at the previous checkpoint). The solo lane rejected it and closed the
+      //   key, so the real result -- written after -- never settled (and a solo run's later segments rejected as chain gaps
+      //   7 days on). Now the key stays open: the bad record is flagged and warned once (recordFlag keeps one flag per key
+      //   while its records are on the shards, Q166), looked at again quietly each run while it stays there, and a record
+      //   that verifies settles the key as before. A co-op key is held meanwhile (its records wait in this lane), as an
+      //   outside start already holds it (Q113).
+      if (recordFlag(signals, c.g, m, nowMs)) {
+        sigDirty = true; trustTouched.add(sid);
+        RUN.soloRej = (RUN.soloRej | 0) + 1;
+        ghWarn('match=' + m + ': solo segment ' + plog(sid) + ' REJECTED (' + gate.reason + ') -- not settled, the key stays open');
+      } else console.log('  solo ' + m + ': ' + plog(sid) + ' rejected again (' + gate.reason + '), flagged before -- not settled, the key stays open');
       return false;
     }
     const f = v.fields;

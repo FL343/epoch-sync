@@ -16,10 +16,11 @@
 //   [1] pruneSoloDone / soloKeyGone: usable, retired past the grace, revoked, another channel, missing, two tables, fuse
 //   [2] screenLateStarts: the room per writer across the notes, the n mark closes the note at the result, an outside
 //       writer spends only his own room, remembered ids are not counted twice
-//   [3] main(), signed segments (a copy of this tree with a test key): the owner's five segments settle once; forged
-//       segments push the processed list past a small cap and the owner's keys go from it; written back they settle
-//       nothing (also once the run's chain memory expired) and are counted; the forged keys are still dropped; once the
-//       key is retired past the grace the remembered segments are forgotten and a written-back one is held, not settled
+//   [3] main(), signed segments (a copy of this tree with a test key): the owner's five segments settle once; other keys
+//       push the processed list past a small cap and the owner's keys go from it; written back they settle nothing (also
+//       once the run's chain memory expired) and are counted; the list is still pruned; forged segments written meanwhile
+//       never enter it (W41); once the key is retired past the grace the remembered segments are forgotten and a
+//       written-back one is held, not settled
 //   [4] main(): the pruning run that adds as many verdict keys as it drops, then the no-consistent-matches exit: the
 //       verdict keys reach processed.json and nobody is judged twice
 //   [5] main(): one key, a fresh roster per start; four accounts writing each other's keys: each account stops at the
@@ -183,12 +184,15 @@ function boardsWith(recs, pts) {
     { id: 21, name: 'endless_comp_solo', entries: [] }, { id: 22, name: 'endless_board_solo', entries: [] });
   return boards;
 }
-// steps: [[ms since the previous run, recs, env?, before?], ...]; before() runs ahead of that step (the key table edit in [3])
+// steps: [[ms since the previous run, recs, env?, before?, mut?], ...]; before() runs ahead of that step (the key table edit in [3]);
+//   mut(files) edits the state files handed to that run (padProcessed)
 function timeline(steps, files0, pts) {
   const out = []; let state = null;
-  for (const [ms, recs, env, before] of steps) {
+  for (const [ms, recs, env, before, mut] of steps) {
     if (before) before();
-    const r = runCron(boardsWith(recs, pts), state ? advance(state, ms) : (files0 || null), env || null);
+    let files = state ? advance(state, ms) : (files0 || null);
+    if (mut) files = mut(files || {});
+    const r = runCron(boardsWith(recs, pts), files, env || null);
     out.push(r); state = r.state;
     if (r.code !== 0) break;
   }
@@ -199,6 +203,20 @@ const allOk = (rs, n) => rs.length === n && rs.every(r => r.code === 0);
 const brk = (rs, n, tag) => { if (allOk(rs, n)) return false; bad(tag + ': run ' + rs.length + ' exit ' + (rs[rs.length - 1] || {}).code + '\n' + ((rs[rs.length - 1] || {}).out || '').slice(-2000)); return true; };
 const ptsPosts = (rs, sid) => [].concat(...rs.map((r) => r.posts.filter((p) => /SetLeaderboardScore/.test(p.url) && /leaderboardid=7(&|$)/.test(p.body) && new RegExp('steamid=' + sid + '(&|$)').test(p.body))));
 const seenPer = (r) => { const c = {}; for (const [k, e] of Object.entries(r.state.STARTS_FILE || {})) if (k.charAt(0) === '~' && e && Array.isArray(e.s)) for (const x of e.s) { const w = x.split('@')[0]; c[w] = (c[w] | 0) + 1; } return c; };
+
+// cloud audit W41: a failed check no longer closes a solo key, so the forged segments of [3] / [3b] / [3c] stopped filling the
+//   processed list (they are flagged and looked at again while on the shards). The overflow these cases need comes from other
+//   traffic instead: n made-up keys (matches settled earlier, none of them on these shards) added to the list ahead of a run.
+function padProcessed(tag, n) {
+  let calls = 0;
+  return (files) => {
+    const list = Array.isArray(files.PROCESSED_FILE) ? files.PROCESSED_FILE : (files.PROCESSED_FILE = []);
+    for (let i = 0; i < n; i++) list.push((-1900000000 - calls * 1000 - i) + '_' + tag + '_2');
+    calls++;
+    return files;
+  };
+}
+const forgedKeys = (rs) => [].concat(...rs.map((r) => (r.state.PROCESSED_FILE || []).filter((k) => /_99[6-9]_7$/.test(k))));
 
 console.log('=== Q144 rework: signed solo segments written back, the remembered-start room, the pruning run\'s verdict keys ===');
 
@@ -313,13 +331,14 @@ console.log('=== Q144 rework: signed solo segments written back, the remembered-
   for (const [tag, runTtl] of [['chain memory alive', 0], ['chain memory expired', HOUR]]) {
     let fz = 0;
     const forged = () => Array.from({ length: 50 }, () => ({ sid: Zf, d: seg({ sid: Zf, id: 'rw-forge-' + tag + (++fz), runSeed: 999, sd: 0, ed: 1, forge: true }) }));
+    const pad = padProcessed(31 + (runTtl ? 1 : 0), 50);
     const CAP = Object.assign({ PROCESSED_CAP: '60', PROCESSED_KEEP: '40', PROCESSED_PRUNE_WAIT_MS: String(HOUR) }, runTtl ? { COMP_RUN_TTL_MS: String(runTtl) } : {});
     const pace = runTtl ? 5 * MIN : HOUR;
     const all = [row('A', 0), row('C0', 1), row('B', 2), row('C1', 3), row('C2', 4)];
     const steps = [
       [0, [row('A', 0), row('C0', 1)], CAP], [pace, [row('A', 0), row('C0', 1)], CAP],
       [pace, all.slice(0, 4), CAP], [pace, all.slice(0, 4), CAP], [pace, all, CAP], [pace, all, CAP],
-      [HOUR, forged(), CAP], [HOUR, forged(), CAP], [HOUR, forged(), CAP], [HOUR, forged(), CAP],
+      [HOUR, forged(), CAP, null, pad], [HOUR, forged(), CAP, null, pad], [HOUR, forged(), CAP, null, pad], [HOUR, forged(), CAP, null, pad],
       [runTtl ? 2 * runTtl : HOUR, back(), CAP], [HOUR, back(), CAP], [HOUR, back(), CAP],
     ];
     const rs = timeline(steps);
@@ -328,7 +347,7 @@ console.log('=== Q144 rework: signed solo segments written back, the remembered-
     const first = settles(0, 6);
     T('[3] ' + tag + ': the owner\'s five segments settle once each', ['A', 'B', 'C0', 'C1', 'C2'].every((n) => first.filter((l) => l.indexOf('solo settle ' + K(n)) >= 0).length === 1), first.length + ' settle lines');
     const gone = ['A', 'B', 'C0', 'C1', 'C2'].filter((n) => (rs[9].state.PROCESSED_FILE || []).indexOf(K(n)) < 0);
-    T('[3] ' + tag + ': the forged flood pushed the owner\'s keys out of the processed list (the case the rework covers)', gone.length === 5, 'gone: ' + gone.join(','));
+    T('[3] ' + tag + ': the processed list overflowed and the owner\'s keys went from it (the case the rework covers)', gone.length === 5, 'gone: ' + gone.join(','));
     T('[3] ' + tag + ': the done memory holds the five', ['A', 'B', 'C0', 'C1', 'C2'].every((n) => ((rs[9].state.SOLO_FILE || {}).done || {})[K(n)]), JSON.stringify(Object.keys((rs[9].state.SOLO_FILE || {}).done || {}).length));
     const again = settles(10, 13);
     T('[3] ' + tag + ': written back, none of them settles again', again.length === 0, again.join(' | '));
@@ -339,12 +358,14 @@ console.log('=== Q144 rework: signed solo segments written back, the remembered-
     T('[3] ' + tag + ': summary row counts the four written back', rs[10].summary.indexOf(' (Q144) | 5 / 4 |') >= 0, (rs[10].summary.match(/signed solo segments[^\n]*/) || [''])[0]);
     T('[3] ' + tag + ': no flag, no signal for the owner\'s own records written back', !((rs[12].state.SIGNALS_FILE || {}).flagged || {})[K('B')] && rs.slice(10).every((r) => !/REJECT/.test(r.out.split('\n').filter((l) => l.indexOf(K('A')) >= 0 || l.indexOf(K('B')) >= 0).join('\n'))));
     const procN = rs.map((r) => (r.state.PROCESSED_FILE || []).length);
-    T('[3] ' + tag + ': the forged keys are still dropped past the cap (armed on one read, dropped on the next an hour on)', Math.max(...procN.slice(6, 10)) > 60 && procN[9] < procN[8] && procN[11] <= 60, JSON.stringify(procN));
+    T('[3] ' + tag + ': the list is still pruned past the cap (armed on one read, dropped on the next an hour on)', Math.max(...procN.slice(6, 10)) > 60 && procN[8] < procN[7] + 50 && procN[11] <= 60, JSON.stringify(procN));
+    T('[3] ' + tag + ': no forged segment key ever enters the processed list (W41: a failed check does not close the key)', forgedKeys(rs).length === 0 && rs.slice(6, 10).every((r) => /REJECTED \(bad-sig\) -- not settled, the key stays open/.test(r.out)), forgedKeys(rs).slice(0, 3).join(','));
   }
   // the key retired past the grace: the remembered segments are forgotten, a written-back one is held (pending), never settled
   {
     let fz = 0;
     const forged = () => Array.from({ length: 50 }, () => ({ sid: Zf, d: seg({ sid: Zf, id: 'rw-forge-ret' + (++fz), runSeed: 998, sd: 0, ed: 1, forge: true }) }));
+    const pad = padProcessed(33, 50);
     const CAP = { PROCESSED_CAP: '60', PROCESSED_KEEP: '40', PROCESSED_PRUNE_WAIT_MS: String(HOUR) };
     const all = [row('A', 0), row('C0', 1), row('B', 2), row('C1', 3), row('C2', 4)];
     const iso = (ms) => new Date(Date.now() + ms).toISOString();
@@ -352,7 +373,7 @@ console.log('=== Q144 rework: signed solo segments written back, the remembered-
     const steps = [
       [0, [row('A', 0), row('C0', 1)], CAP, () => setTestKey({ ch: 'ea' })], [HOUR, [row('A', 0), row('C0', 1)], CAP],
       [HOUR, all.slice(0, 4), CAP], [HOUR, all.slice(0, 4), CAP], [HOUR, all, CAP], [HOUR, all, CAP],
-      [HOUR, forged(), CAP], [HOUR, forged(), CAP], [HOUR, forged(), CAP], [HOUR, forged(), CAP],
+      [HOUR, forged(), CAP, null, pad], [HOUR, forged(), CAP, null, pad], [HOUR, forged(), CAP, null, pad], [HOUR, forged(), CAP, null, pad],
       [HOUR, filler(), CAP, () => setTestKey({ ch: 'ea', retiredAt: iso(-6 * 86400000) })],   // retired 6 days ago: inside the grace
       [HOUR, filler(), CAP, () => setTestKey({ ch: 'ea', retiredAt: iso(-8 * 86400000) })],   // 8 days ago: past it
       [HOUR, back(), CAP], [HOUR, back(), CAP],
@@ -397,17 +418,17 @@ console.log('=== Q144 rework: signed solo segments written back, the remembered-
     const Q = SID(651);
     const s0 = seg({ sid: Q, id: 'rw-rst-a', runSeed: 303, sd: 0, ed: 5, flags: S_ }), s0b = seg({ sid: Q, id: 'rw-rst-b', runSeed: 303, sd: 0, ed: 5, flags: S_ });
     const r0 = { sid: Q, d: s0, shard: 0 }, r0b = { sid: Q, d: s0b, shard: 1 };
-    const fl = flood('rst');
+    const fl = flood('rst'), pad = padProcessed(34, 50);
     const CAP = { PROCESSED_CAP: '60', PROCESSED_KEEP: '40', PROCESSED_PRUNE_WAIT_MS: String(HOUR), COMP_RUN_TTL_MS: String(HOUR) };
     const steps = [
       [0, [r0], CAP], [5 * MIN, [r0, r0b], CAP],
-      [5 * MIN, fl(), CAP], [5 * MIN, fl(), CAP], [HOUR, fl(), CAP], [HOUR, fl(), CAP],
+      [5 * MIN, fl(), CAP, pad], [5 * MIN, fl(), CAP, pad], [HOUR, fl(), CAP, pad], [HOUR, fl(), CAP, pad],
       [3 * HOUR, [r0b], CAP], [HOUR, [r0b], CAP],
     ];
     const rs = timelineMut(steps);
     if (!brk(rs, steps.length, '[3b] restart')) {
       T('[3b] restart: the first segment settles, the second depth-0 one is a chain REJECT', /chain REJECT \(restart\)/.test(rs[1].out) && /solo settle /.test(rs[0].out + rs[1].out), rs.slice(0, 2).map((r) => (r.out.match(/[^\n]*solo [^\n]*/g) || []).join(' / ')).join(' || '));
-      T('[3b] restart: the flood pushed its key out of the processed list', (rs[5].state.PROCESSED_FILE || []).indexOf(keyOf(s0b)) < 0 && ((rs[5].state.SOLO_FILE || {}).done || {})[keyOf(s0b)], '');
+      T('[3b] restart: the overflow pushed its key out of the processed list', (rs[5].state.PROCESSED_FILE || []).indexOf(keyOf(s0b)) < 0 && ((rs[5].state.SOLO_FILE || {}).done || {})[keyOf(s0b)], '');
       const again = [].concat(...rs.slice(6).map((r) => r.out.split('\n').filter((l) => /solo settle /.test(l))));
       T('[3b] restart: written back once its run is forgotten, it does not settle as a new run', again.length === 0 && /processed before \(key/.test(rs[6].out), again.join(' | '));
     }
@@ -418,18 +439,18 @@ console.log('=== Q144 rework: signed solo segments written back, the remembered-
     const Q = SID(655), nowMin = Math.floor(Date.now() / 60000);
     const w0 = seg({ sid: Q, id: 'rw-sc-a', runSeed: 404, sd: 0, ed: 5, flags: S_ });
     const r0 = { sid: Q, d: w0, shard: 0 };
-    const fl = flood('sc');
+    const fl = flood('sc'), pad = padProcessed(35, 50);
     const CAP = { PROCESSED_CAP: '60', PROCESSED_KEEP: '40', PROCESSED_PRUNE_WAIT_MS: String(HOUR), COMP_RUN_TTL_MS: String(HOUR), SEEDCAP_REJECT: '1' };
     const sc = (t1) => (f) => Object.assign(f, { SC_STATE_FILE: { suspects: { [v.pid(Q)]: { n: 1, t1 } } } });
     const steps = [
       [0, [r0], CAP, sc(nowMin)],
-      [5 * MIN, fl(), CAP], [5 * MIN, fl(), CAP], [HOUR, fl(), CAP], [HOUR, fl(), CAP],
+      [5 * MIN, fl(), CAP, pad], [5 * MIN, fl(), CAP, pad], [HOUR, fl(), CAP, pad], [HOUR, fl(), CAP, pad],
       [3 * HOUR, [r0], CAP, sc(nowMin - 3 * 1440)], [HOUR, [r0], CAP, sc(nowMin - 3 * 1440)],
     ];
     const rs = timelineMut(steps);
     if (!brk(rs, steps.length, '[3b] seedcap window')) {
       T('[3b] seedcap window: inside it the segment is discarded', /inside seedcap reject window -- own settlement discarded/.test(rs[0].out) && !/solo settle /.test(rs[0].out), '');
-      T('[3b] seedcap window: the flood pushed its key out of the processed list', (rs[4].state.PROCESSED_FILE || []).indexOf(keyOf(w0)) < 0 && ((rs[4].state.SOLO_FILE || {}).done || {})[keyOf(w0)], '');
+      T('[3b] seedcap window: the overflow pushed its key out of the processed list', (rs[4].state.PROCESSED_FILE || []).indexOf(keyOf(w0)) < 0 && ((rs[4].state.SOLO_FILE || {}).done || {})[keyOf(w0)], '');
       const again = [].concat(...rs.slice(5).map((r) => r.out.split('\n').filter((l) => /solo settle /.test(l))));
       T('[3b] seedcap window: written back after the window, it does not settle', again.length === 0 && /processed before \(key/.test(rs[5].out), again.join(' | '));
     }
@@ -441,15 +462,16 @@ console.log('=== Q144 rework: signed solo segments written back, the remembered-
   const S_ = A.SEG_SUSPENDED;
   let fz = 0;
   const fl = () => Array.from({ length: 50 }, () => ({ sid: SID(669), d: seg({ sid: SID(669), id: 'rw-fl-pr' + (++fz), runSeed: 996, sd: 0, ed: 1, forge: true }) }));
+  const pad = padProcessed(36, 50);
   const pk = seg({ sid: SID(661), id: 'rw-perk-a', runSeed: 505, sd: 0, ed: 5, flags: S_, att: 4, build: 1 });   // a build word with no pick log: perk_forge
   const rr = seg({ sid: SID(662), id: 'rw-rr-a', runSeed: 606, sd: 0, ed: 5, flags: S_, att: 5, rrHi: 1 << 30 });   // a reroll bit far past the depth: reroll-ahead
   const both = () => [{ sid: SID(661), d: pk, shard: 0 }, { sid: SID(662), d: rr, shard: 1 }];
   const CAP = { PROCESSED_CAP: '60', PROCESSED_KEEP: '40', PROCESSED_PRUNE_WAIT_MS: String(HOUR) };
-  const steps = [[0, both(), CAP], [5 * MIN, fl(), CAP], [5 * MIN, fl(), CAP], [HOUR, fl(), CAP], [HOUR, fl(), CAP], [HOUR, both(), CAP]];
+  const steps = [[0, both(), CAP], [5 * MIN, fl(), CAP, null, pad], [5 * MIN, fl(), CAP, null, pad], [HOUR, fl(), CAP, null, pad], [HOUR, fl(), CAP, null, pad], [HOUR, both(), CAP]];
   const rs = timeline(steps);
   if (!brk(rs, steps.length, '[3c] perk / reroll')) {
     T('[3c] perk / reroll: both are rejected once', /perk REJECT/.test(rs[0].out) && /reroll chain REJECT/.test(rs[0].out), (rs[0].out.match(/[^\n]*REJECT[^\n]*/g) || []).join(' | '));
-    T('[3c] perk / reroll: the flood pushed both keys out of the processed list', [pk, rr].every((d) => (rs[4].state.PROCESSED_FILE || []).indexOf(keyOf(d)) < 0 && ((rs[4].state.SOLO_FILE || {}).done || {})[keyOf(d)]), '');
+    T('[3c] perk / reroll: the overflow pushed both keys out of the processed list', [pk, rr].every((d) => (rs[4].state.PROCESSED_FILE || []).indexOf(keyOf(d)) < 0 && ((rs[4].state.SOLO_FILE || {}).done || {})[keyOf(d)]), '');
     T('[3c] perk / reroll: written back, neither is judged again', !/REJECT/.test(rs[5].out) && (rs[5].out.match(/processed before \(key/g) || []).length === 2, (rs[5].out.match(/[^\n]*(REJECT|processed before)[^\n]*/g) || []).join(' | '));
   }
 }
