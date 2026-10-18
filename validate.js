@@ -6482,13 +6482,15 @@ async function main() {
   if (!compId) { strictBoard('solo comp board not found'); ghWarn('solo comp board not found (' + ENDLESS_COMP_LB + ') -> solo segments left pending'); }
   const compBest = {};
   let compComplete = true, compSeasonComplete = true;   // audit B-F4: a paged-out solo ladder must fall back to on-demand reads (ForceUpdate would else overwrite a deeper lifetime best with a shallower run)
-  const compDet = {}, compSeasonDet = {};   // knife 3.5d: raw row details (build word at [1]) -> the composite row inherits the dominant size's build
-  if (compId) { const br = await readBoardAll(compId, 'solo comp board'); compComplete = br.complete !== false; for (const e of br.ents) { compBest[e.steamID] = e.score | 0; compDet[e.steamID] = e.details; } }
+  const compDet = {}, compSeasonDet = {};   // knife 3.5d: raw row detailData (hex; build word at [1]) -> the composite row inherits the dominant size's build
+  //   O290 (client knife 5.1b): a raw Web API entry carries its details as `detailData`; these maps once read `e.details` (always
+  //   undefined) -> composite rows were written with build 0 and every composite row was rewritten every tick
+  if (compId) { const br = await readBoardAll(compId, 'solo comp board'); compComplete = br.complete !== false; for (const e of br.ents) { compBest[e.steamID] = e.score | 0; compDet[e.steamID] = e.detailData; } }
   const compSeason = (seasonId >= 1 && compId) ? await resolveSeasonBoard(lr, ENDLESS_COMP_LB, seasonId) : { name: null, id: null };
   const compSeasonId = compSeason.id;
   if (seasonId >= 1 && compId && !compSeasonId) { strictBoard('seasonal solo comp board not found'); ghWarn('seasonal solo comp board unresolved -> solo segments left pending'); }
   const compSeasonBest = {};
-  if (compSeasonId) { const br = await readBoardAll(compSeasonId, 'seasonal solo comp board'); compSeasonComplete = br.complete !== false; for (const e of br.ents) { compSeasonBest[e.steamID] = e.score | 0; compSeasonDet[e.steamID] = e.details; } }
+  if (compSeasonId) { const br = await readBoardAll(compSeasonId, 'seasonal solo comp board'); compSeasonComplete = br.complete !== false; for (const e of br.ents) { compSeasonBest[e.steamID] = e.score | 0; compSeasonDet[e.steamID] = e.detailData; } }
   // O216 (client knife 3.9b N2) classic solo LIFETIME ladder (SEG_CLASSIC guard segments; no season twin) + the classic save box (guard rows rules=2)
   let enClassicSoloId = byNameLb(ENDLESS_LB_CLASSIC_SOLO);
   if (!enClassicSoloId) enClassicSoloId = await findOrCreateBoard(ENDLESS_LB_CLASSIC_SOLO);
@@ -6527,10 +6529,10 @@ async function main() {
     if (!id) { strictBoard('team comp board not found'); ghWarn('team comp board not found (' + lbName + ') -> ' + low + ' segments left pending'); }
     const best = {}, seasonBest = {}, det = {}, seasonDet = {};
     let complete = true, seasonComplete = true;
-    if (id) { const br = await readBoardAll(id, low + ' comp board'); complete = br.complete; for (const e of br.ents) { best[e.steamID] = e.score | 0; det[e.steamID] = e.details; } }
+    if (id) { const br = await readBoardAll(id, low + ' comp board'); complete = br.complete; for (const e of br.ents) { best[e.steamID] = e.score | 0; det[e.steamID] = e.detailData; } }
     const season = (seasonId >= 1 && id) ? await resolveSeasonBoard(lr, lbName, seasonId) : { name: null, id: null };
     if (seasonId >= 1 && id && !season.id) { strictBoard('seasonal team comp board not found'); ghWarn('seasonal ' + low + ' comp board unresolved -> segments left pending'); }
-    if (season.id) { const br = await readBoardAll(season.id, 'seasonal ' + low + ' comp board'); seasonComplete = br.complete; for (const e of br.ents) { seasonBest[e.steamID] = e.score | 0; seasonDet[e.steamID] = e.details; } }
+    if (season.id) { const br = await readBoardAll(season.id, 'seasonal ' + low + ' comp board'); seasonComplete = br.complete; for (const e of br.ents) { seasonBest[e.steamID] = e.score | 0; seasonDet[e.steamID] = e.detailData; } }
     let sbId = byNameLb(sbName);
     if (!sbId) sbId = await findOrCreateBoard(sbName, false);
     if (!sbId) ghWarn('save box board not found (' + sbName + ', client-writable) -> guard team saves fail until it exists');
@@ -8423,7 +8425,7 @@ async function main() {
       const sids = [...new Set([...pools, ...bestMaps].flatMap(p => Object.keys(p)))];
       if (!sids.length) return;
       const cur = {};
-      try { const br = await readBoardAll(bid, label + ' board'); for (const e of br.ents) cur[String(e.steamID)] = { s: e.score | 0, det: decodeDetails(e.details) }; }
+      try { const br = await readBoardAll(bid, label + ' board'); for (const e of br.ents) cur[String(e.steamID)] = { s: e.score | 0, det: decodeDetails(e.detailData) }; }
       catch (e) { ghWarn('read ' + label + ' board failed (' + (e && e.message) + ') -> composite rows skipped this tick'); return; }
       const wantOf = (sid) => {
         const bests = season
