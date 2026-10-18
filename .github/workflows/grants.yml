@@ -1,0 +1,59 @@
+name: grants
+# Steam inventory keepsakes (the trophy layer: display-only items on the player's Steam profile, never
+# tradable, never marketable). Runs as its own workflow, never inside the reconcile tick: it only READS the
+# trusted boards the reconcile job writes, then grants the keepsakes each recently active player has earned
+# through IInventoryService.
+# Read-only on this repo: no state file, no commit, no push -- every decision is recomputed from Steam each
+# run and every grant is idempotent (promo sweep: Steam grants each promo item once; AddItem: only items the
+# inventory does not hold yet, with a deterministic request id), so it can never contend with the reconcile
+# persist and a missed or doubled run changes nothing.
+#   schedule (once a day)          = the promo sweep (playtime lamps) + purchase items + result items;
+#                                    every mirror row on the 1st of the month, the last 48 hours otherwise
+#   workflow_dispatch mode=fast    = sent by sync-tick every 5 minutes (best effort): result items of the
+#                                    players who just finished a match (mirror row moved in the last 20 min)
+# Off until the repository variable GRANTS_ENABLED is '1'. GRANTS_LIVE='1' opens it to every player; until then
+# only the GRANTS_ALLOW accounts (test accounts) are granted. A failed run only delays grants: the next run
+# recomputes everything; GitHub's own failure mail is the alert (it is not part of the 30-minute heartbeat).
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'fast | daily | full'
+        required: false
+        default: 'fast'
+  schedule:
+    - cron: '41 6 * * *'
+permissions:
+  contents: read
+concurrency:
+  group: grants
+  cancel-in-progress: false
+jobs:
+  grants:
+    if: github.repository == 'FL343/epoch-sync' && vars.GRANTS_ENABLED == '1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: test
+        run: |
+          # same shape as every workflow here: fixture warnings must not become run annotations
+          unset GITHUB_STEP_SUMMARY
+          t="tests-$(date +%s%N)"; echo "::stop-commands::$t"
+          for f in test/grants.js; do echo "== $f =="; node "$f" || exit 1; done
+          echo "::$t::"
+      - name: run
+        env:
+          STEAM_PUBLISHER_KEY: ${{ secrets.STEAM_PUBLISHER_KEY }}
+          APPID: ${{ secrets.APPID }}
+          STATE_SALT: ${{ secrets.STATE_SALT }}
+          LP_LB: ${{ secrets.LP_LB }}
+          XP_LB: ${{ secrets.XP_LB }}
+          CLASSIC_APPID: ${{ secrets.CLASSIC_APPID }}
+          GRANTS_LAUNCH_AT: ${{ secrets.GRANTS_LAUNCH_AT }}
+          GRANTS_EA_END: ${{ secrets.GRANTS_EA_END }}
+          GRANTS_ALLOW: ${{ secrets.GRANTS_ALLOW }}
+          GRANTS_LIVE: ${{ vars.GRANTS_LIVE }}
+          GRANTS_DRY: ${{ vars.GRANTS_DRY }}
+          GRANTS_MODE: ${{ inputs.mode }}
+        run: node grants.js
