@@ -107,7 +107,7 @@ console.log('-- wiring pins (validate.js lane) --');
   assert('pacing on the 40s team level', /endlessRequiredMs\(f, plan\.proven, CLASSIC\.LEVEL_S_TEAM\)/.test(lane));
   assert('no CP outputs in the lane (no milestones / resume fee / continue debit)', !/soloMilestones\(/.test(lane) && !/COMP\.RESUME_CP/.test(lane) && !/endlessDebits\(/.test(lane) && !/changedCp\[/.test(lane));
   assert('no perk replay in the lane (sanity zeroed the tail)', !/verifyPerkPicks\(/.test(lane));
-  assert('ladder write = writers only, packClassicScore(endDepth, team bank), lifetime family pool (no season pool)', /packClassicScore\(f\.endDepth, teamK\)/.test(lane) && /famK\.changed\[sid\] = \{ s: packed, ts: teamK \}/.test(lane) && !/seasonChanged/.test(lane));
+  assert('ladder write = writers only, packClassicScore(endDepth, team bank), lifetime family pool (no season pool)', /packClassicScore\(f\.endDepth, teamK\)/.test(lane) && /famK\.changed\[sid\] = \{ s: packed, ts: teamK, team: rosterSids \}/.test(lane) && !/seasonChanged/.test(lane));
   assert('progress XP x CLASSIC.XP_MUL (from the proven depth on an overlapping retry)', /creditXpEndless\(g, \{ startDepth: Math\.max\(f\.startDepth \| 0, plan\.proven \| 0\), endDepth: f\.endDepth \| 0 \}, xp, changedXp, spSet, CLASSIC\.XP_MUL\)/.test(lane));
   assert('audit B-F5 reject-window writer skipped', /scPendingRestore && scPendingRestore\.sids\.indexOf\(sid\) >= 0/.test(lane));
   assert('sanity: CLASSIC bit legal, own arm (COMP|SUSPENDED refused / cont / classic-perk / span / disp) + classic cap', /attest\.SEG_RESUMED \| attest\.SEG_CLASSIC\)\) !== 0\) out\.push\('flags'\);/.test(src) && /else if \(fl & attest\.SEG_CLASSIC\) \{/.test(src) && /scoreCap = \(\(fl & attest\.SEG_CLASSIC\) \? classicGoalFor\(t\.endDepth, pc\) : endlessGoalFor\(t\.endDepth, pc\)\) \* ENDLESS\.SCORE_MULT;/.test(src));
@@ -116,7 +116,7 @@ console.log('-- wiring pins (validate.js lane) --');
   assert('classic save boxes are NOT in the past-season prune list (lifetime rows)', !/\[classicFam\.\w+\.saveBoxId, /.test(src) && !/\[classicSaveBoxId, /.test(src));
   assert('seedcap correction targets the classic family / solo classic ladder with the classic packing', /const clsC = !!\(\(tC\.flags \| 0\) & attest\.SEG_CLASSIC\);/.test(src) && /const packedC = clsC \? packClassicScore\(tC\.endDepth, teamScoreC\) : packEndlessScore\(tC\.endDepth, teamScoreC\);/.test(src));
   assert('reject-window snapshot covers the three classic family pools', /classicDuoBest: classicFam\.DUO\.best\[sid\]/.test(src) && /scPut\(classicFam\.TRIO\.best, sn\.sid, sn\.classicTrioBest\)/.test(src) && /scPut\(changedEndlessClassicQuad, sn\.sid, sn\.changedEndlessClassicQuad\)/.test(src));
-  assert('write phase writes the three family pools with details [team bank, 0]', /for \(const fam of \['DUO', 'TRIO', 'QUAD'\]\) \{\s*\n\s*const F = classicFam\[fam\];/.test(src) && /leaderboardid: F\.id, steamid: sid, score: w\.s, scoremethod: 'ForceUpdate', format: 'json' \}, \[w\.ts \| 0, 0\]\)/.test(src));
+  assert('write phase writes the three family pools with details [team bank, 0]', /for \(const fam of \['DUO', 'TRIO', 'QUAD'\]\) \{\s*\n\s*const F = classicFam\[fam\];/.test(src) && /leaderboardid: F\.id, steamid: sid, score: w\.s, scoremethod: 'ForceUpdate', format: 'json' \}, ladderDetails\(w\)\)/.test(src));   // O207 (knife 5.1b): [team bank, 0 (no build)] + the team block
   assert('run summary counts the lane', /RUN\.endlessClassic = settledEndlessClassic;/.test(src) && /team-classic\), voided/.test(src));
 }
 

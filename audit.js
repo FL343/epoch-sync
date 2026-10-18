@@ -17,7 +17,20 @@
 // Output discipline (public logs): generic board labels + 8-hex pseudonyms + counts.
 // Never board names from env, never raw steamIDs, never key material.
 const fs = require('fs');
-const { readBoardAll, pid, decodeDetails, getJson, BASE, TRUST_LB, REPORT_LB, START_MAGIC, REPORT_MAGIC, CP_LB, ENDLESS_LB, REDEEM_LB, GRANT_LB } = require('./validate.js');
+const { readBoardAll, pid, decodeDetails, getJson, BASE, TRUST_LB, REPORT_LB, START_MAGIC, REPORT_MAGIC, CP_LB, ENDLESS_LB, REDEEM_LB, GRANT_LB,
+  ENDLESS_LB_SOLO, ENDLESS_LB_TRIO, ENDLESS_LB_QUAD, ENDLESS_LB_OVERALL, ENDLESS_COMP_LB, ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, ENDLESS_COMP_LB_QUAD, ENDLESS_COMP_LB_OVERALL,
+  ENDLESS_LB_CLASSIC_SOLO, ENDLESS_LB_CLASSIC_DUO, ENDLESS_LB_CLASSIC_TRIO, ENDLESS_LB_CLASSIC_QUAD, ENDLESS_LB_CLASSIC_OVERALL } = require('./validate.js');
+// O276 (client knife 5.1b, 2026-10-18): every cron-written endless ladder is a trusted board like endless_board (the closure once held only
+//   endless_board and its season twins). Their names are this repo's public defaults (the jobs never override them), and every writer of
+//   one of them enters the state the closure reads (recordEndlessSignals for every own-record seat, xp for every endless settle).
+const ENDLESS_TRUSTED = [ENDLESS_LB_SOLO, ENDLESS_LB_TRIO, ENDLESS_LB_QUAD, ENDLESS_LB_OVERALL, ENDLESS_COMP_LB, ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, ENDLESS_COMP_LB_QUAD,
+  ENDLESS_COMP_LB_OVERALL, ENDLESS_LB_CLASSIC_SOLO, ENDLESS_LB_CLASSIC_DUO, ENDLESS_LB_CLASSIC_TRIO, ENDLESS_LB_CLASSIC_QUAD, ENDLESS_LB_CLASSIC_OVERALL];
+// season twins (`<base>_s<N>`) of the base board and the season-twinned families (classic ladders are lifetime only)
+const ENDLESS_SEASONED = [ENDLESS_LB, ENDLESS_LB_SOLO, ENDLESS_LB_TRIO, ENDLESS_LB_QUAD, ENDLESS_LB_OVERALL, ENDLESS_COMP_LB, ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, ENDLESS_COMP_LB_QUAD, ENDLESS_COMP_LB_OVERALL];
+function seasonTwinOf(name) {
+  const m = /^(.+)_s(\d+)$/.exec(String(name));
+  return m && ENDLESS_SEASONED.indexOf(m[1]) >= 0 ? { base: m[1], season: m[2] | 0 } : null;
+}
 
 const KEY = process.env.STEAM_PUBLISHER_KEY;
 const APPID = Number(process.env.APPID);
@@ -101,14 +114,17 @@ async function main() {
   // writable by design (like report/mirror) and is inventory-only above.
   const trustedWant = [[RANKED_LB, 'rating'], [LP_LB, 'points'], [TRUST_LB, 'trust'], [CP_LB, 'cp'], [ENDLESS_LB, 'endless'], [GRANT_LB, 'grant']];
   if (XP_LB) trustedWant.push([XP_LB, 'xp']);
+  for (const n of ENDLESS_TRUSTED) trustedWant.push([n, n]);   // O276: the other cron-written endless ladders (absent ones are skipped below)
   // seasonal ladders (`<base>_s<N>`, cron-created trusted boards): audit them like their base
   // boards -- the foreign-writer closure applies identically. Discovered from the listing so a
   // new season needs no audit change; test boards are excluded as everywhere else.
+  //   O276: the endless twins match exactly `<seasoned base>_s<digits>` (the old prefix test also took endless_board_solo for a
+  //   twin of endless_board -- harmless then, since it is trusted too, now listed by name above).
   for (const b of all) {
     const n = String(b.name || b.Name);
     if (n.indexOf('test') >= 0) continue;
     if (n.indexOf(LP_LB + '_s') === 0) trustedWant.push([n, 'points_' + n.slice(LP_LB.length + 1)]);
-    else if (n.indexOf(ENDLESS_LB + '_s') === 0) trustedWant.push([n, 'endless_' + n.slice(ENDLESS_LB.length + 1)]);
+    else { const tw = seasonTwinOf(n); if (tw) trustedWant.push([n, tw.base === ENDLESS_LB ? 'endless_s' + tw.season : n]); }
   }
   for (const [name, label] of trustedWant) {
     if (!byName[name]) continue;
@@ -171,4 +187,4 @@ async function main() {
 if (require.main === module) {
   main().catch(e => { ghErr('audit failed: ' + (e && e.stack || e)); process.exit(1); });
 }
-module.exports = { auditTrusted };
+module.exports = { auditTrusted, ENDLESS_TRUSTED, seasonTwinOf };

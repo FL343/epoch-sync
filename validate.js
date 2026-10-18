@@ -3927,15 +3927,36 @@ const COMP = {
   CHAIN_WAIT_MS: Number(process.env.COMP_CHAIN_WAIT_MS || 7 * 86400000),      // unchained segment waits this long for its predecessor, then rejects
   MS_TTL_MS: Number(process.env.COMP_MS_TTL_MS || 120 * 86400000),           // milestone bitmaps (player x season x ladder family) outlive a season
   RUN_TTL_MS: Number(process.env.COMP_RUN_TTL_MS || 45 * 86400000),           // run chain memory (saves included) pruned after
-  // composite ladder weights (lockstep: client RANKED_CONFIG.ENDLESS.COMP.OVERALL; provisional -- tuned with playtest data):
-  //   K[n-1] = depth discount per team size (extra hooks make team runs deeper), M[n-1] = mixing weight (solo counts double)
+  // composite ladder weights (lockstep: client RANKED_CONFIG.ENDLESS.COMP.OVERALL; provisional -- tuned with season data):
+  //   K[n-1] = depth discount per team size (extra hooks make team runs deeper); M[n-1] = mixing weight of the 3.5d mean rule (solo
+  //   counts double), still read by the playtest / demo jobs until the knife 5.1b gate flips (V51B), then retired
   OVERALL: { K: [1.0, 0.9, 0.8, 0.7], M: [2, 1, 1, 1] },
 };
+// knife 5.1b rollout gate (2026-10-18, KNIFE_51_SEASON_BOARDS_PLAN section 3 note): the composite rule v2, the casual / classic
+//   composites and the team block on team-ladder rows run on the EA job now; the playtest / demo jobs keep the knife 3.5d behaviour
+//   through Next Fest (10-19..10-26, the trial's busiest week) and switch when this constant flips on 10-27. One constant on purpose:
+//   the companion repo's landing pipeline tests the client against this repo's main, so the cron half has to be on main before the
+//   client half lands -- the gate keeps the trial's live behaviour unchanged meanwhile.
+const V51B_PT = false;
+const V51B = !PT_MODE || V51B_PT;
 // Composite score in 0.01-depth units from the per-size packed bests { 1: solo, 2: duo, 3: trio, 4: quad } (0 / missing = never
-//   played that size): the M-weighted mean over the PLAYED sizes of K * depth, floored at the plain solo depth -- trying a team run
-//   can lift you but never pull you below your solo depth (the user's "lean toward solo players"); team-only players get the
-//   discounted depth. Pure function (unit-tested); the hub shows the value as depth with two decimals.
-function overallScore(bests) {
+//   played that size). v2 (O276, user call 10-07 #5): the BEST of K * depth over the played sizes -- trying another size never
+//   lowers it; team depths are discounted for the extra hooks. `legacy` = the knife 3.5d rule (M-weighted mean floored at the
+//   solo depth), kept only for the gated playtest / demo jobs. Pure function (unit-tested); the hub shows the value as depth.
+function overallScore(bests, legacy) {
+  if (legacy) return overallScoreMean(bests);
+  let best = 0;
+  for (let n = 1; n <= 4; n++) {
+    const p = bests ? (bests[n] | 0) : 0;
+    if (!(p > 0)) continue;
+    const d = unpackEndlessScore(p).depth;
+    if (!(d > 0)) continue;
+    const v = (COMP.OVERALL.K[n - 1] != null ? COMP.OVERALL.K[n - 1] : 0.7) * d;
+    if (v > best) best = v;
+  }
+  return Math.round(best * 100);
+}
+function overallScoreMean(bests) {
   let num = 0, den = 0, solo = 0;
   for (let n = 1; n <= 4; n++) {
     const p = bests ? (bests[n] | 0) : 0;
@@ -4559,6 +4580,12 @@ const SAVE_BOX_LB_CLASSIC = process.env.SAVE_BOX_LB_CLASSIC || 'endless_save_box
 const ENDLESS_LB_CLASSIC_DUO = process.env.ENDLESS_LB_CLASSIC_DUO || 'endless_classic_duo';
 const ENDLESS_LB_CLASSIC_TRIO = process.env.ENDLESS_LB_CLASSIC_TRIO || 'endless_classic_trio';
 const ENDLESS_LB_CLASSIC_QUAD = process.env.ENDLESS_LB_CLASSIC_QUAD || 'endless_classic_quad';
+// O276 (client knife 5.1b, 2026-10-18; the user's "every ladder split by team size gets an overall, and it comes first"): composite
+//   ladders for the casual and classic families like the competitive one -- cron-only, trusted, one row per player = the best of
+//   the per-size bests after the size discount (overallScore). Casual: lifetime + season twin (client boardNameFor(base, 'all') =
+//   base + '_overall'); classic: lifetime only like every classic ladder (client classicBoardName(test, 'all')).
+const ENDLESS_LB_OVERALL = process.env.ENDLESS_LB_OVERALL || 'endless_board_overall';
+const ENDLESS_LB_CLASSIC_OVERALL = process.env.ENDLESS_LB_CLASSIC_OVERALL || 'endless_classic_overall';
 const SAVE_BOX_LB_CLASSIC_DUO = process.env.SAVE_BOX_LB_CLASSIC_DUO || 'endless_save_box_classic_duo';
 const SAVE_BOX_LB_CLASSIC_TRIO = process.env.SAVE_BOX_LB_CLASSIC_TRIO || 'endless_save_box_classic_trio';
 const SAVE_BOX_LB_CLASSIC_QUAD = process.env.SAVE_BOX_LB_CLASSIC_QUAD || 'endless_save_box_classic_quad';
@@ -4846,6 +4873,23 @@ function packEndlessScore(depth, teamScore) {
   const tb = Math.max(0, Math.min(ENDLESS.BOARD_SCALE - 1, Math.round((teamScore | 0) / ENDLESS.TIEBREAK_DIV)));
   return (depth | 0) * ENDLESS.BOARD_SCALE + tb;
 }
+// O207 (client knife 5.1b, user calls 09-10 + 10-07 #4 "one rank and one frame per team"): every team-ladder row (casual / competitive /
+//   classic, 2-4 seats) carries the team of the run that set it after its two ints: [teamScore, build, TEAM_MAGIC | ver << 8 | pc << 16,
+//   lo0, hi0, lo1, hi1, ...] = the whole roster in seat order (non-writers included: the roster the settle agreed on). [0] / [1] keep
+//   their meaning, so a shipped client that reads only those two is unaffected; a new client groups rows by (score, roster set) and
+//   keeps a heuristic for the rows written before the block (architecture rule 9: magic + version; this repo writes, the client reads).
+//   Lockstep: client src/util/lb-team-group.js TEAM_MAGIC / TEAM_VER / BLOCK_AT (ledger-schema-lockstep section 33). Behind the
+//   knife 5.1b rollout gate (V51B) like the composites.
+const TEAM_MAGIC = 0xD4, TEAM_VER = 1;
+function teamBlock(rosterSids) {
+  const sids = (rosterSids || []).map(String);
+  if (sids.length < 2 || sids.length > 4) return [];
+  const out = [TEAM_MAGIC | (TEAM_VER << 8) | (sids.length << 16)];
+  for (const sid of sids) { const b = BigInt(sid); out.push(Number(b & 0xFFFFFFFFn) | 0, Number((b >> 32n) & 0xFFFFFFFFn) | 0); }
+  return out;
+}
+// details of an endless ladder row from its write-pool entry { s, ts, build?, team? } (every endless ladder write goes through here)
+function ladderDetails(w) { return [w.ts | 0, w.build | 0].concat(w.team && V51B ? teamBlock(w.team) : []); }
 function unpackEndlessScore(score) { const s = score | 0; return { depth: Math.floor(s / ENDLESS.BOARD_SCALE), tiebreak: s % ENDLESS.BOARD_SCALE }; }
 // Depth-scaled pacing: the minimum REAL time (this job's own clock, anchored at the first
 // sighting of the match's start attestation -- or of the settle itself when no attestation was
@@ -5013,6 +5057,7 @@ function ptBoardPlan(names, cfg) {
   add(cfg.compQuadLb, 1); add(cfg.saveBoxQuadLb, 0);   // four-seat family (client knife 3.7a)
   add(cfg.endlessSoloLb, 1); add(cfg.saveBoxCasualLb, 0);   // O218 casual solo ladder (trusted) + casual checkpoint rows (client-writable, guard-signed)
   add(cfg.compOverallLb, 1);   // composite competitive ladder (knife 3.5d; cron-only)
+  add(cfg.casualOverallLb, 1); add(cfg.classicOverallLb, 1);   // O276 casual / classic composites (knife 5.1b; null until the V51B_PT gate flips)
   // O216/N3 classic (nostalgia) surface: lifetime ladders by seat count (trusted) + guard-row save boxes by seat count (client-writable); the
   //   client ships classic on playtest + demo too (user call 2026-09-16), so the twin must carry the boards
   add(cfg.classicSoloLb, 1); add(cfg.saveBoxClassicLb, 0);
@@ -5133,6 +5178,7 @@ async function main() {
       compQuadLb: ENDLESS_COMP_LB_QUAD, saveBoxQuadLb: SAVE_BOX_LB_QUAD,
       endlessSoloLb: ENDLESS_LB_SOLO, saveBoxCasualLb: SAVE_BOX_LB_CASUAL,
       compOverallLb: ENDLESS_COMP_LB_OVERALL,
+      casualOverallLb: V51B_PT ? ENDLESS_LB_OVERALL : null, classicOverallLb: V51B_PT ? ENDLESS_LB_CLASSIC_OVERALL : null,   // O276 (knife 5.1b): behind the rollout gate
       classicSoloLb: ENDLESS_LB_CLASSIC_SOLO, saveBoxClassicLb: SAVE_BOX_LB_CLASSIC,   // O216/N3 classic surface
       classicDuoLb: ENDLESS_LB_CLASSIC_DUO, saveBoxClassicDuoLb: SAVE_BOX_LB_CLASSIC_DUO, classicTrioLb: ENDLESS_LB_CLASSIC_TRIO, saveBoxClassicTrioLb: SAVE_BOX_LB_CLASSIC_TRIO,
       classicQuadLb: ENDLESS_LB_CLASSIC_QUAD, saveBoxClassicQuadLb: SAVE_BOX_LB_CLASSIC_QUAD,
@@ -5153,7 +5199,8 @@ async function main() {
     const names0 = ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).map(x => String(x.name || x.Name));
     for (const [nm, trusted] of [[ENDLESS_COMP_LB, true], [SAVE_BOX_LB, false], [ENDLESS_COMP_LB_DUO, true], [SAVE_BOX_LB_DUO, false], [ENDLESS_COMP_LB_TRIO, true], [SAVE_BOX_LB_TRIO, false], [ENDLESS_COMP_LB_QUAD, true], [SAVE_BOX_LB_QUAD, false], [ENDLESS_COMP_LB_OVERALL, true], [ENDLESS_LB_SOLO, true], [SAVE_BOX_LB_CASUAL, false],
       [ENDLESS_LB_CLASSIC_SOLO, true], [SAVE_BOX_LB_CLASSIC, false], [ENDLESS_LB_CLASSIC_DUO, true], [SAVE_BOX_LB_CLASSIC_DUO, false], [ENDLESS_LB_CLASSIC_TRIO, true], [SAVE_BOX_LB_CLASSIC_TRIO, false], [ENDLESS_LB_CLASSIC_QUAD, true], [SAVE_BOX_LB_CLASSIC_QUAD, false],   // O216/N3 classic surface (lifetime ladders + guard-row save boxes)
-      [ENDLESS_RATING_LB_SOLO, true], [ENDLESS_RATING_LB_DUO, true], [ENDLESS_RATING_LB_TRIO, true], [ENDLESS_RATING_LB_QUAD, true], [ENDLESS_TIERCUT_LB, true]]) {   // O103 rating ladders (season 0 = base name; twins via resolveSeasonBoard) + tier-cut carrier (trusted, cron-only)
+      [ENDLESS_RATING_LB_SOLO, true], [ENDLESS_RATING_LB_DUO, true], [ENDLESS_RATING_LB_TRIO, true], [ENDLESS_RATING_LB_QUAD, true], [ENDLESS_TIERCUT_LB, true],
+      [ENDLESS_LB_OVERALL, true], [ENDLESS_LB_CLASSIC_OVERALL, true]]) {   // O103 rating ladders (season 0 = base name; twins via resolveSeasonBoard) + tier-cut carrier (trusted, cron-only)
       if (names0.indexOf(nm) >= 0) continue;
       const id0 = await findOrCreateBoard(nm, trusted);
       if (id0) console.log('solo boards: provisioned ' + nm + (trusted ? ' (trusted)' : ' (client-writable)'));
@@ -6392,11 +6439,14 @@ async function main() {
   const enId = enLb ? (enLb.id || enLb.ID) : null;
   if (!enId) { strictBoard('endless board not found'); ghWarn('endless board not found (pre-create ' + ENDLESS_LB + ', trusted-writes) -> skip endless this run'); }
   const endlessBest = {};   // sid -> packed personal best (also the chain-rule memory)
+  // O276 (knife 5.1b): raw row detailData of every casual per-size read (build word at [1]) -> the casual composite row inherits the
+  //   dominant size's build like the competitive one (compDet)
+  const endlessDet = {}, endlessSeasonDet = {}, endlessTrioDet = {}, endlessTrioSeasonDet = {}, endlessQuadDet = {}, endlessQuadSeasonDet = {}, endlessSoloDet = {}, endlessSoloSeasonDet = {};
   let enComplete = true;
   if (enId) {
     const br = await readBoardAll(enId, 'endless board');
     enComplete = br.complete;
-    for (const e of br.ents) endlessBest[e.steamID] = e.score | 0;
+    for (const e of br.ents) { endlessBest[e.steamID] = e.score | 0; endlessDet[e.steamID] = e.detailData; }
   }
   // seasonal endless board (season >= 1): per-season depth ladder, double-written next to the
   // lifetime board. The LIFETIME board stays the chain memory and pacing anchor and never resets.
@@ -6408,7 +6458,7 @@ async function main() {
   if (enSeasonId) {
     const br = await readBoardAll(enSeasonId, 'seasonal endless board');
     enSeasonComplete = br.complete;
-    for (const e of br.ents) endlessSeasonBest[e.steamID] = e.score | 0;
+    for (const e of br.ents) { endlessSeasonBest[e.steamID] = e.score | 0; endlessSeasonDet[e.steamID] = e.detailData; }
   }
   // trio endless board (knife-C 2026-08-13: board exists in production). The board is brand
   // new, so the listing can hide it for over an hour -- fall back to FindOrCreate by name
@@ -6424,7 +6474,7 @@ async function main() {
   if (enTrioId) {
     const br = await readBoardAll(enTrioId, 'trio endless board');
     enTrioComplete = br.complete;
-    for (const e of br.ents) endlessTrioBest[e.steamID] = e.score | 0;
+    for (const e of br.ents) { endlessTrioBest[e.steamID] = e.score | 0; endlessTrioDet[e.steamID] = e.detailData; }
   }
   const enTrioSeason = (seasonId >= 1 && enTrioId) ? await resolveSeasonBoard(lr, ENDLESS_LB_TRIO, seasonId) : { name: null, id: null };
   const enTrioSeasonId = enTrioSeason.id;
@@ -6434,7 +6484,7 @@ async function main() {
   if (enTrioSeasonId) {
     const br = await readBoardAll(enTrioSeasonId, 'seasonal trio endless board');
     enTrioSeasonComplete = br.complete;
-    for (const e of br.ents) endlessTrioSeasonBest[e.steamID] = e.score | 0;
+    for (const e of br.ents) { endlessTrioSeasonBest[e.steamID] = e.score | 0; endlessTrioSeasonDet[e.steamID] = e.detailData; }
   }
   // quad endless board (client knife 3.7a, O178 2026-09-12): same shape as the trio pair (find-or-create, strict belt,
   //   lifetime + season twin); pc=4 groups are left pending while unresolved.
@@ -6446,7 +6496,7 @@ async function main() {
   if (enQuadId) {
     const br = await readBoardAll(enQuadId, 'quad endless board');
     enQuadComplete = br.complete;
-    for (const e of br.ents) endlessQuadBest[e.steamID] = e.score | 0;
+    for (const e of br.ents) { endlessQuadBest[e.steamID] = e.score | 0; endlessQuadDet[e.steamID] = e.detailData; }
   }
   const enQuadSeason = (seasonId >= 1 && enQuadId) ? await resolveSeasonBoard(lr, ENDLESS_LB_QUAD, seasonId) : { name: null, id: null };
   const enQuadSeasonId = enQuadSeason.id;
@@ -6456,7 +6506,7 @@ async function main() {
   if (enQuadSeasonId) {
     const br = await readBoardAll(enQuadSeasonId, 'seasonal quad endless board');
     enQuadSeasonComplete = br.complete;
-    for (const e of br.ents) endlessQuadSeasonBest[e.steamID] = e.score | 0;
+    for (const e of br.ents) { endlessQuadSeasonBest[e.steamID] = e.score | 0; endlessQuadSeasonDet[e.steamID] = e.detailData; }
   }
 
   // O93 solo competitive ladder (knife 3.3a): lifetime + seasonal (trusted) and the client-writable save
@@ -6470,13 +6520,13 @@ async function main() {
   if (!enSoloId) { strictBoard('solo casual endless board not found'); ghWarn('solo casual endless board not found (pre-create ' + ENDLESS_LB_SOLO + ', trusted-writes) -> casual solo segments left pending'); }
   const endlessSoloBest = {};
   let enSoloComplete = true;
-  if (enSoloId) { const br = await readBoardAll(enSoloId, 'solo casual endless board'); enSoloComplete = br.complete; for (const e of br.ents) endlessSoloBest[e.steamID] = e.score | 0; }
+  if (enSoloId) { const br = await readBoardAll(enSoloId, 'solo casual endless board'); enSoloComplete = br.complete; for (const e of br.ents) { endlessSoloBest[e.steamID] = e.score | 0; endlessSoloDet[e.steamID] = e.detailData; } }
   const enSoloSeason = (seasonId >= 1 && enSoloId) ? await resolveSeasonBoard(lr, ENDLESS_LB_SOLO, seasonId) : { name: null, id: null };
   const enSoloSeasonId = enSoloSeason.id;
   if (seasonId >= 1 && enSoloId && !enSoloSeasonId) { strictBoard('seasonal solo casual endless board not found'); ghWarn('seasonal solo casual endless board unresolved -> casual solo segments left pending'); }
   const endlessSoloSeasonBest = {};
   let enSoloSeasonComplete = true;
-  if (enSoloSeasonId) { const br = await readBoardAll(enSoloSeasonId, 'seasonal solo casual endless board'); enSoloSeasonComplete = br.complete; for (const e of br.ents) endlessSoloSeasonBest[e.steamID] = e.score | 0; }
+  if (enSoloSeasonId) { const br = await readBoardAll(enSoloSeasonId, 'seasonal solo casual endless board'); enSoloSeasonComplete = br.complete; for (const e of br.ents) { endlessSoloSeasonBest[e.steamID] = e.score | 0; endlessSoloSeasonDet[e.steamID] = e.detailData; } }
   let compId = byNameLb(ENDLESS_COMP_LB);
   if (!compId) compId = await findOrCreateBoard(ENDLESS_COMP_LB, true);
   if (!compId) { strictBoard('solo comp board not found'); ghWarn('solo comp board not found (' + ENDLESS_COMP_LB + ') -> solo segments left pending'); }
@@ -6546,6 +6596,16 @@ async function main() {
   const overallSeason = (seasonId >= 1 && overallId) ? await resolveSeasonBoard(lr, ENDLESS_COMP_LB_OVERALL, seasonId) : { name: null, id: null };
   const overallSeasonId = overallSeason.id;
   if (seasonId >= 1 && overallId && !overallSeasonId) ghWarn('seasonal overall comp board unresolved -> seasonal composite rows skipped this tick');
+  // O276 (knife 5.1b): casual composite (lifetime + season twin) and classic composite (lifetime), same shape; gated (V51B)
+  let casOverallId = null, casOverallSeasonId = null, clsOverallId = null;
+  if (V51B) {
+    casOverallId = byNameLb(ENDLESS_LB_OVERALL) || await findOrCreateBoard(ENDLESS_LB_OVERALL, true);
+    if (!casOverallId) ghWarn('overall casual board not found (' + ENDLESS_LB_OVERALL + ') -> casual composite rows skipped this tick');
+    casOverallSeasonId = (seasonId >= 1 && casOverallId) ? (await resolveSeasonBoard(lr, ENDLESS_LB_OVERALL, seasonId)).id : null;
+    if (seasonId >= 1 && casOverallId && !casOverallSeasonId) ghWarn('seasonal overall casual board unresolved -> seasonal casual composite rows skipped this tick');
+    clsOverallId = byNameLb(ENDLESS_LB_CLASSIC_OVERALL) || await findOrCreateBoard(ENDLESS_LB_CLASSIC_OVERALL, true);
+    if (!clsOverallId) ghWarn('overall classic board not found (' + ENDLESS_LB_CLASSIC_OVERALL + ') -> classic composite rows skipped this tick');
+  }
 
   // non-endless oldest start first, then by key; endless segments predecessor-first (startDepth, then key) -- see freshOrder
   fresh.sort(freshOrderPaced((m) => (startsPending[m] && startsPending[m].t0) || nowMs));
@@ -7162,7 +7222,7 @@ async function main() {
           if (scPendingRestore && scPendingRestore.sids.indexOf(sid) >= 0) { console.log('  endless-classic ' + c.m + ': ' + plog(sid) + ' inside seedcap reject window -- outputs skipped'); continue; }
           if ((f.endDepth | 0) > 0) {
             const packed = packClassicScore(f.endDepth, teamK);
-            if (famK.best[sid] == null || packed > famK.best[sid]) { famK.best[sid] = packed; famK.changed[sid] = { s: packed, ts: teamK }; console.log('  endless-classic best (' + famK.low + ') ' + c.m + ': ' + plog(sid) + ' depth ' + f.endDepth + ' team ' + teamK + ' -> board ' + packed); }
+            if (famK.best[sid] == null || packed > famK.best[sid]) { famK.best[sid] = packed; famK.changed[sid] = { s: packed, ts: teamK, team: rosterSids }; console.log('  endless-classic best (' + famK.low + ') ' + c.m + ': ' + plog(sid) + ' depth ' + f.endDepth + ' team ' + teamK + ' -> board ' + packed); }
           }
         }
         if (xpId) creditXpEndless(g, { startDepth: Math.max(f.startDepth | 0, plan.proven | 0), endDepth: f.endDepth | 0 }, xp, changedXp, spSet, CLASSIC.XP_MUL);
@@ -7256,8 +7316,8 @@ async function main() {
           }
           if ((f.endDepth | 0) > 0) {
             const packed = packEndlessScore(f.endDepth, teamT);
-            if (fam.best[sid] == null || packed > fam.best[sid]) { fam.best[sid] = packed; fam.changed[sid] = { s: packed, ts: teamT, build: f.build >>> 0 }; console.log('  endless-comp best (' + fam.low + ') ' + c.m + ': ' + plog(sid) + ' depth ' + f.endDepth + ' team ' + teamT + ' -> board ' + packed); }
-            if (fam.seasonId && (t.seasonId | 0) === (seasonId | 0) && (fam.seasonBest[sid] == null || packed > fam.seasonBest[sid])) { fam.seasonBest[sid] = packed; fam.seasonChanged[sid] = { s: packed, ts: teamT, build: f.build >>> 0 }; console.log('  endless-comp season best (' + fam.low + ') ' + c.m + ': ' + plog(sid) + ' -> board ' + packed); }
+            if (fam.best[sid] == null || packed > fam.best[sid]) { fam.best[sid] = packed; fam.changed[sid] = { s: packed, ts: teamT, build: f.build >>> 0, team: rosterSids }; console.log('  endless-comp best (' + fam.low + ') ' + c.m + ': ' + plog(sid) + ' depth ' + f.endDepth + ' team ' + teamT + ' -> board ' + packed); }
+            if (fam.seasonId && (t.seasonId | 0) === (seasonId | 0) && (fam.seasonBest[sid] == null || packed > fam.seasonBest[sid])) { fam.seasonBest[sid] = packed; fam.seasonChanged[sid] = { s: packed, ts: teamT, build: f.build >>> 0, team: rosterSids }; console.log('  endless-comp season best (' + fam.low + ') ' + c.m + ': ' + plog(sid) + ' -> board ' + packed); }
           }
           // O103 rating history (client knife 5.1a): each writer's run in the family history (depth reached; a catch-up only for the writers behind)
           if (!PT_MODE) { ratingHistUpsert(soloState, pid(sid), fam.low, t.seasonId, ratingRunId(key), f.endDepth, nowMs); ratingTouched.add(sid); }
@@ -7383,13 +7443,13 @@ async function main() {
         const packed = packEndlessScore(t.endDepth, teamScore);
         for (const sid of writerSids) {
           if (bBest[sid] == null || packed > bBest[sid]) {
-            bBest[sid] = packed; bChanged[sid] = { s: packed, ts: teamScore, build: t.build >>> 0 };
+            bBest[sid] = packed; bChanged[sid] = { s: packed, ts: teamScore, build: t.build >>> 0, team: rosterSids };
             console.log('  endless best' + (cas.label !== 'endless' ? ' (' + cas.label + ')' : '') + ' ' + c.m + ': ' + plog(sid) + ' depth ' + t.endDepth + ' team ' + teamScore + ' -> board ' + packed);
           }
           // seasonal double-write: same improved-best rule against the season board's own base
           // (fresh each season = the per-season "dig it again" ladder).
           if (bSeasonId && (bSeasonBest[sid] == null || packed > bSeasonBest[sid])) {
-            bSeasonBest[sid] = packed; bSeasonChanged[sid] = { s: packed, ts: teamScore, build: t.build >>> 0 };
+            bSeasonBest[sid] = packed; bSeasonChanged[sid] = { s: packed, ts: teamScore, build: t.build >>> 0, team: rosterSids };
             console.log('  endless season best' + (cas.label !== 'endless' ? ' (' + cas.label + ')' : '') + ' ' + c.m + ': ' + plog(sid) + ' depth ' + t.endDepth + ' -> board ' + packed);
           }
         }
@@ -8255,7 +8315,7 @@ async function main() {
   //   balancing. Every endless ladder write below (casual 2P/trio, solo/duo/trio competitive, lifetime + season) = [score, build].
   const wEndless =await mapPool(Object.keys(changedEndless), CONCURRENCY, async (sid) => {
     const w = changedEndless[sid];
-    const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: enId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, [w.ts | 0, w.build | 0]);
+    const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: enId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, ladderDetails(w));
     const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
     if (!okFlag) ghWarn('write endless ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
     else console.log('  ok endless ' + plog(sid) + ' = ' + w.s);
@@ -8263,7 +8323,7 @@ async function main() {
   });
   const wEndlessSeason = await mapPool(Object.keys(changedEndlessSeason), CONCURRENCY, async (sid) => {
     const w = changedEndlessSeason[sid];
-    const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: enSeasonId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, [w.ts | 0, w.build | 0]);
+    const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: enSeasonId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, ladderDetails(w));
     const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
     if (!okFlag) ghWarn('write seasonal endless ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
     else console.log('  ok endless season ' + plog(sid) + ' = ' + w.s);
@@ -8273,7 +8333,7 @@ async function main() {
   // boards resolved, so the ids are non-null whenever the pools are non-empty.
   const wEndlessTrio = await mapPool(Object.keys(changedEndlessTrio), CONCURRENCY, async (sid) => {
     const w = changedEndlessTrio[sid];
-    const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: enTrioId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, [w.ts | 0, w.build | 0]);
+    const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: enTrioId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, ladderDetails(w));
     const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
     if (!okFlag) ghWarn('write trio endless ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
     else console.log('  ok endless trio ' + plog(sid) + ' = ' + w.s);
@@ -8281,7 +8341,7 @@ async function main() {
   });
   const wEndlessTrioSeason = await mapPool(Object.keys(changedEndlessTrioSeason), CONCURRENCY, async (sid) => {
     const w = changedEndlessTrioSeason[sid];
-    const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: enTrioSeasonId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, [w.ts | 0, w.build | 0]);
+    const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: enTrioSeasonId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, ladderDetails(w));
     const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
     if (!okFlag) ghWarn('write seasonal trio endless ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
     else console.log('  ok endless trio season ' + plog(sid) + ' = ' + w.s);
@@ -8290,7 +8350,7 @@ async function main() {
   // quad ladder writes (client knife 3.7a): same gate rule as trio (pools only fill when the quad boards resolved)
   const wEndlessQuad = await mapPool(Object.keys(changedEndlessQuad), CONCURRENCY, async (sid) => {
     const w = changedEndlessQuad[sid];
-    const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: enQuadId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, [w.ts | 0, w.build | 0]);
+    const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: enQuadId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, ladderDetails(w));
     const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
     if (!okFlag) ghWarn('write quad endless ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
     else console.log('  ok endless quad ' + plog(sid) + ' = ' + w.s);
@@ -8298,7 +8358,7 @@ async function main() {
   });
   const wEndlessQuadSeason = await mapPool(Object.keys(changedEndlessQuadSeason), CONCURRENCY, async (sid) => {
     const w = changedEndlessQuadSeason[sid];
-    const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: enQuadSeasonId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, [w.ts | 0, w.build | 0]);
+    const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: enQuadSeasonId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, ladderDetails(w));
     const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
     if (!okFlag) ghWarn('write seasonal quad endless ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
     else console.log('  ok endless quad season ' + plog(sid) + ' = ' + w.s);
@@ -8317,7 +8377,7 @@ async function main() {
   // O218 solo casual ladder writes (client knife 3.7a): pools only fill when the solo casual boards resolved (same gate rule as trio / quad)
   const wEndlessSolo = await mapPool(Object.keys(changedEndlessSolo), CONCURRENCY, async (sid) => {
     const w = changedEndlessSolo[sid];
-    const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: enSoloId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, [w.ts | 0, w.build | 0]);
+    const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: enSoloId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, ladderDetails(w));
     const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
     if (!okFlag) ghWarn('write solo casual endless ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
     else console.log('  ok endless solo ' + plog(sid) + ' = ' + w.s);
@@ -8325,7 +8385,7 @@ async function main() {
   });
   const wEndlessSoloSeason = await mapPool(Object.keys(changedEndlessSoloSeason), CONCURRENCY, async (sid) => {
     const w = changedEndlessSoloSeason[sid];
-    const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: enSoloSeasonId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, [w.ts | 0, w.build | 0]);
+    const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: enSoloSeasonId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, ladderDetails(w));
     const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
     if (!okFlag) ghWarn('write seasonal solo casual endless ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
     else console.log('  ok endless solo season ' + plog(sid) + ' = ' + w.s);
@@ -8336,7 +8396,7 @@ async function main() {
   // O216 classic solo lifetime ladder writes (client knife 3.9b N2): details = [exact bank, 0] (the packed tiebreak is /1e5-saturated; the hub reads the bank from details)
   const wEndlessClassicSolo = await mapPool(Object.keys(changedEndlessClassicSolo), CONCURRENCY, async (sid) => {
     const w = changedEndlessClassicSolo[sid];
-    const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: enClassicSoloId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, [w.ts | 0, 0]);
+    const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: enClassicSoloId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, ladderDetails(w));
     const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
     if (!okFlag) ghWarn('write classic solo endless ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
     else console.log('  ok endless classic solo ' + plog(sid) + ' = ' + w.s);
@@ -8353,7 +8413,7 @@ async function main() {
     eclTeamN += ids.length;
     const wF = await mapPool(ids, CONCURRENCY, async (sid) => {
       const w = F.changed[sid];
-      const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: F.id, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, [w.ts | 0, 0]);
+      const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: F.id, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, ladderDetails(w));
       const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
       if (!okFlag) ghWarn('write classic ' + F.low + ' endless ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
       else console.log('  ok endless classic ' + F.low + ' ' + plog(sid) + ' = ' + w.s);
@@ -8365,7 +8425,7 @@ async function main() {
   // O93 solo competitive ladder writes (details = exact bank; packed tiebreak is /1000-saturated)
   const wComp = await mapPool(Object.keys(changedComp), CONCURRENCY, async (sid) => {
     const w = changedComp[sid];
-    const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: compId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, [w.ts | 0, w.build | 0]);
+    const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: compId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, ladderDetails(w));
     const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
     if (!okFlag) ghWarn('write solo comp ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
     else console.log('  ok solo comp ' + plog(sid) + ' = ' + w.s);
@@ -8373,7 +8433,7 @@ async function main() {
   });
   const wCompSeason = await mapPool(Object.keys(changedCompSeason), CONCURRENCY, async (sid) => {
     const w = changedCompSeason[sid];
-    const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: compSeasonId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, [w.ts | 0, w.build | 0]);
+    const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: compSeasonId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, ladderDetails(w));
     const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
     if (!okFlag) ghWarn('write seasonal solo comp ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
     else console.log('  ok solo comp season ' + plog(sid) + ' = ' + w.s);
@@ -8390,7 +8450,7 @@ async function main() {
       if (!bid) { ghWarn('write ' + label + ': board unresolved, ' + sids.length + ' row(s) dropped'); continue; }
       const wr = await mapPool(sids, CONCURRENCY, async (sid) => {
         const w = pool[sid];
-        const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: bid, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, [w.ts | 0, w.build | 0]);
+        const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: bid, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, ladderDetails(w));
         const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
         if (!okFlag) ghWarn('write ' + label + ' ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
         else console.log('  ok ' + label + ' ' + plog(sid) + ' = ' + w.s);
@@ -8403,57 +8463,79 @@ async function main() {
   //   be resumed (the client refuses; a resumed segment would chain into a season that no longer exists), so
   //   the publisher key deletes it and a stale row never shows as a save. Capped per run; nothing else
   //   in the cron touches the box (rows are written and consumed by the guard only).
-  // ---- composite ("overall") competitive ladder writes (knife 3.5d, experimental) ----
-  //   The composite row is DERIVED from the three per-size bests, so it is recomputed for every player the bulk reads know about (union of
-  //   the three best maps + this tick's changed pools -- the maps already carry this tick's writes); the composite board is read once per
-  //   tick and only rows that are missing or differ (score / dominant build / size) are ForceUpdated. Steady state = this tick's movers;
-  //   the first tick after rollout = the backfill for every competitive player whose bests predate the ladder (2026-09-10 hub CDP with a
-  //   real board caught the original 'movers only' rule leaving the ladder empty). details = [score, dominant size's build, size] so the
-  //   hub draws the build icons of the size that carries the score (the hub reads details[1] as the build like every endless row).
-  if (overallId || overallSeasonId) {
-    const famOf = { 2: compFam.DUO, 3: compFam.TRIO, 4: compFam.QUAD };   // client knife 3.7a: + quad (K/M tables already carry the 4th entry)
-    const buildOf = (n, sid, season) => {   // this tick's write carries the exact build; otherwise the bulk read's details[1]
-      const ch = n === 1 ? (season ? changedCompSeason : changedComp)[sid] : ((season ? famOf[n].seasonChanged : famOf[n].changed) || {})[sid];
+  // ---- composite ("overall") ladder writes: competitive (knife 3.5d) + casual / classic (O276, knife 5.1b) ----
+  //   A composite row is DERIVED from the per-size bests of its family, so it is recomputed for every player the bulk reads know about
+  //   (union of the four best maps + this tick's changed pools -- the maps already carry this tick's writes); each composite board is
+  //   read once per tick and only rows that are missing or differ (score / dominant build / size) are ForceUpdated. Steady state = this
+  //   tick's movers; the first tick after a rollout (or a rule change) = the backfill for every player of the family (2026-09-10 hub CDP
+  //   with a real board caught the original 'movers only' rule leaving the ladder empty). details = [score, dominant size's build, size]
+  //   so the hub draws the build icons of the size that carries the score (the hub reads details[1] as the build like every endless row).
+  //   Classic rows carry no build ([bank, 0]) -> build 0. Composite rows are never deleted (a best never goes away).
+  const sizeOf = (m) => ({ best: m.best || {}, sBest: m.seasonBest || {}, det: m.det || {}, sDet: m.seasonDet || {}, ch: m.changed || {}, sCh: m.seasonChanged || {} });
+  const OVERALL_FAMS = [{ label: 'overall comp', id: overallId, seasonId: overallSeasonId, legacy: !V51B,
+    size: { 1: { best: compBest, sBest: compSeasonBest, det: compDet, sDet: compSeasonDet, ch: changedComp, sCh: changedCompSeason }, 2: sizeOf(compFam.DUO), 3: sizeOf(compFam.TRIO), 4: sizeOf(compFam.QUAD) } }];
+  if (V51B) {
+    OVERALL_FAMS.push({ label: 'overall casual', id: casOverallId, seasonId: casOverallSeasonId, legacy: false, size: {
+      1: { best: endlessSoloBest, sBest: endlessSoloSeasonBest, det: endlessSoloDet, sDet: endlessSoloSeasonDet, ch: changedEndlessSolo, sCh: changedEndlessSoloSeason },
+      2: { best: endlessBest, sBest: endlessSeasonBest, det: endlessDet, sDet: endlessSeasonDet, ch: changedEndless, sCh: changedEndlessSeason },
+      3: { best: endlessTrioBest, sBest: endlessTrioSeasonBest, det: endlessTrioDet, sDet: endlessTrioSeasonDet, ch: changedEndlessTrio, sCh: changedEndlessTrioSeason },
+      4: { best: endlessQuadBest, sBest: endlessQuadSeasonBest, det: endlessQuadDet, sDet: endlessQuadSeasonDet, ch: changedEndlessQuad, sCh: changedEndlessQuadSeason } } });
+    OVERALL_FAMS.push({ label: 'overall classic', id: clsOverallId, seasonId: null, legacy: false, size: {
+      1: { best: endlessClassicSoloBest, ch: changedEndlessClassicSolo }, 2: sizeOf(classicFam.DUO), 3: sizeOf(classicFam.TRIO), 4: sizeOf(classicFam.QUAD) } });
+  }
+  // O290 follow-up (knife 5.1b): a composite write refused with result 27 (Expired = the account no longer owns the app: a refund, a
+  //   trial removed from the library) is not retried for OV_GONE_MS -- such a row cannot be written and was retried every tick (live
+  //   2026-10-18, demo job right after O290: 17 of 17 composite writes were 27). Per account (the app refuses every board), pid-keyed
+  //   in the chain memory (no steamIDs); a later own settle that moves a per-size best does not lift it (the per-size write gets the
+  //   same 27), the 7 days do.
+  const OV_GONE_MS = 7 * 86400000;   // one try a week: a player who adds the app back gets his composite row within a week
+  const ovGone = soloState.ovGone || (soloState.ovGone = {});
+  for (const k of Object.keys(ovGone)) if (!(nowMs - (Number(ovGone[k]) || 0) < OV_GONE_MS)) delete ovGone[k];
+  const writeOverall = async (F, season) => {
+    const bid = season ? F.seasonId : F.id;
+    if (!bid) return;
+    const label = F.label + (season ? ' season' : '');
+    const at = (n, k) => (F.size[n] && F.size[n][k]) || {};
+    const BK = season ? 'sBest' : 'best', CK = season ? 'sCh' : 'ch', DK = season ? 'sDet' : 'det';
+    const buildOf = (n, sid) => {   // this tick's write carries the exact build; otherwise the bulk read's details[1]
+      const ch = at(n, CK)[sid];
       if (ch && ch.build != null) return ch.build >>> 0;
-      const det = n === 1 ? (season ? compSeasonDet : compDet)[sid] : (season ? famOf[n].seasonDet : famOf[n].det)[sid];
-      const arr = decodeDetails(det);
+      const arr = decodeDetails(at(n, DK)[sid]);
       return arr.length > 1 ? (arr[1] >>> 0) : 0;
     };
-    const writeOverall = async (bid, season, label) => {
-      const pools = season ? [changedCompSeason, compFam.DUO.seasonChanged || {}, compFam.TRIO.seasonChanged || {}, compFam.QUAD.seasonChanged || {}] : [changedComp, compFam.DUO.changed || {}, compFam.TRIO.changed || {}, compFam.QUAD.changed || {}];
-      const bestMaps = season ? [compSeasonBest, compFam.DUO.seasonBest || {}, compFam.TRIO.seasonBest || {}, compFam.QUAD.seasonBest || {}] : [compBest, compFam.DUO.best || {}, compFam.TRIO.best || {}, compFam.QUAD.best || {}];
-      const sids = [...new Set([...pools, ...bestMaps].flatMap(p => Object.keys(p)))];
-      if (!sids.length) return;
-      const cur = {};
-      try { const br = await readBoardAll(bid, label + ' board'); for (const e of br.ents) cur[String(e.steamID)] = { s: e.score | 0, det: decodeDetails(e.detailData) }; }
-      catch (e) { ghWarn('read ' + label + ' board failed (' + (e && e.message) + ') -> composite rows skipped this tick'); return; }
-      const wantOf = (sid) => {
-        const bests = season
-          ? { 1: compSeasonBest[sid] | 0, 2: compFam.DUO.seasonBest[sid] | 0, 3: compFam.TRIO.seasonBest[sid] | 0, 4: compFam.QUAD.seasonBest[sid] | 0 }
-          : { 1: compBest[sid] | 0, 2: compFam.DUO.best[sid] | 0, 3: compFam.TRIO.best[sid] | 0, 4: compFam.QUAD.best[sid] | 0 };
-        const s = overallScore(bests);
-        if (!(s > 0)) return null;
-        const dom = overallDominant(bests);
-        return [s | 0, buildOf(dom, sid, season) | 0, dom | 0];
-      };
-      const todo = sids.map(sid => [sid, wantOf(sid)]).filter(([sid, want]) => {
-        if (!want) return false;
-        const c = cur[sid];
-        return !c || c.s !== want[0] || (c.det[1] | 0) !== want[1] || (c.det[2] | 0) !== want[2];
-      });
-      if (!todo.length) { console.log(label + ' writes: 0/' + sids.length + ' (all composite rows current)'); return; }
-      const wr = await mapPool(todo, CONCURRENCY, async ([sid, want]) => {
-        const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: bid, steamid: sid, score: want[0], scoremethod: 'ForceUpdate', format: 'json' }, want);
-        const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
-        if (!okFlag) ghWarn('write ' + label + ' ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
-        else console.log('  ok ' + label + ' ' + plog(sid) + ' = ' + want[0] + ' (dominant ' + want[2] + 'p' + (cur[sid] ? ', was ' + cur[sid].s : ', new') + ')');
-        return okFlag;
-      });
-      console.log(label + ' writes: ' + wr.filter(x => x.status === 'fulfilled' && x.value).length + '/' + todo.length + ' (of ' + sids.length + ' composite candidates)');
+    const sids = [...new Set([1, 2, 3, 4].flatMap(n => Object.keys(at(n, CK)).concat(Object.keys(at(n, BK)))))];
+    if (!sids.length) return;
+    const cur = {};
+    try { const br = await readBoardAll(bid, label + ' board'); for (const e of br.ents) cur[String(e.steamID)] = { s: e.score | 0, det: decodeDetails(e.detailData) }; }
+    catch (e) { ghWarn('read ' + label + ' board failed (' + (e && e.message) + ') -> composite rows skipped this tick'); return; }
+    const wantOf = (sid) => {
+      const bests = { 1: at(1, BK)[sid] | 0, 2: at(2, BK)[sid] | 0, 3: at(3, BK)[sid] | 0, 4: at(4, BK)[sid] | 0 };
+      const s = overallScore(bests, F.legacy);
+      if (!(s > 0)) return null;
+      const dom = overallDominant(bests);
+      return [s | 0, buildOf(dom, sid) | 0, dom | 0];
     };
-    if (overallId) await writeOverall(overallId, false, 'overall comp');
-    if (overallSeasonId) await writeOverall(overallSeasonId, true, 'overall comp season');
-  }
+    const todo = sids.map(sid => [sid, wantOf(sid)]).filter(([sid, want]) => {
+      if (!want || ovGone[pid(sid)]) return false;
+      const c = cur[sid];
+      return !c || c.s !== want[0] || (c.det[1] | 0) !== want[1] || (c.det[2] | 0) !== want[2];
+    });
+    if (!todo.length) { console.log(label + ' writes: 0/' + sids.length + ' (all composite rows current)'); return; }
+    const wr = await mapPool(todo, CONCURRENCY, async ([sid, want]) => {
+      const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: bid, steamid: sid, score: want[0], scoremethod: 'ForceUpdate', format: 'json' }, want);
+      const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
+      if (!okFlag && res.json && res.json.result && res.json.result.result === 27) {
+        ovGone[pid(sid)] = nowMs; RUN.ovGone = (RUN.ovGone | 0) + 1;
+        console.log('  ' + label + ' ' + plog(sid) + ': result 27 (no longer owns the app) -> not retried for 7 days');
+        return false;
+      }
+      if (!okFlag) ghWarn('write ' + label + ' ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
+      else console.log('  ok ' + label + ' ' + plog(sid) + ' = ' + want[0] + ' (dominant ' + want[2] + 'p' + (cur[sid] ? ', was ' + cur[sid].s : ', new') + ')');
+      return okFlag;
+    });
+    console.log(label + ' writes: ' + wr.filter(x => x.status === 'fulfilled' && x.value).length + '/' + todo.length + ' (of ' + sids.length + ' composite candidates)');
+  };
+  for (const F of OVERALL_FAMS) { await writeOverall(F, false); await writeOverall(F, true); }
   // client knife 5.1a (2026-10-15, user call 10-07 "casual saves no longer expire with the season"): only the COMPETITIVE save boxes are pruned
   //   past their season (the competitive run is bound to the season seed); the casual checkpoint rows (and the classic ones, never on this
   //   list) stay until the run is resumed or replaced -- the client stopped refusing a past-season casual save the same day.
@@ -8511,7 +8593,9 @@ module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CHAT_MUTE: 
   team2TeamDissent, team2Dissent, team2HostTeam, team2NamesSeat, T2_NAME_TAG, team2LateRefusers,   // cloud audit Q56 team-gamble team dissent
   ENDLESS_LB_CLASSIC_SOLO, SAVE_BOX_LB_CLASSIC, CLASSIC, classicGoalAt, classicGoalFor, packClassicScore,   // client knife 3.9b N2 (O216 classic lane)
   ENDLESS_LB_CLASSIC_DUO, ENDLESS_LB_CLASSIC_TRIO, ENDLESS_LB_CLASSIC_QUAD, SAVE_BOX_LB_CLASSIC_DUO, SAVE_BOX_LB_CLASSIC_TRIO, SAVE_BOX_LB_CLASSIC_QUAD,   // client knife 3.9b N3 (team classic lane)
-  ENDLESS_COMP_LB_OVERALL, overallScore, overallDominant,   // knife 3.5d composite ladder
+  ENDLESS_COMP_LB_OVERALL, overallScore, overallScoreMean, overallDominant,   // knife 3.5d composite ladder
+  ENDLESS_LB_OVERALL, ENDLESS_LB_CLASSIC_OVERALL, V51B_PT,   // O276 casual / classic composites + the knife 5.1b rollout gate
+  TEAM_MAGIC, TEAM_VER, teamBlock, ladderDetails,   // O207 team block on team-ladder rows
   CAMPAIGN_ENDLESS_BOX_PREFIX, CAMPAIGN_ENDLESS_LB_PREFIX, CAMPAIGN_ENDLESS_SUFFIX, CAMPAIGN_ENDLESS_OFFENSE_LB, CAMPAIGN_ENDLESS_FILE, CE_MAIL_MIN, CE_SETTLED_TTL_MS, loadCe, saveCe,   // client knife 3.9b N4 (Gold Rush lane)
   absentRosterSeats, absenceHold, shardPlan, transientStatus, ABSENT_GRACE_MS, ABSENT_GRACE_MIN_MS, LEDGER_SHARDS,   // R1-B2-04 / R1-X14 absent-seat hold
   T2LH, hostDissentCount, team2HostOwnsSeat0,   // cloud audit Q57 team-gamble host charges

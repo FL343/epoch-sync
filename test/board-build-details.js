@@ -22,15 +22,18 @@ assert('solo competitive lifetime + season pools carry build (f.build)',
   /changedComp\[sid\] = \{ s: packed, ts: f\.score \| 0, build: f\.build >>> 0 \};/.test(src)
   && /changedCompSeason\[sid\] = \{ s: packed, ts: f\.score \| 0, build: f\.build >>> 0 \};/.test(src));
 assert('team competitive (duo / trio) lifetime + season pools carry build (f.build)',
-  /fam\.changed\[sid\] = \{ s: packed, ts: teamT, build: f\.build >>> 0 \};/.test(src)
-  && /fam\.seasonChanged\[sid\] = \{ s: packed, ts: teamT, build: f\.build >>> 0 \};/.test(src));
+  /fam\.changed\[sid\] = \{ s: packed, ts: teamT, build: f\.build >>> 0, team: rosterSids \};/.test(src)   // O207 (knife 5.1b): + the roster for the team block
+  && /fam\.seasonChanged\[sid\] = \{ s: packed, ts: teamT, build: f\.build >>> 0, team: rosterSids \};/.test(src));
 assert('casual co-op (2P / trio) lifetime + season pools carry build (t.build = consensus tail)',
-  /bChanged\[sid\] = \{ s: packed, ts: teamScore, build: t\.build >>> 0 \};/.test(src)
-  && /bSeasonChanged\[sid\] = \{ s: packed, ts: teamScore, build: t\.build >>> 0 \};/.test(src));
+  /bChanged\[sid\] = \{ s: packed, ts: teamScore, build: t\.build >>> 0, team: rosterSids \};/.test(src)
+  && /bSeasonChanged\[sid\] = \{ s: packed, ts: teamScore, build: t\.build >>> 0, team: rosterSids \};/.test(src));
 // nine ladder writes = [score, build] (2P / season / trio / trio-season / quad / quad-season + solo / solo-season / family); no endless write keeps the old 1-int details
 const writes = (src.match(/postFormDetails\('\/ISteamLeaderboards\/SetLeaderboardScore\/v1\/'[^\n]*\);/g) || []);
-const withBuild = writes.filter(l => /\}, \[w\.ts \| 0, w\.build \| 0\]\);/.test(l));
-assert('11 endless ladder writes send [w.ts | 0, w.build | 0] (found ' + withBuild.length + ' of ' + writes.length + ' SetLeaderboardScore details writes; +2 quad +2 casual solo, client knife 3.7a)', withBuild.length === 11);
+// O207 (knife 5.1b): every endless ladder write goes through one writer, ladderDetails(w) = [w.ts | 0, w.build | 0] + the team block of a team row
+const withBuild = writes.filter(l => /\}, ladderDetails\(w\)\);/.test(l));
+assert('13 endless ladder writes send ladderDetails(w) (11 [ts, build] + 2 classic; found ' + withBuild.length + ' of ' + writes.length + ' SetLeaderboardScore details writes)', withBuild.length === 13);
+assert('no endless ladder write builds its details inline any more (one writer: ladderDetails)', !writes.some(l => /\}, \[w\.ts \| 0, (w\.build \| 0|0)\]\);/.test(l)));
+assert('ladderDetails = [w.ts | 0, w.build | 0] + the team block when the entry has a roster and the rollout gate is open', /function ladderDetails\(w\) \{ return \[w\.ts \| 0, w\.build \| 0\]\.concat\(w\.team && V51B \? teamBlock\(w\.team\) : \[\]\); \}/.test(src));
 assert('no endless ladder write still sends the 1-int details [w.ts | 0]', !/\}, \[w\.ts \| 0\]\);/.test(src));
 // the build word is a real number even for pre-perk writers: the tail parser defaults absent ints to 0 and the pools use >>> 0
 assert('pools coerce with >>> 0 (absent tail build -> 0, never undefined/NaN in details)', !/build: (f|t)\.build \}/.test(src));

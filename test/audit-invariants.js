@@ -33,4 +33,11 @@ ok(r.violations.length === 0 && r.stateOnly === 2, 'state without board entries 
 r = auditTrusted({}, { skill: {}, xp: {}, leavers: {}, signals: {} });
 ok(r.violations.length === 0 && r.entries === 0 && r.known === 0, 'empty audit is clean');
 
+
+// 5) O276 (client knife 5.1b): every cron-written endless ladder is in the closure; season twins match exactly <seasoned base>_s<digits>
+const AU = require('../audit.js');
+ok(['endless_board_solo', 'endless_board_overall', 'endless_comp_solo', 'endless_comp_quad', 'endless_comp_overall', 'endless_classic_duo', 'endless_classic_overall'].every(nm => AU.ENDLESS_TRUSTED.indexOf(nm) >= 0), 'trusted endless ladders listed by name (casual / competitive / classic families + the three composites)');
+ok(JSON.stringify(AU.seasonTwinOf('endless_board_s1')) === JSON.stringify({ base: 'endless_board', season: 1 }) && JSON.stringify(AU.seasonTwinOf('endless_comp_overall_s2')) === JSON.stringify({ base: 'endless_comp_overall', season: 2 }) && JSON.stringify(AU.seasonTwinOf('endless_board_overall_s1')) === JSON.stringify({ base: 'endless_board_overall', season: 1 }), 'season twins of the base board and of the seasoned families are found');
+ok(AU.seasonTwinOf('endless_board_solo') === null && AU.seasonTwinOf('endless_classic_solo_s1') === null && AU.seasonTwinOf('endless_save_box_solo_s1') === null && AU.seasonTwinOf('lp_ladder_s1') === null, 'a ladder is not a twin of endless_board by prefix; classic (lifetime only) / save boxes (client-writable) / points never match');
+
 console.log('audit-invariants: all ' + n + ' assertions passed');
