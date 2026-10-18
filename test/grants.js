@@ -165,7 +165,7 @@ function world0() {
   eq('fast run: S1 result items only', w.inv[S1].slice().sort((a, b) => a - b), [401, 402, 411]);
   // not live: only the allow list
   w = world0(); fk = fakeSteam(w);
-  await g.run({ v, env: Object.assign({}, ENV, { GRANTS_LIVE: '', GRANTS_ALLOW: S3 }), nowMs: NOW, mode: 'daily', fetch: fk.fetch, log: () => {} });
+  await g.run({ v, env: Object.assign({}, ENV, { GRANTS_LIVE: '', GRANTS_ALLOW: S3, GRANTS_LAUNCH_AT: '' }), nowMs: NOW, mode: 'daily', fetch: fk.fetch, log: () => {} });
   assert('not live: only the allow-listed account is granted', !w.inv[S1] && w.inv[S3] && w.inv[S3].length > 0);
   // dry: no writes at all
   w = world0(); fk = fakeSteam(w);
@@ -173,12 +173,20 @@ function world0() {
   assert('dry run: no AddItem / AddPromoItem call', !fk.calls.some((c) => /AddItem|AddPromoItem/.test(c.path)));
   assert('dry run: the plan is still counted', (st4.wouldGrant[401] | 0) === 3);
 
+  // automatic opening at the launch moment: before it only the allow list, from it everybody (no flag to flip)
+  w = world0(); fk = fakeSteam(w);
+  const pre = await g.run({ v, env: Object.assign({}, ENV, { GRANTS_LIVE: '', GRANTS_ALLOW: S3, GRANTS_LAUNCH_AT: '2027-01-21T00:00:00Z' }), nowMs: NOW, mode: 'daily', fetch: fk.fetch, log: () => {} });
+  assert('before the launch moment: not live, only the allow-listed account', pre.live === false && pre.looked === 1 && !w.inv[S1]);
+  w = world0(); fk = fakeSteam(w);
+  const post = await g.run({ v, env: Object.assign({}, ENV, { GRANTS_LIVE: '', GRANTS_ALLOW: S3, GRANTS_LAUNCH_AT: '2027-01-20T11:59:00Z' }), nowMs: NOW, mode: 'daily', fetch: fk.fetch, log: () => {} });
+  assert('from the launch moment: live by itself, every candidate', post.live === true && post.looked === 3 && w.inv[S1] && w.inv[S1].length > 0);
+
   // explicit account list instead of the mirror board (smoke / backfill), still behind the allow gate
   w = world0(); fk = fakeSteam(w);
   const st5 = await g.run({ v, env: Object.assign({}, ENV, { GRANTS_SIDS: S4 + ',' + S4 + ',bogus' }), nowMs: NOW, mode: 'daily', fetch: fk.fetch, log: () => {} });
   assert('GRANTS_SIDS: only the listed account is looked at (old mirror row does not matter)', st5.looked === 1 && !fk.calls.some((c) => c.path.endsWith('/GetLeaderboardEntries/v1/') && c.q.leaderboardid === String(1000 + Object.keys(w.boards).indexOf('mirror_box'))));
   w = world0(); fk = fakeSteam(w);
-  const st6 = await g.run({ v, env: Object.assign({}, ENV, { GRANTS_SIDS: S1, GRANTS_LIVE: '', GRANTS_ALLOW: S3 }), nowMs: NOW, mode: 'daily', fetch: fk.fetch, log: () => {} });
+  const st6 = await g.run({ v, env: Object.assign({}, ENV, { GRANTS_SIDS: S1, GRANTS_LIVE: '', GRANTS_ALLOW: S3, GRANTS_LAUNCH_AT: '' }), nowMs: NOW, mode: 'daily', fetch: fk.fetch, log: () => {} });
   assert('GRANTS_SIDS: the allow gate still applies when not live', st6.looked === 0 && !w.inv[S1]);
 
   console.log('=== grants [7] mutation proofs ===');

@@ -24,9 +24,10 @@
 // lockstep test there). Game ids and dates come from the environment, as everywhere in this public repo:
 //   APPID                 the game (required)
 //   CLASSIC_APPID         the older game whose owners get the classic badge (unset = that item off)
-//   GRANTS_LAUNCH_AT      launch moment, ISO (unset = the first-weeks badge off)
+//   GRANTS_LAUNCH_AT      launch moment, ISO (unset = the first-weeks badge off). Also the automatic opening: from this
+//                         moment on every candidate is granted (no flag to flip on launch day); before it only GRANTS_ALLOW
 //   GRANTS_EA_END         end of early access, ISO (unset = still early access: the veteran badge is open)
-//   GRANTS_LIVE           '1' = every candidate; otherwise only the GRANTS_ALLOW list (comma-separated ids)
+//   GRANTS_LIVE           '1' = every candidate now (manual override); otherwise only the GRANTS_ALLOW list until GRANTS_LAUNCH_AT
 //   GRANTS_DRY            '1' = plan and log, never write
 //   GRANTS_SIDS           comma-separated account ids to look at INSTEAD of the mirror board (smoke tests / a manual
 //                         backfill); the GRANTS_LIVE / GRANTS_ALLOW gate still applies
@@ -201,12 +202,12 @@ async function run(opts) {
   };
   if (cfg.launchMs != null && !isFinite(cfg.launchMs)) throw new Error('GRANTS_LAUNCH_AT is not a date');
   if (cfg.eaEndMs != null && !isFinite(cfg.eaEndMs)) throw new Error('GRANTS_EA_END is not a date');
-  const live = env.GRANTS_LIVE === '1', dry = env.GRANTS_DRY === '1';
+  const live = env.GRANTS_LIVE === '1' || (cfg.launchMs != null && nowMs >= cfg.launchMs), dry = env.GRANTS_DRY === '1';
   const allow = new Set(String(env.GRANTS_ALLOW || '').split(',').map((s) => s.trim()).filter(Boolean));
   const mode = modeOf(opts.mode, nowMs);
   const A = api(opts.fetch, env.STEAM_PUBLISHER_KEY);
   const pid = (s) => v.pid(s);
-  const stat = { mode, candidates: 0, looked: 0, promoCalls: 0, promoGranted: 0, ownershipCalls: 0, inventoryCalls: 0, granted: {}, wouldGrant: {}, errors: {} };
+  const stat = { mode, live, candidates: 0, looked: 0, promoCalls: 0, promoGranted: 0, ownershipCalls: 0, inventoryCalls: 0, granted: {}, wouldGrant: {}, errors: {} };
   const err = (k) => { stat.errors[k] = (stat.errors[k] | 0) + 1; };
 
   const boards = await A.boards(appid);
