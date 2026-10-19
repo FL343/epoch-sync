@@ -198,14 +198,17 @@ window.PERKS = (() => {
   }
   function _fnv1a(str) { let h = 0x811c9dc5; for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; } return h >>> 0; }
   function poolEntries() {
-    return TABLE.slice().sort((a, b) => (a.id | 0) - (b.id | 0)).map(p => ({
+    return TABLE.filter(p => !(p.rulesFrom > 1)).sort((a, b) => (a.id | 0) - (b.id | 0)).map(p => ({
       id: p.id | 0, key: String(p.key), axis: p.axis, rarity: p.rarity, scope: p.scope,
       modes: { solo: !!(p.modes && p.modes.solo), coop: !!(p.modes && p.modes.coop), duel: !!(p.modes && p.modes.duel) },
       rollable: !!p.rollable, contract: !!p.contract,
       seasons: p.seasons ? { from: p.seasons.from == null ? null : (p.seasons.from | 0), until: p.seasons.until == null ? null : (p.seasons.until | 0) } : null,
     }));
   }
-  function poolSig() { return ('00000000' + _fnv1a(JSON.stringify(poolEntries())).toString(16)).slice(-8); }
+  function poolSig(ver) {
+    if ((ver | 0) >= 2) return ('00000000' + _fnv1a(JSON.stringify(_poolEntriesV2())).toString(16)).slice(-8);
+    return ('00000000' + _fnv1a(JSON.stringify(poolEntries())).toString(16)).slice(-8);
+  }
   const CAND_ALGO_VER = 1;
   function candConstants() {
     return { algo: CAND_ALGO_VER, perkSalt: PERK_SALT, seasonSalt: SEASON_SALT, slots: cfgNum('SLOTS'),
@@ -213,7 +216,34 @@ window.PERKS = (() => {
       contractMax: cfgNum('CONTRACT_MAX'), contractMinDraw: cfgNum('CONTRACT_MIN_DRAW'), contractPMilli: cfgNum('CONTRACT_P_MILLI'),
       rarityByBand: RARITY_BY_BAND, rarityGate: RARITY_GATE };
   }
-  function candSig() { return ('00000000' + _fnv1a(JSON.stringify({ pool: poolEntries(), cand: candConstants() })).toString(16)).slice(-8); }
+  function candSig(ver, overlayKey) {
+    if ((ver | 0) >= 2) return ('00000000' + _fnv1a(JSON.stringify({ pool: _poolEntriesV2(), cand: _candConstantsV2(overlayKey || V2_DEFAULT_OVERLAY) })).toString(16)).slice(-8);
+    return ('00000000' + _fnv1a(JSON.stringify({ pool: poolEntries(), cand: candConstants() })).toString(16)).slice(-8);
+  }
+  const CAND_RULES = Object.freeze({
+    ea: Object.freeze([Object.freeze({ fromSeason: 0, ver: 2, overlay: 'ea0' })]),
+    playtest: Object.freeze([Object.freeze({ fromSeason: 0, ver: 1 })]),
+    demo: Object.freeze([Object.freeze({ fromSeason: 0, ver: 1 })]),
+  });
+  const V1_ROW = CAND_RULES.playtest[0];
+  const V2_DEFAULT_OVERLAY = 'ea0';
+  function rulesRow(channel, seasonId) {
+    const rows = (typeof channel === 'string' && Object.prototype.hasOwnProperty.call(CAND_RULES, channel)) ? CAND_RULES[channel] : null;
+    if (!rows) return V1_ROW;
+    const s = Math.max(0, seasonId | 0);
+    let row = rows[0];
+    for (const r of rows) if (s >= (r.fromSeason | 0)) row = r;
+    return row;
+  }
+  function rulesVer(channel, seasonId) { return rulesRow(channel, seasonId).ver | 0; }
+  const CAND_PICK_SALT = 0x91C4, CAND_N = 3;
+  function candIdx(runSeed, depth) {
+    const R = window.RNG;
+    return Math.min(CAND_N - 1, Math.floor(window.makeRNG(R.deriveSeed(R.deriveSeed(runSeed | 0, CAND_PICK_SALT), depth | 0))() * CAND_N));
+  }
+  function poolEntriesFor(ver) { return ((ver | 0) >= 2) ? _poolEntriesV2() : poolEntries(); }
+  function candConstantsFor(ver, overlayKey) { return ((ver | 0) >= 2) ? _candConstantsV2(overlayKey || V2_DEFAULT_OVERLAY) : candConstants(); }
+  function candSigOfRow(row) { return candSig((row && row.ver) | 0, row && row.overlay); }
   function packBuild(slots) {
     let v = 0;
     for (let k = 0; k < 3; k++) {
@@ -331,6 +361,10 @@ window.PERKS = (() => {
   }
   function _not(cards, id) { return !cards.some(c => c.id === id); }
   function candidates(sSeed, depth, build, drawIdx, skipBank, opts) {
+    if (rulesVer(opts && opts.channel, opts && opts.seasonId) >= 2) return _candidatesV2(sSeed, depth, build, drawIdx, skipBank, opts);
+    return _candidatesV1(sSeed, depth, build, drawIdx, skipBank, opts);
+  }
+  function _candidatesV1(sSeed, depth, build, drawIdx, skipBank, opts) {
     const mode = (opts && opts.mode) || 'solo';
     const sid = (opts && opts.seasonId != null) ? (opts.seasonId | 0) : 0;
     const rng = window.makeRNG(drawSeed(sSeed, depth, build));
@@ -338,7 +372,7 @@ window.PERKS = (() => {
     const held = slots.filter(Boolean);
     const heldIds = new Set(held.map(s => s.id));
     const heldAxes = new Set(held.map(s => get(s.id) && get(s.id).axis));
-    const poolAll = TABLE.filter(p => p.rollable && p.modes && p.modes[mode] && inSeason(p, sid));
+    const poolAll = TABLE.filter(p => p.rollable && p.modes && p.modes[mode] && inSeason(p, sid) && !(p.rulesFrom > 1));
     const pool = poolAll.filter(p => !p.contract);
     const cPool = poolAll.filter(p => p.contract && !heldIds.has(p.id));
     const n = 3 + (skipBank ? 1 : 0);
@@ -391,6 +425,7 @@ window.PERKS = (() => {
   }
   function hasContract(cards) { return !!(cards && cards.some(c => isContract(c.id))); }
   function contractsSeenBefore(sSeed, picksArr, k, opts) {
+    if (rulesVer(opts && opts.channel, opts && opts.seasonId) >= 2) return _walkV2(sSeed, picksArr, k, opts, false).contractsSeen;
     const mode = (opts && opts.mode) || 'solo';
     const seasonId = (opts && opts.seasonId != null) ? (opts.seasonId | 0) : 0;
     let build = 0, skipBank = 0, seen = 0;
@@ -473,6 +508,14 @@ window.PERKS = (() => {
     return true;
   }
   function replay(sSeed, picksArr, endDepth, opts) {
+    if (rulesVer(opts && opts.channel, opts && opts.seasonId) >= 2) {
+      const n2 = picksCount(picksArr);
+      if (n2 < 0) return { ok: false, why: 'picks-shape', rv: 2 };
+      if (n2 > maxDrawsByDepth(endDepth)) return { ok: false, why: 'picks-count', at: n2, rv: 2 };
+      const w = _walkV2(sSeed, picksArr, n2, opts, true);
+      if (!w.ok) return { ok: false, why: w.why, at: w.at, rv: 2 };
+      return { ok: true, build: w.build >>> 0, n: n2, skipBank: w.skipBank, contractsSeen: w.contractsSeen, rv: 2 };
+    }
     const n = picksCount(picksArr);
     if (n < 0) return { ok: false, why: 'picks-shape' };
     if (n > maxDrawsByDepth(endDepth)) return { ok: false, why: 'picks-count', at: n };
@@ -490,6 +533,49 @@ window.PERKS = (() => {
       build = nb; skipBank = 0;
     }
     return { ok: true, build: build >>> 0, n, skipBank, contractsSeen: seen };
+  }
+  function drawCtxAt(sSeed, picksArr, k, opts) {
+    if (rulesVer(opts && opts.channel, opts && opts.seasonId) >= 2) {
+      const w = _walkV2(sSeed, picksArr, k, opts, false);
+      return { build: w.build >>> 0, skipBank: w.skipBank | 0, contractsSeen: w.contractsSeen | 0, prevShown: w.prevShown.slice(), rv: 2 };
+    }
+    const mode = (opts && opts.mode) || 'solo';
+    const seasonId = (opts && opts.seasonId != null) ? (opts.seasonId | 0) : 0;
+    let build = 0, skipBank = 0, seen = 0;
+    const cnt = picksCount(picksArr);
+    const kk = Math.min(k | 0, cnt < 0 ? 0 : cnt);
+    for (let j = 0; j < kk; j++) {
+      const choice = picksArr[j] | 0;
+      const cards = _candidatesV1(sSeed, depthOfDraw(j), build, j, skipBank, { mode, contractsSeen: seen, seasonId });
+      if (hasContract(cards)) seen++;
+      if (choice === 5) { skipBank = 1; continue; }
+      const nb = applyPick(build, cards, choice);
+      if (nb == null) break;
+      build = nb; skipBank = 0;
+    }
+    return { build: build >>> 0, skipBank, contractsSeen: seen, prevShown: [], rv: 1 };
+  }
+  function _walkV2(sSeed, picksArr, kStop, opts, strict) {
+    const base = { mode: (opts && opts.mode) || 'solo', seasonId: (opts && opts.seasonId != null) ? (opts.seasonId | 0) : 0,
+      channel: opts && opts.channel, runSeed: (opts && opts.runSeed) | 0 };
+    let build = 0, skipBank = 0, seen = 0, prevShown = [];
+    const arr = Array.isArray(picksArr) ? picksArr : emptyPicks();
+    const cnt = picksCount(arr);
+    if (cnt < 0) return strict ? { ok: false, why: 'picks-shape' } : { ok: true, build: 0, skipBank: 0, contractsSeen: 0, prevShown: [] };
+    const kk = Math.min(kStop | 0, cnt);
+    for (let j = 0; j < kk; j++) {
+      const choice = arr[j] | 0;
+      const cards = _candidatesV2(sSeed, depthOfDraw(j), build, j, skipBank, Object.assign({}, base, { contractsSeen: seen, prevShown }));
+      if (hasContract(cards)) seen++;
+      if (choice === 5) { prevShown = cards.map(c => c.id); skipBank = 1; continue; }
+      if (choice === 4 && !skipBank) { if (strict) return { ok: false, why: 'pick-4-nobank', at: j }; break; }
+      const nb = applyPick(build, cards, choice);
+      if (nb == null) { if (strict) return { ok: false, why: 'pick-range', at: j }; break; }
+      const picked = cards[choice - 1] ? cards[choice - 1].id : 0;
+      prevShown = cards.filter(c => c.id !== picked).map(c => c.id);
+      build = nb; skipBank = 0;
+    }
+    return { ok: true, build: build >>> 0, skipBank, contractsSeen: seen, prevShown };
   }
   function effOfBuild(build) {
     const e = { valueMul: {}, clearBonusMul: 1, levelTimeAdd: 0, invGrant: { tnt: 0, freeze: 0 }, strengthBonus: 0, shopMul: 1,
@@ -583,7 +669,11 @@ window.PERKS = (() => {
   function descParams(id, lv) { const p = get(id); return p ? (p.p[Math.max(0, Math.min(2, (lv | 0) - 1))] || {}) : {}; }
   function iconOf(id) { const p = get(id); return p ? p.icon : ''; }
   function rarityOf(id) { const p = get(id); return p ? p.rarity : 'common'; }
+  function _poolEntriesV2() { throw new Error('perks: candidate rules v2 not implemented yet (knife 5.10a S2)'); }
+  function _candConstantsV2() { throw new Error('perks: candidate rules v2 not implemented yet (knife 5.10a S2)'); }
+  function _candidatesV2() { throw new Error('perks: candidate rules v2 not implemented yet (knife 5.10a S2)'); }
   return {
+    CAND_RULES, rulesRow, rulesVer, candIdx, drawCtxAt, poolEntriesFor, candConstantsFor, candSigOfRow,
     PERK_SALT, SEASON_SALT, CLS, CLS_KEYS, ITEM_CLS, T1_FIELDS, RENDER_ONLY, VALUE_MUL_KEYS, INV_KEYS, FLAG_KEYS, AXES, RARITIES, SCOPES,
     RARITY_BY_BAND, RARITY_GATE, FALLBACK,
     cfg, get, list, validateTable, clsOfItem, clsOfCreature,
