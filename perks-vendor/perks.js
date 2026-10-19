@@ -11,7 +11,7 @@ window.PERKS = (() => {
   const SEASON_SALT = 0x5EA5;
   const CLS_KEYS = ['gold', 'rock', 'bone', 'gem', 'cursed', 'creature', 'other', 'relic'];
   const CLS = {}; CLS_KEYS.forEach((k, i) => { CLS[k] = i; });
-  const CLASS_TOTAL_CAP = { gold: 1.5, rock: 6, bone: 40, gem: 3 };
+  const CLASS_TOTAL_CAP = { gold: 2, rock: 6, bone: 40, gem: 3 };
   const CURSED_FLIP_MIN = -1;
   const ITEM_CLS = {
     goldSmall: 'gold', goldMid: 'gold', goldLarge: 'gold', goldHuge: 'gold',
@@ -33,9 +33,12 @@ window.PERKS = (() => {
   const VALUE_MUL_KEYS = CLS_KEYS.concat(['all']);
   const INV_KEYS = ['tnt', 'freeze'];
   const FLAG_KEYS = ['clover'];
-  const SUB_KEYS = { combo: ['every', 'mul'], emptyReturn: ['amt', 'cap'], midas: ['n', 'value'], drill: ['lv'] };
-  const ONE_PER_TABLE = ['combo', 'emptyReturn', 'midas', 'drill'];
-  const RENDER_ONLY = ['hookSpeedMul', 'pullSpeedMul', 'freezeDurMul', 'highlight', 'laser', 'emptyPullMul'];
+  const SUB_KEYS = { combo: ['every', 'mul'], emptyReturn: ['amt', 'cap'], midas: ['n', 'value'], drill: ['lv'], openPull: ['secs', 'mul'], lightPull: ['wMax', 'mul'] };
+  const ONE_PER_TABLE = ['combo', 'emptyReturn', 'midas', 'drill', 'openPull', 'lightPull'];
+  const RENDER_ONLY = ['hookSpeedMul', 'pullSpeedMul', 'freezeDurMul', 'highlight', 'laser', 'emptyPullMul',
+    'swingNatMul', 'openPull', 'lightPull', 'hitRadiusMul', 'mechVeteran', 'blind', 'topLit'];
+  const FIELD_SPEC = Object.freeze({ hookSpeedMul: 'mul', pullSpeedMul: 'mul', freezeDurMul: 'mul', highlight: 'minPos', laser: 'max', emptyPullMul: 'mul',
+    swingNatMul: 'mul', openPull: 'one', lightPull: 'one', hitRadiusMul: 'mul', mechVeteran: 'max', blind: 'or', topLit: 'max' });
   const AXES = ['time', 'value', 'speed', 'item', 'neg', 'economy', 'collect', 'life', 'info'];
   const RARITIES = ['common', 'rare', 'epic'];
   const SCOPES = ['self', 'team', 'world'];
@@ -59,7 +62,7 @@ window.PERKS = (() => {
     { id: 8, key: 'quickHands', axis: 'speed', rarity: 'common', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, icon: '🚀',
       lv: [{ hookSpeedMul: 1.25, pullSpeedMul: 1.25 }, { hookSpeedMul: 1.35, pullSpeedMul: 1.35 }, { hookSpeedMul: 1.45, pullSpeedMul: 1.45 }], p: [{ a: 25 }, { a: 35 }, { a: 45 }] },
     { id: 9, key: 'eagleEye', axis: 'info', rarity: 'common', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, icon: '👁',
-      lv: [{ highlight: 300 }, { highlight: 150 }, { highlight: 60 }], p: [{ a: 300 }, { a: 150 }, { a: 60 }] },
+      lv: [{ topLit: 1 }, { topLit: 2 }, { topLit: 3 }], p: [{ a: 1 }, { a: 2 }, { a: 3 }] },
     { id: 10, key: 'cloverField', axis: 'neg', rarity: 'common', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, icon: '🍀',
       lv: [{ flags: { clover: true } }, { flags: { clover: true } }, { flags: { clover: true } }], p: [{}, {}, {}] },
     { id: 11, key: 'memberCard', axis: 'economy', rarity: 'common', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, icon: '🛒',
@@ -83,6 +86,28 @@ window.PERKS = (() => {
         { hookSpeedMul: 2, pullSpeedMul: 2, strengthBonus: 5, cursedMul: 3, emptyPullMul: 0.22 }], p: [{ a: 50, b: 2, c: 2, d: 35 }, { a: 75, b: 2.5, c: 3, d: 28 }, { a: 100, b: 3, c: 5, d: 22 }] },
     { id: 20, key: 'miserPact', axis: 'economy', rarity: 'epic', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, contract: true, icon: '💰',
       lv: [{ shopMul: 0.5, clearBonusMul: 0 }, { shopMul: 0.4, clearBonusMul: 0 }, { shopMul: 0.3, clearBonusMul: 0 }], p: [{ a: 50 }, { a: 40 }, { a: 30 }] },
+    { id: 21, key: 'jeweler', axis: 'value', rarity: 'common', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, rulesFrom: 2, tags: ['class'], role: 'steady', icon: '💎',
+      lv: [{ valueMul: { gem: 1.12, rock: 0.5 } }, { valueMul: { gem: 1.18, rock: 0.5 } }, { valueMul: { gem: 1.24, rock: 0.5 } }], p: [{ a: 1.12, b: 50 }, { a: 1.18, b: 50 }, { a: 1.24, b: 50 }] },
+    { id: 22, key: 'prospector', axis: 'value', rarity: 'common', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, rulesFrom: 2, tags: ['class'], role: 'steady', icon: '🏅',
+      lv: [{ valueMul: { gold: 1.35, gem: 0.85 } }, { valueMul: { gold: 1.45, gem: 0.85 } }, { valueMul: { gold: 1.55, gem: 0.85 } }], p: [{ a: 1.35, b: 15 }, { a: 1.45, b: 15 }, { a: 1.55, b: 15 }] },
+    { id: 23, key: 'trapper', axis: 'value', rarity: 'common', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, rulesFrom: 2, tags: ['class'], role: 'steady', icon: '🪤',
+      lv: [{ valueMul: { creature: 1.3, rock: 0.5 } }, { valueMul: { creature: 1.45, rock: 0.5 } }, { valueMul: { creature: 1.6, rock: 0.5 } }], p: [{ a: 1.3, b: 50 }, { a: 1.45, b: 50 }, { a: 1.6, b: 50 }] },
+    { id: 24, key: 'slowAndSteady', axis: 'time', rarity: 'common', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, rulesFrom: 2, tags: ['time'], role: 'steady', icon: '🐢',
+      lv: [{ levelTimeAdd: 15, hookSpeedMul: 0.8 }, { levelTimeAdd: 20, hookSpeedMul: 0.8 }, { levelTimeAdd: 25, hookSpeedMul: 0.8 }], p: [{ a: 15, b: 20 }, { a: 20, b: 20 }, { a: 25, b: 20 }] },
+    { id: 25, key: 'boomerang', axis: 'speed', rarity: 'common', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, rulesFrom: 2, tags: ['rhythm'], role: 'swing', icon: '🪃',
+      lv: [{ emptyPullMul: 3, hookSpeedMul: 1.1 }, { emptyPullMul: 3.5, hookSpeedMul: 1.15 }, { emptyPullMul: 4, hookSpeedMul: 1.25 }], p: [{ a: 3, b: 10 }, { a: 3.5, b: 15 }, { a: 4, b: 25 }] },
+    { id: 26, key: 'steadyHand', axis: 'info', rarity: 'common', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, rulesFrom: 2, tags: ['quick'], role: 'utility', icon: '🧭',
+      lv: [{ swingNatMul: 0.8 }, { swingNatMul: 0.7 }, { swingNatMul: 0.6 }], p: [{ a: 20 }, { a: 30 }, { a: 40 }] },
+    { id: 27, key: 'openingRush', axis: 'time', rarity: 'common', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, rulesFrom: 2, tags: ['time'], role: 'swing', icon: '🏃',
+      lv: [{ openPull: { secs: 15, mul: 3 } }, { openPull: { secs: 25, mul: 3 } }, { openPull: { secs: 35, mul: 3 } }], p: [{ a: 15, b: 3 }, { a: 25, b: 3 }, { a: 35, b: 3 }] },
+    { id: 28, key: 'travelLight', axis: 'speed', rarity: 'common', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, rulesFrom: 2, tags: ['quick'], role: 'steady', icon: '🪶',
+      lv: [{ lightPull: { wMax: 7, mul: 1.6 } }, { lightPull: { wMax: 8, mul: 1.8 } }, { lightPull: { wMax: 9, mul: 2 } }], p: [{ a: 7, b: 1.6 }, { a: 8, b: 1.8 }, { a: 9, b: 2 }] },
+    { id: 29, key: 'magnetClaw', axis: 'speed', rarity: 'epic', scope: 'self', modes: { solo: true, coop: true, duel: false }, rollable: true, rulesFrom: 2, tags: ['quick'], role: 'swing', icon: '🧲',
+      lv: [{ hitRadiusMul: 1.25 }, { hitRadiusMul: 1.4 }, { hitRadiusMul: 1.6 }], p: [{ a: 25 }, { a: 40 }, { a: 60 }] },
+    { id: 30, key: 'oldMiner', axis: 'info', rarity: 'rare', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, rulesFrom: 2, tags: ['deep'], role: 'utility', minDepth: 10, excl: [31], icon: '🔦',
+      lv: [{ mechVeteran: 1 }, { mechVeteran: 2 }, { mechVeteran: 3 }], p: [{}, {}, {}] },
+    { id: 31, key: 'blindDig', axis: 'value', rarity: 'epic', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, contract: true, rulesFrom: 2, tags: ['class'], role: 'swing', excl: [30], icon: '🕶',
+      lv: [{ valueMul: { gold: 1.35, gem: 1.3 }, blind: true }, { valueMul: { gold: 1.5, gem: 1.4 }, blind: true }, { valueMul: { gold: 1.65, gem: 1.5 }, blind: true }], p: [{ a: 1.35, b: 1.3 }, { a: 1.5, b: 1.4 }, { a: 1.65, b: 1.5 }] },
   ];
   let TABLE = LIST;
   const BY_ID = new Map();
@@ -164,9 +189,26 @@ window.PERKS = (() => {
       if (c === 'creature' || c === 'relic' || c === 'cursed' || c === 'other') errs.push('CLASS_TOTAL_CAP must not cap class: ' + c);
     }
     if (!(CURSED_FLIP_MIN < 0)) errs.push('CURSED_FLIP_MIN must be negative');
+    const num = (v) => typeof v === 'number' && isFinite(v);
     for (const p of TABLE) (p.lv || []).forEach((e, k) => {
-      if (e && e.emptyPullMul != null && !(typeof e.emptyPullMul === 'number' && e.emptyPullMul > 0 && e.emptyPullMul <= 1)) errs.push('emptyPullMul must be in (0, 1]: ' + p.key + ' Lv' + (k + 1));
+      const at = p.key + ' Lv' + (k + 1);
+      if (!e) return;
+      if (e.emptyPullMul != null && !(num(e.emptyPullMul) && e.emptyPullMul > 0 && e.emptyPullMul <= 5)) errs.push('emptyPullMul must be in (0, 5]: ' + at);
+      if (e.swingNatMul != null && !(num(e.swingNatMul) && e.swingNatMul > 0 && e.swingNatMul <= 2)) errs.push('swingNatMul must be in (0, 2]: ' + at);
+      if (e.hitRadiusMul != null && !(num(e.hitRadiusMul) && e.hitRadiusMul >= 1 && e.hitRadiusMul <= 2)) errs.push('hitRadiusMul must be in [1, 2]: ' + at);
+      if (e.mechVeteran != null && !(e.mechVeteran === (e.mechVeteran | 0) && e.mechVeteran >= 1 && e.mechVeteran <= 3)) errs.push('mechVeteran must be int 1..3: ' + at);
+      if (e.topLit != null && !(e.topLit === (e.topLit | 0) && e.topLit >= 1 && e.topLit <= 5)) errs.push('topLit must be int 1..5: ' + at);
+      if (e.blind != null && e.blind !== true) errs.push('blind must be true: ' + at);
+      if (e.openPull && !(e.openPull.secs >= 1 && e.openPull.secs <= 60 && e.openPull.mul > 1 && e.openPull.mul <= 3)) errs.push('openPull needs secs 1..60 and mul (1, 3]: ' + at);
+      if (e.lightPull && !(e.lightPull.wMax >= 1 && e.lightPull.wMax <= 20 && e.lightPull.mul > 1 && e.lightPull.mul <= 2)) errs.push('lightPull needs wMax 1..20 and mul (1, 2]: ' + at);
     });
+    for (const f of RENDER_ONLY) if (!FIELD_SPEC[f]) errs.push('RENDER_ONLY field without FIELD_SPEC stacking rule: ' + f);
+    for (const f of Object.keys(FIELD_SPEC)) if (RENDER_ONLY.indexOf(f) < 0) errs.push('FIELD_SPEC ghost field (not RENDER_ONLY): ' + f);
+    {
+      const pos = TABLE.map(p => Math.max.apply(null, p.lv.map(e => (e && e.levelTimeAdd > 0) ? e.levelTimeAdd : 0))).sort((a, b) => b - a);
+      const best3 = (pos[0] || 0) + (pos[1] || 0) + (pos[2] || 0);
+      if (best3 > 60 + 1e-9) errs.push('positive time cap exceeded: 3-slot positive time ' + best3 + ' > 60');
+    }
     for (const p of TABLE) {
       const id = p.id | 0;
       if (p.rulesFrom != null && !(p.rulesFrom === (p.rulesFrom | 0) && p.rulesFrom >= 2)) errs.push('rulesFrom must be int >= 2: ' + p.key);
@@ -607,11 +649,21 @@ window.PERKS = (() => {
   function effOfBuild(build) {
     const e = { valueMul: {}, clearBonusMul: 1, levelTimeAdd: 0, invGrant: { tnt: 0, freeze: 0 }, strengthBonus: 0, shopMul: 1,
       clover: false, hookSpeedMul: 1, pullSpeedMul: 1, emptyPullMul: 1, freezeDurMul: 1, highlight: 0, slots: heldOf(build),
-      cursedMul: 1, comboEvery: 0, comboMul: 1, emptyAmt: 0, emptyCap: 0, midasN: 0, midasValue: 0, drillLv: 0, shatterBonus: 0, laser: 0 };
+      cursedMul: 1, comboEvery: 0, comboMul: 1, emptyAmt: 0, emptyCap: 0, midasN: 0, midasValue: 0, drillLv: 0, shatterBonus: 0, laser: 0,
+      swingNatMul: 1, hitRadiusMul: 1, mechVeteran: 0, topLit: 0, blind: false, openPullSecs: 0, openPullMul: 1, lightPullW: 0, lightPullMul: 1 };
     for (const c of VALUE_MUL_KEYS) e.valueMul[c] = 1;
     for (const s of e.slots) {
       const p = get(s.id); if (!p) continue;
       const L = p.lv[Math.max(0, Math.min(2, s.lv - 1))] || {};
+      for (const f of ['swingNatMul', 'hitRadiusMul', 'mechVeteran', 'topLit', 'blind']) {
+        if (L[f] == null) continue;
+        const how = FIELD_SPEC[f];
+        if (how === 'mul') e[f] = e[f] * L[f];
+        else if (how === 'max') e[f] = Math.max(e[f], L[f] | 0);
+        else if (how === 'or') e[f] = e[f] || !!L[f];
+      }
+      if (L.openPull) { e.openPullSecs = +L.openPull.secs; e.openPullMul = +L.openPull.mul; }
+      if (L.lightPull) { e.lightPullW = +L.lightPull.wMax; e.lightPullMul = +L.lightPull.mul; }
       if (L.cursedMul != null) e.cursedMul = e.cursedMul * L.cursedMul;
       if (L.combo) { e.comboEvery = L.combo.every | 0; e.comboMul = +L.combo.mul; }
       if (L.emptyReturn) { e.emptyAmt = L.emptyReturn.amt | 0; e.emptyCap = L.emptyReturn.cap | 0; }
