@@ -188,7 +188,10 @@ const flagged = (r, m) => !!(((r.state.SIGNALS_FILE || {}).flagged || {})[m]);
 const playerF = (r, sid) => (((((r.state.SIGNALS_FILE || {}).players || {})[v.pid(sid)]) || {}).f | 0);
 const summaryNeg = (r) => { const x = /\| signed solo segments whose guard clock went back inside the segment[^|]*\| (\d+) \|/.exec(r.summary || ''); return x ? Number(x[1]) : -1; };
 // the board writes a run made, without the per-run noise (order kept)
-const boardWrites = (rs) => [].concat(...rs.map(r => r.posts.filter(p => /SetLeaderboardScore/.test(p.url)).map(p => p.body)));
+// 5.4a: the xp row's 0xCA v2 career block carries the segment's PLAY TIME (the writer's own d[9], a negative guard clock = 0) ->
+//   [2] and [3] legitimately differ there; compare the career block's v1 head only (the first 5 ints = 20 bytes), the rest as is
+const careerHead = (body) => body.replace(/(details=%ca%00%00%00(?:%[0-9a-f]{2}){16})(?:%[0-9a-f]{2})*/, '$1');
+const boardWrites = (rs) => [].concat(...rs.map(r => r.posts.filter(p => /SetLeaderboardScore/.test(p.url)).map(p => careerHead(p.body))));
 
 console.log('=== Q242: a signed solo segment whose guard clock went back settles (counted, not rejected) ===');
 

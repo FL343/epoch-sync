@@ -3754,11 +3754,167 @@ function matchProgressOf(g) {
 // writes no record and counts nothing). Published to the client as xp_ladder DETAIL bytes
 // [CAREER_MAGIC, ver, games, wins, losses] alongside every XP write -- boot read-back overwrites
 // the optimistic counters the same way the XP score itself does.
-const CAREER_MAGIC = 0xCA, CAREER_VER = 1;
+const CAREER_MAGIC = 0xCA, CAREER_VER = 2;
+// ---- 5.4a career matrix (O111, 2026-10-19): per-player "mode x character" counters -> 0xCA v2 ----
+// Client mirror: mvp src/systems/career.js (CAREER) + result-reporter.js 0xD8 char block; lockstep-pinned in mvp
+// test/ledger-schema-lockstep.js. Counting rule = the career counters' rule: valid + innocent count a game and its
+// time, only valid counts a win / loss and only in the quick / ranked cells; private / bots / endless count games +
+// time only. The character of a seat = per-seat majority over the writers' 0xD8 blocks (NEVER in the consistency
+// vector: a missing or disagreeing block can never stop a match from settling); no majority -> the seat owner's own
+// vote (moves only his own cells); else 0 (unknown). Solo endless and classic endless force the default miner (code 1).
+// Time = the writer's OWN record d[9] (local monotonic clock), clamped per mode; never min-of-writers (a writer who
+// under-reports must not drag the others down). State: xp.json per player cm = { "<mode>:<code>": [games, seconds,
+// wins, losses] } (only non-zero cells; exact seconds -- the board carries minutes).
+// v2 wire: [0xCA, 2, g, w, l, H, cells...], H = 0xC2 | modes << 8 | cols << 16 | wlMask << 24; per mode (wire order)
+// per column (code 0 .. cols-1): A = games | minutes << 16 (16 bits each, saturating), W/L modes add B = wins | losses << 16.
+// The first 5 ints keep the v1 meaning: deployed clients read only [2..4] and never look at the version.
+const CHAR_MAGIC = 0xD8;
+const CAREER_MATRIX_MAGIC = 0xC2;
+const CAREER_MODES = ['quick', 'ranked', 'private', 'bots', 'endless'];   // wire order, append-only
+const CAREER_WL_MASK = 0x3;   // quick + ranked carry wins / losses
+const CAREER_COLS = 5;        // code 0 (unknown) + characters 1..4 (= client CHARACTERS max code + 1; lockstep test)
+const CAREER_DUR_CAP = 3600, CAREER_ENDLESS_PER_LEVEL = 300, CAREER_ENDLESS_MIN_CAP = 600;
+const CAREER_SESSION_END = 1 | 2;   // segment flags SUSPENDED | FINAL: a segmented endless session ends -> counts one game
+function careerModeOfMt(mt) {
+  const b = baseMt(mt);
+  if (b === 1 || b === 3 || b === 5 || b === 8) return 0;
+  if (b === 2 || b === 4 || b === 6 || b === 9) return 1;
+  if (b === 10) return 2;
+  if (b === 11) return 3;
+  if (b === 7) return 4;
+  return -1;
+}
+// the 0xD8 block: from `from` onward, the first int whose low byte is 0xD8 and whose pc field matches -> codes per seat
+function decodeCharBlock(d, from, pc) {
+  if (!Array.isArray(d)) return null;
+  for (let i = Math.max(0, from | 0); i < d.length; i++) {
+    const h = d[i] | 0;
+    if ((h & 0xff) !== CHAR_MAGIC || ((h >>> 16) & 0xff) !== (pc | 0)) continue;
+    if (i + Math.ceil((pc | 0) / 4) > d.length - 1) return null;   // truncated block
+    const codes = [];
+    for (let k = 0; k < (pc | 0); k++) codes.push(((d[i + 1 + (k >> 2)] | 0) >>> (8 * (k & 3))) & 0xff);
+    return codes;
+  }
+  return null;
+}
+// per-seat character of one consistent group: majority over the writers' blocks (one vote per seat-writer)
+function careerSeatCodes(g) {
+  const pc = (g[0] && g[0].d[8]) | 0;
+  const from = 11 + 3 * pc + ((baseMt(g[0].d[2] | 0) === 7 && pc >= 2) ? 12 : 0);
+  const bySeat = {};
+  for (const r of g) { const s = r.d[5] | 0; if (bySeat[s] == null) bySeat[s] = r; }
+  const votes = [], own = {};
+  let withBlock = 0;
+  for (const s of Object.keys(bySeat)) {
+    const codes = decodeCharBlock(bySeat[s].d, from, pc);
+    if (!codes) continue;
+    withBlock++;
+    for (let i = 0; i < pc; i++) { const v = votes[i] = votes[i] || {}; v[codes[i]] = (v[codes[i]] | 0) + 1; }
+    own[s | 0] = codes[s | 0];
+  }
+  const codes = [], majority = [];
+  for (let i = 0; i < pc; i++) {
+    let best = 0, bestN = 0;
+    const v = votes[i] || {};
+    for (const k of Object.keys(v)) if (v[k] > bestN || (v[k] === bestN && (k | 0) < best)) { bestN = v[k]; best = k | 0; }
+    if (withBlock > 0 && bestN * 2 > withBlock) { codes[i] = best; majority[i] = true; }
+    else { codes[i] = own[i] != null ? (own[i] | 0) : 0; majority[i] = false; }
+  }
+  return { codes, majority, withBlock };
+}
+function careerSecOf(mode, d9, tail) {
+  const s = Math.max(0, d9 | 0);
+  if (mode !== 4) return Math.min(s, CAREER_DUR_CAP);
+  const lv = tail ? Math.max(0, (tail.endDepth | 0) - (tail.startDepth | 0)) : 0;
+  return Math.min(s, Math.max(CAREER_ENDLESS_MIN_CAP, lv * CAREER_ENDLESS_PER_LEVEL));
+}
+// one cell += (game?, seconds, win/loss/none) on a player's state
+function careerCellAdd(st, mode, code, sec, win, countGame) {
+  const cm = st.cm = (st.cm && typeof st.cm === 'object') ? st.cm : {};
+  const k = mode + ':' + (code | 0);
+  const a = cm[k] || (cm[k] = [0, 0, 0, 0]);
+  if (countGame !== false) a[0] += 1;
+  a[1] += Math.max(0, sec | 0);
+  if (win === true) a[2] += 1;
+  else if (win === false) a[3] += 1;
+}
+// matchmade / private / bots: every non-abandoner record writer of a settled group (seat-deduped)
+function creditCareerMatch(g, matchType, rankOf, xpState, touched) {
+  const mode = careerModeOfMt(matchType);
+  if (mode < 0 || mode === 4) return 0;
+  const sc = careerSeatCodes(g);
+  const recBySeat = {};
+  for (const r of g) { const s = r.d[5] | 0; if (recBySeat[s] == null) recBySeat[s] = r; }
+  let n = 0;
+  for (const seatKey of Object.keys(recBySeat)) {
+    const r = recBySeat[seatKey], seat = seatKey | 0, sid = String(r.steamID);
+    const cls = dispClassOf(r.dispCode);
+    if (cls === 'abandoner') continue;
+    const st = xpState[pid(sid)] = xpState[pid(sid)] || { lastWinDay: 0, games: 0 };
+    const win = (((CAREER_WL_MASK >> mode) & 1) && cls === 'valid' && rankOf) ? careerWon(matchType, rankOf[sid]) : null;
+    careerCellAdd(st, mode, sc.codes[seat] | 0, careerSecOf(mode, r.d[9], null), win, true);
+    if (touched) touched.add(sid);
+    n++;
+  }
+  return n;
+}
+// endless (co-op / team competitive / team classic / solo): opts.segmented = a session is cut into segments (one game per
+// session end); opts.forced = the mode forces the default miner (solo, classic)
+function creditCareerEndless(g, tail, xpState, touched, opts) {
+  const o = opts || {};
+  const sc = o.forced ? null : careerSeatCodes(g);
+  const recBySeat = {};
+  for (const r of g) { const s = r.d[5] | 0; if (recBySeat[s] == null) recBySeat[s] = r; }
+  const flags = (tail && tail.flags) | 0;
+  const countGame = !o.segmented || (flags & CAREER_SESSION_END) !== 0;
+  let n = 0;
+  for (const seatKey of Object.keys(recBySeat)) {
+    const r = recBySeat[seatKey], sid = String(r.steamID);
+    if (dispClassOf(r.dispCode) === 'abandoner') continue;
+    const st = xpState[pid(sid)] = xpState[pid(sid)] || { lastWinDay: 0, games: 0 };
+    const code = o.forced ? 1 : (sc.codes[seatKey | 0] | 0);
+    careerCellAdd(st, 4, code, careerSecOf(4, r.d[9], tail), null, countGame);
+    if (touched) touched.add(sid);
+    n++;
+  }
+  return n;
+}
 // the career block of one player's cumulative state (null = no career counters yet -> nothing to publish)
 function careerBlockOf(st) {
-  if (!st || !((st.cg | 0) || (st.cw | 0) || (st.cl | 0))) return null;
-  return [CAREER_MAGIC, CAREER_VER, st.cg | 0, st.cw | 0, st.cl | 0];
+  if (!st) return null;
+  const cm = (st.cm && typeof st.cm === 'object') ? st.cm : {};
+  const keys = Object.keys(cm);
+  if (!((st.cg | 0) || (st.cw | 0) || (st.cl | 0) || keys.length)) return null;
+  const cells = {};   // fold codes beyond the column count into column 0 (a newer client's character, before this cron knows it)
+  for (const k of keys) {
+    const [m, c] = k.split(':').map((x) => x | 0);
+    const kk = m + ':' + (c < CAREER_COLS ? c : 0);
+    const a = cm[k] || [], t = cells[kk] || (cells[kk] = [0, 0, 0, 0]);
+    for (let i = 0; i < 4; i++) t[i] += Math.max(0, a[i] | 0);
+  }
+  const c16 = (v) => Math.min(0xFFFF, Math.max(0, Math.floor(v)));
+  const out = [CAREER_MAGIC, CAREER_VER, st.cg | 0, st.cw | 0, st.cl | 0,
+    (CAREER_MATRIX_MAGIC | (CAREER_MODES.length << 8) | (CAREER_COLS << 16) | (CAREER_WL_MASK << 24)) | 0];
+  for (let m = 0; m < CAREER_MODES.length; m++) {
+    for (let c = 0; c < CAREER_COLS; c++) {
+      const a = cells[m + ':' + c] || [0, 0, 0, 0];
+      out.push((c16(a[0]) | (c16(a[1] / 60) << 16)) | 0);
+      if ((CAREER_WL_MASK >> m) & 1) out.push((c16(a[2]) | (c16(a[3]) << 16)) | 0);
+    }
+  }
+  return out;
+}
+// a player whose cells moved this run but whose XP did not (a day-capped friend room / bot match) still gets his row
+// rewritten -- same score, fresh block. Only when this run knows his board score (never write a guessed XP).
+function careerEnsureWrites(touched, changedXp, xp) {
+  let n = 0;
+  for (const sid of touched || []) {
+    if (changedXp[sid] != null) continue;
+    if (xp[sid] == null) continue;
+    changedXp[sid] = xp[sid] | 0;
+    n++;
+  }
+  return n;
 }
 // 5.4a S0 (2026-10-19): EVERY xp write carries the full career block. creditXp (matchmade) is the only
 // credit path that fills careerDet; a run in which a player only settled a friend-room / bot / endless
@@ -3766,12 +3922,16 @@ function careerBlockOf(st) {
 // block vanished from the board until his next matchmade settle (live read 2026-10-19: 20 of the 32 demo
 // players with career games had lost it -> their loading-card W/L showed "-" to everyone else). The
 // totals are cumulative in xpState, so the block is rebuilt from state, never read back from the old row.
+// 5.4a S2: the block is rebuilt for EVERY written sid from the run's final state (a matchmade settle early in the run
+// built careerDet before a later endless / bot settle of the same player added cells); a sid with no counters in state
+// keeps whatever creditXp built (none in practice). Returns how many sids had no block before.
 function fillCareerDetails(changedXp, careerDet, xpState) {
   let n = 0;
   for (const sid of Object.keys(changedXp || {})) {
-    if (careerDet[sid]) continue;
     const blk = careerBlockOf(xpState && xpState[pid(sid)]);
-    if (blk) { careerDet[sid] = blk; n++; }
+    if (!blk) continue;
+    if (!careerDet[sid]) n++;
+    careerDet[sid] = blk;
   }
   return n;
 }
@@ -3870,7 +4030,7 @@ function creditXp(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers,
     // detail write always carries the latest totals even across multiple settles in one run.
     if (cls === 'valid' || cls === 'innocent') st.cg = (st.cg | 0) + 1;
     if (cls === 'valid') { if (careerWon(matchType, rankOf[sid])) st.cw = (st.cw | 0) + 1; else st.cl = (st.cl | 0) + 1; }
-    if (careerDet && cls !== 'abandoner') careerDet[sid] = [CAREER_MAGIC, CAREER_VER, st.cg | 0, st.cw | 0, st.cl | 0];
+    if (careerDet && cls !== 'abandoner') careerDet[sid] = careerBlockOf(st);   // 5.4a: v2 (fillCareerDetails rebuilds it again from the run's final state before the write)
     console.log('  xp ' + plog(sid) + ' ' + cls + ' rank' + (rank0 + 1) + (firstWin ? ' dailyWin' : '') + ' x' + factor + (factor !== lf ? ' (record-only, would be x' + lf + ')' : '') + (pf !== 1 ? ' prog x' + pf : '') + (bm !== 1 ? ' boost x' + bm : '') + ' +' + gain + ' -> ' + (xp[sid] | 0) + ' career ' + (st.cg | 0) + 'g/' + (st.cw | 0) + 'w/' + (st.cl | 0) + 'l');
   }
 }
@@ -6971,7 +7131,7 @@ async function main() {
     console.log('on-demand base reads: ' + need.size + ' players (bulk window incomplete)');
   }
   const today = Math.floor(Date.now() / 86400000);   // UTC day index (matches client lastWinDay) for the daily-first bonus
-  const changed = {}; const changedLp = {}; const changedXp = {}; const changedCp = {}; const changedEndless = {}; const changedEndlessSeason = {}; const changedEndlessTrio = {}; const changedEndlessTrioSeason = {}; const changedEndlessQuad = {}; const changedEndlessQuadSeason = {}; const reveal = {}; const careerDet = {}; let settled = 0, voided = 0, settledEndless = 0, settledPrivate = 0, settledSolo = 0, settledEndlessComp = 0, settledBots = 0;
+  const changed = {}; const changedLp = {}; const changedXp = {}; const changedCp = {}; const changedEndless = {}; const changedEndlessSeason = {}; const changedEndlessTrio = {}; const changedEndlessTrioSeason = {}; const changedEndlessQuad = {}; const changedEndlessQuadSeason = {}; const reveal = {}; const careerDet = {}; const careerTouched = new Set(); let settled = 0, voided = 0, settledEndless = 0, settledPrivate = 0, settledSolo = 0, settledEndlessComp = 0, settledBots = 0;
   const lateCv = [];   // Q228: [entry key, sid, gains] of this run's convictions at a ranked settle (only writes that landed count, below)
   const changedEndlessSolo = {}, changedEndlessSoloSeason = {};   // O218 solo casual ladder write pools (client knife 3.7a)
   const changedEndlessClassicSolo = {};   // O216 classic solo lifetime ladder write pool (client knife 3.9b N2)
@@ -7319,6 +7479,8 @@ async function main() {
     if (!PT_MODE) { ratingHistUpsert(soloState, p, 'solo', f.seasonId, ratingRunId(key), f.endDepth, nowMs); ratingTouched.add(sid); }
     }
     if (xpId) creditXpEndless(c.g, { startDepth: Math.max(f.startDepth | 0, plan.proven | 0), endDepth: f.endDepth }, xp, changedXp, spSet, classic ? CLASSIC.XP_MUL : 1);   // audit B-F2: overlap credits new depth only; O216 classic x0.5
+    // 5.4a career: solo endless = the default miner (forced); one game per session end; an overlap segment with no new depth adds nothing
+    if (xpId && (plan.overlap == null || (f.endDepth | 0) > (plan.proven | 0))) creditCareerEndless(c.g, { startDepth: Math.max(f.startDepth | 0, plan.proven | 0), endDepth: f.endDepth | 0, flags: f.flags | 0 }, xpState, careerTouched, { segmented: true, forced: true });
     console.log('  solo settle ' + m + ': ' + plog(sid) + (classic ? ' classic' : (casual ? ' casual' : '')) + ' depth ' + f.startDepth + '->' + f.endDepth + ' bank ' + f.score + ' flags ' + f.flags + ((f.dispCode | 0) === attest.DISP_USER_QUIT ? ' (quit)' : '') + ' key=' + f.keyName + (v.sealed ? '' : ' [dev]') + (plan.overlap != null ? ' (overlap from ' + plan.overlap + ', proven ' + plan.proven + ')' : '') + (plan.truncated ? ' (recovered pool segment: truncated chain, head ' + plan.proven + ')' : '') + (plan.revive ? (classic ? ' (revived by a classic token resume)' : ' (revived by a casual token resume)') : ''));
     soloDone();
     return true;
@@ -7579,6 +7741,7 @@ async function main() {
           }
         }
         if (xpId) creditXpEndless(g, { startDepth: Math.max(f.startDepth | 0, plan.proven | 0), endDepth: f.endDepth | 0 }, xp, changedXp, spSet, CLASSIC.XP_MUL);
+        if (xpId && (plan.overlap == null || (f.endDepth | 0) > (plan.proven | 0))) creditCareerEndless(g, { startDepth: Math.max(f.startDepth | 0, plan.proven | 0), endDepth: f.endDepth | 0, flags: f.flags | 0 }, xpState, careerTouched, { segmented: true, forced: true });   // 5.4a: classic = default miner
         console.log('  endless-classic settle ' + c.m + ': pc ' + pc7 + ' depth ' + f.startDepth + '->' + f.endDepth + ' team ' + teamK + ' flags ' + f.flags + ' proven ' + plan.proven + (plan.revive ? ' (revived by a classic token resume)' : '') + (plan.overlap != null ? ' (overlap from ' + plan.overlap + ')' : ''));
         processed.add(c.m); settledEndlessClassic++;
         continue;
@@ -7678,6 +7841,8 @@ async function main() {
         }
         // audit B-F2: an overlap credits new depth only -- Q237: from each writer's own floor (teamXpStarts), never less than that rule
         if (xpId) creditXpEndless(catchUp ? g.filter((r) => catchUp.has(String(r.steamID))) : g, { startDepth: f.startDepth | 0, endDepth: f.endDepth | 0, startOf: (sid) => xpFrom[String(sid)] }, xp, changedXp, spSet);
+        // 5.4a career: the same writers as the XP credit (a catch-up = only the writers behind; the rest got this segment before)
+        if (xpId) creditCareerEndless(catchUp ? g.filter((r) => catchUp.has(String(r.steamID))) : g, { startDepth: f.startDepth | 0, endDepth: f.endDepth | 0, flags: f.flags | 0 }, xpState, careerTouched, { segmented: true, forced: false });
         teamXpMark(soloState.runs[key], g, f, headT0);
         if (catchUp) console.log('  endless-comp catch-up ' + c.m + ': pc ' + pc7 + ' depth ' + f.startDepth + '->' + f.endDepth + ' at the head ' + plan.proven + ' (' + plan0.reason + ') for ' + [...catchUp].map(plog).join('+') + ' -- chain left as it is');
         else console.log('  endless-comp settle ' + c.m + ': pc ' + pc7 + ' depth ' + f.startDepth + '->' + f.endDepth + ' team ' + teamT + ' flags ' + f.flags + ' proven ' + plan.proven + (plan.overlap != null ? ' (overlap from ' + plan.overlap + ')' : ''));
@@ -7811,6 +7976,7 @@ async function main() {
       // progress XP (2026-09-05): writers only, depth gain of THIS session; the pacing gate above already
       //   made the claimed gain cost real time, so the rate is bounded without a day cap.
       if (xpId) creditXpEndless(g, t, xp, changedXp, spSet);
+      if (xpId) creditCareerEndless(g, t, xpState, careerTouched, { segmented: false, forced: false });   // 5.4a career: one casual co-op record = one session
       console.log('  endless settle ' + c.m + ': pc ' + pc7 + ' depth ' + t.startDepth + '->' + t.endDepth + ' team ' + teamScore + (c.void ? ' (void disp majority -- settled anyway: co-op has no outcome to void)' : ''));
       processed.add(c.m); settledEndless++;
       continue;
@@ -7973,6 +8139,7 @@ async function main() {
       if (writerPaced(c.m, writerSids, pendP.t0, reqMsP)) continue;   // one match at a time per account
       countDay();
       if (xpId) creditXpPrivate(g, rankOf, lvP, xp, changedXp, xpState, today, spSet);
+      if (xpId) creditCareerMatch(g, matchType, rankOf, xpState, careerTouched);   // 5.4a career: games + time, no W/L (user 09-05)
       console.log('  private settle ' + c.m + ': ' + g.length + ' writers, lv ' + lvP + (c.void ? ' (void majority -- XP by class only, nothing else to void)' : ''));
       processed.add(c.m); settledPrivate++;
       continue;
@@ -7997,6 +8164,7 @@ async function main() {
       if (writerPaced(c.m, writerSids, pendB.t0, reqMsB)) continue;   // one match at a time per account (a lone writer cannot run parallel bot matches, R1-A2-01)
       countDay();
       if (xpId) creditXpBot(g, lvB, xp, changedXp, xpState, today, spSet, !!c.botLone);
+      if (xpId) creditCareerMatch(g, matchType, null, xpState, careerTouched);   // 5.4a career: games + time, no W/L (no ranks needed)
       console.log('  bots settle ' + c.m + ': ' + g.length + ' writer' + (g.length > 1 ? 's' : '') + ', lv ' + lvB + ' tier ' + botTierOf(matchType) + (c.botLone ? ' (lone lane x' + BOT_XP.loneMult + ')' : '') + (c.void ? ' (void majority -- XP by class only, nothing else to void)' : ''));
       processed.add(c.m); settledBots++;
       continue;
@@ -8008,6 +8176,7 @@ async function main() {
     const progFrac = xpProgressFrac(prog);
     if (progFrac !== 1) console.log('  progress ' + c.m + ': ' + prog + '/' + XP_CFG.progressLevels + ' levels -> points x' + progFrac);
     if (xpId) creditXp(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers, today, progFrac, careerDet, spSet);
+    if (xpId) creditCareerMatch(g, matchType, rankOf, xpState, careerTouched);   // 5.4a career matrix (mode x character; W/L in quick / ranked cells)
     // CP (the endless-economy wallet) earns from matchmade records on the same credit classes.
     // Playtest starter wallet first: writers only (a leaver whose first-ever appearance is the
     // leave itself earns the baseline on their first finished game instead).
@@ -8669,6 +8838,8 @@ async function main() {
       st.g = gains.reduce((a, y) => a + (lpOk.has(y[0]) ? y[1] : 0), 0);
     }
   }
+  const careerRewrites = careerEnsureWrites(careerTouched, changedXp, xp);   // 5.4a: cells moved, XP did not (day cap) -> rewrite the row, same score
+  if (careerRewrites) console.log('career: ' + careerRewrites + ' xp row(s) rewritten at the same score to publish new career cells');
   const careerRefilled = fillCareerDetails(changedXp, careerDet, xpState);   // 5.4a S0: no xp write without the career block
   if (careerRefilled) console.log('career block rebuilt from state for ' + careerRefilled + ' xp write(s) without a matchmade settle this run');
   const wXp = await mapPool(Object.keys(changedXp), CONCURRENCY, async (sid) => {
@@ -9045,4 +9216,4 @@ Object.assign(module.exports, { CUP, CUP_FAMS, ENDLESS_CUP_LB, ENDLESS_CUP_HONOR
   cupStandings, cupPodium, cupPodiumFor, cupVerdict, cupMarksOf, cupHonorEncode, cupHonorDecode, cupHonorPlan, cupHeldMasks, cupCarrierEncode, cupCarrierDecode, cupRevoke, pruneCup });   // O180 Gold Rush Cup (client knife 5.1c-1; test/endless-cup.js)   // O103 endless competitive rating (client knife 5.1a; test/endless-rating.js)
 Object.assign(module.exports, { lpWriteDetails, mhOfKey, groupSids, prunePendingWrites, PENDING_WRITES_FILE, RECEIPT_HOLD_MS });   // O480 points receipts + backlog (test/receipt-ring.js)
 Object.assign(module.exports, { lpReadStale, lpLastLive, LP_LAST_HOLD_MS });   // O481 the backlog's last write against a lagging read (test/stale-lp-read.js)
-Object.assign(module.exports, { careerBlockOf, fillCareerDetails });   // 5.4a S0 every xp write carries the career block (test/career-refill.js)
+Object.assign(module.exports, { careerBlockOf, fillCareerDetails, careerEnsureWrites, decodeCharBlock, careerSeatCodes, careerModeOfMt, careerSecOf, careerCellAdd, creditCareerMatch, creditCareerEndless, CHAR_MAGIC, CAREER_MATRIX_MAGIC, CAREER_MODES, CAREER_WL_MASK, CAREER_COLS });   // 5.4a S0 / S2 career block + matrix (test/career-refill.js, test/career-matrix.js, mvp ledger-schema-lockstep)

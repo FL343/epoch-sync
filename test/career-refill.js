@@ -24,8 +24,8 @@ const A = '76561198000000001', B = '76561198000000002', C = '76561198000000003';
 console.log('=== careerBlockOf ===');
 eq('no state -> null', careerBlockOf(null), null);
 eq('state without career counters -> null', careerBlockOf({ lastWinDay: 0, games: 0, pvDay: 5, pvXp: 40 }), null);
-eq('games only (innocent) -> block', careerBlockOf({ cg: 3 }), [CAREER_MAGIC, CAREER_VER, 3, 0, 0]);
-eq('full counters -> block', careerBlockOf({ cg: 12, cw: 5, cl: 6 }), [0xCA, 1, 12, 5, 6]);
+eq('games only (innocent) -> block head', careerBlockOf({ cg: 3 }).slice(0, 5), [CAREER_MAGIC, CAREER_VER, 3, 0, 0]);
+eq('full counters -> block head (v2 since 5.4a S2; the first 5 ints keep the v1 meaning)', careerBlockOf({ cg: 12, cw: 5, cl: 6 }).slice(0, 5), [0xCA, 2, 12, 5, 6]);
 
 console.log('=== fillCareerDetails ===');
 {
@@ -38,7 +38,7 @@ console.log('=== fillCareerDetails ===');
   const changedXp = { [A]: 500, [B]: 120, [C]: 900 };
   const n = fillCareerDetails(changedXp, careerDet, xpState);
   eq('refilled count', n, 1);
-  eq('A (xp changed via a non-matchmade path) gets its cumulative block', careerDet[A], [0xCA, 1, 10, 4, 5]);
+  eq('A (xp changed via a non-matchmade path) gets its cumulative block', careerDet[A].slice(0, 5), [0xCA, 2, 10, 4, 5]);
   eq('B (no career counters) stays without details', careerDet[B], undefined);
   eq('C (creditXp block this run) untouched', careerDet[C], [0xCA, 1, 1, 1, 0]);
   eq('sids whose xp did not change are not added', Object.keys(careerDet).sort(), [A, C].sort());
@@ -93,7 +93,7 @@ console.log('=== end to end: friend-room credit then refill keeps the block ==='
   assert('friend-room credit changed A xp', changedXp[A] > 1000);
   eq('friend-room credit did not build a career block', careerDet[A], undefined);
   fillCareerDetails(changedXp, careerDet, xpState);
-  eq('after refill A is written with its career block', careerDet[A], [0xCA, 1, 4, 2, 2]);
+  eq('after refill A is written with its career block', careerDet[A].slice(0, 5), [0xCA, 2, 4, 2, 2]);
   eq('B (no career yet) still writes without details', careerDet[B], undefined);
 }
 

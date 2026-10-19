@@ -63,11 +63,11 @@ const B = XP_CFG.base;
   creditXp(g, 1, scores, rankOf, xp, changedXp, xpState, leavers, TODAY, 1, det);
   eq('winner career 1g/1w/0l', [xpState[pid(A)].cg, xpState[pid(A)].cw | 0, xpState[pid(A)].cl | 0], [1, 1, 0]);
   eq('2nd career 1g/0w/1l', [xpState[pid(BB)].cg, xpState[pid(BB)].cw | 0, xpState[pid(BB)].cl | 0], [1, 0, 1]);
-  eq('careerDet[winner] = [MAGIC, ver, 1, 1, 0]', det[A], [CAREER_MAGIC, CAREER_VER, 1, 1, 0]);
-  eq('careerDet[3rd] = [MAGIC, ver, 1, 0, 1]', det[C], [CAREER_MAGIC, CAREER_VER, 1, 0, 1]);
+  eq('careerDet[winner] head = [MAGIC, ver, 1, 1, 0] (5.4a: v2 matrix follows)', det[A].slice(0, 5), [CAREER_MAGIC, CAREER_VER, 1, 1, 0]);
+  eq('careerDet[3rd] head = [MAGIC, ver, 1, 0, 1]', det[C].slice(0, 5), [CAREER_MAGIC, CAREER_VER, 1, 0, 1]);
   // second match same run: cumulative totals in det
   creditXp(g, 1, scores, rankOf, xp, changedXp, xpState, leavers, TODAY, 1, det);
-  eq('cumulative after 2nd settle: winner 2g/2w/0l', det[A], [CAREER_MAGIC, CAREER_VER, 2, 2, 0]);
+  eq('cumulative after 2nd settle: winner 2g/2w/0l', det[A].slice(0, 5), [CAREER_MAGIC, CAREER_VER, 2, 2, 0]);
 }
 
 // team match (mt=4): winning pair (team ranks 1,2) BOTH count wins
