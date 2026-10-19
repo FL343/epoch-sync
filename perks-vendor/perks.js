@@ -167,6 +167,33 @@ window.PERKS = (() => {
     for (const p of TABLE) (p.lv || []).forEach((e, k) => {
       if (e && e.emptyPullMul != null && !(typeof e.emptyPullMul === 'number' && e.emptyPullMul > 0 && e.emptyPullMul <= 1)) errs.push('emptyPullMul must be in (0, 1]: ' + p.key + ' Lv' + (k + 1));
     });
+    for (const p of TABLE) {
+      const id = p.id | 0;
+      if (p.rulesFrom != null && !(p.rulesFrom === (p.rulesFrom | 0) && p.rulesFrom >= 2)) errs.push('rulesFrom must be int >= 2: ' + p.key);
+      if (p.rulesFrom == null && !V2_META[id] && (p.tags == null || p.role == null)) errs.push('v1 entry missing V2_META (tags / role for rules v2): ' + p.key);
+      if (p.rulesFrom != null && (p.tags == null || p.role == null)) errs.push('rules v2 entry must carry tags and role: ' + p.key);
+      const f = poolFieldOf(p, V2_DEFAULT_OVERLAY);
+      if (!Array.isArray(f.tags) || !f.tags.length || f.tags.some(t => TAGS.indexOf(t) < 0)) errs.push('tags must be a non-empty subset of TAGS: ' + p.key);
+      if (ROLES.indexOf(f.role) < 0) errs.push('unknown role: ' + p.key + ' ' + f.role);
+      if (p.minDepth != null && !(p.minDepth === (p.minDepth | 0) && p.minDepth >= 0)) errs.push('minDepth must be int >= 0: ' + p.key);
+      if (p.needs != null && p.needs !== 'coop2') errs.push('unknown needs: ' + p.key + ' ' + p.needs);
+      if (p.excl != null) {
+        if (!Array.isArray(p.excl)) errs.push('excl must be an array: ' + p.key);
+        else for (const x of p.excl) {
+          const q = get(x);
+          if (!q || x === id) errs.push('excl points at unknown / self id: ' + p.key + ' -> ' + x);
+          else if (!Array.isArray(q.excl) || q.excl.indexOf(id) < 0) errs.push('excl must be symmetric: ' + p.key + ' -> ' + q.key);
+        }
+      }
+      if (p.rulesFrom != null) {
+        for (let k = 0; k < 2; k++) if (JSON.stringify(p.lv[k] || {}) === JSON.stringify(p.lv[k + 1] || {})) errs.push('rules v2 entry tiers must differ (no no-op upgrade): ' + p.key + ' Lv' + (k + 1) + '->Lv' + (k + 2));
+      }
+    }
+    for (const ok of Object.keys(POOL_OVERLAY)) for (const sid of Object.keys(POOL_OVERLAY[ok])) {
+      if (!get(sid | 0)) errs.push('POOL_OVERLAY ' + ok + ' unknown id ' + sid);
+      for (const fk of Object.keys(POOL_OVERLAY[ok][sid])) if (POOL_FIELDS.indexOf(fk) < 0) errs.push('POOL_OVERLAY ' + ok + ' id ' + sid + ' field outside POOL_FIELDS: ' + fk);
+    }
+    for (const ch of Object.keys(CAND_RULES)) for (const r of CAND_RULES[ch]) if ((r.ver | 0) >= 2 && !POOL_OVERLAY[r.overlay]) errs.push('CAND_RULES ' + ch + ' row overlay missing: ' + r.overlay);
     const C = cfg();
     const allMax = TABLE.map(p => Math.max.apply(null, p.lv.map(e => (e.valueMul && e.valueMul.all) || 1))).sort((a, b) => b - a);
     const top3All = (allMax[0] || 1) * (allMax[1] || 1) * (allMax[2] || 1);
@@ -669,11 +696,211 @@ window.PERKS = (() => {
   function descParams(id, lv) { const p = get(id); return p ? (p.p[Math.max(0, Math.min(2, (lv | 0) - 1))] || {}) : {}; }
   function iconOf(id) { const p = get(id); return p ? p.icon : ''; }
   function rarityOf(id) { const p = get(id); return p ? p.rarity : 'common'; }
-  function _poolEntriesV2() { throw new Error('perks: candidate rules v2 not implemented yet (knife 5.10a S2)'); }
-  function _candConstantsV2() { throw new Error('perks: candidate rules v2 not implemented yet (knife 5.10a S2)'); }
-  function _candidatesV2() { throw new Error('perks: candidate rules v2 not implemented yet (knife 5.10a S2)'); }
+  const V2 = Object.freeze({
+    CAND_SALT: 0x5A2D,
+    SUB: Object.freeze({ A: 0x101, B: 0x102, C: 0x103, X: 0x104, K: 0x105, O: 0x106 }),
+    RW: Object.freeze({ common: 10, rare: 5, epic: 2 }),
+    BAND_MUL: Object.freeze({ common: Object.freeze([1, 1, 1, 1]), rare: Object.freeze([1, 1.3, 1.6, 2]), epic: Object.freeze([0, 1, 1.5, 2]) }),
+    GATE_MUL: Object.freeze({ common: 0.3, rare: 2, epic: 3 }),
+    TAG_BIAS: 2, TAG_CAP: 2,
+    UP_MUL: 1.5,
+    UTIL_DEEP: 0.4,
+    MIN_FRESH: 6,
+    EPIC_GATE_MIN: 3,
+  });
+  const TAGS = ['heavy', 'quick', 'blast', 'rhythm', 'class', 'deep', 'cursed', 'time', 'collect', 'team', 'econ', 'freeze'];
+  const ROLES = ['steady', 'swing', 'utility'];
+  const V2_META = Object.freeze({
+    1: { tags: ['time'], role: 'steady' }, 2: { tags: ['time'], role: 'swing' }, 3: { tags: ['class', 'heavy'], role: 'steady' },
+    4: { tags: ['class'], role: 'steady' }, 5: { tags: ['blast'], role: 'steady' }, 6: { tags: ['freeze'], role: 'steady' },
+    7: { tags: ['heavy'], role: 'steady' }, 8: { tags: ['quick'], role: 'steady' }, 9: { tags: ['class'], role: 'utility' },
+    10: { tags: ['collect'], role: 'steady' }, 11: { tags: ['econ'], role: 'steady' }, 12: { tags: ['heavy'], role: 'swing' },
+    13: { tags: ['quick'], role: 'utility' }, 14: { tags: ['cursed'], role: 'swing' }, 15: { tags: ['rhythm'], role: 'swing' },
+    16: { tags: ['rhythm'], role: 'steady' }, 17: { tags: ['heavy'], role: 'swing' }, 18: { tags: ['time'], role: 'swing' },
+    19: { tags: ['quick'], role: 'swing' }, 20: { tags: ['econ'], role: 'swing' },
+  });
+  const POOL_OVERLAY = Object.freeze({
+    ea0: Object.freeze({ 6: Object.freeze({ modes: Object.freeze({ solo: true, coop: true, duel: true }) }), 20: Object.freeze({ rollable: false }) }),
+  });
+  const POOL_FIELDS = ['rarity', 'rollable', 'modes', 'tags', 'role'];
+  function poolFieldOf(p, overlayKey) {
+    const m = V2_META[p.id | 0] || {};
+    const o = (POOL_OVERLAY[overlayKey || V2_DEFAULT_OVERLAY] || {})[p.id | 0] || {};
+    const pick = (k, dflt) => (o[k] !== undefined ? o[k] : (p[k] !== undefined ? p[k] : (m[k] !== undefined ? m[k] : dflt)));
+    return { id: p.id | 0, axis: p.axis, rarity: pick('rarity', 'common'), rollable: !!pick('rollable', false), modes: pick('modes', {}), tags: pick('tags', []), role: pick('role', 'steady'),
+      contract: !!p.contract, minDepth: p.minDepth | 0, needs: p.needs || null, excl: Array.isArray(p.excl) ? p.excl : [] };
+  }
+  function _poolEntriesV2() {
+    return TABLE.filter(p => !(p.rulesFrom > 2)).sort((a, b) => (a.id | 0) - (b.id | 0)).map(p => {
+      const m = V2_META[p.id | 0] || {};
+      return { id: p.id | 0, key: String(p.key), axis: p.axis, rarity: p.rarity, scope: p.scope,
+        modes: { solo: !!(p.modes && p.modes.solo), coop: !!(p.modes && p.modes.coop), duel: !!(p.modes && p.modes.duel) },
+        rollable: !!p.rollable, contract: !!p.contract,
+        seasons: p.seasons ? { from: p.seasons.from == null ? null : (p.seasons.from | 0), until: p.seasons.until == null ? null : (p.seasons.until | 0) } : null,
+        rulesFrom: p.rulesFrom | 0, tags: (p.tags || m.tags || []).slice(), role: p.role || m.role || 'steady', minDepth: p.minDepth | 0, needs: p.needs || null,
+        excl: Array.isArray(p.excl) ? p.excl.slice().sort((a, b) => a - b) : [] };
+    });
+  }
+  function _candConstantsV2(overlayKey) {
+    return { algo: 2, perkSalt: PERK_SALT, seasonSalt: SEASON_SALT, candPickSalt: CAND_PICK_SALT, candN: CAND_N, slots: cfgNum('SLOTS'),
+      drawEvery: drawEvery(), gateEvery: gateEvery(), maxDraws: maxDraws(), pityEvery: cfgNum('PITY_EVERY'),
+      contractMax: cfgNum('CONTRACT_MAX'), contractMinDraw: cfgNum('CONTRACT_MIN_DRAW'), contractPMilli: cfgNum('CONTRACT_P_MILLI'),
+      v2: V2, tags: TAGS, roles: ROLES, overlay: POOL_OVERLAY[overlayKey] || null };
+  }
+  function sameTier(id, lv) {
+    const p = get(id);
+    if (!p || lv < 1 || lv >= 3) return false;
+    return JSON.stringify(p.lv[lv - 1] || {}) === JSON.stringify(p.lv[lv] || {});
+  }
+  function _wPick(rng, items, wOf) {
+    let tot = 0;
+    const ws = items.map(it => { const w = wOf(it); const v = (w > 0 && isFinite(w)) ? w : 0; tot += v; return v; });
+    if (!(tot > 0)) return null;
+    let x = rng() * tot;
+    for (let i = 0; i < items.length; i++) { if (ws[i] <= 0) continue; x -= ws[i]; if (x < 0) return items[i]; }
+    for (let i = items.length - 1; i >= 0; i--) if (ws[i] > 0) return items[i];
+    return null;
+  }
+  function _soft(list, preds) {
+    let cur = list;
+    for (const f of preds) { if (!f) continue; const nx = cur.filter(f); if (nx.length) cur = nx; }
+    return cur;
+  }
+  const _RIX = { common: 0, rare: 1, epic: 2 };
+  function _candidatesV2(sSeed, depth, build, drawIdx, skipBank, opts) {
+    const mode = (opts && opts.mode) || 'solo';
+    const sid = (opts && opts.seasonId != null) ? (opts.seasonId | 0) : 0;
+    const row = rulesRow(opts && opts.channel, sid);
+    const ov = row.overlay || V2_DEFAULT_OVERLAY;
+    const d = Math.max(0, depth | 0), k = drawIdx | 0;
+    const R = window.RNG;
+    const base = R.deriveSeed(drawSeed(sSeed, d, build), V2.CAND_SALT + candIdx((opts && opts.runSeed) | 0, d));
+    const sub = (s) => window.makeRNG(R.deriveSeed(base, s));
+    const rA = sub(V2.SUB.A), rB = sub(V2.SUB.B), rC = sub(V2.SUB.C), rX = sub(V2.SUB.X), rK = sub(V2.SUB.K), rO = sub(V2.SUB.O);
+    const slots = unpackBuild(build);
+    const held = slots.filter(Boolean);
+    const heldIds = new Set(held.map(s => s.id));
+    const fOf = new Map();
+    const F = (p) => { let f = fOf.get(p.id); if (!f) { f = poolFieldOf(p, ov); fOf.set(p.id, f); } return f; };
+    const heldF = held.map(s => get(s.id)).filter(Boolean).map(F);
+    const heldAxes = new Set(heldF.map(f => f.axis));
+    const tagShare = (f) => Math.min(V2.TAG_CAP, heldF.filter(h => h.tags.some(t => f.tags.indexOf(t) >= 0)).length);
+    const exclHit = (f) => f.excl.some(x => heldIds.has(x)) || heldF.some(h => h.excl.indexOf(f.id) >= 0);
+    const band = Math.min(3, Math.floor(d / gateEvery()));
+    const gate = k > 0 && isGateDepth(d);
+    const pityN = (cfg().PITY_EVERY | 0) || FALLBACK.PITY_EVERY;
+    const pity = k > 0 && !gate && (k % pityN) === pityN - 1;
+    const poolAll = TABLE.filter(p => {
+      if (p.rulesFrom > row.ver) return false;
+      const f = F(p);
+      return f.rollable && f.modes && f.modes[mode] && inSeason(p, sid) && f.minDepth <= d && (!f.needs || (f.needs === 'coop2' && mode === 'coop'));
+    });
+    const wNew = (p) => {
+      const f = F(p), r = f.rarity;
+      return (V2.RW[r] || 0) * ((V2.BAND_MUL[r] || [])[band] || 0) * (gate ? (V2.GATE_MUL[r] || 0) : 1) * (1 + V2.TAG_BIAS * tagShare(f)) * (f.role === 'utility' && band >= 2 ? V2.UTIL_DEEP : 1);
+    };
+    let pool = poolAll.filter(p => !F(p).contract && !heldIds.has(p.id) && !exclHit(F(p)) && wNew(p) > 0);
+    const prev = (opts && Array.isArray(opts.prevShown)) ? opts.prevShown : [];
+    if (prev.length) { const fresh = pool.filter(p => prev.indexOf(p.id) < 0); if (fresh.length >= V2.MIN_FRESH) pool = fresh; }
+    const cPool = poolAll.filter(p => F(p).contract && !heldIds.has(p.id) && !exclHit(F(p)));
+    const n = 3 + (skipBank ? 1 : 0);
+    const upsAll = held.filter(s => s.lv < 3 && !sameTier(s.id, s.lv)).map(_cardUp);
+    const wUp = (c) => (V2.RW[F(get(c.id)).rarity] || 0) * V2.UP_MUL;
+    const rOf = (c) => _RIX[F(get(c.id)).rarity] | 0;
+    const epicN = pool.filter(p => F(p).rarity === 'epic').length;
+    const floorC = (gate && band >= 2 && epicN >= V2.EPIC_GATE_MIN) ? 2 : ((gate || pity) ? 1 : 0);
+    const floorB = gate ? 1 : 0;
+    const cards = [];
+    const used = new Set();
+    const take = (c, pos) => { if (!c) return null; c.pos = pos; cards.push(c); used.add(c.id); return c; };
+    const left = () => pool.filter(p => !used.has(p.id));
+    const leftUps = () => upsAll.filter(c => !used.has(c.id));
+    const pickNew = (rng, list, mk) => { const p = _wPick(rng, list, wNew); return p ? mk(p) : null; };
+    const rollContract = (mk) => {
+      if (!(k >= cfgNum('CONTRACT_MIN_DRAW') && ((opts && opts.contractsSeen) | 0) < cfgNum('CONTRACT_MAX') && cPool.length > 0)) return null;
+      if (Math.floor(rK() * 1000) >= cfgNum('CONTRACT_P_MILLI')) return null;
+      const p = cPool[Math.floor(rK() * cPool.length)];
+      return mk(p);
+    };
+    const roleOf = (c) => F(get(c.id)).role, axisOf = (c) => get(c.id).axis;
+    if (held.length < 3) {
+      const free = _firstEmpty(slots);
+      const mkNew = (p) => _cardNew(p, free);
+      const contA = left().filter(p => heldAxes.has(p.axis) || tagShare(F(p)) > 0);
+      const aItems = leftUps().map(c => ({ up: c })).concat(contA.map(p => ({ p })));
+      const aPick = _wPick(rA, aItems, (it) => (it.up ? wUp(it.up) : wNew(it.p)));
+      if (aPick) take(aPick.up ? aPick.up : mkNew(aPick.p), 'A');
+      else take(pickNew(rA, left(), mkNew), 'A');
+      const aAx = cards.length ? axisOf(cards[0]) : null;
+      const bBase = _soft(left(), [floorB ? (p => _RIX[F(p).rarity] >= floorB) : null]);
+      const axes = [];
+      for (const p of bBase) if (!heldAxes.has(p.axis) && p.axis !== aAx && axes.indexOf(p.axis) < 0) axes.push(p.axis);
+      axes.sort((x, y) => AXES.indexOf(x) - AXES.indexOf(y));
+      let b = null;
+      if (axes.length) { const ax = axes[Math.floor(rB() * axes.length)]; b = pickNew(rB, bBase.filter(p => p.axis === ax), mkNew); }
+      if (!b) {
+        const bItems = bBase.map(p => ({ p })).concat(leftUps().map(c => ({ up: c })));
+        const bp = _wPick(rB, bItems, (it) => (it.up ? wUp(it.up) : wNew(it.p)));
+        b = bp ? (bp.up ? bp.up : mkNew(bp.p)) : null;
+      }
+      take(b, 'B');
+      const cc = rollContract(mkNew);
+      if (cc) take(cc, 'C');
+      else if (cards.length < n) {
+        const sameRole = cards.length >= 2 && roleOf(cards[0]) === roleOf(cards[1]) ? roleOf(cards[0]) : null;
+        const axSet = cards.map(axisOf);
+        const cItems = left().map(p => ({ p, f: F(p) })).concat(leftUps().map(c => ({ up: c, f: F(get(c.id)) })));
+        const cList = _soft(cItems, [floorC ? (it => _RIX[it.f.rarity] >= floorC) : null, sameRole ? (it => it.f.role !== sameRole) : null, (it => axSet.indexOf(it.f.axis) < 0)]);
+        const cp = _wPick(rC, cList, (it) => (it.up ? wUp(it.up) : wNew(it.p)));
+        if (cp) take(cp.up ? cp.up : mkNew(cp.p), 'C');
+      }
+      while (cards.length < n) {
+        const xItems = left().map(p => ({ p })).concat(leftUps().map(c => ({ up: c })));
+        const xp = _wPick(rX, xItems, (it) => (it.up ? wUp(it.up) : wNew(it.p)));
+        if (!xp) break;
+        take(xp.up ? xp.up : mkNew(xp.p), cards.length >= 3 ? 'X' : 'C');
+      }
+    } else {
+      const order = [0, 1, 2].filter(s => slots[s]).sort((x, y) => (slots[x].lv - slots[y].lv) || (x - y));
+      const targeted = [];
+      const nextTarget = (pref) => {
+        if (pref != null && targeted.indexOf(pref) < 0) { targeted.push(pref); return pref; }
+        for (const s of order) if (targeted.indexOf(s) < 0) { targeted.push(s); return s; }
+        return order[0];
+      };
+      const sameAxisSlot = (p) => { for (const s of order) if (targeted.indexOf(s) < 0 && get(slots[s].id) && get(slots[s].id).axis === p.axis) return s; return null; };
+      const ups = leftUps();
+      const u = _wPick(rA, ups, wUp);
+      if (u) take(u, 'A');
+      const bBase = _soft(left(), [floorB ? (p => _RIX[F(p).rarity] >= floorB) : null]);
+      const t1 = nextTarget(null);
+      const rb = pickNew(rB, bBase, (p) => _cardReplace(p, t1));
+      if (rb) take(rb, u ? 'B' : 'A');
+      if (!u) {
+        const p2 = _wPick(rA, _soft(left(), [floorB ? (p => _RIX[F(p).rarity] >= floorB) : null]), wNew);
+        if (p2) take(_cardReplace(p2, nextTarget(sameAxisSlot(p2))), 'B');
+      }
+      const cc = rollContract((p) => _cardReplace(p, nextTarget(sameAxisSlot(p))));
+      if (cc) take(cc, 'C');
+      else if (cards.length < n) {
+        const sameRole = cards.length >= 2 && roleOf(cards[0]) === roleOf(cards[1]) ? roleOf(cards[0]) : null;
+        const axSet = cards.map(axisOf);
+        const cList = _soft(left(), [floorC ? (p => _RIX[F(p).rarity] >= floorC) : null, sameRole ? (p => F(p).role !== sameRole) : null, (p => axSet.indexOf(p.axis) < 0)]);
+        const cp = _wPick(rC, cList, wNew);
+        if (cp) take(_cardReplace(cp, nextTarget(sameAxisSlot(cp))), 'C');
+      }
+      while (cards.length < n) {
+        const xp = _wPick(rX, left(), wNew);
+        if (!xp) break;
+        take(_cardReplace(xp, nextTarget(sameAxisSlot(xp))), cards.length >= 3 ? 'X' : 'C');
+      }
+    }
+    for (let i = cards.length - 1; i > 0; i--) { const j = Math.floor(rO() * (i + 1)); const t = cards[i]; cards[i] = cards[j]; cards[j] = t; }
+    return cards;
+  }
   return {
     CAND_RULES, rulesRow, rulesVer, candIdx, drawCtxAt, poolEntriesFor, candConstantsFor, candSigOfRow,
+    V2, TAGS, ROLES, V2_META, POOL_OVERLAY, poolFieldOf, sameTier,
     PERK_SALT, SEASON_SALT, CLS, CLS_KEYS, ITEM_CLS, T1_FIELDS, RENDER_ONLY, VALUE_MUL_KEYS, INV_KEYS, FLAG_KEYS, AXES, RARITIES, SCOPES,
     RARITY_BY_BAND, RARITY_GATE, FALLBACK,
     cfg, get, list, validateTable, clsOfItem, clsOfCreature,
