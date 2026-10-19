@@ -81,7 +81,7 @@ assert('all four settle call sites pass spSet', /creditXpBot\(g, lvB, xp, change
 assert('processSupporters: playtest hard-off + env appid gate + probes via CheckAppOwnership + capped plan', /const processSupporters = async \(xpMap, extraSids\) => \{\s*const spSet = new Set\(\);\s*if \(PT_MODE\) return spSet;\s*const S = supporters\.SUPPORTER;\s*if \(!S\.DLC_APPID\)/.test(vjs) && /DLC_APPID: Number\(process\.env\.SUPPORTER_DLC_APPID\) \|\| 0/.test(fs.readFileSync(path.join(__dirname, '..', 'supporters.js'), 'utf8'))
   && /ISteamUser\/CheckAppOwnership\/v2\//.test(vjs) && /supporters\.checkPlan\(st, cands, pid, nowMs\)/.test(vjs));
 assert('processSupporters runs on both early-exit paths (quiet days still reconcile the wall) and on the main path before settle',
-  (vjs.match(/await processSupporters\(null, \[\]\); writeRunSummary\(\); return; \}/g) || []).length === 2 && /const spSet = await processSupporters\(xp, spSids\);/.test(vjs));
+  (vjs.match(/await processSupporters\(null, \[\]\); await processClassicOwners\(null, \[\]\); writeRunSummary\(\); return; \}/g) || []).length === 2 && /const spSet = await processSupporters\(xp, spSids\);/.test(vjs));
 assert('wall writes: Descending board, score = wallScore(first-seen), ForceUpdate; opt-out (score 1) -> DeleteLeaderboardScore; grant bit via postFormDetails GRANT_MAGIC',
   /score: supporters\.wallScore\(e\.f\), scoremethod: 'ForceUpdate'/.test(vjs) && /if \(\(e\.score \| 0\) === 1\) optOut\.add/.test(vjs)
   && /DeleteLeaderboardScore\/v1\/', \{ key: KEY, appid: APPID, leaderboardid: wallId/.test(vjs) && /setGrantBit\(newMask, S\.GRANT_BIT\)/.test(vjs));

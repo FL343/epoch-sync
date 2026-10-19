@@ -101,7 +101,7 @@ const nowMin = () => Math.floor(Date.now() / 60000);
   T('[7] PT_MODE writes its own pulse too', pt.code === 0 && pulseWrites(pt).length === 1 && J(pulseWrites(pt)[0].details) === J([0xCC, PP.RULES_VER]), pt.out.slice(-500));
 }
 // ---- [8] wiring ----
-T('[8] both quiet returns write it before the supporter upkeep', (H.SRC.match(/await processChatMute\(\); await writePulse\(\); await processSupporters\(null, \[\]\); writeRunSummary\(\); return; \}/g) || []).length === 2);
+T('[8] both quiet returns write it before the supporter / classic upkeep', (H.SRC.match(/await processChatMute\(\); await writePulse\(\); await processSupporters\(null, \[\]\); await processClassicOwners\(null, \[\]\); writeRunSummary\(\); return; \}/g) || []).length === 2);
 T('[8] the main path writes it last, before the summary', /\n  await writePulse\(\);[^\n]*\n  writeRunSummary\(\);\n\}/.test(H.SRC));
 
 console.log(failN ? ('cron-pulse: ' + failN + ' FAIL') : 'cron-pulse: all ok');

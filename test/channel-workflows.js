@@ -88,6 +88,7 @@ console.log('-- reconcile twins --');
     //   unless its lane is hard-off under PT_MODE (pinned: the lane returns before it touches the file)
     const PT_OFF_LANES = {
       CAMPAIGN_ENDLESS_FILE: /const processCampaignEndless = async \(\) => \{\s*if \(PT_MODE\) return;/,   // Gold Rush: the campaign never ships on these channels
+      CLASSIC_FILE: /const processClassicOwners = async \(xpMap, writers\) => \{\s*if \(PT_MODE\) return;/,   // classic loyalty crate: main app only
     };
     const vjs = fs.readFileSync(path.join(__dirname, '..', 'validate.js'), 'utf8');
     const written = [...new Set(Array.from(vjs.matchAll(/writeStateFile\(([A-Z0-9_]+_FILE),/g), m => m[1]))].sort();

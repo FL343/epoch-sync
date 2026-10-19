@@ -86,15 +86,9 @@ function levelItems(level) { return GRANTS.LEVEL_ITEMS.filter(([, lv]) => (level
 
 // CheckAppOwnership (v4) -> the license start (ms) when the player bought it himself and kept it; else null.
 //   Not his own (family sharing: ownersteamid is the lender), not permanent (free weekend, family share, site
-//   license), cancelled by the user, or a site license -> null.
-function ownLicenseMs(json, sid) {
-  const a = json && json.appownership;
-  if (!a || a.ownsapp !== true || a.permanent !== true) return null;
-  if (a.sitelicense === true || a.usercanceled === true) return null;
-  if (String(a.ownersteamid) !== String(sid)) return null;
-  const t = Date.parse(a.timestamp);
-  return isFinite(t) && t > 0 ? t : null;
-}
+//   license), cancelled by the user, or a site license -> null. Shared with the reconcile job's classic-owner lane
+//   (ownership.js: one predicate, one test vector set).
+const { ownLicenseMs } = require('./ownership.js');
 // purchase items earned: license start + the refund window passed; first-weeks badge before launch + 14 days;
 //   veteran badge while early access lasts (licenses before its end); classic badge for the older game.
 function purchaseItems(mainMs, classicMs, nowMs, cfg) {

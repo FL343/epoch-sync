@@ -7,6 +7,7 @@ const perks = require('./perks.js');     // endless perk build replay (record ta
 const campaign = require('./campaign.js');   // O159 knife-7d: Vegas campaign clear attestation -> exclusive cosmetic grants
 const campaignEndless = require('./campaign-endless.js');   // knife 3.9b N4: Vegas Gold Rush run attestation -> per-difficulty best-only ladders + offense ledger
 const supporters = require('./supporters.js');   // supporter pack: DLC ownership probe -> wall board / grant bit / points bonus
+const classicOwners = require('./classic.js');   // classic loyalty crate: older-game ownership probe -> revocable grant bit (word 1)
 const chatMute = require('./chat-mute.js');     // chat moderation lane: report snapshots -> automatic mutes + expiry sweep + private mail digest
 // O480: the visible points rules (the LP tables, the series clamp, the mismatch / premade / team plans, the leaver fine) live in
 //   points-plan.js, one copy for this job and for the client (see its header). The environment knobs this file used to read
@@ -3675,6 +3676,9 @@ const XP_FILE = process.env.XP_FILE || 'xp.json';
 const SUPPORTERS_FILE = process.env.SUPPORTERS_FILE || 'supporters.json';
 function loadSupporters() { try { return JSON.parse(fs.readFileSync(SUPPORTERS_FILE, 'utf8')) || {}; } catch (e) { return {}; } }
 function saveSupporters(s) { try { writeStateFile(SUPPORTERS_FILE, JSON.stringify(s, null, 0)); } catch (e) { ghWarn('write ' + SUPPORTERS_FILE + ' failed: ' + (e && e.message)); } }
+const CLASSIC_FILE = process.env.CLASSIC_FILE || 'classic.json';
+function loadClassic() { try { return JSON.parse(fs.readFileSync(CLASSIC_FILE, 'utf8')) || {}; } catch (e) { return {}; } }
+function saveClassic(s) { try { writeStateFile(CLASSIC_FILE, JSON.stringify(s, null, 0)); } catch (e) { ghWarn('write ' + CLASSIC_FILE + ' failed: ' + (e && e.message)); } }
 const SUPPORTER_WALL_LB = process.env.SUPPORTER_WALL_LB || supporters.SUPPORTER.WALL_LB;
 const SUPPORTER_OPTOUT_LB = process.env.SUPPORTER_OPTOUT_LB || supporters.SUPPORTER.OPTOUT_LB;
 // chat moderation lane state (HMAC keyed by the lane's own pseudonyms CHAT_KEYS, Q190; Q209: tokens per harvested row and per
@@ -6448,6 +6452,10 @@ async function main() {
   // every exit path (wants arrive with or without settles, same rationale as reports/trust).
   // cpVals = in-memory post-settle balances on the main path (fresh -- avoids the read-lag on
   // just-written scores); null on the settle-free paths -> targeted reads per claimant.
+  // grant masks written earlier in THIS run (sid -> mask), by every grant-box lane. The classic lane (last in the run) ORs
+  //   word 0 from here into its board read: the permanent bits only ever grow, and a read that lags a write made seconds
+  //   earlier must not hand a stale word 0 back to the board.
+  const grantSeen = {};
   const processRedeems = async (cpVals) => {
     // playtest channel: the redeem/entitlement surface does not exist (lock layer 3) and this
     // resolver would otherwise CREATE its boards via find-or-create -- hard-disabled first.
@@ -6520,7 +6528,7 @@ async function main() {
         const gw = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: gtLb.id || gtLb.ID, steamid: w.sid, score: popcountWords(newMask), scoremethod: 'ForceUpdate', format: 'json' }, det);
         const gOk = gw.ok && !(gw.json && gw.json.result && gw.json.result.result && gw.json.result.result !== 1);
         if (!gOk) { ghWarn('grant write failed ' + plog(w.sid) + ': HTTP ' + gw.status + ' (deferred, no debit)'); continue; }
-        grantedBy[w.sid] = newMask;
+        grantedBy[w.sid] = newMask; grantSeen[w.sid] = newMask;
         nBits += plan.bits.length; nPlayers++;
         const dw = await postForm('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: cpIdF, steamid: w.sid, score: plan.balance, scoremethod: 'ForceUpdate', format: 'json' });
         const dOk = dw.ok && !(dw.json && dw.json.result && dw.json.result.result && dw.json.result.result !== 1);
@@ -6569,7 +6577,7 @@ async function main() {
         const gw = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: gtId, steamid: sid, score: popcountWords(newMask), scoremethod: 'ForceUpdate', format: 'json' }, det);
         const gOk = gw.ok && !(gw.json && gw.json.result && gw.json.result.result && gw.json.result.result !== 1);
         if (!gOk) { ghWarn('campaign grant write failed ' + plog(sid) + ': HTTP ' + gw.status + ' (deferred)'); continue; }
-        grantedBy[sid] = newMask;
+        grantedBy[sid] = newMask; grantSeen[sid] = newMask;
         nBits += newBits.length; nPlayers++;
         console.log('  campaign ' + plog(sid) + ': granted bits [' + newBits.join(' ') + '] tier=' + v.fields.tierBits + ' lastU=' + v.fields.lastU + ' credited=' + v.fields.credited + ' key=' + v.fields.keyName);
       }
@@ -6725,7 +6733,7 @@ async function main() {
               const det = [(GRANT_MAGIC | (GRANT_VER << 8)) | 0, Math.floor(nowMs / 60000) | 0, newMask[0] | 0, newMask[1] | 0];
               const gw = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: gtId, steamid: sid, score: popcountWords(newMask), scoremethod: 'ForceUpdate', format: 'json' }, det);
               const gOk = gw.ok && !(gw.json && gw.json.result && gw.json.result.result && gw.json.result.result !== 1);
-              if (gOk) { grantedBy[String(sid)] = newMask; nGrant++; } else ghWarn('supporter grant write failed ' + plog(sid) + ': HTTP ' + gw.status + ' (deferred)');
+              if (gOk) { grantedBy[String(sid)] = newMask; grantSeen[String(sid)] = newMask; nGrant++; } else ghWarn('supporter grant write failed ' + plog(sid) + ': HTTP ' + gw.status + ' (deferred)');
             }
           }
         }
@@ -6738,6 +6746,68 @@ async function main() {
       saveSupporters(st);
     } catch (e) { ghWarn('supporter channel failed: ' + (e && e.message)); }
     return spSet;
+  };
+  // Classic loyalty crate (classic.js header): probe the older game's license for known players (writers of this run
+  //   first, capped), then reconcile the REVOCABLE grant bit CLASSIC.BIT (word 1) with the state: owners get it, two
+  //   definite "not owned" answers in a row take it back. Runs LAST on every path (no other grant lane writes after it
+  //   in the run) and ORs the permanent word 0 from this run's other grant writes (grantSeen): it can only ever move its
+  //   own bit. Main app only (the crate is not offered on the playtest / demo apps).
+  const processClassicOwners = async (xpMap, writers) => {
+    if (PT_MODE) return;
+    const C = classicOwners.CLASSIC;
+    if (!C.APPID) { if (!processClassicOwners._warned) { processClassicOwners._warned = true; console.log('classic: CLASSIC_APPID unset -> lane off'); } return; }
+    try {
+      const st = loadClassic();
+      const list = (lr.json && lr.json.response && lr.json.response.leaderboards) || [];
+      const byName = (name) => { const f = list.find(x => String(x.name || x.Name) === name); return f ? (f.id || f.ID) : null; };
+      let known = xpMap;
+      if (!known) {
+        const xpId0 = XP_LB ? byName(XP_LB) : null;
+        known = {};
+        if (xpId0) { const br = await readBoardAll(xpId0, 'xp board (classic)'); for (const e of br.ents) known[e.steamID] = 1; }
+      }
+      const ws = (writers || []).map(String);
+      const cands = Array.from(new Set(Object.keys(known).map(String).concat(ws)));
+      const plan = classicOwners.checkPlan(st, cands, ws, pid, nowMs);
+      let nUnk = 0;
+      if (plan.length) {
+        const res = await mapPool(plan, 8, async (sid) => {
+          const r = await getJson(BASE + '/ISteamUser/CheckAppOwnership/v4/?key=' + KEY + '&steamid=' + sid + '&appid=' + C.APPID + '&format=json');
+          return r.ok ? classicOwners.probeResult(r.json, sid) : null;
+        });
+        res.forEach((o, i) => { const v0 = o.status === 'fulfilled' ? o.value : null; if (v0 == null) nUnk++; classicOwners.applyProbe(st, pid(plan[i]), v0, nowMs); });
+      }
+      const gtId = byName(GRANT_LB) || await findOrCreateBoard(GRANT_LB, true);
+      let nSet = 0, nClear = 0, nOwn = 0, nFail = 0;
+      if (gtId) {
+        const gb = await readBoardAll(gtId, 'grant box (classic)');
+        if (!gb.complete) ghWarn('classic: grant box read incomplete -> players missing from the read wait for the next run');
+        const onBoard = {};
+        for (const e of gb.ents) { const m = decodeGrantMask(decodeDetails(e.detailData)); if (m) onBoard[String(e.steamID)] = m; }
+        let budget = C.MAX_WRITES_PER_RUN;
+        for (const sid of cands) {
+          const e = st[pid(sid)];
+          if (!e) continue;
+          if (e.o) nOwn++;
+          if (!gb.complete && !onBoard[sid]) continue;   // row may sit on a page we did not get: never write over a mask we have not seen
+          const b0 = onBoard[sid] || [0, 0], seen = grantSeen[sid] || [0, 0];
+          const merged = [(b0[0] | seen[0]) | 0, b0[1] | 0];
+          const newMask = classicOwners.maskPlan(merged, !!e.o);
+          if (!newMask || budget <= 0) continue;
+          budget--;
+          if (!APPLY_MMR) { console.log('  classic ' + plog(sid) + ': dry-run, would ' + (e.o ? 'set' : 'clear') + ' bit ' + C.BIT); continue; }
+          const det = [(GRANT_MAGIC | (GRANT_VER << 8)) | 0, Math.floor(nowMs / 60000) | 0, newMask[0] | 0, newMask[1] | 0];
+          const gw = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: gtId, steamid: sid, score: popcountWords(newMask), scoremethod: 'ForceUpdate', format: 'json' }, det);
+          const gOk = gw.ok && !(gw.json && gw.json.result && gw.json.result.result && gw.json.result.result !== 1);
+          if (gOk) { grantSeen[sid] = newMask; if (e.o) nSet++; else nClear++; } else { nFail++; ghWarn('classic grant write failed ' + plog(sid) + ': HTTP ' + gw.status + ' (deferred)'); }
+        }
+      }
+      if (plan.length || nSet || nClear) {
+        console.log('classic: owners ' + nOwn + ' (probed ' + plan.length + ', unknown ' + nUnk + ') bit +' + nSet + ' -' + nClear + (nFail ? ' failed ' + nFail : '') + (APPLY_MMR ? '' : ' [dry-run]'));
+        RUN.classic = nOwn + 'o/' + plan.length + 'p' + (nSet ? '/+' + nSet : '') + (nClear ? '/-' + nClear : '');
+      }
+      saveClassic(st);
+    } catch (e) { ghWarn('classic owner lane failed: ' + (e && e.message)); }
   };
   // ---- chat moderation lane (public channel, knife 3.13c): harvest report snapshots -> automatic mutes + expiry sweep + private digest ----
   //   Rides every tick (idempotent: reporter watermark + per-window auto memory); boards are per app id (this job's APPID) so the
@@ -6819,11 +6889,11 @@ async function main() {
   const PT_MODE_MAIL_OFF = false;
 
   RUN.consistent = consistentMatches.length;
-  if (consistentMatches.length === 0) { console.log('no consistent matches'); await lpRetry(); persistStartsSide(); await maintainTrust(); { const st0 = loadSolo(); await maintainRating(st0, new Set()); if (await maintainCup(st0, null) && APPLY_MMR) saveSolo(st0, nowMs); } await processRedeems(null); await processCampaignGrants(); await processCampaignEndless(); await processChatMute(); await writePulse(); await processSupporters(null, []); writeRunSummary(); return; }
+  if (consistentMatches.length === 0) { console.log('no consistent matches'); await lpRetry(); persistStartsSide(); await maintainTrust(); { const st0 = loadSolo(); await maintainRating(st0, new Set()); if (await maintainCup(st0, null) && APPLY_MMR) saveSolo(st0, nowMs); } await processRedeems(null); await processCampaignGrants(); await processCampaignEndless(); await processChatMute(); await writePulse(); await processSupporters(null, []); await processClassicOwners(null, []); writeRunSummary(); return; }
   const fresh = consistentMatches.filter(c => !processed.has(c.m));
   RUN.fresh = fresh.length;
   console.log(consistentMatches.length + ' consistent, ' + fresh.length + ' fresh (settled ' + (consistentMatches.length - fresh.length) + ')');
-  if (fresh.length === 0) { console.log('no fresh matches, skip'); await lpRetry(); persistStartsSide(); await maintainTrust(); { const st0 = loadSolo(); await maintainRating(st0, new Set()); if (await maintainCup(st0, null) && APPLY_MMR) saveSolo(st0, nowMs); } await processRedeems(null); await processCampaignGrants(); await processCampaignEndless(); await processChatMute(); await writePulse(); await processSupporters(null, []); writeRunSummary(); return; }
+  if (fresh.length === 0) { console.log('no fresh matches, skip'); await lpRetry(); persistStartsSide(); await maintainTrust(); { const st0 = loadSolo(); await maintainRating(st0, new Set()); if (await maintainCup(st0, null) && APPLY_MMR) saveSolo(st0, nowMs); } await processRedeems(null); await processCampaignGrants(); await processCampaignEndless(); await processChatMute(); await writePulse(); await processSupporters(null, []); await processClassicOwners(null, []); writeRunSummary(); return; }
 
   // playtest channel: no rating board exists (and must not -- lock layer 3); the TrueSkill
   // update block below is skipped wholesale, so the id is never consulted.
@@ -9156,6 +9226,7 @@ async function main() {
   // above (passing the map avoids re-reading scores that global reads may still serve stale).
   await processRedeems(cp);
   await processCampaignGrants(); await processCampaignEndless();
+  await processClassicOwners(xp, spSids);   // last grant-box writer of the run (classic.js header)
   console.log('written: rating ' + rOk + '/' + wRating.length + ', points ' + pOk + '/' + wPoints.length + ', xp ' + xOk + '/' + wXp.length + ', cp ' + cOk + '/' + wCp.length + ', endless ' + eOk + '/' + wEndless.length + (wEndlessSeason.length ? (' (+season ' + esOk + '/' + wEndlessSeason.length + ')') : '') + (wEndlessTrio.length ? (' (+trio ' + etOk + '/' + wEndlessTrio.length + ')') : '') + (wEndlessTrioSeason.length ? (' (+trio-season ' + etsOk + '/' + wEndlessTrioSeason.length + ')') : '') + (wEndlessQuad.length ? (' (+quad ' + eqOk + '/' + wEndlessQuad.length + ')') : '') + (wEndlessQuadSeason.length ? (' (+quad-season ' + eqsOk + '/' + wEndlessQuadSeason.length + ')') : '') + (wEndlessSolo.length ? (' (+solo ' + esoOk + '/' + wEndlessSolo.length + ')') : '') + (wEndlessSoloSeason.length ? (' (+solo-season ' + esosOk + '/' + wEndlessSoloSeason.length + ')') : '') + ', state updated (idempotent)');
   RUN.writes = rOk + '/' + wRating.length + ' ' + pOk + '/' + wPoints.length + ' ' + xOk + '/' + wXp.length;
   RUN.writesEndless = cOk + '/' + wCp.length + ' ' + eOk + '/' + wEndless.length + (wEndlessSeason.length ? ('+' + esOk + '/' + wEndlessSeason.length) : '') + (wEndlessTrio.length ? ('+t' + etOk + '/' + wEndlessTrio.length) : '') + (wEndlessQuad.length ? ('+q' + eqOk + '/' + wEndlessQuad.length) : '') + (wEndlessSolo.length ? ('+s' + esoOk + '/' + wEndlessSolo.length) : '');
@@ -9166,7 +9237,7 @@ async function main() {
 if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
-module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CHAT_MUTE: chatMute.CHAT_MUTE, CHAT_MUTE_FILE, CHAT_MUTE_LB, CHAT_REPORT_LB, isVoidDisp, voidByConsensus, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, RS_SOLO_VS_TRIO, RS_TRIO_WIN, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, CONFESS_MAGIC, NOTE_MAGIC, NOTE_DISP, reconcileConfessions, SANITY, sanityFlags, sanitySplit, recordSanityFlags, SANITY_RECORD_SLUGS, SANITY_ROSTER_SLUGS, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, rekeyReports, repKeysReady, REP_KEYS, REP_KEYS_VER, CHAT_KEYS, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, trustIndex, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan, postForm, postFormDetails, findOrCreateBoard, isTestBoardName, sandboxOn, ghWarn, ghErr, PT_MODE, PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, ACTIVE_MATCH_LB, ptSeedCp, ptBoardPlan, PRIVATE_XP, isPrivateMt, privateProgressOf, creditXpPrivate, BOT_XP, isBotMt, botTierOf, botTierMult, botSeatSplit, botRanksOf, botRankEffOf, botXpGain, botProgressOf, creditXpBot, DEMO_APPID, ENDLESS_XP, computeXpEndless, creditXpEndless, CAMPAIGN_LB, SEEDCAP_REJECT_LADDER_MIN, seedcapRejectWindowMin, seedcapRejectUntilMin, seedcapRejectActive,
+module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CLASSIC_OWNERS: classicOwners.CLASSIC, CLASSIC_FILE, CHAT_MUTE: chatMute.CHAT_MUTE, CHAT_MUTE_FILE, CHAT_MUTE_LB, CHAT_REPORT_LB, isVoidDisp, voidByConsensus, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, RS_SOLO_VS_TRIO, RS_TRIO_WIN, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, CONFESS_MAGIC, NOTE_MAGIC, NOTE_DISP, reconcileConfessions, SANITY, sanityFlags, sanitySplit, recordSanityFlags, SANITY_RECORD_SLUGS, SANITY_ROSTER_SLUGS, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, rekeyReports, repKeysReady, REP_KEYS, REP_KEYS_VER, CHAT_KEYS, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, trustIndex, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan, postForm, postFormDetails, findOrCreateBoard, isTestBoardName, sandboxOn, ghWarn, ghErr, PT_MODE, PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, ACTIVE_MATCH_LB, ptSeedCp, ptBoardPlan, PRIVATE_XP, isPrivateMt, privateProgressOf, creditXpPrivate, BOT_XP, isBotMt, botTierOf, botTierMult, botSeatSplit, botRanksOf, botRankEffOf, botXpGain, botProgressOf, creditXpBot, DEMO_APPID, ENDLESS_XP, computeXpEndless, creditXpEndless, CAMPAIGN_LB, SEEDCAP_REJECT_LADDER_MIN, seedcapRejectWindowMin, seedcapRejectUntilMin, seedcapRejectActive,
   ENDLESS_COMP_LB, SAVE_BOX_LB, SOLO_FILE, COMP, soloSanity, soloChainPlan, rerollChain, soloMilestones, soloAdvance, soloRunKey, soloStartAttested, loadSolo, saveSolo, segOrderOf, segStartOf, freshOrder, freshOrderPaced, writerReadyAt, writerClaim,
   ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, SAVE_BOX_LB_DUO, SAVE_BOX_LB_TRIO, teamRunKey, soloMsSlot, groupRecords,
   ENDLESS_COMP_LB_QUAD, SAVE_BOX_LB_QUAD, ENDLESS_LB_QUAD, ENDLESS_MAX_PC, compFamKeyOf,   // client knife 3.7a (O178 four seats)
