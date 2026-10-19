@@ -3755,6 +3755,26 @@ function matchProgressOf(g) {
 // [CAREER_MAGIC, ver, games, wins, losses] alongside every XP write -- boot read-back overwrites
 // the optimistic counters the same way the XP score itself does.
 const CAREER_MAGIC = 0xCA, CAREER_VER = 1;
+// the career block of one player's cumulative state (null = no career counters yet -> nothing to publish)
+function careerBlockOf(st) {
+  if (!st || !((st.cg | 0) || (st.cw | 0) || (st.cl | 0))) return null;
+  return [CAREER_MAGIC, CAREER_VER, st.cg | 0, st.cw | 0, st.cl | 0];
+}
+// 5.4a S0 (2026-10-19): EVERY xp write carries the full career block. creditXp (matchmade) is the only
+// credit path that fills careerDet; a run in which a player only settled a friend-room / bot / endless
+// game used to write his xp row with NO details -> Steam replaces the whole details array -> the 0xCA
+// block vanished from the board until his next matchmade settle (live read 2026-10-19: 20 of the 32 demo
+// players with career games had lost it -> their loading-card W/L showed "-" to everyone else). The
+// totals are cumulative in xpState, so the block is rebuilt from state, never read back from the old row.
+function fillCareerDetails(changedXp, careerDet, xpState) {
+  let n = 0;
+  for (const sid of Object.keys(changedXp || {})) {
+    if (careerDet[sid]) continue;
+    const blk = careerBlockOf(xpState && xpState[pid(sid)]);
+    if (blk) { careerDet[sid] = blk; n++; }
+  }
+  return n;
+}
 function careerWon(matchType, rank) { return isTeamMt(matchType) ? ((rank | 0) <= teamSizeOfMt(matchType)) : ((rank | 0) === 1); }
 // repeat-leaver discount: gradient + minimum-sample gate in one, via min-denominator smoothing. values tunable on real data.
 const LEAVER_XP = { minSample: 20, tiers: [{ maxRate: 0.05, factor: 1.0 }, { maxRate: 0.15, factor: 0.5 }, { maxRate: 1.01, factor: 0.3 }] };
@@ -8649,9 +8669,12 @@ async function main() {
       st.g = gains.reduce((a, y) => a + (lpOk.has(y[0]) ? y[1] : 0), 0);
     }
   }
+  const careerRefilled = fillCareerDetails(changedXp, careerDet, xpState);   // 5.4a S0: no xp write without the career block
+  if (careerRefilled) console.log('career block rebuilt from state for ' + careerRefilled + ' xp write(s) without a matchmade settle this run');
   const wXp = await mapPool(Object.keys(changedXp), CONCURRENCY, async (sid) => {
     // career details ride every XP write ([CAREER_MAGIC, ver, games, wins, losses] -- the client's
-    // authoritative W/L read-back surface). A sid whose XP changed always has fresh career totals.
+    // authoritative W/L read-back surface). fillCareerDetails above rebuilt the block for every sid
+    // whose XP changed through a non-matchmade credit path (a bare write would erase it).
     const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: xpId, steamid: sid, score: changedXp[sid], scoremethod: 'ForceUpdate', format: 'json' }, careerDet[sid] || null);
     const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
     if (!okFlag) ghWarn('write xp ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
@@ -9022,3 +9045,4 @@ Object.assign(module.exports, { CUP, CUP_FAMS, ENDLESS_CUP_LB, ENDLESS_CUP_HONOR
   cupStandings, cupPodium, cupPodiumFor, cupVerdict, cupMarksOf, cupHonorEncode, cupHonorDecode, cupHonorPlan, cupHeldMasks, cupCarrierEncode, cupCarrierDecode, cupRevoke, pruneCup });   // O180 Gold Rush Cup (client knife 5.1c-1; test/endless-cup.js)   // O103 endless competitive rating (client knife 5.1a; test/endless-rating.js)
 Object.assign(module.exports, { lpWriteDetails, mhOfKey, groupSids, prunePendingWrites, PENDING_WRITES_FILE, RECEIPT_HOLD_MS });   // O480 points receipts + backlog (test/receipt-ring.js)
 Object.assign(module.exports, { lpReadStale, lpLastLive, LP_LAST_HOLD_MS });   // O481 the backlog's last write against a lagging read (test/stale-lp-read.js)
+Object.assign(module.exports, { careerBlockOf, fillCareerDetails });   // 5.4a S0 every xp write carries the career block (test/career-refill.js)
