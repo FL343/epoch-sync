@@ -320,8 +320,11 @@ console.log('-- wiring pins --');
   // perk replay (2026-09-07): every endless lane verifies the tail's pick log against its build (solo + team comp with the
   //   run's chain memory, casual co-op without), rejects are processed like chain rejects, and the memory keeps the log
   assert('perk replay wired into the solo lane (chain memory) + team comp lane + casual lane; rejects processed',
-    /perks\.verifyPerkPicks\(f, soloState\.runs\[key\], 1\)/.test(src) && /perks\.verifyPerkPicks\(f, soloState\.runs\[key\], pc7\)/.test(src)
-    && /perks\.verifyPerkPicks\(\{ build: t\.build >>> 0, picksLo: t\.picksLo \| 0, picksHi: t\.picksHi \| 0, seasonId: t\.seasonId \| 0, endDepth: t\.endDepth \| 0 \}, null, pc7\)/.test(src)
+    // knife 5.10a: every lane passes the job channel (rules v2 on EA, v1 on playtest / demo) and the run seed (team lanes fill it from d[4])
+    /perks\.verifyPerkPicks\(f, soloState\.runs\[key\], 1, PERK_CH\)/.test(src) && /perks\.verifyPerkPicks\(f, soloState\.runs\[key\], pc7, PERK_CH\)/.test(src)
+    && /perks\.verifyPerkPicks\(\{ build: t\.build >>> 0, picksLo: t\.picksLo \| 0, picksHi: t\.picksHi \| 0, seasonId: t\.seasonId \| 0, endDepth: t\.endDepth \| 0, runSeed: g\[0\]\.d\[4\] \| 0 \}, null, pc7, PERK_CH\)/.test(src)
+    && /rerollLo: t\.rerollLo >>> 0, rerollHi: t\.rerollHi >>> 0, runSeed: g\[0\]\.d\[4\] \| 0 \};/.test(src)
+    && /const PERK_CH = KEY_CHANNEL \|\| \(PT_MODE \? 'playtest' : 'ea'\);/.test(src)
     && (src.match(/perk REJECT \(/g) || []).length === 3 && /run\.pk = \{ lo: f\.picksLo \| 0, hi: f\.picksHi \| 0 \}/.test(src));
 }
 console.log('=== ' + (failN === 0 ? 'PASS' : 'FAIL') + ' — ' + failN + ' fail (solo-settle) ===');

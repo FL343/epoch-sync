@@ -1,7 +1,7 @@
 // generated file: comments stripped from the client-side source; regenerate with the companion repo's scripts/gen-perks-vendor.js (byte-locked there)
 window.PERKS = (() => {
   const FALLBACK = { SLOTS: 3, MAX_DRAWS: 20, DRAW_EVERY: 5, GATE_EVERY: 10, PICK_TIMEOUT_S: 20, PITY_EVERY: 3,
-    CONTRACT_MAX: 2, CONTRACT_MIN_DRAW: 3, CONTRACT_P_MILLI: 350, TIME_ADD_MIN: -20, VALUE_MUL_CAP: 1.9, CLASS_MUL_CAP: 20, TABLE_VER: 1 };
+    CONTRACT_MAX: 2, CONTRACT_MIN_DRAW: 3, CONTRACT_P_MILLI: 350, TIME_ADD_MIN: -20, VALUE_MUL_CAP: 1.9, CLASS_MUL_CAP: 20, TABLE_VER: 2 };
   function cfg() {
     const R = window.RANKED_CONFIG;
     return (R && R.ENDLESS && R.ENDLESS.PERKS) || FALLBACK;

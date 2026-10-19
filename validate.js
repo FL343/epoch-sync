@@ -1795,6 +1795,8 @@ const DEMO_APPID = Number(process.env.DEMO_APPID || 0);
 //   off (warned every run), retirement still applies. EVERY production read of attest-keys.json goes through loadJobPubTable
 //   (test/playtest-key-policy.js pins it).
 const KEY_CHANNEL = !PT_MODE ? 'ea' : (DEMO_APPID > 0 ? (APPID === DEMO_APPID ? 'demo' : 'playtest') : null);
+// knife 5.10a: perk candidate rules dispatch by channel (EA = rules v2, playtest / demo = v1); a PT job that cannot tell its channel stays v1
+const PERK_CH = KEY_CHANNEL || (PT_MODE ? 'playtest' : 'ea');
 const keyPolicyWarned = new Set();
 const keyPolicyWarn = (msg) => { if (!keyPolicyWarned.has(msg)) { keyPolicyWarned.add(msg); ghWarn(msg); } };   // once per message per run
 function loadJobPubTable(nowMs, exempt) {
@@ -7470,7 +7472,7 @@ async function main() {
     }
     // perk replay (2026-09-07): the pick log must reproduce the build (perk_forge) and extend the run's previous log (perk_chain).
     //   A causal contradiction, not a statistical one -> reject + processed, like a chain reject.
-    const pv = perks.verifyPerkPicks(f, soloState.runs[key], 1);
+    const pv = perks.verifyPerkPicks(f, soloState.runs[key], 1, PERK_CH);   // f = attest fields (carries runSeed)
     if (!pv.ok) {
       recordFlag(signals, c.g, m, nowMs); sigDirty = true; trustTouched.add(sid); RUN.perkRej = (RUN.perkRej | 0) + 1;
       ghWarn('match=' + m + ': solo segment ' + plog(sid) + ' perk REJECT (' + pv.reason + ': ' + pv.why + ') build ' + (f.build >>> 0) + ' depth ' + f.startDepth + '->' + f.endDepth);
@@ -7832,7 +7834,7 @@ async function main() {
         const key = teamRunKey(rosterSids, t.seasonId, g[0].d[4] | 0);
         const f = { startDepth: t.startDepth | 0, endDepth: t.endDepth | 0, flags: t.flags | 0,
           build: t.build >>> 0, picksLo: t.picksLo | 0, picksHi: t.picksHi | 0, seasonId: t.seasonId | 0,
-          rerollLo: t.rerollLo >>> 0, rerollHi: t.rerollHi >>> 0 };   // perk tail + reroll bitmap ride the same consensus vector
+          rerollLo: t.rerollLo >>> 0, rerollHi: t.rerollHi >>> 0, runSeed: g[0].d[4] | 0 };   // perk tail + reroll bitmap ride the same consensus vector; runSeed (d[4], same in the group) = rules v2 candidate set (knife 5.10a)
         // cloud audit Q237: the chain entry is read before the planner (XP floors + the head this settle starts from); a reject that
         //   is the shadow of a residual save point becomes a depth-0 overlap or a catch-up (teamRollbackPlan)
         const runT0 = soloState.runs[key], headT0 = runT0 ? (runT0.max | 0) : 0;
@@ -7853,7 +7855,7 @@ async function main() {
           processed.add(c.m);
           continue;
         }
-        const pvT = perks.verifyPerkPicks(f, soloState.runs[key], pc7);   // shared team build: the co-op draw pool, same replay + chain rules
+        const pvT = perks.verifyPerkPicks(f, soloState.runs[key], pc7, PERK_CH);   // shared team build: the co-op draw pool, same replay + chain rules
         if (!pvT.ok) {
           if (!catchUp) { recordFlag(signals, g, c.m, nowMs); sigDirty = true; RUN.perkRej = (RUN.perkRej | 0) + 1; }   // Q237: a catch-up was a plain chain-back reject before (never flagged)
           ghWarn('match=' + c.m + ': team comp segment perk REJECT (' + pvT.reason + ': ' + pvT.why + ') build ' + (f.build >>> 0) + ' depth ' + f.startDepth + '->' + f.endDepth + ' ' + rosterSids.map(plog).join('+') + (catchUp ? ' (catch-up, nobody flagged)' : ''));
@@ -7928,7 +7930,7 @@ async function main() {
         processed.add(c.m);
         continue;
       }
-      const pvC = perks.verifyPerkPicks({ build: t.build >>> 0, picksLo: t.picksLo | 0, picksHi: t.picksHi | 0, seasonId: t.seasonId | 0, endDepth: t.endDepth | 0 }, null, pc7);
+      const pvC = perks.verifyPerkPicks({ build: t.build >>> 0, picksLo: t.picksLo | 0, picksHi: t.picksHi | 0, seasonId: t.seasonId | 0, endDepth: t.endDepth | 0, runSeed: g[0].d[4] | 0 }, null, pc7, PERK_CH);
       if (!pvC.ok) {
         recordFlag(signals, g, c.m, nowMs); sigDirty = true; RUN.perkRej = (RUN.perkRej | 0) + 1;
         ghWarn('match=' + c.m + ': endless perk REJECT (' + pvC.reason + ': ' + pvC.why + ') build ' + (t.build >>> 0) + ' depth ' + t.startDepth + '->' + t.endDepth);

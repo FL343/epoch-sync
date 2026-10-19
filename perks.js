@@ -23,7 +23,8 @@ const path = require('path');
 //   claims a contract at an earlier draw (or a third one) cannot reproduce its build (perk_forge). TIME_ADD_MIN = table-level tripwire only.
 // 2026-10-01: table caps retuned with the perk value table (TIME_ADD_MIN -30 -> -20, VALUE_MUL_CAP 1.6 -> 1.9, CLASS_MUL_CAP 25 -> 20). None of the three feeds
 //   candidates() (the candidate signature is unchanged), so in-chain pick logs replay exactly as before.
-const PERKS_CFG = { SLOTS: 3, MAX_DRAWS: 20, DRAW_EVERY: 5, GATE_EVERY: 10, PICK_TIMEOUT_S: 20, PITY_EVERY: 3, CONTRACT_MAX: 2, CONTRACT_MIN_DRAW: 3, CONTRACT_P_MILLI: 350, TIME_ADD_MIN: -20, VALUE_MUL_CAP: 1.9, CLASS_MUL_CAP: 20, TABLE_VER: 1 };
+const PERKS_CFG = { SLOTS: 3, MAX_DRAWS: 20, DRAW_EVERY: 5, GATE_EVERY: 10, PICK_TIMEOUT_S: 20, PITY_EVERY: 3, CONTRACT_MAX: 2, CONTRACT_MIN_DRAW: 3, CONTRACT_P_MILLI: 350, TIME_ADD_MIN: -20, VALUE_MUL_CAP: 1.9, CLASS_MUL_CAP: 20, TABLE_VER: 2 };
+// 2026-10-19 (knife 5.10a): TABLE_VER 2 = the client fixture now also pins the rules-v2 (EA) candidate signature; v1 candidates are unchanged.
 const VENDOR_DIR = path.join(__dirname, 'perks-vendor');
 const VENDOR_FILES = ['rng.js', 'perks.js'];   // load order: the table module reads window.RNG / window.makeRNG
 
@@ -49,9 +50,16 @@ function isPrefix(prevLo, prevHi, curLo, curHi) {
   return true;
 }
 
-// f: tail fields { build, picksLo, picksHi, seasonId, endDepth }; run: chain memory ({ pk: {lo, hi} } or null); pc: seats
+// Candidate rules by release channel + season (knife 5.10a, 2026-10-19): the EA appid uses rules v2 from its first season, playtest /
+//   demo keep v1 forever (the vendor's CAND_RULES). ch = the job's channel ('ea' | 'playtest' | 'demo'); missing = v1 (old callers /
+//   tests unchanged). v2 also needs the run seed (per-run candidate set, same granularity as the world route) -> f.runSeed (record d[4]).
+//   A caller that forgets ch on the EA job would replay v2 logs with v1 = honest players perk_forge: the three validate lanes and the
+//   two seedcap calls are pinned by test/solo-settle.js + test/channel-perk-rules.js.
+function replayOpts(f, pc, ch) { return { mode: modeOf(pc), seasonId: (f && f.seasonId) | 0, channel: ch, runSeed: (f && f.runSeed) | 0 }; }
+
+// f: tail fields { build, picksLo, picksHi, seasonId, endDepth, runSeed }; run: chain memory ({ pk: {lo, hi} } or null); pc: seats; ch: channel
 //   -> { ok: true, n, build } | { ok: false, reason: 'perk_forge' | 'perk_chain', why }
-function verifyPerkPicks(f, run, pc) {
+function verifyPerkPicks(f, run, pc, ch) {
   const P = load();
   const build = (f && f.build) >>> 0, lo = (f && f.picksLo) | 0, hi = (f && f.picksHi) | 0;
   const arr = P.unpackPicks(lo, hi);
@@ -62,7 +70,7 @@ function verifyPerkPicks(f, run, pc) {
   if (n === 0) return build === 0 ? { ok: true, n: 0, build: 0 } : { ok: false, reason: 'perk_forge', why: 'build-without-picks' };
   // seasonId also selects the season window of the pool (client knife 3.5d: table entries may carry seasons {from, until};
   //   a perk that opens next season is not offered when replaying this season's log, exactly like the client drew it)
-  const r = P.replay(P.seasonSeed(f.seasonId | 0), arr, f.endDepth | 0, { mode: modeOf(pc), seasonId: f.seasonId | 0 });
+  const r = P.replay(P.seasonSeed(f.seasonId | 0), arr, f.endDepth | 0, replayOpts(f, pc, ch));
   if (!r.ok) return { ok: false, reason: 'perk_forge', why: String(r.why) + (r.at != null ? '@' + r.at : '') };
   if ((r.build >>> 0) !== build) return { ok: false, reason: 'perk_forge', why: 'build-mismatch' };
   return { ok: true, n, build };
@@ -73,7 +81,7 @@ function verifyPerkPicks(f, run, pc) {
 //   (candidate rule changes -- knife 5.10a season variants -- reach both callers at once). The record tail's build word is the build at
 //   the END of the record; a segment [sd, ed] earns its levels with the build after the draw at depth sd (and, for a session-level
 //   record, one per draw: buildsOf). A log that does not replay is the reconcile's perk_forge -> { ok: false } (caller steps aside).
-function buildAt(f, depth, pc) {
+function buildAt(f, depth, pc, ch) {
   const P = load();
   const lo = (f && f.picksLo) | 0, hi = (f && f.picksHi) | 0;
   const arr = P.unpackPicks(lo, hi);
@@ -82,23 +90,23 @@ function buildAt(f, depth, pc) {
   const m = Math.min(n, P.maxDrawsByDepth(depth | 0));
   const cut = arr.slice(0, m);
   while (cut.length < 20) cut.push(0);
-  const r = P.replay(P.seasonSeed(f.seasonId | 0), cut, depth | 0, { mode: modeOf(pc), seasonId: f.seasonId | 0 });
+  const r = P.replay(P.seasonSeed(f.seasonId | 0), cut, depth | 0, replayOpts(f, pc, ch));
   if (!r.ok) return { ok: false, reason: 'perk_forge', why: String(r.why) + (r.at != null ? '@' + r.at : '') };
   return { ok: true, build: r.build >>> 0, n: m, total: n };
 }
 // Per-draw build list b_k (k = 1..n; the build after draw k = at depth k * DRAW_EVERY) for a session-level record -> seedcap CLI builds= token
-function buildsOf(f, pc) {
+function buildsOf(f, pc, ch) {
   const P = load();
   const arr = P.unpackPicks((f && f.picksLo) | 0, (f && f.picksHi) | 0);
   const n = P.picksCount(arr);
   if (n < 0) return { ok: false, reason: 'perk_forge', why: 'picks-shape' };
   const builds = [];
   for (let k = 1; k <= n; k++) {
-    const r = buildAt(f, k * P.drawEvery(), pc);
+    const r = buildAt(f, k * P.drawEvery(), pc, ch);
     if (!r.ok) return r;
     builds.push(r.build);
   }
   return { ok: true, builds, n };
 }
 
-module.exports = { PERKS_CFG, VENDOR_DIR, VENDOR_FILES, load, modeOf, isPrefix, verifyPerkPicks, buildAt, buildsOf };
+module.exports = { PERKS_CFG, VENDOR_DIR, VENDOR_FILES, load, modeOf, isPrefix, replayOpts, verifyPerkPicks, buildAt, buildsOf };

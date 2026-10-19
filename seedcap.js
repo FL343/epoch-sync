@@ -86,6 +86,9 @@ const SEEDCAP_CLI = process.env.SEEDCAP_CLI || './seedcap_cli.exe';
 // on disk -> the root CLI (SEEDCAP_CLI) exactly as before, so this reads older artifact layouts unchanged.
 const SEEDCAP_DIST_DIR = process.env.SEEDCAP_DIST_DIR || path.dirname(SEEDCAP_CLI);
 const SEEDCAP_CHANNEL = process.env.SEEDCAP_CHANNEL || '';
+// knife 5.10a: perk candidate rules dispatch (EA = rules v2, playtest / demo = v1). Never v.KEY_CHANNEL: the seedcap jobs set no PT_MODE,
+//   so it reads 'ea' on every job (demo / playtest logs would replay with v2 and skip capping). Empty = v1 (conservative).
+const PERK_CH = SEEDCAP_CHANNEL || 'playtest';
 const OVERLAP_GRACE_MS = 12 * 3600 * 1000;
 const OVERLAP_MAX_MS = 7 * 86400 * 1000;
 const AUDITED_KEEP = Math.max(500, Number(process.env.SC_AUDITED_KEEP || 4000));
@@ -140,12 +143,12 @@ function capParamsOf(mt, pc, tail) {
     if (!classic && tail) {
       buildEnd = (tail.build != null) ? (tail.build >>> 0) : 0;
       if (buildEnd || (tail.picksLo | 0) || (tail.picksHi | 0)) {
-        const rb = perks.buildAt(tail, tail.startDepth | 0, pc);
+        const rb = perks.buildAt(tail, tail.startDepth | 0, pc, PERK_CH);
         if (!rb.ok) replayErr = rb.reason + ':' + rb.why;
         else {
           build = rb.build >>> 0;
           if (pc >= 2 && !((tail.flags | 0) & attest.SEG_COMP)) {
-            const rl = perks.buildsOf(tail, pc);
+            const rl = perks.buildsOf(tail, pc, PERK_CH);
             if (!rl.ok) replayErr = rl.reason + ':' + rl.why;
             else if (rl.builds.length) builds = rl.builds;
           }
@@ -323,8 +326,11 @@ function chainStartBank(st, rosterPids, pc, startDepth, runSeed) {
 // tail of an endless record by its writer's layout: a guard-signed solo record (pc 1) has its own int layout (attest.soloTail; a pc=1
 //   record that is not one falls back to the team-shaped read), everything else = the client team tail (validate.endlessTail)
 function tailOf(d) {
-  if ((d[8] | 0) === 1) { const t = attest.soloTail(d); if (t) return t; }
-  return v.endlessTail(d);
+  let t = null;
+  if ((d[8] | 0) === 1) t = attest.soloTail(d);
+  if (!t) t = v.endlessTail(d);
+  if (t && t.runSeed == null) t.runSeed = d[4] | 0;   // knife 5.10a: rules v2 candidate set needs the run seed (d[4] in every layout)
+  return t;
 }
 // registered core of the package that signed a solo record (live.json window whose buildNum == keyId); null = unknown / pre-core package
 function coreForBuildNum(live, channel, buildNum) {
