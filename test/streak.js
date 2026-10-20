@@ -237,15 +237,17 @@ const skOf = (r, sid) => { const e = (r.state.XP_FILE || {})[v.pid(sid)]; return
   const W3 = match(2, 0x5B304, [E, F], [0, 1]);
   let recs = [];
   const add = (...xs) => { for (const x of xs) recs = recs.concat(x); return recs.slice(); };
+  // every step 7 minutes (the 5-minute start age and the one-match-at-a-time gap with margin: a fake-clock run of the suite
+  //   gives each cron process the same instant, so a step exactly at 5 minutes flips on milliseconds)
   const m = run([
     [0, add(L.S)],
-    [5 * MIN, add(W1.S)],
-    [5 * MIN, add(W1.R)],
-    [6 * MIN, add(W2.S)],
-    [5 * MIN, add(W2.R)],
-    [6 * MIN, add(W3.S)],
-    [5 * MIN, add(W3.R)],
-    [6 * MIN, add(L.R)],
+    [7 * MIN, add(W1.S)],
+    [7 * MIN, add(W1.R)],
+    [7 * MIN, add(W2.S)],
+    [7 * MIN, add(W2.R)],
+    [7 * MIN, add(W3.S)],
+    [7 * MIN, add(W3.R)],
+    [7 * MIN, add(L.R)],
   ], {});
   const done = settledKeys(m);
   T('[10] every match settled', m.okAll && [L, W1, W2, W3].every((x) => done.has(x.key)), m.out.slice(-800));
@@ -270,7 +272,7 @@ const skOf = (r, sid) => { const e = (r.state.XP_FILE || {})[v.pid(sid)]; return
   const mm = match(2, 0x5B311, [P, Q], [0]);
   const conf = { sid: Q, d: H.rec(0xB5, 2, 0x5B311, 1, 0, false, [P, Q], [6000, 5000], 5) };   // Q quits (user-quit)
   const files0 = { XP_FILE: { [v.pid(Q)]: { lastWinDay: 0, games: 4, sk: { p: 3, b: 3 } } } };
-  const m = run([[0, mm.S], [5 * MIN, mm.S.concat([conf])]], {}, files0);
+  const m = run([[0, mm.S], [7 * MIN, mm.S.concat([conf])]], {}, files0);
   const sk = skOf(m.last, Q);
   T('[11] the run returned early (no settle group)', /no (consistent|fresh) match/.test(m.last.out), m.last.out.slice(-400));
   T('[11] the break landed in the XP state file (3 -> 0), sorted at the match\'s start', sk && SP.current(sk).cur === 0 && sk.e.length === 1 && sk.e[0][1] === mm.mh && sk.e[0][2] === 3, J(sk));
@@ -280,7 +282,7 @@ const skOf = (r, sid) => { const e = (r.state.XP_FILE || {})[v.pid(sid)]; return
 {
   const X = H.SID(9221), Y = H.SID(9222), Z = H.SID(9223);
   const mm = match(2, 0x5B321, [X, Y, Z], [0, 1]);   // Z writes his start and leaves
-  const steps = [[0, mm.S], [5 * MIN, mm.S.concat(mm.R)], [GRACE, mm.S.concat(mm.R)], [LEAVE, mm.S.concat(mm.R)], [3 * HOUR, mm.S.concat(mm.R)]];
+  const steps = [[0, mm.S], [7 * MIN, mm.S.concat(mm.R)], [GRACE, mm.S.concat(mm.R)], [LEAVE, mm.S.concat(mm.R)], [3 * HOUR, mm.S.concat(mm.R)]];
   const prog0 = { [Z]: { score: 5000, details: [] } };
   const m = run(steps, prog0, { XP_FILE: { [v.pid(Z)]: { lastWinDay: 0, games: 9, cg: 9, cw: 5, cl: 4, sk: { p: 4, b: 4 } } } });
   const sk = skOf(m.last, Z), wz = xpWrites(m, Z);
@@ -289,7 +291,7 @@ const skOf = (r, sid) => { const e = (r.state.XP_FILE || {})[v.pid(sid)]; return
   T('[12] Z\'s row rewritten, same score, with the tail', wz.length === 1 && wz[0].score === 5000 && (() => { const t = SP.tailOf(wz[0].details, 41); return t && t.cur === 4; })(), J(wz));
   // again within the week: a break
   const mm2 = match(2, 0x5B322, [X, Y, Z], [0, 1]);
-  const m2 = run([[0, mm2.S], [5 * MIN, mm2.S.concat(mm2.R)], [GRACE, mm2.S.concat(mm2.R)], [LEAVE, mm2.S.concat(mm2.R)], [3 * HOUR, mm2.S.concat(mm2.R)]],
+  const m2 = run([[0, mm2.S], [7 * MIN, mm2.S.concat(mm2.R)], [GRACE, mm2.S.concat(mm2.R)], [LEAVE, mm2.S.concat(mm2.R)], [3 * HOUR, mm2.S.concat(mm2.R)]],
     m.prog, { XP_FILE: m.last.state.XP_FILE });
   const sk2 = skOf(m2.last, Z), wz2 = xpWrites(m2, Z);
   T('[12] the next absence within the week breaks (0)', sk2 && SP.current(sk2).cur === 0 && sk2.e.some((e) => e[1] === mm2.mh && e[2] === 3), J(sk2));
