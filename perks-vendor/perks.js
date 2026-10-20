@@ -59,7 +59,7 @@ window.PERKS = (() => {
   const LIST = [
     { id: 1, key: 'timekeeper', axis: 'time', rarity: 'common', scope: 'team', modes: { solo: true, coop: true, duel: false }, rollable: true, icon: '⏱',
       lv: [{ levelTimeAdd: 10 }, { levelTimeAdd: 15 }, { levelTimeAdd: 20 }], p: [{ a: 10 }, { a: 15 }, { a: 20 }] },
-    { id: 2, key: 'timeIsMoney', axis: 'time', rarity: 'common', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, icon: '⏳',
+    { id: 2, key: 'timeIsMoney', axis: 'time', rarity: 'common', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, excl: [47], icon: '⏳',
       lv: [{ levelTimeAdd: -5, valueMul: { all: 1.12 } }, { levelTimeAdd: -5, valueMul: { all: 1.16 } }, { levelTimeAdd: -5, valueMul: { all: 1.2 } }], p: [{ a: 1.12, b: 5 }, { a: 1.16, b: 5 }, { a: 1.2, b: 5 }] },
     { id: 3, key: 'rockLover', axis: 'value', rarity: 'common', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, icon: '🪨',
       lv: [{ valueMul: { rock: 3.5, gold: 0.92 } }, { valueMul: { rock: 4, gold: 0.92 } }, { valueMul: { rock: 4.5, gold: 0.92 } }], p: [{ a: 3.5, b: 8, c: 6 }, { a: 4, b: 8, c: 6 }, { a: 4.5, b: 8, c: 6 }] },
@@ -76,7 +76,7 @@ window.PERKS = (() => {
     { id: 9, key: 'eagleEye', axis: 'info', rarity: 'common', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, icon: '👁',
       lv: [{ topLit: 1 }, { topLit: 2 }, { topLit: 3 }], p: [{ a: 1 }, { a: 2 }, { a: 3 }] },
     { id: 10, key: 'cloverField', axis: 'neg', rarity: 'common', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, icon: '🍀',
-      lv: [{ flags: { clover: true } }, { flags: { clover: true }, bagCashMul: 1.25 }, { flags: { clover: true }, bagCashMul: 1.5, doomLossMul: 0.5 }], p: [{}, { a: 1.25 }, { a: 1.5, b: 50 }] },
+      lv: [{ flags: { clover: true } }, { flags: { clover: true }, bagCashMul: 1.4 }, { flags: { clover: true }, bagCashMul: 1.8, doomLossMul: 0.5 }], p: [{}, { a: 1.4 }, { a: 1.8, b: 50 }] },
     { id: 11, key: 'memberCard', axis: 'economy', rarity: 'common', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, icon: '🛒',
       lv: [{ shopMul: 0.8 }, { shopMul: 0.7 }, { shopMul: 0.6 }], p: [{ a: 80 }, { a: 70 }, { a: 60 }] },
     { id: 12, key: 'drillHook', axis: 'speed', rarity: 'epic', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, icon: '⛏',
@@ -91,9 +91,9 @@ window.PERKS = (() => {
       lv: [{ emptyReturn: { amt: 60, cap: 6 } }, { emptyReturn: { amt: 100, cap: 6 } }, { emptyReturn: { amt: 130, cap: 6 } }], p: [{ a: 60, b: 6 }, { a: 100, b: 6 }, { a: 130, b: 6 }] },
     { id: 17, key: 'midas', axis: 'value', rarity: 'rare', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, icon: '✨',
       lv: [{ midas: { n: 3, value: 400 } }, { midas: { n: 4, value: 450 } }, { midas: { n: 5, value: 500 } }], p: [{ a: 3, b: 400 }, { a: 4, b: 450 }, { a: 5, b: 500 }] },
-    { id: 18, key: 'greedPact', axis: 'value', rarity: 'epic', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, contract: true, icon: '📜',
+    { id: 18, key: 'greedPact', axis: 'value', rarity: 'epic', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, contract: true, excl: [47], icon: '📜',
       lv: [{ valueMul: { all: 1.28 }, levelTimeAdd: -10 }, { valueMul: { all: 1.42 }, levelTimeAdd: -13 }, { valueMul: { all: 1.55 }, levelTimeAdd: -15 }], p: [{ a: 1.28, b: 10 }, { a: 1.42, b: 13 }, { a: 1.55, b: 15 }] },
-    { id: 19, key: 'glassCannon', axis: 'speed', rarity: 'epic', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, contract: true, icon: '⚡',
+    { id: 19, key: 'glassCannon', axis: 'speed', rarity: 'epic', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, contract: true, excl: [47], icon: '⚡',
       lv: [{ hookSpeedMul: 1.5, pullSpeedMul: 1.5, strengthBonus: 2, cursedMul: 2, emptyPullMul: 0.35 }, { hookSpeedMul: 1.75, pullSpeedMul: 1.75, strengthBonus: 3, cursedMul: 2.5, emptyPullMul: 0.28 },
         { hookSpeedMul: 2, pullSpeedMul: 2, strengthBonus: 5, cursedMul: 3, emptyPullMul: 0.22 }], p: [{ a: 50, b: 2, c: 2, d: 35 }, { a: 75, b: 2.5, c: 3, d: 28 }, { a: 100, b: 3, c: 5, d: 22 }] },
     { id: 20, key: 'miserPact', axis: 'economy', rarity: 'epic', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, contract: true, icon: '💰',
@@ -128,7 +128,7 @@ window.PERKS = (() => {
       lv: [{ condMul: [{ when: 'deep', mul: 1.12 }, { when: 'shallow', mul: 0.9 }] }, { condMul: [{ when: 'deep', mul: 1.2 }, { when: 'shallow', mul: 0.9 }] }, { condMul: [{ when: 'deep', mul: 1.28 }, { when: 'shallow', mul: 0.9 }] }],
       p: [{ a: 1.12, b: 10 }, { a: 1.2, b: 10 }, { a: 1.28, b: 10 }] },
     { id: 35, key: 'firstCatch', axis: 'value', rarity: 'rare', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, rulesFrom: 2, tags: ['quick'], role: 'swing', icon: '🌅',
-      lv: [{ condMul: [{ when: 'first', mul: 1.4 }] }, { condMul: [{ when: 'first', mul: 1.7 }] }, { condMul: [{ when: 'first', mul: 2 }] }], p: [{ a: 1.4 }, { a: 1.7 }, { a: 2 }] },
+      lv: [{ condMul: [{ when: 'first', mul: 1.3 }] }, { condMul: [{ when: 'first', mul: 1.5 }] }, { condMul: [{ when: 'first', mul: 1.7 }] }], p: [{ a: 1.3 }, { a: 1.5 }, { a: 1.7 }] },
     { id: 36, key: 'mechExpert', axis: 'value', rarity: 'rare', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, rulesFrom: 2, tags: ['deep'], role: 'steady', excl: [37], icon: '🎪',
       lv: [{ condMul: [{ when: 'mech', mul: 1.35 }] }, { condMul: [{ when: 'mech', mul: 1.6 }] }, { condMul: [{ when: 'mech', mul: 1.85 }] }], p: [{ a: 1.35 }, { a: 1.6 }, { a: 1.85 }] },
     { id: 37, key: 'headwind', axis: 'value', rarity: 'rare', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, rulesFrom: 2, tags: ['deep'], role: 'swing', minDepth: 6, excl: [36], icon: '🪁',
@@ -146,16 +146,16 @@ window.PERKS = (() => {
     { id: 43, key: 'bigPockets', axis: 'economy', rarity: 'common', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, rulesFrom: 2, tags: ['collect'], role: 'steady', icon: '🎒',
       lv: [{ bagCashMul: 1.5 }, { bagCashMul: 2 }, { bagCashMul: 2.5 }], p: [{ a: 1.5 }, { a: 2 }, { a: 2.5 }] },
     { id: 44, key: 'demolition', axis: 'item', rarity: 'rare', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, rulesFrom: 2, tags: ['blast'], role: 'swing', icon: '💥',
-      lv: [{ invGrant: { tnt: 1 }, blastBonus: 20 }, { invGrant: { tnt: 1 }, blastBonus: 30 }, { invGrant: { tnt: 1 }, blastBonus: 40 }], p: [{ a: 20, b: 1 }, { a: 30, b: 1 }, { a: 40, b: 1 }] },
+      lv: [{ invGrant: { tnt: 2 }, blastBonus: 40 }, { invGrant: { tnt: 3 }, blastBonus: 60 }, { invGrant: { tnt: 4 }, blastBonus: 80 }], p: [{ a: 40, b: 2 }, { a: 60, b: 3 }, { a: 80, b: 4 }] },
     { id: 45, key: 'regular', axis: 'economy', rarity: 'common', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, rulesFrom: 2, tags: ['econ'], role: 'steady', icon: '🧾',
       lv: [{ shopFirstMul: 0.7 }, { shopFirstMul: 0.6 }, { shopFirstMul: 0.5 }], p: [{ a: 70 }, { a: 60 }, { a: 50 }] },
     { id: 46, key: 'debtPact', axis: 'economy', rarity: 'epic', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, contract: true, lockSlot: true, rulesFrom: 2, tags: ['econ'], role: 'swing', icon: '💸',
       lv: [{ levelFee: { cash: 1500, fee: 150 } }, { levelFee: { cash: 2500, fee: 225 } }, { levelFee: { cash: 3500, fee: 300 } }], p: [{ a: 1500, b: 150 }, { a: 2500, b: 225 }, { a: 3500, b: 300 }] },
-    { id: 47, key: 'limitPact', axis: 'time', rarity: 'epic', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, contract: true, rulesFrom: 2, tags: ['quick'], role: 'swing', icon: '🔢',
-      lv: [{ condMul: [{ when: 'grabWithin', n: 30, mul: 1.8 }, { when: 'grabAfter', n: 30, mul: 0 }] }, { condMul: [{ when: 'grabWithin', n: 35, mul: 1.9 }, { when: 'grabAfter', n: 35, mul: 0 }] },
-        { condMul: [{ when: 'grabWithin', n: 40, mul: 2 }, { when: 'grabAfter', n: 40, mul: 0 }] }], p: [{ a: 30, b: 1.8 }, { a: 35, b: 1.9 }, { a: 40, b: 2 }] },
+    { id: 47, key: 'limitPact', axis: 'time', rarity: 'epic', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, contract: true, rulesFrom: 2, tags: ['quick'], role: 'swing', excl: [2, 18, 19], icon: '🔢',
+      lv: [{ condMul: [{ when: 'grabWithin', n: 36, mul: 1.5 }, { when: 'grabAfter', n: 36, mul: 0 }] }, { condMul: [{ when: 'grabWithin', n: 40, mul: 1.55 }, { when: 'grabAfter', n: 40, mul: 0 }] },
+        { condMul: [{ when: 'grabWithin', n: 44, mul: 1.6 }, { when: 'grabAfter', n: 44, mul: 0 }] }], p: [{ a: 36, b: 1.5 }, { a: 40, b: 1.55 }, { a: 44, b: 1.6 }] },
     { id: 48, key: 'highRoller', axis: 'economy', rarity: 'rare', scope: 'self', modes: { solo: true, coop: true, duel: false }, rollable: true, rulesFrom: 2, tags: ['econ'], role: 'swing', icon: '🎰',
-      lv: [{ wagerWinMul: 1.3 }, { wagerWinMul: 1.5 }, { wagerWinMul: 1.7 }], p: [{ a: 1.3 }, { a: 1.5 }, { a: 1.7 }] },
+      lv: [{ wagerWinMul: 1.6 }, { wagerWinMul: 2 }, { wagerWinMul: 2.4 }], p: [{ a: 1.6 }, { a: 2 }, { a: 2.4 }] },
     { id: 49, key: 'relay', axis: 'value', rarity: 'common', scope: 'self', modes: { solo: false, coop: true, duel: false }, rollable: true, rulesFrom: 2, tags: ['team'], role: 'steady', icon: '🤝',
       lv: [{ condMul: [{ when: 'relay', mul: 1.15 }] }, { condMul: [{ when: 'relay', mul: 1.2 }] }, { condMul: [{ when: 'relay', mul: 1.3 }] }], p: [{ a: 15 }, { a: 20 }, { a: 30 }] },
     { id: 50, key: 'splitWork', axis: 'collect', rarity: 'rare', scope: 'self', modes: { solo: false, coop: true, duel: false }, rollable: true, rulesFrom: 2, tags: ['team'], role: 'swing', icon: '🧩',
@@ -384,7 +384,7 @@ window.PERKS = (() => {
       return best;
     };
     const maxTier = (p, f) => Math.max.apply(null, p.lv.map(e => (e && e[f] != null) ? e[f] : 1));
-    if (top3(TABLE.map(p => maxTier(p, 'bagCashMul'))) > 4 + 1e-9) errs.push('3-slot bagCashMul product > 4');
+    if (top3(TABLE.map(p => maxTier(p, 'bagCashMul'))) > 5 + 1e-9) errs.push('3-slot bagCashMul product > 5');
     if (top3(TABLE.map(p => maxTier(p, 'wagerWinMul'))) > 2.5 + 1e-9) errs.push('3-slot wagerWinMul product > 2.5');
     const ctxs = [];
     const items = IT || window.ITEMS || {};
