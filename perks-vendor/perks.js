@@ -42,9 +42,9 @@ window.PERKS = (() => {
   const COND_STATIC = ['heavy', 'light', 'deep', 'shallow', 'mech', 'debuffAffix'];
   const COND_NEW_CLASS = ['gold', 'rock', 'bone', 'gem', 'creature', 'relic'];
   const DEEP_Y = 350;
-  const COND_MUL_CAP = 2;
+  const COND_MUL_CAP = 3.5;
   const COND_DYN_CAP = 3;
-  const COND_TOTAL_CAP = 4;
+  const COND_TOTAL_CAP = 20;
   const FIELD_SPEC_T1 = Object.freeze({ bagCashMul: 'mul', doomLossMul: 'mul', blastBonus: 'sum', shopFirstMul: 'mul', wagerWinMul: 'mul' });
   const ONE_PER_TABLE = ['combo', 'emptyReturn', 'midas', 'drill', 'openPull', 'lightPull'];
   const RENDER_ONLY = ['hookSpeedMul', 'pullSpeedMul', 'freezeDurMul', 'highlight', 'laser', 'emptyPullMul',
@@ -66,7 +66,7 @@ window.PERKS = (() => {
     { id: 4, key: 'boneDealer', axis: 'value', rarity: 'common', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, icon: '💀',
       lv: [{ valueMul: { bone: 10, relic: 1.75 } }, { valueMul: { bone: 15, relic: 2 } }, { valueMul: { bone: 20, relic: 2.25 } }], p: [{ a: 10, b: 1.75, c: 40 }, { a: 15, b: 2, c: 40 }, { a: 20, b: 2.25, c: 40 }] },
     { id: 5, key: 'pyrotechnician', axis: 'item', rarity: 'common', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, icon: '🧨',
-      lv: [{ invGrant: { tnt: 1 } }, { invGrant: { tnt: 2 } }, { invGrant: { tnt: 3 } }], p: [{ a: 1 }, { a: 2 }, { a: 3 }] },
+      lv: [{ invGrant: { tnt: 1 } }, { invGrant: { tnt: 2 } }, { invGrant: { tnt: 2 }, blastBonus: 20 }], p: [{ a: 1 }, { a: 2 }, { a: 2, b: 20 }] },
     { id: 6, key: 'coldStorage', axis: 'item', rarity: 'common', scope: 'self', modes: { solo: false, coop: true, duel: true }, rollable: true, icon: '❄',
       lv: [{ invGrant: { freeze: 1 }, freezeDurMul: 1.5 }, { invGrant: { freeze: 1 }, freezeDurMul: 2 }, { invGrant: { freeze: 1 }, freezeDurMul: 2.5 }], p: [{ a: 1.5 }, { a: 2 }, { a: 2.5 }] },
     { id: 7, key: 'strengthTraining', axis: 'speed', rarity: 'common', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, icon: '💪',
@@ -76,7 +76,7 @@ window.PERKS = (() => {
     { id: 9, key: 'eagleEye', axis: 'info', rarity: 'common', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, icon: '👁',
       lv: [{ topLit: 1 }, { topLit: 2 }, { topLit: 3 }], p: [{ a: 1 }, { a: 2 }, { a: 3 }] },
     { id: 10, key: 'cloverField', axis: 'neg', rarity: 'common', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, icon: '🍀',
-      lv: [{ flags: { clover: true } }, { flags: { clover: true } }, { flags: { clover: true } }], p: [{}, {}, {}] },
+      lv: [{ flags: { clover: true } }, { flags: { clover: true }, bagCashMul: 1.25 }, { flags: { clover: true }, bagCashMul: 1.5, doomLossMul: 0.5 }], p: [{}, { a: 1.25 }, { a: 1.5, b: 50 }] },
     { id: 11, key: 'memberCard', axis: 'economy', rarity: 'common', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, icon: '🛒',
       lv: [{ shopMul: 0.8 }, { shopMul: 0.7 }, { shopMul: 0.6 }], p: [{ a: 80 }, { a: 70 }, { a: 60 }] },
     { id: 12, key: 'drillHook', axis: 'speed', rarity: 'epic', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, icon: '⛏',
@@ -120,6 +120,48 @@ window.PERKS = (() => {
       lv: [{ mechVeteran: 1 }, { mechVeteran: 2 }, { mechVeteran: 3 }], p: [{}, {}, {}] },
     { id: 31, key: 'blindDig', axis: 'value', rarity: 'epic', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, contract: true, rulesFrom: 2, tags: ['class'], role: 'swing', excl: [30], icon: '🕶',
       lv: [{ valueMul: { gold: 1.35, gem: 1.3 }, blind: true }, { valueMul: { gold: 1.5, gem: 1.4 }, blind: true }, { valueMul: { gold: 1.65, gem: 1.5 }, blind: true }], p: [{ a: 1.35, b: 1.3 }, { a: 1.5, b: 1.4 }, { a: 1.65, b: 1.5 }] },
+    { id: 32, key: 'heavyLifter', axis: 'value', rarity: 'rare', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, rulesFrom: 2, tags: ['heavy'], role: 'steady', icon: '🏋',
+      lv: [{ condMul: [{ when: 'heavy', n: 8, mul: 1.2 }] }, { condMul: [{ when: 'heavy', n: 8, mul: 1.3 }] }, { condMul: [{ when: 'heavy', n: 8, mul: 1.4 }] }], p: [{ a: 1.2 }, { a: 1.3 }, { a: 1.4 }] },
+    { id: 33, key: 'smallFinds', axis: 'value', rarity: 'common', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, rulesFrom: 2, tags: ['quick'], role: 'steady', icon: '🤏',
+      lv: [{ condMul: [{ when: 'light', n: 3, mul: 1.12 }] }, { condMul: [{ when: 'light', n: 3, mul: 1.18 }] }, { condMul: [{ when: 'light', n: 3, mul: 1.24 }] }], p: [{ a: 1.12 }, { a: 1.18 }, { a: 1.24 }] },
+    { id: 34, key: 'deepDiver', axis: 'value', rarity: 'rare', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, rulesFrom: 2, tags: ['deep'], role: 'steady', icon: '🤿',
+      lv: [{ condMul: [{ when: 'deep', mul: 1.12 }, { when: 'shallow', mul: 0.9 }] }, { condMul: [{ when: 'deep', mul: 1.2 }, { when: 'shallow', mul: 0.9 }] }, { condMul: [{ when: 'deep', mul: 1.28 }, { when: 'shallow', mul: 0.9 }] }],
+      p: [{ a: 1.12, b: 10 }, { a: 1.2, b: 10 }, { a: 1.28, b: 10 }] },
+    { id: 35, key: 'firstCatch', axis: 'value', rarity: 'rare', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, rulesFrom: 2, tags: ['quick'], role: 'swing', icon: '🌅',
+      lv: [{ condMul: [{ when: 'first', mul: 1.4 }] }, { condMul: [{ when: 'first', mul: 1.7 }] }, { condMul: [{ when: 'first', mul: 2 }] }], p: [{ a: 1.4 }, { a: 1.7 }, { a: 2 }] },
+    { id: 36, key: 'mechExpert', axis: 'value', rarity: 'rare', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, rulesFrom: 2, tags: ['deep'], role: 'steady', excl: [37], icon: '🎪',
+      lv: [{ condMul: [{ when: 'mech', mul: 1.35 }] }, { condMul: [{ when: 'mech', mul: 1.6 }] }, { condMul: [{ when: 'mech', mul: 1.85 }] }], p: [{ a: 1.35 }, { a: 1.6 }, { a: 1.85 }] },
+    { id: 37, key: 'headwind', axis: 'value', rarity: 'rare', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, rulesFrom: 2, tags: ['deep'], role: 'swing', minDepth: 6, excl: [36], icon: '🪁',
+      lv: [{ condMul: [{ when: 'debuffAffix', n: 2, mul: 1.15 }] }, { condMul: [{ when: 'debuffAffix', n: 2, mul: 1.25 }] }, { condMul: [{ when: 'debuffAffix', n: 2, mul: 1.35 }] }], p: [{ a: 1.15, b: 2 }, { a: 1.25, b: 2 }, { a: 1.35, b: 2 }] },
+    { id: 38, key: 'collector', axis: 'collect', rarity: 'common', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, rulesFrom: 2, tags: ['collect'], role: 'swing', icon: '🗂',
+      lv: [{ condBonus: [{ when: 'newClass', amt: 60 }] }, { condBonus: [{ when: 'newClass', amt: 90 }] }, { condBonus: [{ when: 'newClass', amt: 120 }] }], p: [{ a: 60 }, { a: 90 }, { a: 120 }] },
+    { id: 39, key: 'gemCollector', axis: 'collect', rarity: 'rare', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, rulesFrom: 2, tags: ['collect'], role: 'swing', icon: '🌈',
+      lv: [{ condBonus: [{ when: 'newGemColor', amt: 120 }] }, { condBonus: [{ when: 'newGemColor', amt: 180 }] }, { condBonus: [{ when: 'newGemColor', amt: 240 }] }], p: [{ a: 120 }, { a: 180 }, { a: 240 }] },
+    { id: 40, key: 'milestone', axis: 'collect', rarity: 'rare', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, rulesFrom: 2, tags: ['rhythm'], role: 'steady', icon: '🔔',
+      lv: [{ condBonus: [{ when: 'catchFrom', n: 4, amt: 60 }] }, { condBonus: [{ when: 'catchFrom', n: 3, amt: 70 }] }, { condBonus: [{ when: 'catchFrom', n: 3, amt: 100 }] }], p: [{ a: 4, b: 60 }, { a: 3, b: 70 }, { a: 3, b: 100 }] },
+    { id: 41, key: 'bagLuck', axis: 'value', rarity: 'rare', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, rulesFrom: 2, tags: ['rhythm', 'collect'], role: 'swing', icon: '🎁',
+      lv: [{ condMul: [{ when: 'afterBag', mul: 2 }] }, { condMul: [{ when: 'afterBag', mul: 2.5 }] }, { condMul: [{ when: 'afterBag', mul: 3 }] }], p: [{ a: 2 }, { a: 2.5 }, { a: 3 }] },
+    { id: 42, key: 'freezeHunter', axis: 'item', rarity: 'rare', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, rulesFrom: 2, tags: ['freeze'], role: 'swing', icon: '🥶',
+      lv: [{ condMul: [{ when: 'afterFreeze', cls: 'creature', mul: 2 }] }, { condMul: [{ when: 'afterFreeze', cls: 'creature', mul: 2.5 }] }, { condMul: [{ when: 'afterFreeze', cls: 'creature', mul: 3 }] }], p: [{ a: 2 }, { a: 2.5 }, { a: 3 }] },
+    { id: 43, key: 'bigPockets', axis: 'economy', rarity: 'common', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, rulesFrom: 2, tags: ['collect'], role: 'steady', icon: '🎒',
+      lv: [{ bagCashMul: 1.5 }, { bagCashMul: 2 }, { bagCashMul: 2.5 }], p: [{ a: 1.5 }, { a: 2 }, { a: 2.5 }] },
+    { id: 44, key: 'demolition', axis: 'item', rarity: 'rare', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, rulesFrom: 2, tags: ['blast'], role: 'swing', icon: '💥',
+      lv: [{ invGrant: { tnt: 1 }, blastBonus: 20 }, { invGrant: { tnt: 1 }, blastBonus: 30 }, { invGrant: { tnt: 1 }, blastBonus: 40 }], p: [{ a: 20, b: 1 }, { a: 30, b: 1 }, { a: 40, b: 1 }] },
+    { id: 45, key: 'regular', axis: 'economy', rarity: 'common', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, rulesFrom: 2, tags: ['econ'], role: 'steady', icon: '🧾',
+      lv: [{ shopFirstMul: 0.7 }, { shopFirstMul: 0.6 }, { shopFirstMul: 0.5 }], p: [{ a: 70 }, { a: 60 }, { a: 50 }] },
+    { id: 46, key: 'debtPact', axis: 'economy', rarity: 'epic', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, contract: true, lockSlot: true, rulesFrom: 2, tags: ['econ'], role: 'swing', icon: '💸',
+      lv: [{ levelFee: { cash: 1500, fee: 150 } }, { levelFee: { cash: 2500, fee: 225 } }, { levelFee: { cash: 3500, fee: 300 } }], p: [{ a: 1500, b: 150 }, { a: 2500, b: 225 }, { a: 3500, b: 300 }] },
+    { id: 47, key: 'limitPact', axis: 'time', rarity: 'epic', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, contract: true, rulesFrom: 2, tags: ['quick'], role: 'swing', icon: '🔢',
+      lv: [{ condMul: [{ when: 'grabWithin', n: 30, mul: 1.8 }, { when: 'grabAfter', n: 30, mul: 0 }] }, { condMul: [{ when: 'grabWithin', n: 35, mul: 1.9 }, { when: 'grabAfter', n: 35, mul: 0 }] },
+        { condMul: [{ when: 'grabWithin', n: 40, mul: 2 }, { when: 'grabAfter', n: 40, mul: 0 }] }], p: [{ a: 30, b: 1.8 }, { a: 35, b: 1.9 }, { a: 40, b: 2 }] },
+    { id: 48, key: 'highRoller', axis: 'economy', rarity: 'rare', scope: 'self', modes: { solo: true, coop: true, duel: false }, rollable: true, rulesFrom: 2, tags: ['econ'], role: 'swing', icon: '🎰',
+      lv: [{ wagerWinMul: 1.3 }, { wagerWinMul: 1.5 }, { wagerWinMul: 1.7 }], p: [{ a: 1.3 }, { a: 1.5 }, { a: 1.7 }] },
+    { id: 49, key: 'relay', axis: 'value', rarity: 'common', scope: 'self', modes: { solo: false, coop: true, duel: false }, rollable: true, rulesFrom: 2, tags: ['team'], role: 'steady', icon: '🤝',
+      lv: [{ condMul: [{ when: 'relay', mul: 1.15 }] }, { condMul: [{ when: 'relay', mul: 1.2 }] }, { condMul: [{ when: 'relay', mul: 1.3 }] }], p: [{ a: 15 }, { a: 20 }, { a: 30 }] },
+    { id: 50, key: 'splitWork', axis: 'collect', rarity: 'rare', scope: 'self', modes: { solo: false, coop: true, duel: false }, rollable: true, rulesFrom: 2, tags: ['team'], role: 'swing', icon: '🧩',
+      lv: [{ condBonus: [{ when: 'splitFirst', amt: 150 }] }, { condBonus: [{ when: 'splitFirst', amt: 250 }] }, { condBonus: [{ when: 'splitFirst', amt: 350 }] }], p: [{ a: 150 }, { a: 250 }, { a: 350 }] },
+    { id: 51, key: 'highFive', axis: 'collect', rarity: 'common', scope: 'self', modes: { solo: false, coop: true, duel: false }, rollable: true, rulesFrom: 2, tags: ['team'], role: 'steady', icon: '🙌',
+      lv: [{ condBonus: [{ when: 'teamEvery', n: 8, amt: 80 }] }, { condBonus: [{ when: 'teamEvery', n: 8, amt: 120 }] }, { condBonus: [{ when: 'teamEvery', n: 8, amt: 160 }] }], p: [{ a: 80, b: 8 }, { a: 120, b: 8 }, { a: 160, b: 8 }] },
   ];
   let TABLE = LIST;
   const BY_ID = new Map();
@@ -324,9 +366,25 @@ window.PERKS = (() => {
       if (usesB && !(p.modes && p.modes.solo === false && p.modes.duel === false)) errs.push('B-family condition (relay / splitFirst / teamEvery) needs modes.solo false and modes.duel false: ' + p.key);
       if (p.lockSlot != null && !(p.lockSlot === true && p.contract)) errs.push('lockSlot must be true and only on a contract: ' + p.key);
     }
-    const top3 = (vals) => { const s = vals.slice().sort((a, b) => b - a); return (s[0] || 1) * (s[1] || 1) * (s[2] || 1); };
+    const top3 = (vals) => {
+      const idx = vals.map((v, i) => i).sort((a, b) => vals[b] - vals[a]).slice(0, 8);
+      const ex = (i, j) => { const a = TABLE[i], b = TABLE[j]; return !!(a && b && Array.isArray(a.excl) && a.excl.indexOf(b.id | 0) >= 0); };
+      let best = 1;
+      for (let x = 0; x < idx.length; x++) {
+        best = Math.max(best, vals[idx[x]] || 1);
+        for (let y = x + 1; y < idx.length; y++) {
+          if (ex(idx[x], idx[y])) continue;
+          best = Math.max(best, (vals[idx[x]] || 1) * (vals[idx[y]] || 1));
+          for (let z = y + 1; z < idx.length; z++) {
+            if (ex(idx[x], idx[z]) || ex(idx[y], idx[z])) continue;
+            best = Math.max(best, (vals[idx[x]] || 1) * (vals[idx[y]] || 1) * (vals[idx[z]] || 1));
+          }
+        }
+      }
+      return best;
+    };
     const maxTier = (p, f) => Math.max.apply(null, p.lv.map(e => (e && e[f] != null) ? e[f] : 1));
-    if (top3(TABLE.map(p => maxTier(p, 'bagCashMul'))) > 3 + 1e-9) errs.push('3-slot bagCashMul product > 3');
+    if (top3(TABLE.map(p => maxTier(p, 'bagCashMul'))) > 4 + 1e-9) errs.push('3-slot bagCashMul product > 4');
     if (top3(TABLE.map(p => maxTier(p, 'wagerWinMul'))) > 2.5 + 1e-9) errs.push('3-slot wagerWinMul product > 2.5');
     const ctxs = [];
     const items = IT || window.ITEMS || {};
