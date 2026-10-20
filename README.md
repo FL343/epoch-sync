@@ -163,6 +163,16 @@ absent, so a run is unaffected before it is provisioned.
   codes, mismatch UPSET / PROTECTED, the series clamp, seeds, the leaver fine, the board bounds) that
   both repos replay (`test/points-plan-fixtures.js` here); `tools/gen-points-fixtures.js` regenerates
   them with a rules change and prints the `FIXTURES_HASH` the module must carry.
+- `streak-plan.js` — the matchmade win streak rules (O181): events ordered by the match's start minute
+  (this job settles out of order), a 12 h window folded into a prefix, freezes (interrupted matches, a
+  loss after a teammate left, the first convicted absence in a week), breaks (a confessed quit, a
+  repeat absence), the same match twice = the later outcome, the XP tier of the win that brings the
+  streak to 2 / 3 / 5 / 7 (+5 / 10 / 15 / 20 %, added into the level / supporter boost) and the tail
+  block published after the career matrix on the xp row (`[0xC9 | ver << 8 | len << 16, cur, best,
+  matchHash]`). Self-contained like `points-plan.js`; the client vendors a comment-stripped copy.
+  Golden cases: `fixtures/streak-plan/cases.json` (`test/streak-plan-fixtures.js`,
+  `tools/gen-streak-fixtures.js`); the settle's wiring: `test/streak.js`. Gate `V54B3_STREAK`: the
+  full game's job only.
 - Points receipts and the pulse (O480): every rating row carries `[0xCB, plan rating, RULES_VER, 0]`
   (the rating the points plan reads for that player); every points row carries the RS reveal slot (6
   ints, zeros when none) then a receipt ring `[0xC6, n, (matchHash, delta, flags) x n <= 8]`, newest first:
@@ -240,7 +250,8 @@ absent, so a run is unaffected before it is provisioned.
 
 State files committed back each run (idempotency): `processed.json`, `skill.json`,
 `leavers.json`, `xp.json` (per-player `{ lastWinDay, games }` for the daily-first bonus
-and the repeat-leaver rate), `starts.json` (pending start attestations awaiting
+and the repeat-leaver rate, the career counters, and on the full game's job the win streak
+`sk`: `{ p, b, h, l, e: [[start minute, matchHash, k]], f: [[minute, matchHash]] }`), `starts.json` (pending start attestations awaiting
 settlement or maturity), `signals.json` (rolling per-player/pairwise signal aggregates +
 flag dedup + daily settle counters), `groups.json` (per-player recent-opponents memory for
 the repeat-group rating decay — consecutive matches against mostly the same people update

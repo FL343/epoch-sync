@@ -32,6 +32,9 @@ function lpWriteDetails(prevDet, rv, events) {
   return lpDetails(rv ? [RS_MAGIC, rv.matchHash, rv.seed, rv.flag, rv.adjDelta, rv.normalDelta] : cur.rs, ring);
 }
 const mhOfKey = (m) => parseInt(String(m), 10) | 0;   // a match key starts with its records' matchHash (d[3]_d[4]_d[2])
+// O181 (knife 5.4b3): the matchmade win streak rules (event order, freezes, the XP tiers, the published tail) live in
+//   streak-plan.js, one copy for this job and for the client (see its header); the gate V54B3_STREAK is next to XP_CFG
+const streakPlan = require('./streak-plan.js');
 // ---- O480 points-row backlog (PENDING_WRITES_FILE; test/receipt-ring.js, test/pending-writes.js, test/stale-lp-read.js) ----
 // pid -> { rc, w, l }, de-identified like every state file (pid keys; a matchHash is the key the start rosters in starts.json carry
 //   already; the score and details in w / l are the ones his public points row shows):
@@ -1453,6 +1456,7 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
   let convicted = 0, cleaned = 0, held = 0;
   const voided = [];   // O480: keys this verdict processed without a settle ({ m, pids: the attested roster }) -> VOID receipts (main)
   const consoledSids = [];   // interrupted-match consolation: real sids of still-visible settle writers at verdict time (in-memory only, never persisted -- state stays HMAC-keyed)
+  const skEv = [];   // O181: the win streak events of these verdicts ({ p, mh, t0, kind }); the XP state is loaded later in main
   // 1) register new pending entries
   const registered = preRegistered == null ? registerStartRosters(starts, processed, pending, now, readComplete) : preRegistered;
   // 2) upkeep + maturity verdicts for pending entries
@@ -1513,6 +1517,7 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
       leavers[h] = leavers[h] || { leaves: 0, lastMatch: '' };
       leavers[h].leaves += 1; leavers[h].lastMatch = m;
       hit.push(h.slice(0, 8));
+      skEv.push({ p: h, mh: mhOfKey(m), t0: p.t0 || now, kind: 'absence' });   // O181: applied to the XP state in main (streakApplyEarly)
     }
     // interrupted-match consolation: whoever wrote a settle record for this key and is STILL
     // visible on their shard at verdict time gets the flat CONSOLATION_XP credit (caller writes
@@ -1544,7 +1549,7 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
       + (spared.length ? ', ' + spared.length + ' spared (own exit note: ' + spared.join(',') + ', Q64)' : '')
       + (wasContested ? '; contested once (Q127), nobody rated' + (who ? ', contested by ' + who : '') + ' (Q143)' : ''));
   }
-  return { registered, convicted, cleaned, held, consoledSids, voided };
+  return { registered, convicted, cleaned, held, consoledSids, voided, skEv };
 }
 // ---- a ranked 1V1 whose loser wrote nothing (cloud audit Q184) ----
 // A 1V1 key needs two start votes to register a roster and two writers to settle. A loser who writes nothing for the match
@@ -2624,6 +2629,7 @@ function writeRunSummary() {
       '| groups waiting for a seat that started but has no result yet, until the match must be over (Q121) | ' + s('leaveWait', 0) + ' |',
       '| confessions seen/penalized/refunded | ' + s('confess', '0/0/0') + ' |',
       '| leaves convicted at a settle this run, kept for a late result / late results forgiven (points of the finish, exit retracted) / late results over the cap, the leave stands (Q228) | ' + s('lateCv', 0) + ' / ' + s('lateForgive', 0) + ' / ' + s('lateCapped', 0) + ' |',
+      '| win streak events landing before matches already counted (a late settle; its own tier counts what came before it) / stale (older than the fold, ignored) / absences frozen (the first in a week) / absences that broke a streak (O181) | ' + s('streakLate', 0) + ' / ' + s('streakStale', 0) + ' / ' + s('streakAbsFreeze', 0) + ' / ' + s('streakAbsBreak', 0) + ' |',
       '| ranked 1V1s only the winner wrote (Q184): counted on the silent seat / waiting for a second opponent / paid (points written) / not counted, no signals of his own / over the weekly cap | ' + s('lone1v1', '0 / 0 / 0 / 0 / 0') + ' (' + s('lone1v1Paid', 0) + ') |',
       '| team-gamble host charges / at trust threshold | ' + s('t2lh', '0/0') + ' |',
       '| reports seen / counted | ' + s('repSeen', 0) + ' / ' + s('repCounted', 0) + ' |',
@@ -2973,7 +2979,7 @@ function saveUnmatched(s) { try { writeStateFile(UNMATCHED_FILE, JSON.stringify(
 // Q228: the upkeep also forgives a conviction's entry (cv, see LATE_RESULT_MS) on its own probe (lateRec), at most
 //   LATE_CAP.N times per account in LATE_CAP.MS.
 async function reconcileConfessions(confs, groups, processed, confState, leavers, now, opts) {
-  const res = { seen: 0, penalized: 0, exitHits: 0, refunded: 0, finalized: 0, retracted: 0, late: 0, lateCapped: 0 };
+  const res = { seen: 0, penalized: 0, exitHits: 0, refunded: 0, finalized: 0, retracted: 0, late: 0, lateCapped: 0, skEv: [] };
   // absolution probe (2026-07-19 audit H3): "came back and finished" must mean a record inside a
   // CONSISTENT settle group (>=2 distinct writers, identical consistency vectors) whose own disp
   // is non-abandoner. The old any-record probe accepted a lone or divergent 0xB1 -- which any
@@ -3014,6 +3020,9 @@ async function reconcileConfessions(confs, groups, processed, confState, leavers
     leavers[c.p] = leavers[c.p] || { leaves: 0, lastMatch: '' };
     leavers[c.p].leaves += 1; leavers[c.p].lastMatch = c.m;
     res.exitHits++;
+    // O181: a confessed quit breaks the streak (his own result, if he comes back and finishes, replaces it at that settle);
+    //   ordered by the match's start when its entry is still pending (opts.startOf), else by this sighting
+    res.skEv.push({ p: c.p, mh: mhOfKey(c.m), t0: (opts.startOf && opts.startOf(c.m)) || now, kind: 'break' });
     if (opts.appliesLpFn(c.mt | 0) && opts.readLp) {
       const e = await opts.readLp(String(c.steamID));
       const base = e ? (e.score | 0) : (opts.seedFor ? opts.seedFor(String(c.steamID)) : 0);
@@ -3081,7 +3090,7 @@ async function reconcileConfessions(confs, groups, processed, confState, leavers
           + (st.cv ? ' (convicted before his result came in' + (sameBoard ? ': fine ' + (st.ded | 0) + ', finish ' + (st.w | 0) + ', the others\' gain ' + (st.g | 0) + ', nothing to give back' : '') + ', Q228)' : ''));
       }
       if (st.ex && leavers[p]) { leavers[p].leaves = Math.max(0, (leavers[p].leaves | 0) - 1); st.ex = 0; retracted = true; res.retracted++; }
-      if (st.cv) { leavers[p].lf = lf.concat([now]); res.late++; }
+      if (st.cv) { leavers[p].lf = lf.concat([now]); res.late++; res.skEv.push({ p, mh: mhOfKey(m), t0: st.t0 || now, kind: 'pardon' }); }   // O181: the conviction's streak event turns into a freeze
       st.refunded = 1;
       if (wrote && opts.checkpoint) opts.checkpoint();   // R1-B2-03: the refund is relative too -- its marker on disk before the next exit
       else if ((retracted || st.cv) && opts.checkpoint) opts.checkpoint();   // Q228: an exit retracted or a late result forgiven alone too
@@ -3726,10 +3735,69 @@ function xpLevelOf(totalXp) {
 }
 // supporter (optional) = the pack's permanent +10% on top of the level tier -- one shared multiplier
 //   expression (supporters.xpMult) so the client's optimistic mirror rounds identically.
-function xpBoostMult(level, supporter) {
+// streakPct (optional, O181) = the win streak tier of this match (streakPlan.xpPct), added into the same percentage: one
+//   multiplier, no new rounding step (the client adds it into its boostPct the same way).
+function xpBoostMult(level, supporter, streakPct) {
   let pct = 0;
   for (const b of XP_CFG.boosts) if ((level | 0) >= b[0]) pct = b[1];
-  return supporters.xpMult(pct, !!supporter);
+  return supporters.xpMult(pct + Math.max(0, streakPct | 0), !!supporter);
+}
+// ---- O181 matchmade win streak (knife 5.4b3, 2026-10-20) ----
+// Rules: streak-plan.js. A player's state is xpState[pid].sk (so the seedcap reject window's whole-entry restore takes it back
+//   with everything else). Events: creditXp (a settled matchmade record: win / loss; an interrupted match -- innocent class or
+//   peers-gone -- and a loss after a teammate's seat went absent freeze), a confession (break; his own result after he came
+//   back replaces it), an absence convicted at the settle or by an orphaned start (the first in a week freezes, later ones
+//   break; a late result forgiven by Q228 turns it into a freeze and gives the week's grant back). Ordered by the match's
+//   start minute (startsPending t0), never by settle order. The win that brings the streak to 2 / 3 / 5 / 7 adds 5 / 10 / 15
+//   / 20 percent into the boost. Published as a tail block after the career matrix on every XP write (careerBlockOf).
+// Gate: on for the full game's job only (the EA launch, user call 10-20); the playtest / demo jobs record nothing, add nothing
+//   and publish no tail (their trial levels are capped and the trial ends with Next Fest). One constant so the companion
+//   repo's landing pipeline can test the client against this main before the client lands (V51B pattern).
+const V54B3_STREAK = !PT_MODE;
+const minuteOf = (ms) => Math.floor((Number(ms) || 0) / 60000);
+// one outcome into a player's state -> the apply result (null = gate off). k = a streakPlan.K value.
+function streakApply(xpState, p, t0Ms, mh, k, nowMs) {
+  if (!V54B3_STREAK) return null;
+  const st = xpState[p] = xpState[p] || { lastWinDay: 0, games: 0 };
+  const r = streakPlan.apply(st.sk, minuteOf(t0Ms), mh | 0, k | 0, minuteOf(nowMs));
+  st.sk = r.st;
+  if (r.late && !r.stale) RUN.streakLate = (RUN.streakLate | 0) + 1;
+  if (r.stale) RUN.streakStale = (RUN.streakStale | 0) + 1;
+  return r;
+}
+// a convicted absence (settle or orphaned start): the week's first freezes, the rest break
+function streakAbsence(xpState, p, t0Ms, mh, nowMs) {
+  if (!V54B3_STREAK) return null;
+  const st = xpState[p] = xpState[p] || { lastWinDay: 0, games: 0 };
+  const ab = streakPlan.absence(st.sk, mh | 0, minuteOf(nowMs));
+  st.sk = ab.st;
+  if (ab.k === streakPlan.K.FREEZE) RUN.streakAbsFreeze = (RUN.streakAbsFreeze | 0) + 1; else RUN.streakAbsBreak = (RUN.streakAbsBreak | 0) + 1;
+  return streakApply(xpState, p, t0Ms, mh, ab.k, nowMs);
+}
+// a conviction forgiven by his late result (Q228): the event turns into a freeze (his result did not settle: no win, no loss)
+//   and the week's freeze grant comes back. Only an event still in the window moves.
+function streakPardon(xpState, p, mh) {
+  if (!V54B3_STREAK || !xpState[p] || !xpState[p].sk) return false;
+  const st = xpState[p];
+  st.sk = streakPlan.pardon(st.sk, mh | 0);
+  const ev = st.sk.e.find((x) => x[1] === (mh | 0));
+  if (!ev) return false;
+  st.sk = streakPlan.apply(st.sk, ev[0], mh | 0, streakPlan.K.FREEZE, ev[0]).st;
+  return true;
+}
+// the events this run produced before the XP state was loaded (confessions, orphaned starts, late results forgiven):
+//   [{ p, mh, t0, kind: 'break' | 'absence' | 'pardon' }], applied in order
+function streakApplyEarly(xpState, evs, nowMs) {
+  if (!V54B3_STREAK) return 0;
+  let n = 0;
+  for (const ev of evs || []) {
+    if (ev.kind === 'break') streakApply(xpState, ev.p, ev.t0, ev.mh, streakPlan.K.BREAK, nowMs);
+    else if (ev.kind === 'absence') streakAbsence(xpState, ev.p, ev.t0, ev.mh, nowMs);
+    else if (ev.kind === 'pardon') streakPardon(xpState, ev.p, ev.mh);
+    else continue;
+    n++;
+  }
+  return n;
 }
 // ---- match-progress discount (early-settled matches award partial points) ----
 // A matchmade record carries "levels reached" in the high bits of d[7] (bit 0 stays the legacy
@@ -3908,6 +3976,9 @@ function careerBlockOf(st) {
       if ((CAREER_WL_MASK >> m) & 1) out.push((c16(a[2]) | (c16(a[3]) << 16)) | 0);
     }
   }
+  // O181: the win streak tail after the matrix ([0xC9 | ver << 8 | len << 16, cur, best, matchHash], streak-plan.js tail): a
+  //   self-describing block, so a deployed client (reads [2..4] or the matrix by its header) never sees it; 41 -> 45 of 64 ints
+  if (V54B3_STREAK && st.sk) for (const x of streakPlan.tail(st.sk)) out.push(x | 0);
   return out;
 }
 // a player whose cells moved this run but whose XP did not (a day-capped friend room / bot match) still gets his row
@@ -4008,15 +4079,36 @@ function computeXpGain(cls, rank0, money, isRanked, firstWinToday, factor, boost
 //   progFrac (optional, default 1) = match-progress discount, multiplied INTO the leaver factor so both
 //   repos share the exact rounding expression round(round(xp) * (leaverFactor * progFrac)).
 //   careerDet (optional map) receives per-sid cumulative career detail arrays for the board write.
-function creditXp(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers, today, progFrac, careerDet, spSet) {
+//   sk (optional, O181) = { t0, nowMs, absentSeats } for the win streak: the match's start (startsPending t0, ms), this run's
+//   clock, and the roster seats with no record at this settle (a teammate gone before a loss freezes the streak). Without it
+//   (a direct caller, the gate off) nothing about the streak moves and the boost is the level + supporter one as before.
+function creditXp(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers, today, progFrac, careerDet, spSet, sk) {
   const isRanked = appliesLp(matchType);
   const pf = (progFrac == null ? 1 : progFrac);
   const recBySeat = {};
   for (const r of g) { const s = r.d[5] | 0; if (recBySeat[s] == null) recBySeat[s] = r; }
+  const skOn = !!(V54B3_STREAK && sk);
+  const absentSeats = (sk && sk.absentSeats) || new Set();
   for (const seatKey of Object.keys(recBySeat)) {
     const r = recBySeat[seatKey], seat = seatKey | 0, sid = r.steamID, p = pid(sid);
     const cls = dispClassOf(r.dispCode);
     const st = xpState[p] = xpState[p] || { lastWinDay: 0, games: 0 };
+    // O181: the streak moves first (the win's own tier goes into this match's boost). Interrupted (innocent class, or the
+    //   lone-survivor peers-gone end) = freeze; a loss with an absent teammate = freeze (the teammate shield's reading).
+    let streakPct = 0, skNote = '';
+    if (skOn && (cls === 'valid' || cls === 'innocent')) {
+      const won = cls === 'valid' && careerWon(matchType, rankOf[sid]);
+      let k = streakPlan.K.LOSS;
+      if (cls === 'innocent' || (r.dispCode | 0) === 1) k = streakPlan.K.FREEZE;
+      else if (won) k = streakPlan.K.WIN;
+      else if (isTeamMt(matchType)) {
+        const tsz = teamSizeOfMt(matchType), myTeam = teamOfSeat(seat, tsz);
+        for (const s of absentSeats) if (teamOfSeat(s, tsz) === myTeam && (s | 0) !== seat) { k = streakPlan.K.FREEZE; break; }
+      }
+      const sr = streakApply(xpState, p, sk.t0, g[0].d[3] | 0, k, sk.nowMs);
+      if (sr && k === streakPlan.K.WIN && !sr.stale) streakPct = streakPlan.xpPct(sr.at);
+      if (sr) skNote = ' streak ' + (sr.stale ? 'stale' : (['f', 'w', 'l', 'b'][k] + sr.at)) + (streakPct ? ' +' + streakPct + '%' : '');
+    }
     const lf = effectiveLeaverFactor((leavers[p] && leavers[p].leaves) || 0, st.games);
     const factor = LEAVER_XP_RECORD_ONLY ? 1 : lf;   // M194 / W57: demo Next Fest window = leaves recorded, not discounted
     const rank0 = ((rankOf[sid] || 1) | 0) - 1;   // 0-based for rankBonus index (group rank is 1-based)
@@ -4027,7 +4119,7 @@ function creditXp(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers,
     // team win = team outcome) -- one predicate, three consumers (career wins, first-win, client
     // opts.win) now agree. FFA behavior unchanged (careerWon === rank 1 there).
     if (cls === 'valid' && careerWon(matchType, rankOf[sid]) && (st.lastWinDay | 0) < today) { firstWin = true; st.lastWinDay = today; }
-    const bm = xpBoostMult(xpLevelOf(xp[sid] | 0), !!(spSet && spSet.has(String(sid))));   // pre-credit board value -> level -> permanent boost (+ supporter pack)
+    const bm = xpBoostMult(xpLevelOf(xp[sid] | 0), !!(spSet && spSet.has(String(sid))), streakPct);   // pre-credit board value -> level -> permanent boost (+ supporter pack, + O181 streak tier)
     const gain = computeXpGain(cls, rank0, scores[seat] | 0, isRanked, firstWin, factor * pf, bm);
     if (gain > 0) { xp[sid] = (xp[sid] | 0) + gain; changedXp[sid] = xp[sid]; }
     if (cls === 'valid') st.games += 1;   // denominator = real finishes (innocent/abandoner don't count; mirrors client window)
@@ -4037,7 +4129,7 @@ function creditXp(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers,
     if (cls === 'valid' || cls === 'innocent') st.cg = (st.cg | 0) + 1;
     if (cls === 'valid') { if (careerWon(matchType, rankOf[sid])) st.cw = (st.cw | 0) + 1; else st.cl = (st.cl | 0) + 1; }
     if (careerDet && cls !== 'abandoner') careerDet[sid] = careerBlockOf(st);   // 5.4a: v2 (fillCareerDetails rebuilds it again from the run's final state before the write)
-    console.log('  xp ' + plog(sid) + ' ' + cls + ' rank' + (rank0 + 1) + (firstWin ? ' dailyWin' : '') + ' x' + factor + (factor !== lf ? ' (record-only, would be x' + lf + ')' : '') + (pf !== 1 ? ' prog x' + pf : '') + (bm !== 1 ? ' boost x' + bm : '') + ' +' + gain + ' -> ' + (xp[sid] | 0) + ' career ' + (st.cg | 0) + 'g/' + (st.cw | 0) + 'w/' + (st.cl | 0) + 'l');
+    console.log('  xp ' + plog(sid) + ' ' + cls + ' rank' + (rank0 + 1) + (firstWin ? ' dailyWin' : '') + ' x' + factor + (factor !== lf ? ' (record-only, would be x' + lf + ')' : '') + (pf !== 1 ? ' prog x' + pf : '') + (bm !== 1 ? ' boost x' + bm : '') + ' +' + gain + ' -> ' + (xp[sid] | 0) + ' career ' + (st.cg | 0) + 'g/' + (st.cw | 0) + 'w/' + (st.cl | 0) + 'l' + skNote);
   }
 }
 // ===== endless progress XP (match type 7) -- 2026-09-05 =====
@@ -6109,7 +6201,7 @@ async function main() {
   }
   // abandon confessions: immediate authoritative leaver penalty without finisher consensus.
   // Runs before the early returns (the everyone-left scenario produces no settle groups at all).
-  let confRes = { seen: 0, penalized: 0, exitHits: 0, refunded: 0, finalized: 0, retracted: 0, late: 0, lateCapped: 0 };
+  let confRes = { seen: 0, penalized: 0, exitHits: 0, refunded: 0, finalized: 0, retracted: 0, late: 0, lateCapped: 0, skEv: [] };
   if (confessions.length || Object.keys(confState).length) {
     const lpId0 = lpBoardId;   // season-resolved (see top of main)
     // playtest: no points surface by design -- confessions still record exit-rate signals, the
@@ -6121,6 +6213,7 @@ async function main() {
       lateMs: LATE_RESULT_MS, vecTag, lpBoard: lpId0,   // Q228: a conviction's entry (cv)
       appliesLpFn: appliesLp,
       consistentKeys,   // absolution probe only trusts consistent settle groups (a lone/divergent 0xB1 cancels nothing)
+      startOf: (m) => (startsPending[m] && startsPending[m].t0) || 0,   // O181: a confession's streak break sorts at the match's start
       checkpoint: () => saveEarlyMarks(true),   // R1-B2-03: after every points write (fine or refund), before the next exit can happen
       seedFor: (sid) => { const sk = skill0[pid(sid)] || ts.DEFAULTS; return seedLp(ts.displayRating(sk.mu, sk.sigma)); },
       readLp: lpId0 ? (async (sid) => {
@@ -6148,6 +6241,16 @@ async function main() {
   }
   RUN.confess = confRes.seen + '/' + confRes.penalized + '/' + confRes.refunded;
   RUN.lateForgive = confRes.late | 0; RUN.lateCapped = confRes.lateCapped | 0;   // Q228
+  // O181: the streak events of the orphaned-start verdicts, the confessions and the late results forgiven, applied to the XP
+  //   state where it is loaded (the settle path below), or straight to its file when this run returns early (no settle group:
+  //   the everyone-left case these exist for)
+  const streakEarly = V54B3_STREAK ? (startsRes.skEv || []).concat(confRes.skEv || []) : [];
+  const streakEarlyFile = () => {
+    if (!streakEarly.length || !XP_LB || !APPLY_MMR) return;
+    const xs = loadXp();
+    const n = streakApplyEarly(xs, streakEarly, nowMs);
+    if (n) { saveXp(xs); console.log('streak: ' + n + ' early event(s) written to the XP state (no settle this run)'); }
+  };
   // forgery-flag counters for the inconsistent groups seen this run
   // (they are never processed, so they re-surface every run -- recordFlag dedups by match key).
   for (const { m, g } of inconsistentGroups) {
@@ -6419,6 +6522,7 @@ async function main() {
   };
   const persistStartsSide = () => {
     if (!APPLY_MMR) { console.log('APPLY_MMR=0 dry-run, nothing written'); return; }
+    streakEarlyFile();   // O181
     saveStarts(startsPending);
     saveConfessions(confState, nowMs, confLive);
     if (sigDirty) saveSignals(signals, nowMs);
@@ -6940,6 +7044,10 @@ async function main() {
     for (const e of br.ents) xp[e.steamID] = e.score | 0;
   }
   const xpState = xpId ? loadXp() : {};
+  if (xpId && streakEarly.length) {   // O181: this run's early streak events (see streakEarlyFile)
+    const n = streakApplyEarly(xpState, streakEarly, nowMs);
+    if (n) console.log('streak: ' + n + ' early event(s) (confessions / orphaned starts / late results forgiven)');
+  }
   // supporter pack owners for this run's points credit (probe + wall + grant bit happen here too)
   const spSids = [];
   for (const c of fresh) for (const r of c.g) { spSids.push(String(r.steamID)); for (const rs of Object.values(r.roster || {})) if (rs) spSids.push(String(rs)); }   // roster = {seat: sid} (decodeRoster)
@@ -8247,7 +8355,8 @@ async function main() {
     const prog = matchProgressOf(g);
     const progFrac = xpProgressFrac(prog);
     if (progFrac !== 1) console.log('  progress ' + c.m + ': ' + prog + '/' + XP_CFG.progressLevels + ' levels -> points x' + progFrac);
-    if (xpId) creditXp(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers, today, progFrac, careerDet, spSet);
+    if (xpId) creditXp(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers, today, progFrac, careerDet, spSet,
+      { t0: pend.t0 || nowMs, nowMs, absentSeats: new Set(absentNow.map((x) => x.seat | 0)) });   // O181: the streak orders by the match's start
     if (xpId) creditCareerMatch(g, matchType, rankOf, xpState, careerTouched);   // 5.4a career matrix (mode x character; W/L in quick / ranked cells)
     // CP (the endless-economy wallet) earns from matchmade records on the same credit classes.
     // Playtest starter wallet first: writers only (a leaver whose first-ever appearance is the
@@ -8758,6 +8867,9 @@ async function main() {
       leavers[pid(x.steamID)] = leavers[pid(x.steamID)] || { leaves: 0, lastMatch: '' };
       leavers[pid(x.steamID)].leaves += 1; leavers[pid(x.steamID)].lastMatch = c.m; leaverHits++;
       console.log('  leaver ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' (in roster, no record; total ' + leavers[pid(x.steamID)].leaves + ')');
+      // O181: a convicted absence -- the week's first freezes the streak, later ones break it; his row is rewritten this run
+      //   (same score, fresh tail) so the streak others are shown for him drops now, not at his next settle
+      if (xpId && streakAbsence(xpState, pid(x.steamID), pend.t0 || nowMs, g[0].d[3] | 0, nowMs) && careerBlockOf(xpState[pid(x.steamID)])) careerTouched.add(String(x.steamID));   // (no block = never rewrite: a write without details empties the row's)
       // Q228: kept, so his own result for these scores coming in late forgives this conviction (LATE_RESULT_MS)
       const cvKey = pid(x.steamID) + '|' + c.m;
       confState[cvKey] = { t0: nowMs, mt: matchType, ded: 0, ex: 1, cv: 1, s: x.seat | 0, v: vecTag(g[0]) };
@@ -9290,3 +9402,4 @@ Object.assign(module.exports, { CUP, CUP_FAMS, ENDLESS_CUP_LB, ENDLESS_CUP_HONOR
 Object.assign(module.exports, { lpWriteDetails, mhOfKey, groupSids, prunePendingWrites, PENDING_WRITES_FILE, RECEIPT_HOLD_MS });   // O480 points receipts + backlog (test/receipt-ring.js)
 Object.assign(module.exports, { lpReadStale, lpLastLive, LP_LAST_HOLD_MS });   // O481 the backlog's last write against a lagging read (test/stale-lp-read.js)
 Object.assign(module.exports, { careerBlockOf, fillCareerDetails, careerEnsureWrites, decodeCharBlock, careerSeatCodes, careerModeOfMt, careerSecOf, careerCellAdd, creditCareerMatch, creditCareerEndless, CHAR_MAGIC, CAREER_MATRIX_MAGIC, CAREER_MODES, CAREER_WL_MASK, CAREER_COLS });   // 5.4a S0 / S2 career block + matrix (test/career-refill.js, test/career-matrix.js, mvp ledger-schema-lockstep)
+Object.assign(module.exports, { V54B3_STREAK, streakPlan, streakApply, streakAbsence, streakPardon, streakApplyEarly, minuteOf });   // O181 matchmade win streak (client knife 5.4b3; test/streak.js, test/streak-plan-fixtures.js, mvp ledger-schema-lockstep)

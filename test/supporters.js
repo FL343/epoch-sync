@@ -74,10 +74,10 @@ assert('validate.xpBoostMult(level, supporter) routes through xpMult (Lv90 -> 1.
 console.log('=== supporters [5] validate.js wiring pins ===');
 const vjs = fs.readFileSync(path.join(__dirname, '..', 'validate.js'), 'utf8');
 assert('creditXp/creditXpPrivate/creditXpEndless/creditXpBot take spSet and pass supporter flag into xpBoostMult (four credit paths)',
-  /function creditXp\([^)]*careerDet, spSet\)/.test(vjs) && /function creditXpPrivate\([^)]*today, spSet\)/.test(vjs)
+  /function creditXp\([^)]*careerDet, spSet, sk\)/.test(vjs) && /function creditXpPrivate\([^)]*today, spSet\)/.test(vjs)
   && /function creditXpEndless\([^)]*changedXp, spSet, mult\)/.test(vjs) && /function creditXpBot\([^)]*today, spSet, lone\)/.test(vjs)
-  && (vjs.match(/xpBoostMult\(xpLevelOf\(xp\[sid\] \| 0\), !!\(spSet && spSet\.has\(String\(sid\)\)\)\)/g) || []).length === 4);
-assert('all four settle call sites pass spSet', /creditXpBot\(g, lvB, xp, changedXp, xpState, today, spSet, !!c\.botLone\)/.test(vjs) && /creditXpPrivate\(g, rankOf, lvP, xp, changedXp, xpState, today, spSet\)/.test(vjs) && /creditXp\(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers, today, progFrac, careerDet, spSet\)/.test(vjs) && /creditXpEndless\(g, t, xp, changedXp, spSet\)/.test(vjs));
+  && (vjs.match(/xpBoostMult\(xpLevelOf\(xp\[sid\] \| 0\), !!\(spSet && spSet\.has\(String\(sid\)\)\)(, streakPct)?\)/g) || []).length === 4);   // O181: the matchmade one adds the streak tier
+assert('all four settle call sites pass spSet', /creditXpBot\(g, lvB, xp, changedXp, xpState, today, spSet, !!c\.botLone\)/.test(vjs) && /creditXpPrivate\(g, rankOf, lvP, xp, changedXp, xpState, today, spSet\)/.test(vjs) && /creditXp\(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers, today, progFrac, careerDet, spSet[,)]/.test(vjs) && /creditXpEndless\(g, t, xp, changedXp, spSet\)/.test(vjs));
 assert('processSupporters: playtest hard-off + env appid gate + probes via CheckAppOwnership + capped plan', /const processSupporters = async \(xpMap, extraSids\) => \{\s*const spSet = new Set\(\);\s*if \(PT_MODE\) return spSet;\s*const S = supporters\.SUPPORTER;\s*if \(!S\.DLC_APPID\)/.test(vjs) && /DLC_APPID: Number\(process\.env\.SUPPORTER_DLC_APPID\) \|\| 0/.test(fs.readFileSync(path.join(__dirname, '..', 'supporters.js'), 'utf8'))
   && /ISteamUser\/CheckAppOwnership\/v2\//.test(vjs) && /supporters\.checkPlan\(st, cands, pid, nowMs\)/.test(vjs));
 assert('processSupporters runs on both early-exit paths (quiet days still reconcile the wall) and on the main path before settle',
