@@ -109,4 +109,33 @@ function buildsOf(f, pc, ch) {
   return { ok: true, builds, n };
 }
 
-module.exports = { PERKS_CFG, VENDOR_DIR, VENDOR_FILES, load, modeOf, isPrefix, replayOpts, verifyPerkPicks, buildAt, buildsOf };
+// Debt pact cash (client knife 5.10b): picking the debt pact (new or an upgrade) pays that tier's full cash to every seat at once, inside
+//   the PERK op -- money the seedcap envelope cannot see from the field. Replays the same log (buildsOf) and sums feeCashOf for every slot
+//   whose (id, lv) changed at a draw whose passed depth lies in [fromDepth, toDepth] (both ends: the draw at a segment boundary may land
+//   on either side of the record snapshot -> counted, never missed; a chain counts it at most twice = looser, never tighter).
+//   -> { ok: true, cash } | the replay's { ok: false, ... } (the caller already steps aside on a replay error).
+function debtCashOf(f, pc, ch, fromDepth, toDepth) {
+  const P = load();
+  const rl = buildsOf(f, pc, ch);
+  if (!rl.ok) return rl;
+  const every = P.drawEvery();
+  let cash = 0, prev = 0;
+  for (let k = 1; k <= rl.builds.length; k++) {
+    const b = rl.builds[k - 1] >>> 0, at = k * every;
+    if (at >= (fromDepth | 0) && at <= (toDepth | 0)) {
+      const a = P.unpackBuild(prev), c = P.unpackBuild(b);
+      for (let s = 0; s < 3; s++) {
+        const x = c[s], y = a[s];
+        if (!x || (y && y.id === x.id && y.lv === x.lv)) continue;
+        cash += P.feeCashOf(x.id, x.lv) | 0;
+      }
+    }
+    prev = b;
+  }
+  return { ok: true, cash };
+}
+// Candidate-rules version of a record (client knife 5.10a: EA = v2 from its first season, playtest / demo = v1 forever) -> the seedcap
+//   CLI's rv= token (the high-roller coin envelope takes the table max of that version)
+function rulesVerOf(f, ch) { const P = load(); return (P.rulesVer(ch, (f && f.seasonId) | 0) | 0) || 1; }
+
+module.exports = { PERKS_CFG, VENDOR_DIR, VENDOR_FILES, load, modeOf, isPrefix, replayOpts, verifyPerkPicks, buildAt, buildsOf, debtCashOf, rulesVerOf };

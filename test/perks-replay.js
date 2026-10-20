@@ -18,7 +18,7 @@ const assert = (label, cond, detail) => { if (cond) ok(label); else bad(label + 
 console.log('== vendor load ==');
 const P = perks.load();
 assert('vendor exposes the replay surface', typeof P.candidates === 'function' && typeof P.replay === 'function' && typeof P.packPicks === 'function' && typeof P.seasonSeed === 'function');
-eq('table size (11 first-release perks + 6 behaviour perks + 3 contracts = 20 rules-v1 entries, knife 3.5c1; + 11 rules-v2-only cards, knife 5.10a)', [P.list().length, P.list().filter(p => !(p.rulesFrom > 1)).length], [31, 20]);
+eq('table size (11 first-release perks + 6 behaviour perks + 3 contracts = 20 rules-v1 entries, knife 3.5c1; + 11 rules-v2-only cards, knife 5.10a; + 20 condition cards, knife 5.10b)', [P.list().length, P.list().filter(p => !(p.rulesFrom > 1)).length], [51, 20]);
 eq('PERKS_CFG == vendor fallback constants', perks.PERKS_CFG, P.FALLBACK);
 eq('vendor cfg() reads PERKS_CFG', [P.drawEvery(), P.gateEvery(), P.maxDraws()], [perks.PERKS_CFG.DRAW_EVERY, perks.PERKS_CFG.GATE_EVERY, perks.PERKS_CFG.MAX_DRAWS]);
 {
@@ -151,7 +151,7 @@ console.log('== season window (client knife 3.5d: table freeze by season) ==');
     assert('the same log claimed for season 1 -> perk_forge', perks.verifyPerkPicks(Object.assign({ seasonId: 1 }, f), null, 1).reason === 'perk_forge');
   }
   P._setTableForTest(null);
-  eq('table restored', P.list().length, 31);
+  eq('table restored', P.list().length, 51);
 }
 
 console.log('== perk_chain (run memory) ==');

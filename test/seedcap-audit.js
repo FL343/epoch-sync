@@ -460,6 +460,45 @@ const SIDA = '76561198000000001', SIDB = '76561198000000002', SIDX = '7656119800
   ok('[14] main(): readGroups -> takeSkips(pickAuditable) -> auditPending -> applyAudit (shared with tools/seedcap-reaudit.js)', /const picked = takeSkips\(st, pickAuditable\(st, groups\), nowMin\(\)\);/.test(src) && /audited = auditPending\(picked\.pending, \{ cores, live: cf\.live, channel: SEEDCAP_CHANNEL, distDir: SEEDCAP_DIST_DIR \}\);/.test(src) && /stats = applyAudit\(st, audited\.pending, audited\.map, processed, nowMin\(\)\);/.test(src));
   ok('[14] reaudit tool exists, is read-only (no saveState / writeOffense / sendAlertMail) and shares the audit routine', (() => { let t = ''; try { t = require('fs').readFileSync(path.join(__dirname, '..', 'tools', 'seedcap-reaudit.js'), 'utf8'); } catch (e) { return false; } return /sc\.readGroups\(\)/.test(t) && /sc\.auditPending\(/.test(t) && /sc\.applyAudit\(/.test(t) && !/saveState\(/.test(t) && !/writeOffense\(/.test(t) && !/sendAlertMail\(/.test(t); })());
 }
+// ---- [15] debt-pact cash replay + fee= / rv= tokens (client knife 5.10b) ----
+{
+  const perks = require('../perks.js');
+  const P = perks.load();
+  // an honest EA (rules v2) solo log that takes the debt pact (id 46) whenever it is offered (else card 1); search seeds until one does
+  const walk = (season, runSeed, n) => {
+    const s = P.seasonSeed(season), base = { mode: 'solo', seasonId: season, channel: 'ea', runSeed };
+    const picks = P.emptyPicks();
+    const debt = [];
+    for (let k = 0; k < n; k++) {
+      const ctx = P.drawCtxAt(s, picks, k, base);
+      const cards = P.candidates(s, P.depthOfDraw(k), ctx.build, k, ctx.skipBank, Object.assign({}, base, { contractsSeen: ctx.contractsSeen, prevShown: ctx.prevShown }));
+      let ci = cards.findIndex(c => c.id === 46) + 1;
+      if (ci > 0) debt.push({ k, lv: cards[ci - 1].lv }); else ci = 1;
+      picks[k] = ci;
+    }
+    const pk = P.packPicks(picks);
+    return { f: { picksLo: pk.lo, picksHi: pk.hi, seasonId: season, runSeed }, debt };
+  };
+  let w = null;
+  for (let rs = 1; rs < 4000 && !w; rs++) { const t = walk(1, rs, 8); if (t.debt.length) w = t; }
+  ok('[15] an EA honest log that takes the debt pact exists (seed search)', !!w);
+  if (w) {
+    const every = P.drawEvery();
+    const want = w.debt.reduce((a, d) => a + P.feeCashOf(46, d.lv), 0);
+    const all = perks.debtCashOf(w.f, 1, 'ea', 0, 100);
+    ok('[15] debtCashOf over the whole log = sum of the debt tiers picked (' + want + ')', all.ok && all.cash === want && want > 0, JSON.stringify(all));
+    const atK = (w.debt[0].k + 1) * every;
+    const before = perks.debtCashOf(w.f, 1, 'ea', 0, atK - 1), onEdge = perks.debtCashOf(w.f, 1, 'ea', atK, atK);
+    ok('[15] range filter: a range ending before the draw pays 0; the draw depth itself counts (both ends inclusive)', before.ok && before.cash === 0 && onEdge.ok && onEdge.cash === P.feeCashOf(46, w.debt[0].lv));
+    const d1 = perks.debtCashOf(w.f, 1, 'demo', 0, 100);
+    ok('[15] the same log replayed as v1 (demo): the v1 pool has no debt pact -> either a perk_forge or 0 cash, never v2 money', !d1.ok || d1.cash === 0, JSON.stringify(d1));
+  }
+  ok('[15] rulesVerOf: ea -> 2 / demo / playtest -> 1', perks.rulesVerOf({ seasonId: 1 }, 'ea') === 2 && perks.rulesVerOf({ seasonId: 1 }, 'demo') === 1 && perks.rulesVerOf({ seasonId: 1 }, 'playtest') === 1);
+  const p = { entry: 'endless', pc: 1, startDepth: 5, endDepth: 10, startBank: 100, seasonId: 1, build: 386, builds: null, fee: 2500, rv: 2 };
+  ok('[15] core reads fee= / rv= -> tokens appended after the positional fields', sc.cliLineOf('t', p, 42, { builds: true, fee: true, rv: true }) === 'E t 42 1 5 10 100 1 386 fee=2500 rv=2');
+  ok('[15] core without them -> no token (the caller defers the group instead)', sc.cliLineOf('t', p, 42, { builds: true }) === 'E t 42 1 5 10 100 1 386');
+  ok('[15] rv 1 / fee 0 -> no token even when the core reads them (demo lines byte for byte)', sc.cliLineOf('t', Object.assign({}, p, { fee: 0, rv: 1 }), 42, { builds: true, fee: true, rv: true }) === 'E t 42 1 5 10 100 1 386');
+}
 try { fs.unlinkSync(process.env.SC_STATE_FILE); } catch (e) {}
 console.log(fail ? '\n[seedcap-audit] FAIL ' + fail + ' (pass ' + pass + ')' : '\n[seedcap-audit] all green (' + pass + ')');
 process.exit(fail ? 1 : 0);

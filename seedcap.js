@@ -155,12 +155,21 @@ function capParamsOf(mt, pc, tail) {
         }
       }
     }
+    // knife 5.10b (client): debt-pact cash the log paid inside [startDepth, endDepth] (CLI fee= token) + the record's candidate-rules
+    //   version (CLI rv= token: the high-roller coin envelope). A log that does not replay is already replayErr above.
+    let fee = 0;
+    if (!classic && tail && !replayErr && (buildEnd || (tail.picksLo | 0) || (tail.picksHi | 0))) {
+      const dc = perks.debtCashOf(tail, pc, PERK_CH, tail.startDepth | 0, tail.endDepth | 0);
+      if (!dc.ok) replayErr = dc.reason + ':' + dc.why;
+      else fee = dc.cash | 0;
+    }
+    const rv = classic ? 1 : perks.rulesVerOf(tail, PERK_CH);
     // seasonId (2026-09-05): the run's season snapshot from the record tail (5th int; -1 when the
     // record predates it) -- the world core replays the season-keyed boards exactly, so the cap is
     // per-run exact instead of a legacy runSeed-keyed replay.
     return { entry: 'endless', pc, startDepth: tail ? tail.startDepth | 0 : 0, endDepth: tail ? tail.endDepth | 0 : 0,
       seasonId: (tail && tail.seasonId != null) ? (tail.seasonId | 0) : -1,
-      build, builds, buildEnd, replayErr,
+      build, builds, buildEnd, replayErr, fee, rv,
       // endless affix reroll bitmap (2026-09-11, 10th/11th tail ints): rerolled depths derive their world with it (exact cap); absent = 0
       rerollLo: (!classic && tail && tail.rerollLo != null) ? (tail.rerollLo >>> 0) : 0,
       rerollHi: (!classic && tail && tail.rerollHi != null) ? (tail.rerollHi >>> 0) : 0,
@@ -207,7 +216,9 @@ function cliLineOf(tag, p, runSeed, caps) {
     const cl = !!p.classic;
     const season = (p.seasonId != null && p.seasonId >= 0) ? (p.seasonId | 0) : ((bd || hasRr || cl) ? -1 : null);
     return 'E ' + tag + ' ' + (runSeed | 0) + ' ' + p.pc + ' ' + (p.startDepth | 0) + ' ' + (p.endDepth | 0) + ' ' + Math.round(p.startBank || 0) +
-      (season != null ? (' ' + season) : '') + ((bd || hasRr || cl) ? (' ' + bd) : '') + ((hasRr || cl) ? (' ' + rl + ' ' + rh) : '') + (cl ? ' 1' : '') + listTok;
+      (season != null ? (' ' + season) : '') + ((bd || hasRr || cl) ? (' ' + bd) : '') + ((hasRr || cl) ? (' ' + rl + ' ' + rh) : '') + (cl ? ' 1' : '') + listTok +
+      // knife 5.10b: fee= (debt cash) / rv= (rules version >= 2) only to a core that reads them (caps.fee / caps.rv; the caller defers otherwise)
+      (((p.fee | 0) > 0 && caps && caps.fee) ? (' fee=' + (p.fee | 0)) : '') + (((p.rv | 0) > 1 && caps && caps.rv) ? (' rv=' + (p.rv | 0)) : '');
   }
   return 'C ' + tag + ' ' + (runSeed | 0) + ' ' + p.entry + ' ' + p.pc + ' ' + (p.ts | 0) + ' ' +
     (p.isTeam ? 1 : 0) + ' ' + (p.team2 ? 1 : 0) + ' ' + p.levels + ' ' + (p.teams && p.teams.length ? p.teams.join('') : '-');
@@ -239,6 +250,16 @@ function cliSupportsRerolls(run) {
 function cliSupportsClassic(run) {
   const r = (run || runCli)(['V p0']);
   return !!(r && !r.fail && r.map && r.map.p0 && r.map.p0.v && /\bclassic=1\b/.test(r.map.p0.v));
+}
+// The fee= / rv= tokens (client knife 5.10b) are read only by a CLI answering fee=1 / rv=1; an older core would drop them and cap a
+//   debt-pact / EA run without the debt cash / the high-roller coin envelope (too low = a false veto) -> such groups are deferred.
+function cliSupportsFee(run) {
+  const r = (run || runCli)(['V p0']);
+  return !!(r && !r.fail && r.map && r.map.p0 && r.map.p0.v && /\bfee=1\b/.test(r.map.p0.v));
+}
+function cliSupportsRv(run) {
+  const r = (run || runCli)(['V p0']);
+  return !!(r && !r.fail && r.map && r.map.p0 && r.map.p0.v && /\brv=1\b/.test(r.map.p0.v));
 }
 // ---- versioned cores: window selection (pure) ----
 // live = parsed live.json | null. Returns { primary: coreId|null, extra: [coreId], why } where null primary
@@ -655,10 +676,21 @@ function auditPending(pendingIn, ctx) {
     pending = pending.filter(x => !(x.p && x.p.classic));
     console.log('seedcap: CLI ignores the classic flag -- ' + (n - pending.length) + ' classic groups deferred until the CLI is refreshed');
   }
+  const needFee = (x) => !!(x.p && (x.p.fee | 0) > 0), needRv = (x) => !!(x.p && (x.p.rv | 0) > 1);
+  if (pending.some(needFee) && !cliSupportsFee(runPrimary)) {
+    const n = pending.length;
+    pending = pending.filter(x => !needFee(x));
+    console.log('seedcap: CLI ignores the fee= debt-cash token -- ' + (n - pending.length) + ' debt-pact groups deferred until the CLI is refreshed');
+  }
+  if (pending.some(needRv) && !cliSupportsRv(runPrimary)) {
+    const n = pending.length;
+    pending = pending.filter(x => !needRv(x));
+    console.log('seedcap: CLI ignores the rv= rules-version token -- ' + (n - pending.length) + ' rules-v2 groups deferred until the CLI is refreshed');
+  }
   out.deferred = pendingIn.length - pending.length;
   out.pending = pending;
   if (!pending.length) return out;
-  const capsPrimary = { builds: cliSupportsBuilds(runPrimary) };
+  const capsPrimary = { builds: cliSupportsBuilds(runPrimary), fee: cliSupportsFee(runPrimary), rv: cliSupportsRv(runPrimary) };
   const res = runPrimary(pending.map((x, i) => cliLineOf('m' + i, x.p, x.runSeed, capsPrimary)));
   if (res.fail) return Object.assign(out, { fail: 'CLI run failed ' + res.fail });
   out.head = res.head;
@@ -666,12 +698,13 @@ function auditPending(pendingIn, ctx) {
   //   costs nothing but the extra headroom (the primary verdicts stand)
   for (const c of cores.slice(1)) {
     const run = runOf(c.exe);
-    const okRr = cliSupportsRerolls(run), okBuild = cliSupportsBuild(run), okCl = cliSupportsClassic(run), caps = { builds: cliSupportsBuilds(run) };
+    const okRr = cliSupportsRerolls(run), okBuild = cliSupportsBuild(run), okCl = cliSupportsClassic(run), caps = { builds: cliSupportsBuilds(run), fee: cliSupportsFee(run), rv: cliSupportsRv(run) };
     const lines = [];
     pending.forEach((x, i) => {
       if (!okRr && x.p && (x.p.rerollLo || x.p.rerollHi)) return;
       if (!okBuild && x.p && x.p.build) return;
       if (!okCl && x.p && x.p.classic) return;
+      if ((!caps.fee && needFee(x)) || (!caps.rv && needRv(x))) return;
       lines.push(cliLineOf('m' + i, x.p, x.runSeed, caps));
     });
     if (!lines.length) continue;
@@ -692,13 +725,14 @@ function auditPending(pendingIn, ctx) {
   });
   for (const [exe, ex] of exactOf) {
     const run = runOf(exe);
-    const okRr = cliSupportsRerolls(run), okBuild = cliSupportsBuild(run), okCl = cliSupportsClassic(run), caps = { builds: cliSupportsBuilds(run) };
+    const okRr = cliSupportsRerolls(run), okBuild = cliSupportsBuild(run), okCl = cliSupportsClassic(run), caps = { builds: cliSupportsBuilds(run), fee: cliSupportsFee(run), rv: cliSupportsRv(run) };
     const lines = [];
     for (const i of ex.idx) {
       const x = pending[i];
       if (!okRr && x.p && (x.p.rerollLo || x.p.rerollHi)) continue;
       if (!okBuild && x.p && x.p.build) continue;
       if (!okCl && x.p && x.p.classic) continue;
+      if ((!caps.fee && needFee(x)) || (!caps.rv && needRv(x))) continue;
       lines.push(cliLineOf('m' + i, x.p, x.runSeed, caps));
     }
     if (!lines.length) continue;
@@ -758,7 +792,7 @@ async function main() {
     ' suspects=' + Object.keys(st.suspects).length + ' corrections=' + st.corrections.length);
 }
 
-module.exports = { selectCores, resolveCores, mergeCaps, corePathOf, OVERLAP_GRACE_MS, OVERLAP_MAX_MS, cliSupportsRerolls, cliSupportsClassic, cliSupportsBuilds, capParamsOf, cliLineOf, cliSupportsBuild, chainKey, chainStartBank, tailOf, coreForBuildNum, selfSeatsOf, pickAuditable, takeSkips, applyAudit, pruneState, readGroups, coresForNow, auditPending, runCli, loadState, saveState, SC_STATE_FILE, AUDITED_KEEP, VETO_KEEP_MIN, CHAIN_LEGACY_KEEP_MIN, CHAIN_KEEP_MIN, offensePlanOf, writeOffense, mailDecision, sendAlertMail, alertMailText, rejectWindowsOf, OFFENSE_LB, OFFENSE_MAGIC, SC_MAIL_MIN_OVER, SC_MAIL_SUS_MIN };
+module.exports = { selectCores, resolveCores, mergeCaps, corePathOf, OVERLAP_GRACE_MS, OVERLAP_MAX_MS, cliSupportsRerolls, cliSupportsClassic, cliSupportsBuilds, cliSupportsFee, cliSupportsRv, capParamsOf, cliLineOf, cliSupportsBuild, chainKey, chainStartBank, tailOf, coreForBuildNum, selfSeatsOf, pickAuditable, takeSkips, applyAudit, pruneState, readGroups, coresForNow, auditPending, runCli, loadState, saveState, SC_STATE_FILE, AUDITED_KEEP, VETO_KEEP_MIN, CHAIN_LEGACY_KEEP_MIN, CHAIN_KEEP_MIN, offensePlanOf, writeOffense, mailDecision, sendAlertMail, alertMailText, rejectWindowsOf, OFFENSE_LB, OFFENSE_MAGIC, SC_MAIL_MIN_OVER, SC_MAIL_SUS_MIN };
 if (require.main === module) {
   main().catch(e => { console.log('::error::seedcap run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
