@@ -286,15 +286,11 @@
     },
     "2026102001": {
       "pubs": [
-        "52bdcb542b8ccdf4436d342ac3584b74b7cf8685c22f87cf3bb073ed1e4d1e49",
-        "0a76fe1b4f20d1a449f1960afa7c3e2a9d7a4dc67680fa344645e3a49d3a24b1"
+        "52bdcb542b8ccdf4436d342ac3584b74b7cf8685c22f87cf3bb073ed1e4d1e49"
       ],
       "sealed": true,
       "at": "2026-10-20T07:09:30.044Z",
       "pubInfo": {
-        "0a76fe1b4f20d1a449f1960afa7c3e2a9d7a4dc67680fa344645e3a49d3a24b1": {
-          "ch": "demo"
-        },
         "52bdcb542b8ccdf4436d342ac3584b74b7cf8685c22f87cf3bb073ed1e4d1e49": {
           "ch": "demo"
         }
