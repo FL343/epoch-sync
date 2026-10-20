@@ -29,11 +29,22 @@ window.PERKS = (() => {
   function clsOfItem(key) { const c = ITEM_CLS[key]; return c == null ? CLS.other : CLS[c]; }
   function clsOfCreature() { return CLS.creature; }
   const T1_FIELDS = ['valueMul', 'clearBonusMul', 'levelTimeAdd', 'invGrant', 'strengthBonus', 'shopMul', 'flags',
-    'cursedMul', 'combo', 'emptyReturn', 'midas', 'drill', 'shatterBonus'];
+    'cursedMul', 'combo', 'emptyReturn', 'midas', 'drill', 'shatterBonus',
+    'condMul', 'condBonus', 'bagCashMul', 'doomLossMul', 'blastBonus', 'shopFirstMul', 'levelFee', 'wagerWinMul'];
   const VALUE_MUL_KEYS = CLS_KEYS.concat(['all']);
   const INV_KEYS = ['tnt', 'freeze'];
   const FLAG_KEYS = ['clover'];
-  const SUB_KEYS = { combo: ['every', 'mul'], emptyReturn: ['amt', 'cap'], midas: ['n', 'value'], drill: ['lv'], openPull: ['secs', 'mul'], lightPull: ['wMax', 'mul'] };
+  const SUB_KEYS = { combo: ['every', 'mul'], emptyReturn: ['amt', 'cap'], midas: ['n', 'value'], drill: ['lv'], openPull: ['secs', 'mul'], lightPull: ['wMax', 'mul'],
+    levelFee: ['cash', 'fee'] };
+  const COND_MUL_KEYS = ['heavy', 'light', 'deep', 'shallow', 'first', 'afterBag', 'afterFreeze', 'mech', 'debuffAffix', 'grabWithin', 'grabAfter', 'relay'];
+  const COND_BONUS_KEYS = ['newClass', 'newGemColor', 'catchFrom', 'splitFirst', 'teamEvery'];
+  const COND_B_FAMILY = ['relay', 'splitFirst', 'teamEvery'];
+  const COND_STATIC = ['heavy', 'light', 'deep', 'shallow', 'mech', 'debuffAffix'];
+  const COND_NEW_CLASS = ['gold', 'rock', 'bone', 'gem', 'creature', 'relic'];
+  const COND_MUL_CAP = 2;
+  const COND_DYN_CAP = 3;
+  const COND_TOTAL_CAP = 4;
+  const FIELD_SPEC_T1 = Object.freeze({ bagCashMul: 'mul', doomLossMul: 'mul', blastBonus: 'sum', shopFirstMul: 'mul', wagerWinMul: 'mul' });
   const ONE_PER_TABLE = ['combo', 'emptyReturn', 'midas', 'drill', 'openPull', 'lightPull'];
   const RENDER_ONLY = ['hookSpeedMul', 'pullSpeedMul', 'freezeDurMul', 'highlight', 'laser', 'emptyPullMul',
     'swingNatMul', 'openPull', 'lightPull', 'hitRadiusMul', 'mechVeteran', 'blind', 'topLit'];
@@ -174,8 +185,10 @@ window.PERKS = (() => {
       if (n > 1) errs.push('field ' + f + ' must appear on at most one perk (max semantics), found ' + n);
     }
     {
-      const nc = TABLE.filter(p => p.contract).length;
-      if (nc > 6) errs.push('too many contracts (' + nc + ' > 6)');
+      const nc1 = TABLE.filter(p => p.contract && !(p.rulesFrom > 1) && p.rollable).length;
+      const nc2 = TABLE.filter(p => p.contract && !(p.rulesFrom > 2) && poolFieldOf(p, V2_DEFAULT_OVERLAY).rollable).length;
+      if (nc1 > 6) errs.push('too many contracts in the rules v1 pool (' + nc1 + ' > 6)');
+      if (nc2 > 6) errs.push('too many contracts in the rules v2 pool (' + nc2 + ' > 6)');
     }
     if (IT) {
       for (const k of Object.keys(IT)) if (!(k in ITEM_CLS)) errs.push('ITEMS key unclassified (add to ITEM_CLS): ' + k);
@@ -254,7 +267,96 @@ window.PERKS = (() => {
       const top3c = (cm[0] || 1) * (cm[1] || 1) * (cm[2] || 1);
       if (top3c > 3 + 1e-9) errs.push('CURSED_MUL_CAP exceeded: 3-slot |cursedMul| product ' + top3c + ' > 3');
     }
+    _validateCond510b(errs, IT);
     return errs;
+  }
+  function _validateCond510b(errs, IT) {
+    const num = (v) => typeof v === 'number' && isFinite(v);
+    const isInt = (v) => num(v) && v === (v | 0);
+    const N_DOM = { heavy: [1, 20], light: [1, 20], debuffAffix: [1, 3], grabWithin: [1, 120], grabAfter: [1, 120] };
+    const NB_DOM = { catchFrom: [1, 40], teamEvery: [2, 60] };
+    const DYN = ['first', 'afterBag', 'afterFreeze', 'grabWithin', 'relay'];
+    for (const p of TABLE) {
+      let usesB = false;
+      (p.lv || []).forEach((e, k) => {
+        if (!e) return;
+        const at = p.key + ' Lv' + (k + 1);
+        if (e.condMul != null) {
+          if (!Array.isArray(e.condMul) || !e.condMul.length) errs.push('condMul must be a non-empty array: ' + at);
+          else for (const c of e.condMul) {
+            if (!c || typeof c !== 'object') { errs.push('condMul entry must be an object: ' + at); continue; }
+            for (const f of Object.keys(c)) if (['when', 'mul', 'cls', 'n'].indexOf(f) < 0) errs.push('condMul entry field outside {when, mul, cls, n}: ' + at + ' ' + f);
+            if (COND_MUL_KEYS.indexOf(c.when) < 0) errs.push('condMul unknown when: ' + at + ' ' + c.when);
+            if (!(num(c.mul) && (c.mul > 0 || (c.when === 'grabAfter' && c.mul === 0)))) errs.push('condMul.mul must be > 0 (0 only for grabAfter): ' + at);
+            if (c.mul === 1) errs.push('condMul.mul 1 is a no-op: ' + at);
+            if (c.cls != null && CLS_KEYS.indexOf(c.cls) < 0) errs.push('condMul unknown cls: ' + at + ' ' + c.cls);
+            const dom = N_DOM[c.when];
+            if (dom) { if (!(isInt(c.n) && c.n >= dom[0] && c.n <= dom[1])) errs.push('condMul.n out of ' + dom.join('..') + ' for ' + c.when + ': ' + at); }
+            else if (c.n != null) errs.push('condMul.n not used by ' + c.when + ': ' + at);
+            if (DYN.indexOf(c.when) >= 0 && num(c.mul) && c.mul > COND_DYN_CAP + 1e-9) errs.push('dynamic condMul ' + c.when + ' mul ' + c.mul + ' > COND_DYN_CAP ' + COND_DYN_CAP + ': ' + at);
+            if (COND_B_FAMILY.indexOf(c.when) >= 0) usesB = true;
+          }
+        }
+        if (e.condBonus != null) {
+          if (!Array.isArray(e.condBonus) || !e.condBonus.length) errs.push('condBonus must be a non-empty array: ' + at);
+          else for (const c of e.condBonus) {
+            if (!c || typeof c !== 'object') { errs.push('condBonus entry must be an object: ' + at); continue; }
+            for (const f of Object.keys(c)) if (['when', 'amt', 'n'].indexOf(f) < 0) errs.push('condBonus entry field outside {when, amt, n}: ' + at + ' ' + f);
+            if (COND_BONUS_KEYS.indexOf(c.when) < 0) errs.push('condBonus unknown when: ' + at + ' ' + c.when);
+            if (!(isInt(c.amt) && c.amt >= 1 && c.amt <= 1000)) errs.push('condBonus.amt must be int 1..1000: ' + at);
+            const dom = NB_DOM[c.when];
+            if (dom) { if (!(isInt(c.n) && c.n >= dom[0] && c.n <= dom[1])) errs.push('condBonus.n out of ' + dom.join('..') + ' for ' + c.when + ': ' + at); }
+            else if (c.n != null) errs.push('condBonus.n not used by ' + c.when + ': ' + at);
+            if (COND_B_FAMILY.indexOf(c.when) >= 0) usesB = true;
+          }
+        }
+        if (e.bagCashMul != null && !(num(e.bagCashMul) && e.bagCashMul >= 1 && e.bagCashMul <= 3)) errs.push('bagCashMul must be in [1, 3]: ' + at);
+        if (e.doomLossMul != null && !(num(e.doomLossMul) && e.doomLossMul > 0 && e.doomLossMul <= 1)) errs.push('doomLossMul must be in (0, 1]: ' + at);
+        if (e.blastBonus != null && !(isInt(e.blastBonus) && e.blastBonus >= 0 && e.blastBonus <= 200)) errs.push('blastBonus must be int 0..200: ' + at);
+        if (e.shopFirstMul != null && !(num(e.shopFirstMul) && e.shopFirstMul > 0 && e.shopFirstMul < 1)) errs.push('shopFirstMul must be in (0, 1): ' + at);
+        if (e.wagerWinMul != null && !(num(e.wagerWinMul) && e.wagerWinMul >= 1 && e.wagerWinMul <= 3)) errs.push('wagerWinMul must be in [1, 3]: ' + at);
+        if (e.levelFee != null) {
+          if (!p.contract) errs.push('levelFee only on a contract (the cost must bite): ' + at);
+          if (!(isInt(e.levelFee.cash) && e.levelFee.cash >= 0 && isInt(e.levelFee.fee) && e.levelFee.fee > 0)) errs.push('levelFee needs int cash >= 0 and int fee > 0: ' + at);
+        }
+      });
+      if (usesB && !(p.modes && p.modes.solo === false && p.modes.duel === false)) errs.push('B-family condition (relay / splitFirst / teamEvery) needs modes.solo false and modes.duel false: ' + p.key);
+      if (p.lockSlot != null && !(p.lockSlot === true && p.contract)) errs.push('lockSlot must be true and only on a contract: ' + p.key);
+    }
+    const top3 = (vals) => { const s = vals.slice().sort((a, b) => b - a); return (s[0] || 1) * (s[1] || 1) * (s[2] || 1); };
+    const maxTier = (p, f) => Math.max.apply(null, p.lv.map(e => (e && e[f] != null) ? e[f] : 1));
+    if (top3(TABLE.map(p => maxTier(p, 'bagCashMul'))) > 3 + 1e-9) errs.push('3-slot bagCashMul product > 3');
+    if (top3(TABLE.map(p => maxTier(p, 'wagerWinMul'))) > 2.5 + 1e-9) errs.push('3-slot wagerWinMul product > 2.5');
+    const ctxs = [];
+    const items = IT || window.ITEMS || {};
+    const creatures = window.CREATURE_STATS || {};
+    const keys = Object.keys(items).map(k => ({ isItem: true, w: +items[k].weight || 0, cls: clsOfItem(k) }))
+      .concat(Object.keys(creatures).map(() => ({ isItem: false, w: 0, cls: CLS.creature })));
+    if (!keys.length) keys.push({ isItem: true, w: 5, cls: CLS.gold });
+    for (const kc of keys) for (const deep of [0, 1]) for (const mech of [false, true]) for (const debuffN of [0, 1, 2, 3]) ctxs.push(Object.assign({ deep, mech, debuffN }, kc));
+    const dynCtx = { hookN: 0, bagNext: true, frozeLvl: true, grabMs: 0 };
+    let worstS = 1, worstT = 1;
+    for (const c of ctxs) {
+      const sMax = [], tMax = [];
+      for (const p of TABLE) {
+        let bs = 1, bt = 1;
+        for (const e of p.lv) {
+          if (!e || !Array.isArray(e.condMul)) continue;
+          let s = 1, d = 1;
+          for (const x of e.condMul) {
+            if (COND_STATIC.indexOf(x.when) >= 0) { const t = condTimes(x, c); for (let r = 0; r < t; r++) s = s * x.mul; }
+            else if (x.when === 'relay' || x.when === 'grabAfter') { if (x.mul > 1) d = d * x.mul; }
+            else if (x.mul > 1 && condTimes(x, Object.assign({}, c, dynCtx)) > 0) d = d * x.mul;
+          }
+          if (s > bs) bs = s;
+          if (s * d > bt) bt = s * d;
+        }
+        sMax.push(bs); tMax.push(bt);
+      }
+      worstS = Math.max(worstS, top3(sMax)); worstT = Math.max(worstT, top3(tMax));
+    }
+    if (worstS > COND_MUL_CAP + 1e-9) errs.push('COND_MUL_CAP exceeded: 3-slot static condition product ' + worstS + ' > ' + COND_MUL_CAP);
+    if (worstT > COND_TOTAL_CAP + 1e-9) errs.push('COND_TOTAL_CAP exceeded: 3-slot static x dynamic condition product ' + worstT + ' > ' + COND_TOTAL_CAP);
   }
   function isContract(id) { const p = get(id); return !!(p && p.contract); }
   function inSeason(p, seasonId) {
@@ -520,7 +622,10 @@ window.PERKS = (() => {
     const slot = card.slot | 0;
     if (slot < 0 || slot > 2) return null;
     if (card.tag === 'up') { if (!slots[slot] || slots[slot].id !== card.id || slots[slot].lv + 1 !== card.lv) return null; }
-    else { if (slots.some((s, k) => s && s.id === card.id && k !== slot)) return null; if (card.tag === 'new' && slots[slot]) return null; }
+    else {
+      if (slots.some((s, k) => s && s.id === card.id && k !== slot)) return null; if (card.tag === 'new' && slots[slot]) return null;
+      if (slots[slot] && isLocked(slots[slot].id)) return null;
+    }
     slots[slot] = { id: card.id, lv: card.lv, slot };
     return packBuild(slots);
   }
@@ -542,6 +647,7 @@ window.PERKS = (() => {
       else {
         if (plv !== 1) return false;
         if (slots.some((x, k) => x && k !== s && x.id === pid)) return false;
+        if (cur && isLocked(cur.id)) return false;
       }
       slots[s] = { id: pid, lv: plv, slot: s };
       nb = packBuild(slots);
@@ -650,11 +756,21 @@ window.PERKS = (() => {
     const e = { valueMul: {}, clearBonusMul: 1, levelTimeAdd: 0, invGrant: { tnt: 0, freeze: 0 }, strengthBonus: 0, shopMul: 1,
       clover: false, hookSpeedMul: 1, pullSpeedMul: 1, emptyPullMul: 1, freezeDurMul: 1, highlight: 0, slots: heldOf(build),
       cursedMul: 1, comboEvery: 0, comboMul: 1, emptyAmt: 0, emptyCap: 0, midasN: 0, midasValue: 0, drillLv: 0, shatterBonus: 0, laser: 0,
-      swingNatMul: 1, hitRadiusMul: 1, mechVeteran: 0, topLit: 0, blind: false, openPullSecs: 0, openPullMul: 1, lightPullW: 0, lightPullMul: 1 };
+      swingNatMul: 1, hitRadiusMul: 1, mechVeteran: 0, topLit: 0, blind: false, openPullSecs: 0, openPullMul: 1, lightPullW: 0, lightPullMul: 1,
+      bagCashMul: 1, doomLossMul: 1, blastBonus: 0, shopFirstMul: 1, wagerWinMul: 1, levelFee: 0, condMul: [], condBonus: [], lockedSlot: -1 };
     for (const c of VALUE_MUL_KEYS) e.valueMul[c] = 1;
     for (const s of e.slots) {
       const p = get(s.id); if (!p) continue;
       const L = p.lv[Math.max(0, Math.min(2, s.lv - 1))] || {};
+      for (const f of Object.keys(FIELD_SPEC_T1)) {
+        if (L[f] == null) continue;
+        if (FIELD_SPEC_T1[f] === 'mul') e[f] = e[f] * L[f];
+        else if (FIELD_SPEC_T1[f] === 'sum') { if (L[f]) e[f] = e[f] + L[f]; }
+      }
+      if (L.levelFee && L.levelFee.fee) e.levelFee += L.levelFee.fee | 0;
+      if (Array.isArray(L.condMul)) for (const c of L.condMul) e.condMul.push(c);
+      if (Array.isArray(L.condBonus)) for (const c of L.condBonus) e.condBonus.push(c);
+      if (p.lockSlot) e.lockedSlot = s.slot;
       for (const f of ['swingNatMul', 'hitRadiusMul', 'mechVeteran', 'topLit', 'blind']) {
         if (L[f] == null) continue;
         const how = FIELD_SPEC[f];
@@ -720,6 +836,91 @@ window.PERKS = (() => {
     }
     return m;
   }
+  function condTimes(e, c) {
+    if (!e || !c) return 0;
+    if (e.cls != null && CLS[e.cls] !== (c.cls | 0)) return 0;
+    const g = (c.grabMs == null) ? -1 : +c.grabMs;
+    switch (e.when) {
+      case 'heavy': return (c.isItem && (+c.w || 0) >= (e.n | 0)) ? 1 : 0;
+      case 'light': return (c.isItem && (+c.w || 0) <= (e.n | 0)) ? 1 : 0;
+      case 'deep': return (c.deep === 1) ? 1 : 0;
+      case 'shallow': return (c.deep === 0) ? 1 : 0;
+      case 'first': return ((c.hookN | 0) === 0) ? 1 : 0;
+      case 'afterBag': return c.bagNext ? 1 : 0;
+      case 'afterFreeze': return c.frozeLvl ? 1 : 0;
+      case 'mech': return c.mech ? 1 : 0;
+      case 'debuffAffix': return Math.max(0, Math.min(c.debuffN | 0, e.n | 0));
+      case 'grabWithin': return (g >= 0 && g < (e.n | 0) * 1000) ? 1 : 0;
+      case 'grabAfter': return (g >= 0 && g >= (e.n | 0) * 1000) ? 1 : 0;
+      default: return 0;
+    }
+  }
+  function condMulOfBuild(build, c) {
+    let m = 1;
+    for (const s of heldOf(build)) {
+      const p = get(s.id); if (!p) continue;
+      const L = p.lv[Math.max(0, Math.min(2, s.lv - 1))] || {};
+      if (!Array.isArray(L.condMul)) continue;
+      for (const e of L.condMul) { const t = condTimes(e, c); for (let r = 0; r < t; r++) m = m * e.mul; }
+    }
+    return m;
+  }
+  function condBonusOfBuild(build, c) {
+    let b = 0;
+    for (const s of heldOf(build)) {
+      const p = get(s.id); if (!p) continue;
+      const L = p.lv[Math.max(0, Math.min(2, s.lv - 1))] || {};
+      if (!Array.isArray(L.condBonus)) continue;
+      for (const e of L.condBonus) {
+        if (e.when === 'newClass' && c && c.newCls) b += e.amt | 0;
+        else if (e.when === 'newGemColor' && c && c.newGem) b += e.amt | 0;
+        else if (e.when === 'catchFrom' && c && ((c.hookN | 0) + 1) >= (e.n | 0)) b += e.amt | 0;
+      }
+    }
+    return b;
+  }
+  function relayMulOfBuild(build) {
+    let m = 1;
+    for (const s of heldOf(build)) {
+      const p = get(s.id); if (!p) continue;
+      const L = p.lv[Math.max(0, Math.min(2, s.lv - 1))] || {};
+      if (Array.isArray(L.condMul)) for (const e of L.condMul) if (e.when === 'relay') m = m * e.mul;
+    }
+    return m;
+  }
+  function splitFirstAmtOfBuild(build) {
+    let a = 0;
+    for (const s of heldOf(build)) {
+      const p = get(s.id); if (!p) continue;
+      const L = p.lv[Math.max(0, Math.min(2, s.lv - 1))] || {};
+      if (Array.isArray(L.condBonus)) for (const e of L.condBonus) if (e.when === 'splitFirst') a += e.amt | 0;
+    }
+    return a;
+  }
+  function teamEveryOfBuild(build) {
+    const out = [];
+    for (const s of heldOf(build)) {
+      const p = get(s.id); if (!p) continue;
+      const L = p.lv[Math.max(0, Math.min(2, s.lv - 1))] || {};
+      if (Array.isArray(L.condBonus)) for (const e of L.condBonus) if (e.when === 'teamEvery') out.push({ n: e.n | 0, amt: e.amt | 0 });
+    }
+    return out;
+  }
+  function feeCashOf(id, lv) {
+    const p = get(id);
+    const L = p && p.lv[Math.max(0, Math.min(2, (lv | 0) - 1))];
+    return (L && L.levelFee) ? (L.levelFee.cash | 0) : 0;
+  }
+  function isLocked(id) { const p = get(id); return !!(p && p.lockSlot); }
+  function hasCondB(build) {
+    for (const s of heldOf(build)) {
+      const p = get(s.id); if (!p) continue;
+      const L = p.lv[Math.max(0, Math.min(2, s.lv - 1))] || {};
+      if ((Array.isArray(L.condMul) && L.condMul.some(e => COND_B_FAMILY.indexOf(e.when) >= 0)) ||
+          (Array.isArray(L.condBonus) && L.condBonus.some(e => COND_B_FAMILY.indexOf(e.when) >= 0))) return true;
+    }
+    return false;
+  }
   function classCapOf(build, cls) {
     if (isEmpty(build)) return 0;
     const ck = CLS_KEYS[cls | 0];
@@ -754,7 +955,7 @@ window.PERKS = (() => {
     RW: Object.freeze({ common: 10, rare: 5, epic: 2 }),
     BAND_MUL: Object.freeze({ common: Object.freeze([1, 1, 1, 1]), rare: Object.freeze([1, 1.3, 1.6, 2]), epic: Object.freeze([0, 1, 1.5, 2]) }),
     GATE_MUL: Object.freeze({ common: 0.3, rare: 2, epic: 3 }),
-    TAG_BIAS: 2, TAG_CAP: 2,
+    TAG_BIAS: 3, TAG_CAP: 2,
     UP_MUL: 1.5,
     UTIL_DEEP: 0.4,
     MIN_FRESH: 6,
@@ -790,7 +991,8 @@ window.PERKS = (() => {
         rollable: !!p.rollable, contract: !!p.contract,
         seasons: p.seasons ? { from: p.seasons.from == null ? null : (p.seasons.from | 0), until: p.seasons.until == null ? null : (p.seasons.until | 0) } : null,
         rulesFrom: p.rulesFrom | 0, tags: (p.tags || m.tags || []).slice(), role: p.role || m.role || 'steady', minDepth: p.minDepth | 0, needs: p.needs || null,
-        excl: Array.isArray(p.excl) ? p.excl.slice().sort((a, b) => a - b) : [] };
+        excl: Array.isArray(p.excl) ? p.excl.slice().sort((a, b) => a - b) : [],
+        noUp: [sameTier(p.id | 0, 1) ? 1 : 0, sameTier(p.id | 0, 2) ? 1 : 0], lock: !!p.lockSlot };
     });
   }
   function _candConstantsV2(overlayKey) {
@@ -913,7 +1115,7 @@ window.PERKS = (() => {
         take(xp.up ? xp.up : mkNew(xp.p), cards.length >= 3 ? 'X' : 'C');
       }
     } else {
-      const order = [0, 1, 2].filter(s => slots[s]).sort((x, y) => (slots[x].lv - slots[y].lv) || (x - y));
+      const order = [0, 1, 2].filter(s => slots[s] && !isLocked(slots[s].id)).sort((x, y) => (slots[x].lv - slots[y].lv) || (x - y));
       const targeted = [];
       const nextTarget = (pref) => {
         if (pref != null && targeted.indexOf(pref) < 0) { targeted.push(pref); return pref; }
@@ -965,6 +1167,8 @@ window.PERKS = (() => {
     candConstants, candSig, CAND_ALGO_VER,
     effOfBuild, valueMulOfBuild, buildOf, effOf, valueMulOf, levelTimeAddMax, NEUTRAL,
     CLASS_TOTAL_CAP, CURSED_FLIP_MIN, clsMulOfBuild, allMulOfBuild, classCapOf,
+    COND_MUL_KEYS, COND_BONUS_KEYS, COND_B_FAMILY, COND_STATIC, COND_NEW_CLASS, COND_MUL_CAP, COND_DYN_CAP, COND_TOTAL_CAP, FIELD_SPEC_T1,
+    condTimes, condMulOfBuild, condBonusOfBuild, relayMulOfBuild, splitFirstAmtOfBuild, teamEveryOfBuild, feeCashOf, isLocked, hasCondB,
     nameKey, descKey, descParams, iconOf, rarityOf,
     _setTableForTest(list) { TABLE = list || LIST; _index(); _effCache = { build: -1, eff: effOfBuild(0) }; },
   };
