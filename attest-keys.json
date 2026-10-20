@@ -283,6 +283,18 @@
         }
       }
     },
+    "2026102001": {
+      "pubs": [
+        "0a76fe1b4f20d1a449f1960afa7c3e2a9d7a4dc67680fa344645e3a49d3a24b1"
+      ],
+      "sealed": true,
+      "at": "2026-10-20T06:37:19.615Z",
+      "pubInfo": {
+        "0a76fe1b4f20d1a449f1960afa7c3e2a9d7a4dc67680fa344645e3a49d3a24b1": {
+          "ch": "demo"
+        }
+      }
+    },
     "dev": {
       "pubs": [
         "f341d48777a90ad4ca0db15deb16824c7162c872fd48fa8c07b9b0458844d835"
