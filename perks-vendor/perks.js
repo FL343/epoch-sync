@@ -151,7 +151,7 @@ window.PERKS = (() => {
       lv: [{ shopFirstMul: 0.7 }, { shopFirstMul: 0.6 }, { shopFirstMul: 0.5 }], p: [{ a: 70 }, { a: 60 }, { a: 50 }] },
     { id: 46, key: 'debtPact', axis: 'economy', rarity: 'epic', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, contract: true, lockSlot: true, rulesFrom: 2, tags: ['econ'], role: 'swing', icon: '💸',
       lv: [{ levelFee: { cash: 1500, fee: 150 } }, { levelFee: { cash: 2500, fee: 225 } }, { levelFee: { cash: 3500, fee: 300 } }], p: [{ a: 1500, b: 150 }, { a: 2500, b: 225 }, { a: 3500, b: 300 }] },
-    { id: 47, key: 'limitPact', axis: 'time', rarity: 'epic', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, contract: true, rulesFrom: 2, tags: ['quick'], role: 'swing', excl: [2, 18, 19], icon: '🔢',
+    { id: 47, key: 'limitPact', axis: 'time', rarity: 'epic', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, contract: true, rulesFrom: 2, tags: ['quick'], role: 'swing', excl: [2, 18, 19], icon: '⏰',
       lv: [{ condMul: [{ when: 'grabWithin', n: 36, mul: 1.5 }, { when: 'grabAfter', n: 36, mul: 0 }] }, { condMul: [{ when: 'grabWithin', n: 40, mul: 1.55 }, { when: 'grabAfter', n: 40, mul: 0 }] },
         { condMul: [{ when: 'grabWithin', n: 44, mul: 1.6 }, { when: 'grabAfter', n: 44, mul: 0 }] }], p: [{ a: 36, b: 1.5 }, { a: 40, b: 1.55 }, { a: 44, b: 1.6 }] },
     { id: 48, key: 'highRoller', axis: 'economy', rarity: 'rare', scope: 'self', modes: { solo: true, coop: true, duel: false }, rollable: true, rulesFrom: 2, tags: ['econ'], role: 'swing', icon: '🎰',
