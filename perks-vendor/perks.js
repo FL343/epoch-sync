@@ -41,6 +41,7 @@ window.PERKS = (() => {
   const COND_B_FAMILY = ['relay', 'splitFirst', 'teamEvery'];
   const COND_STATIC = ['heavy', 'light', 'deep', 'shallow', 'mech', 'debuffAffix'];
   const COND_NEW_CLASS = ['gold', 'rock', 'bone', 'gem', 'creature', 'relic'];
+  const DEEP_Y = 350;
   const COND_MUL_CAP = 2;
   const COND_DYN_CAP = 3;
   const COND_TOTAL_CAP = 4;
@@ -1167,7 +1168,7 @@ window.PERKS = (() => {
     candConstants, candSig, CAND_ALGO_VER,
     effOfBuild, valueMulOfBuild, buildOf, effOf, valueMulOf, levelTimeAddMax, NEUTRAL,
     CLASS_TOTAL_CAP, CURSED_FLIP_MIN, clsMulOfBuild, allMulOfBuild, classCapOf,
-    COND_MUL_KEYS, COND_BONUS_KEYS, COND_B_FAMILY, COND_STATIC, COND_NEW_CLASS, COND_MUL_CAP, COND_DYN_CAP, COND_TOTAL_CAP, FIELD_SPEC_T1,
+    COND_MUL_KEYS, COND_BONUS_KEYS, COND_B_FAMILY, COND_STATIC, COND_NEW_CLASS, COND_MUL_CAP, COND_DYN_CAP, COND_TOTAL_CAP, FIELD_SPEC_T1, DEEP_Y,
     condTimes, condMulOfBuild, condBonusOfBuild, relayMulOfBuild, splitFirstAmtOfBuild, teamEveryOfBuild, feeCashOf, isLocked, hasCondB,
     nameKey, descKey, descParams, iconOf, rarityOf,
     _setTableForTest(list) { TABLE = list || LIST; _index(); _effCache = { build: -1, eff: effOfBuild(0) }; },
