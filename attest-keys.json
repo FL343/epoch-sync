@@ -292,7 +292,8 @@
       "at": "2026-10-20T07:09:30.044Z",
       "pubInfo": {
         "52bdcb542b8ccdf4436d342ac3584b74b7cf8685c22f87cf3bb073ed1e4d1e49": {
-          "ch": "demo"
+          "ch": "demo",
+          "retiredAt": "2026-10-21T02:29:45.735Z"
         }
       }
     },
