@@ -35,6 +35,7 @@ const mhOfKey = (m) => parseInt(String(m), 10) | 0;   // a match key starts with
 // O181 (knife 5.4b3): the matchmade win streak rules (event order, freezes, the XP tiers, the published tail) live in
 //   streak-plan.js, one copy for this job and for the client (see its header); the gate V54B3_STREAK is next to XP_CFG
 const streakPlan = require('./streak-plan.js');
+const startProof = require('./start-proof.js');   // O462: a matchmade start's seat commitment (one copy with the client, its vendor copy byte-locked there)
 // ---- O480 points-row backlog (PENDING_WRITES_FILE; test/receipt-ring.js, test/pending-writes.js, test/stale-lp-read.js) ----
 // pid -> { rc, w, l }, de-identified like every state file (pid keys; a matchHash is the key the start rosters in starts.json carry
 //   already; the score and details in w / l are the ones his public points row shows):
@@ -1139,6 +1140,149 @@ function lateWriterRoster(e, m, lateStarts, results, pending, processed, now, re
   }
   return null;
 }
+// ---- a matchmade start proves its table (roadmap O462, 2026-10-21; the companion repo's mvp/KNIFE_O462_PLAN.md) ----
+// Everything a matchmade start record names the match by is public (the matchHash, the seed, the roster), so an account
+// outside the match could copy a key off a public start and write a start of its own: the key was split or contested and
+// voided two hours later (Q127), or it voted from an empty seat and the lone 1V1 verdict paid nobody (Q184 / Q254), or its
+// id in the note kept the Q261 roster from registering. Q208 caps how often one account does that; it does not stop a whole
+// table of outside accounts or a key with a start missing. Now the host commits to the table when it starts the match:
+// start-proof.js (one copy with the client) derives the match id and the seed from sha256(n + seat count + roster), n a
+// random the host draws, and every matchmade start record (version 2) carries n in a block after its roster. A start whose
+// block binds its own matchHash and seed and seats its writer at the seat he writes from is 'ok' (proofState); one proves
+// the key's table T (finding another n for another table is a 63-bit second preimage), and the note keeps T (pt: seat
+// count, roster canon, the first 8 hex of n) for the runs that read no 'ok' start. On a proven key, ahead of everything
+// that reads starts or the note:
+//   - a start or result of an account T does not seat counts nowhere (pf): no vote, no split, no contest, no Q208 ledger,
+//     no id in the note; a start of an account T seats that names another table (pr) or another seat (ps) is left out
+//     (his results stay: a missing start convicts nobody, Q69);
+//   - the note's s and lo keep only the ids of T's own seats (Q261 needs s to hold the other seat's id alone, the lone 1V1
+//     verdict reads lo), its n (a start past its writer's room) goes when every writer that set it (nw) is off T;
+//   - a provisional roster that is not T (an incomplete read registered the outside starts first) becomes T, t0 kept;
+//   - a contest every party of which (w, not full) is off T is withdrawn (c = 0): they never sat in the match. Q127's
+//     sticky contest was against withdrawal games of players and their alts; an account T does not seat can not be one.
+// Two 'ok' tables for one key (only a modded host can make that, or a 63-bit collision) fork: the key keeps today's rules.
+// A key with no 'ok' start ever read (an old build, the host could not mint, every start unread) keeps today's rules too.
+// Why this frames nobody (architecture decision 10): an account T seats is never dropped for its results, and its start
+//   only when it names another table or seat (the client writes T and its own seat at every start, a cold-reconnect copy
+//   included); pf / pr / ps are counted only -- no flag, no signal, no trust tier. Until START_PROOF_GATE=1 (set after the
+//   observation the plan names: at least 7 days and 20 proven matches live, no seated account that would have lost a
+//   result, ps zero) the step only counts and logs what it would do: records, notes and settles stay as before.
+const START_PROOF_ENFORCE = process.env.START_PROOF_GATE === '1';
+const START_PROOF_NW_CAP = 8;   // the writers a note remembers for its n (more -> n stays: one of them may be on T)
+function proofSha(s) { return crypto.createHash('sha256').update(String(s), 'utf8').digest('hex'); }
+function noteRoomWriter(e, w) {   // Q144's n and who set it (O462: n goes on a proven key when they are all off its table)
+  if (e.nwx) return;
+  const nw = Array.isArray(e.nw) ? e.nw : (e.nw = []);
+  if (nw.indexOf(w) >= 0) return;
+  if (nw.length >= START_PROOF_NW_CAP) { e.nwx = 1; delete e.nw; return; }
+  nw.push(w);
+}
+// 'ok' | 'bad' | 'none' for one start record (ok: its block binds it and seats its writer at the seat he writes from)
+function proofState(r) {
+  const st = startProof.check(r.d, proofSha);
+  if (st !== 'ok') return st;
+  return String((r.roster || {})[r.d[5] | 0]) === String(r.steamID) ? 'ok' : 'bad';
+}
+// T from its seat count and roster canon (rosterCanon: seat:pid, ascending seats): sig = startSigOf of the same roster
+function proofTable(pc, canon) {
+  const seat = {};
+  for (const x of String(canon || '').split(',')) { const i = x.indexOf(':'); if (i > 0) seat[x.slice(0, i) | 0] = x.slice(i + 1); }
+  const sig = crypto.createHash('sha256').update((pc | 0) + '|' + String(canon || '')).digest('hex').slice(0, 12);
+  return { pc: pc | 0, canon: String(canon || ''), sig, seat, pids: new Set(Object.values(seat)) };
+}
+// note ids (startSeenId: pid@seat#sig) T owns
+function proofOwnsId(T, id) {
+  const at = String(id).indexOf('@'), hash = String(id).indexOf('#');
+  if (at < 0 || hash < at) return false;
+  return String(id).slice(hash + 1) === T.sig && T.seat[String(id).slice(at + 1, hash) | 0] === String(id).slice(0, at);
+}
+// Drops (enforce) or counts (observe), in place, the records a proven key's table T does not own. Returns the counts.
+function applyStartProof(starts, recs, pending, processed, now, enforce) {
+  const on = enforce == null ? START_PROOF_ENFORCE : !!enforce;   // tests pass it; main reads START_PROOF_GATE
+  const res = { mode: on ? 'enforce' : 'observe', keys: 0, proven: 0, ok: 0, bad: 0, none: 0, pf: 0, pr: 0, ps: 0, scrub: 0, fork: 0, reseat: 0, uncontest: 0, unroom: 0 };
+  const keyOf = (r) => r.d[3] + '_' + r.d[4] + '_' + r.d[2];
+  const byKey = {};
+  for (const r of starts || []) if (r && r.d && isMatchmadeMt(r.d[2] | 0)) { const m = keyOf(r); (byKey[m] = byKey[m] || { s: [], r: [] }).s.push(r); }
+  for (const r of recs || []) if (r && r.d && isMatchmadeMt(r.d[2] | 0)) { const m = keyOf(r); (byKey[m] = byKey[m] || { s: [], r: [] }).r.push(r); }
+  const drop = new Map(), lines = [];   // record -> why
+  for (const m of Object.keys(byKey).sort()) {
+    if (processed.has(m)) continue;
+    res.keys++;
+    const tabs = new Map();
+    for (const r of byKey[m].s) {
+      const st = proofState(r);
+      res[st]++;
+      if (st !== 'ok') continue;
+      const canon = rosterCanon(r.roster), pc = r.d[8] | 0, n8 = (startProof.nonceOf(r.d) || '').slice(0, 8);
+      tabs.set(pc + '|' + canon + '|' + n8, { pc, canon, n8 });
+    }
+    const note = pending['~' + m], pt = note && note.pt && typeof note.pt.c === 'string' ? note.pt : null;
+    let T = null;
+    if (tabs.size === 1) {
+      const t = [...tabs.values()][0];
+      if (pt && (pt.c !== t.canon || (pt.pc | 0) !== t.pc || pt.n !== t.n8)) { res.fork++; lines.push(m + ': fork (this run\'s proven table differs from the note\'s) -- today\'s rules'); continue; }
+      T = proofTable(t.pc, t.canon); T.n8 = t.n8; T.fresh = !pt;
+    } else if (tabs.size > 1) {
+      res.fork++; lines.push(m + ': fork (' + tabs.size + ' proven tables) -- today\'s rules'); continue;
+    } else if (pt) { T = proofTable(pt.pc, pt.c); T.n8 = pt.n; }
+    if (!T) continue;
+    res.proven++;
+    const who = [];
+    for (const r of byKey[m].s) {
+      const w = pid(String(r.steamID));
+      const why = !T.pids.has(w) ? 'pf' : ((r.d[8] | 0) !== T.pc || rosterCanon(r.roster) !== T.canon) ? 'pr' : T.seat[r.d[5] | 0] !== w ? 'ps' : null;
+      if (why) { res[why]++; drop.set(r, why); who.push(plog(r.steamID) + '@' + (r.d[5] | 0) + 's:' + why); }
+    }
+    for (const r of byKey[m].r) if (!T.pids.has(pid(String(r.steamID)))) { res.pf++; drop.set(r, 'pf'); who.push(plog(r.steamID) + '@' + (r.d[5] | 0) + ':pf'); }
+    // the note: what it holds from accounts T does not own (counted in both modes, changed only when enforcing)
+    const strayS = note && Array.isArray(note.s) ? note.s.filter((id) => !proofOwnsId(T, id)) : [];
+    const strayLo = note && Array.isArray(note.lo) ? note.lo.filter((id) => !proofOwnsId(T, id)) : [];
+    const unroom = !!(note && note.n && !note.nwx && Array.isArray(note.nw) && note.nw.length && note.nw.every((h) => !T.pids.has(h)));
+    const p = pending[m];
+    const reseat = !!(p && p.prov && !p.split && !p.synth && p.prov !== T.sig);
+    const uncontest = !!(note && note.c && Array.isArray(note.w) && note.w.length && note.w.length < CONTEST_PARTY_CAP && note.w.every((x) => !T.pids.has(String(x).slice(0, 16))));
+    if (strayS.length || strayLo.length) res.scrub++;
+    if (unroom) res.unroom++;
+    if (reseat) res.reseat++;
+    if (uncontest) res.uncontest++;
+    if (p && !p.prov && !p.split && !p.synth && p.roster && pidCanon(p.roster) !== T.canon) lines.push(m + ': final roster is not the proven table -- left as it is');
+    if (who.length || strayS.length || strayLo.length || unroom || reseat || uncontest) {
+      lines.push(m + ' (n ' + T.n8 + '): ' + (who.length ? who.join(' ') : 'no record off the table')
+        + (strayS.length + strayLo.length ? ' · note ids off the table ' + (strayS.length + strayLo.length) : '') + (unroom ? ' · room flag n' : '')
+        + (reseat ? ' · provisional roster -> T' : '') + (uncontest ? ' · contest by accounts off the table' : ''));
+    }
+    if (!on) continue;
+    const e = seenNote(pending, m, now);
+    if (T.fresh) e.pt = { pc: T.pc, c: T.canon, n: T.n8 };
+    if (strayS.length) e.s = e.s.filter((id) => proofOwnsId(T, id));
+    if (strayLo.length) { e.lo = e.lo.filter((id) => proofOwnsId(T, id)); if (!e.lo.length) delete e.lo; }
+    if (unroom) { delete e.n; delete e.nw; }
+    if (reseat) { p.roster = Object.assign({}, T.seat); p.prov = T.sig; if (Array.isArray(p.started)) p.started = p.started.filter((h) => T.pids.has(h)); }
+    if (uncontest) e.c = 0;
+  }
+  if (on && drop.size) {
+    for (const list of [starts, recs]) {
+      if (!list) continue;
+      let w = 0;
+      for (let i = 0; i < list.length; i++) {
+        const r = list[i];
+        if (drop.has(r)) {
+          if (list === starts && blankSeatStart(r)) { noteBlankStarts(keyOf(r), [r]); if (!pending[keyOf(r)]) RUN.blankStarts = (RUN.blankStarts | 0) + 1; }   // Q130 flags its writer as before (capContests' count rule)
+          continue;
+        }
+        list[w++] = r;
+      }
+      list.length = w;
+    }
+  }
+  for (const x of lines) console.log('  start-proof ' + x);
+  console.log('[start-proof] mode=' + res.mode + ' keys=' + res.keys + ' proven=' + res.proven + ' ok=' + res.ok + ' bad=' + res.bad + ' none=' + res.none
+    + ' drop(pf)=' + res.pf + ' drop(pr)=' + res.pr + ' drop(ps)=' + res.ps + ' scrub=' + res.scrub + ' unroom=' + res.unroom + ' fork=' + res.fork
+    + ' reseat=' + res.reseat + ' uncontest=' + res.uncontest + (on ? '' : ' (observe: nothing changed)') + ' (O462)');
+  RUN.startProof = res.mode + ': ' + res.proven + ' / ' + res.ok + ' / ' + res.bad + ' / ' + res.none + ' / ' + res.pf + ' / ' + res.pr + ' / ' + res.ps
+    + ' / ' + res.scrub + ' / ' + res.fork + ' / ' + res.reseat + ' / ' + res.uncontest;
+  return res;
+}
 function screenLateStarts(starts, recs, pending, processed, now, readComplete) {
   const keyOf = (r) => r.d[3] + '_' + r.d[4] + '_' + r.d[2];
   const sg = {}, settled = new Set(), resBy = {};   // resBy (Q254): key -> the accounts with a result of it read this run
@@ -1163,6 +1307,7 @@ function screenLateStarts(starts, recs, pending, processed, now, readComplete) {
       if (e.s.indexOf(id) >= 0) continue;
       if (e.r) { late.add(r); if (keepLateOwn(e, r, id, resBy[m])) keptOwn++; continue; }   // Q254: lo, for the lone 1V1 verdict only
       const w = id.split('@')[0];
+      if ((perW[w] | 0) >= SEEN_PER_WRITER) noteRoomWriter(e, w);   // O462: who set n (cleared on a proven key when they are all off its table)
       if ((perW[w] | 0) >= SEEN_PER_WRITER) { e.n = 1; over.add(w); continue; }   // Q144 rework: past the writer's room
       e.s.push(id); perW[w] = (perW[w] | 0) + 1;
     }
@@ -3025,6 +3170,7 @@ function writeRunSummary() {
       '| accounts whose remembered starts across the notes are at the room (Q144) | ' + s('seenCapped', 0) + ' |',
       '| 1V1s registered from the result writer\'s late start and the other seat\'s own start read before it (Q261) | ' + s('lateWriter', 0) + ' |',
       '| ranked 1V1s whose loser wrote only records the job cannot use (Q216; counted and paid in the Q184 row below): claims / voided on an incomplete read, not claimed | ' + s('lone1v1Spoiled', 0) + ' / ' + s('lone1v1VoidHeld', 0) + ' |',
+      '| start proof (O462) mode: keys proven / starts ok / bad / none / records off the table (pf) / own start naming another table (pr) / another seat (ps) / notes scrubbed / forks / provisional rosters set to the table / contests withdrawn | ' + s('startProof', '-') + ' |',
       '| absent-seat holds (incomplete read / grace) | ' + s('absentHeld', 0) + ' |',
       '| groups waiting for a seat that started but has no result yet, until the match must be over (Q121) | ' + s('leaveWait', 0) + ' |',
       '| confessions seen/penalized/refunded | ' + s('confess', '0/0/0') + ' |',
@@ -7354,6 +7500,9 @@ async function main() {
   //   (its start votes on no roster, splits nothing) and of grouping; nobody flagged (Q148: a bot-match record too, counted
   //   in RUN.seatlessBot)
   RUN.seatless = dropSeatlessPrivate(recs, starts, processed).n;
+  // O462: a proven matchmade key's records from accounts its committed table does not seat count nowhere -- ahead of every step that
+  //   reads starts or the note (the late screen, Q254's lo, Q261, the Q208 cap, registration, the seat gate). Observe-only until START_PROOF_GATE=1.
+  applyStartProof(starts, recs, startsPending, processed, Date.now());
   screenLateStarts(starts, recs, startsPending, processed, Date.now(), shardsComplete);   // Q127 / Q138: a start first read after the result counts nowhere
   capContests(starts, recs, startsPending, processed, Date.now(), shardsComplete);   // Q208: an outside account past its daily cap contests nothing
   const registeredEarly = registerStartRosters(starts, processed, startsPending, Date.now(), shardsComplete);   // Q113: endless keys wait for a full read
@@ -11028,3 +11177,4 @@ Object.assign(module.exports, { lpReadStale, lpLastLive, LP_LAST_HOLD_MS });   /
 Object.assign(module.exports, { careerBlockOf, fillCareerDetails, careerEnsureWrites, decodeCharBlock, careerSeatCodes, careerModeOfMt, careerSecOf, careerCellAdd, creditCareerMatch, creditCareerEndless, CHAR_MAGIC, CAREER_MATRIX_MAGIC, CAREER_MODES, CAREER_WL_MASK, CAREER_COLS });   // 5.4a S0 / S2 career block + matrix (test/career-refill.js, test/career-matrix.js, mvp ledger-schema-lockstep)
 Object.assign(module.exports, { V54B3_STREAK, streakPlan, streakApply, streakAbsence, streakPardon, streakApplyEarly, minuteOf });   // O181 matchmade win streak (client knife 5.4b3; test/streak.js, test/streak-plan-fixtures.js, mvp ledger-schema-lockstep)
 Object.assign(module.exports, { PRIVATE_LONE, privateLoneClaim, privateLoneVerdicts });   // cloud audit Q316 a friends' room only one player wrote a result for (test/private-lone-stayer.js)
+Object.assign(module.exports, { START_PROOF_ENFORCE, startProof, proofState, proofTable, proofOwnsId, applyStartProof, screenLateStarts, seenNote, startSeenId, startSig });   // O462 matchmade start proof (test/start-proof-step.js)
