@@ -1625,7 +1625,7 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
 // lpDelta at rank 1 of 2, the series clamp unless it seeds his season) on the claimant's points board, plus the flat
 // CONSOLATION_XP of a lone writer at the start-orphan verdict. No rating, career or win XP; the silent seat's points,
 // rating and exits are untouched. At most once: the key is processed and the claimant's l1t is on disk before the write
-// (saveEarlyMarks), a failed write is forfeited (as the consolation).
+// (saveEarlyMarks), a failed points write is forfeited (the consolation XP of a failed write is owed to a later run, Q315).
 const LONE1V1 = { GATE: 2, OPP_CAP: 8, QUEUE_CAP: 4, RETRO_MS: 14 * 86400000, WEEK_MS: 7 * 86400000, WEEK_CAP: 3 };
 function lone1v1Claim(e, key, g, confState, confSeen) {
   if (!e || e.c || !Array.isArray(e.s) || !g || !g.length) return null;
@@ -2807,7 +2807,7 @@ function recordMatchSignals(s, g, parts, rankOf, matchType, isVoid, now) {
 // or not (nothing settles twice). A points write of the settle that fails waits in the
 // points-row backlog (PENDING_WRITES_FILE: its absolute value, retried next run, O480); every
 // other failed write is logged and forfeited (until O480 the points write was forfeited too,
-// while this comment said it self-healed).
+// while this comment said it self-healed) -- but a consolation XP write, owed to a later run (Q315, CONSOLE_OWED).
 const transientStatus = (st) => st >= 500 || st === 408 || st === 429;
 const READ_RETRY_MS = Math.max(0, Number(process.env.READ_RETRY_MS || 8000));   // backoff step (env: offline tests only)
 async function getJson(url) {
@@ -2944,6 +2944,7 @@ function writeRunSummary() {
       '| endless keys without a seat gate whose records disagree, nobody flagged (Q128) | ' + s('endlessUngated', 0) + ' |',
       '| keys of two voices (a 1V1, a friends\' room / endless run / bot match of two) whose writers disagree, nobody flagged for it (Q289 / Q291) / of them a writer flagged alone for his own record\'s duration / accounts newly at ' + PAIR_DISPUTE.LOOK + ' different dispute opponents (record only) | ' + s('pairDispute', 0) + ' / ' + s('pairDisputeOwn', 0) + ' / ' + s('pairDisputeLook', 0) + ' |',
       '| voided disputed 1V1s: writers paid the loser\'s XP instead of the flat ' + CONSOLATION_XP + ' (Q308) / kept at ' + CONSOLATION_XP + ', past ' + DISPUTE_FLOOR.DAY_CAP + ' such payments in a day | ' + s('disputeFloor', 0) + ' / ' + s('disputeFloorCapped', 0) + ' |',
+      '| consolation XP writes that failed, owed to a later run / owed credits paid (of them on an XP row moved since) / owed writes found landed after all / owed given up, unpaid ' + Math.round(CONSOLE_OWED.MAX_MS / 86400000) + ' days / still owed, account not seen this run (Q315) | ' + s('owedNew', 0) + ' / ' + s('owedPaid', 0) + ' (' + s('owedMoved', 0) + ') / ' + s('owedLanded', 0) + ' / ' + s('owedExpired', 0) + ' / ' + s('owedWaiting', 0) + ' |',
       '| start rosters split by a later start / confirmed (Q118) | ' + s('lateSplit', 0) + ' / ' + s('confirmed', 0) + ' |',
       '| contested matchmade keys voided, no start roster / held to maturity (Q127) | ' + s('contestVoid', 0) + ' / ' + s('contestHeldVoid', 0) + ' |',
       "| friends' room / bot match keys no longer held by start records alone, a contest past maturity (Q200) | " + s('contestLifted', 0) + ' |',
@@ -3466,6 +3467,99 @@ function disputeFloorAdmit(consoleFloor, signals, now) {
 function disputeFloorXp(fl, boardXp, leaves, games) {
   const factor = LEAVER_XP_RECORD_ONLY ? 1 : effectiveLeaverFactor(leaves | 0, games | 0);
   return Math.max(CONSOLATION_XP, computeXpGain(fl.cls, 1, fl.money, !!fl.ranked, false, factor, xpBoostMult(xpLevelOf(boardXp | 0), false, 0)));
+}
+// ---- a consolation XP write that failed: paid by a later run, never twice (cloud audit Q315) ----
+// The consolation (CONSOLATION_XP, or the Q308 floor) rides the processed gate: its key is marked on disk ahead of the write,
+//   and a write that failed was forfeited -- the writer of a voided match lost the 50 (or the floor) for good, and the Q308
+//   day slot counted ahead of the write stayed taken. Now what failed is owed on his signals entry (players[pid].cq) and the
+//   next run that can name the account (sidByPid: a record or start of his on the shards) pays it in his one consolation
+//   write of that run:
+//   - u: credits whose write was never sent (his XP read failed, the XP board was missing from the listing), each paid at
+//     the board value of the run that pays it (CONSOLATION_XP; a floor through disputeFloorXp, its { cls, mo, rk } kept);
+//   - s: the one write that was sent and failed ({ a: its XP, h0 / h1: keyed tags of the row it read and of the row it meant
+//     to leave, d: the floor days in it }). Steam may have taken it (an answer lost, a 5xx after the commit). His row reading
+//     what it meant to leave (h1): it landed, not paid again. Still reading what it found (h0): paid again -- the write is
+//     absolute (c + a), right whether or not that one had landed and the read is behind. Any other row: something wrote his
+//     XP since and nobody can tell whether it carries the credit -- paid on that row, warned (architecture decision 10: that
+//     row moved without this job re-tagging it takes a run killed between the settle's write and its save, or a hand
+//     restore; a credit Steam took although it answered failed on top of that is the only way it pays twice, while giving it
+//     up would short the honest writer in every other such case). The tags are HMACs under the state salt: the public
+//     signals file never holds an XP score (his XP row is public, a score next to his pid would name him).
+//   - t: the first failure; unpaid past CONSOLE_OWED.MAX_MS (7 days), given up.
+//   An owed floor keeps its Q308 day slot while it waits (the cap counts floors paid or owed); one given up hands its slot
+//     back while its UTC day is still today. Every consolation write is put on his entry as s and the signals saved before it
+//     is sent (and again once it landed, s gone): a run that dies once Steam took it leaves the next run h1 to find (not the
+//     same credits to pay again), one that dies before it went out leaves h0 (paid then). One that failed, then the settle's
+//     own XP write of the same account landed later in the run, is re-tagged on the row that write left (consoleOwedRebase)
+//     -- else the next run would take that row for a moved one: paid on it, and twice when Steam had kept the failed write
+//     (the settle read it back, h1, and wrote on top).
+const CONSOLE_OWED = { MAX_MS: Number(process.env.CONSOLE_OWED_MAX_MS || 7 * 86400000), U_CAP: 8 };
+const owedTag = (h, x) => crypto.createHmac('sha256', String(SALT || '')).update('q315|' + h + '|' + (x | 0)).digest('hex').slice(0, 12);
+// this run's credit of one account as an owed item: the flat one, or a floor with what disputeFloorXp needs and its slot's day
+function owedItem(fl, day) { return fl ? { cls: fl.cls, mo: fl.money | 0, rk: fl.ranked ? 1 : 0, d: day } : { c: 1 }; }
+// an item's XP at the board value it is paid at (gamesOf: lazy, only a floor reads the XP state)
+function owedItemXp(it, boardXp, leaves, gamesOf) {
+  return (it && it.cls) ? disputeFloorXp({ cls: it.cls, money: it.mo | 0, ranked: !!it.rk }, boardXp, leaves, gamesOf()) : CONSOLATION_XP;
+}
+const owedDays = (cq) => [].concat(...((cq && cq.u) || []).map((it) => (it && it.d != null) ? [it.d] : []), (cq && cq.s && cq.s.d) || []);
+// hand back the Q308 day slots of floors given up, those of today only -> how many
+function owedRefund(p, days, now) {
+  const day = Math.floor(now / 86400000);
+  let n = 0;
+  for (const d of days || []) if (d === day && (p.fq | 0) === day && (p.fqn | 0) > 0) { p.fqn--; n++; }
+  return n;
+}
+// a read that failed (or no XP board): the credits stay unsent, the sent write unjudged; at most U_CAP unsent (oldest dropped)
+function owedUnsent(p, cq, item, now) {
+  const u = ((cq && cq.u) || []).concat(item ? [item] : []);
+  const drop = u.length > CONSOLE_OWED.U_CAP ? u.splice(0, u.length - CONSOLE_OWED.U_CAP) : [];
+  if (drop.length) {
+    owedRefund(p, drop.map((it) => it.d).filter((d) => d != null), now);
+    console.log('  consolation: ' + drop.length + ' owed credit(s) past ' + CONSOLE_OWED.U_CAP + ' unsent -- the oldest given up (Q315)');
+  }
+  const out = { t: (cq && cq.t) || now, u };
+  if (cq && cq.s) out.s = cq.s;
+  return out;
+}
+// main, ahead of the consolation loop: the owed entries this run can pay (account named) -> { bySid: Map(sid -> cq),
+//   expired, waiting, dirty }; an entry past MAX_MS is dropped here (its floor slots of today handed back)
+function consoleOwedTake(signals, now, sidOfPid) {
+  const res = { bySid: new Map(), expired: 0, waiting: 0, dirty: false };
+  for (const h of Object.keys(signals.players || {})) {
+    const p = signals.players[h], cq = p && p.cq;
+    if (!cq) continue;
+    if (now - (Number(cq.t) || 0) > CONSOLE_OWED.MAX_MS) {
+      owedRefund(p, owedDays(cq), now); delete p.cq; res.expired++; res.dirty = true;
+      console.log('  consolation: ' + h.slice(0, 8) + ' owed since a write failed ' + Math.round((now - (Number(cq.t) || 0)) / 3600000) + 'h ago, never named since -- given up (Q315)');
+      continue;
+    }
+    const sid = sidOfPid(h);
+    if (sid) res.bySid.set(String(sid), cq); else res.waiting++;
+  }
+  return res;
+}
+// one account's write this run: c = his row as read, cq = what earlier runs owe him (or null), fresh = this run's credit item
+//   (or null), xpOf(item) -> its XP => { add, days: the floor days it pays, sent: null | 'paid' | 'landed' | 'moved' }
+function consoleOwedPlan(h, c, cq, fresh, xpOf) {
+  const out = { add: 0, days: [], sent: null };
+  if (cq && cq.s) {
+    const t = owedTag(h, c);
+    if (t === cq.s.h1) out.sent = 'landed';
+    else { out.add += cq.s.a | 0; out.days.push(...(cq.s.d || [])); out.sent = t === cq.s.h0 ? 'paid' : 'moved'; }
+  }
+  for (const it of ((cq && cq.u) || []).concat(fresh ? [fresh] : [])) { out.add += xpOf(it); if (it.d != null) out.days.push(it.d); }
+  return out;
+}
+// main, after the settle's XP writes: p = the signals entry of an account whose consolation write failed this run (s) and
+//   whose XP the settle then wrote and saw land -- base = his row as the settle read it, wrote = the row it left. The s found
+//   on base (h0) is re-tagged on that row; found landed there (h1) it is dropped. -> 'moved' | 'landed' | null
+function consoleOwedRebase(p, h, base, wrote) {
+  const s = p && p.cq && p.cq.s;
+  if (!s) return null;
+  const t = owedTag(h, base);
+  if (t === s.h0) { s.h0 = owedTag(h, wrote); s.h1 = owedTag(h, (wrote | 0) + (s.a | 0)); return 'moved'; }
+  if (t === s.h1) { delete p.cq.s; if (!(p.cq.u || []).length) delete p.cq; return 'landed'; }
+  return null;
 }
 function loadStarts() { try { return JSON.parse(fs.readFileSync(STARTS_FILE, 'utf8')) || {}; } catch (e) { return {}; } }
 function saveStarts(s) { try { writeStateFile(STARTS_FILE, JSON.stringify(s, null, 0)); } catch (e) { ghWarn('write ' + STARTS_FILE + ' failed: ' + (e && e.message)); } }
@@ -7060,8 +7154,8 @@ async function main() {
   // markers that make them one-shot, so the next run paid / fined the same match again -- every run, for as long
   // as the failure lasted. The markers are now on disk right next to the writes, and the persist step commits the
   // state files even when this run fails afterwards (validate.yml / playtest.yml / demo.yml persist: always()).
-  // Consolation is written ahead (at most once: a run killed mid-loop forfeits the unpaid credits, which is the
-  // documented failed-write behavior); each confession write is followed by its marker (reconcileConfessions).
+  // Consolation is written ahead (at most once; a failed write is owed to a later run, Q315 -- a run killed mid-loop loses
+  // only the credits of accounts the loop had not reached); each confession write is followed by its marker (reconcileConfessions).
   // Writes a pruned COPY of confState: pruning the live object would delete entries the upkeep loop still visits.
   // O481: the points-row backlog too (a pruned copy, quietly: the live one is pruned and reported by the save of the run), so a
   //   run that dies after a fine or a refund landed leaves the next run that write as his last one (l), not the one before it:
@@ -7087,7 +7181,7 @@ async function main() {
   // inline (same pre-early-return pattern as the confession LP writes -- the everyone-left scenario
   // produces no consistent settle groups, so the main XP pipeline never runs on this path). The
   // write preserves the entry's existing details verbatim (career 0xCA payload must survive).
-  // One-shot by design (rides the processed gate); a failed write is logged and forfeited.
+  // One-shot by design (rides the processed gate); a write that failed is owed to a later run (Q315, CONSOLE_OWED).
   let consoledN = 0;
   // Q308: the writers of a disputed 1V1 this verdict voided are paid the loser's XP instead of the 50, within the day cap
   //   (counted on the signals, on disk ahead of the writes)
@@ -7096,29 +7190,73 @@ async function main() {
   for (const s of floorRes.capped) console.log('  consolation: ' + plog(s) + ' past ' + DISPUTE_FLOOR.DAY_CAP + ' disputed-1V1 floors today -- the flat ' + CONSOLATION_XP + ' (Q308)');
   RUN.disputeFloorCapped = floorRes.capped.length;
   let floorN = 0, xsFloor = null;
-  if (startsRes.consoledSids && startsRes.consoledSids.length && XP_LB) {
+  // Q315: what earlier runs owe (their write failed) is paid in this run's one write of the account, never twice; this run's
+  //   write is owed in turn when it fails (owedSent: those sent and failed -- re-tagged below once the settle writes their XP)
+  const owedRes = XP_LB ? consoleOwedTake(signals, nowMs, (h) => sidByPid.get(h) || null) : { bySid: new Map(), expired: 0, waiting: 0, dirty: false };
+  if (owedRes.dirty) sigDirty = true;
+  const consoled = (startsRes.consoledSids || []).map(String);
+  const paySids = consoled.concat([...owedRes.bySid.keys()].filter((s) => consoled.indexOf(s) < 0));
+  const owedSent = new Set();
+  const ow = { paid: 0, landed: 0, moved: 0, owed: 0 };
+  const owedSet = (sid, cq) => { const p = sigPlayer(signals, pid(sid), nowMs); if (cq) p.cq = cq; else delete p.cq; sigDirty = true; return p; };
+  const fday = Math.floor(nowMs / 86400000);
+  if (paySids.length && XP_LB) {
     const xpLb0 = ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).find(x => String(x.name || x.Name) === XP_LB);
     const xpId0 = xpLb0 ? (xpLb0.id || xpLb0.ID) : null;
-    if (!xpId0) ghWarn('xp board absent (consolation path) -> ' + startsRes.consoledSids.length + ' credits forfeited');
-    else for (const sid of startsRes.consoledSids) {
+    if (!xpId0) {
+      ghWarn('xp board absent (consolation path) -> ' + paySids.length + ' account(s) owed to a later run (Q315)');
+      if (APPLY_MMR) for (const sid of consoled) {
+        const p = sigPlayer(signals, pid(sid), nowMs);
+        owedSet(sid, owedUnsent(p, p.cq, owedItem(floorRes.admitted.get(sid), fday), nowMs)); ow.owed++;
+      }
+      if (APPLY_MMR && consoled.length) saveSignals(signals, nowMs);   // owed on disk: a run failing later must not lose it
+    } else for (const sid of paySids) {
+      const h = pid(sid);
+      const cq0 = owedRes.bySid.get(sid) || null;
+      const fl = floorRes.admitted.get(sid);   // Q308: a disputed 1V1's writer -- the loser's XP
+      const item = consoled.indexOf(sid) >= 0 ? owedItem(fl, fday) : null;
+      const flNote = fl ? ' (Q308: a disputed ' + (fl.ranked ? 'ranked' : 'quick') + ' 1V1, the loser\'s XP, money ' + fl.money + ')' : '';
+      let e, c, plan;
       try {
-        const e = await readUserEntry(xpId0, sid, 'xp');
-        const fl = floorRes.admitted.get(sid);   // Q308: a disputed 1V1's writer -- the loser's XP
-        const h = pid(sid);
-        const add = fl ? disputeFloorXp(fl, e ? (e.score | 0) : 0, (leavers[h] && leavers[h].leaves) || 0, ((xsFloor || (xsFloor = loadXp()))[h] || {}).games) : CONSOLATION_XP;
-        const flNote = fl ? ' (Q308: a disputed ' + (fl.ranked ? 'ranked' : 'quick') + ' 1V1, the loser\'s XP, money ' + fl.money + ')' : '';
-        const next = (e ? (e.score | 0) : 0) + add;
-        const det = e ? decodeDetails(e.detailData) : null;
-        if (!APPLY_MMR) { console.log('  (dry-run) consolation xp ' + plog(sid) + ' = ' + next + flNote); consoledN++; if (fl) floorN++; continue; }
+        e = await readUserEntry(xpId0, sid, 'xp');
+        c = e ? (e.score | 0) : 0;
+        const leaves = (leavers[h] && leavers[h].leaves) || 0;
+        plan = consoleOwedPlan(h, c, cq0, item, (it) => owedItemXp(it, c, leaves, () => ((xsFloor || (xsFloor = loadXp()))[h] || {}).games));
+      } catch (err) {
+        ghWarn('consolation xp read failed for ' + plog(sid) + ': ' + (err && err.message) + ' -- owed to a later run (Q315)');
+        if (APPLY_MMR) { owedSet(sid, owedUnsent(sigPlayer(signals, h, nowMs), cq0, item, nowMs)); ow.owed++; saveSignals(signals, nowMs); }
+        continue;
+      }
+      if (plan.sent === 'landed') { ow.landed++; console.log('  consolation: ' + plog(sid) + ' a write owed since an earlier run landed after all -- not paid again (Q315)'); }
+      else if (plan.sent === 'moved') ghWarn('consolation: ' + plog(sid) + ' XP row moved since an owed write failed -- paid on the row it shows now (Q315)');
+      const owN = (plan.sent === 'paid' || plan.sent === 'moved' ? 1 : 0) + ((cq0 && cq0.u) || []).length;
+      const owNote = owN ? ' (Q315: + ' + owN + ' owed by an earlier run)' : '';
+      if (!plan.add) { if (APPLY_MMR && cq0) owedSet(sid, null); continue; }
+      const next = c + plan.add;
+      const det = e ? decodeDetails(e.detailData) : null;
+      if (!APPLY_MMR) { console.log('  (dry-run) consolation xp ' + plog(sid) + ' = ' + next + flNote + owNote); if (item) { consoledN++; if (fl) floorN++; } continue; }
+      // on disk before it is sent: a run that dies after Steam took it leaves the next run h1 (landed), one that dies before, h0
+      const keepT = cq0 && (plan.sent === 'paid' || plan.sent === 'moved' || ((cq0.u || []).length));
+      const sent = { t: keepT ? cq0.t : nowMs, u: [], s: { a: plan.add, h0: owedTag(h, c), h1: owedTag(h, next), d: plan.days } };
+      owedSet(sid, sent); saveSignals(signals, nowMs);
+      let why = null;
+      try {
         const r = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: xpId0, steamid: sid, score: next, scoremethod: 'ForceUpdate', format: 'json' }, (det && det.length) ? det : null);
-        if (r.ok && !(r.json && r.json.result && r.json.result.result && r.json.result.result !== 1)) { consoledN++; if (fl) floorN++; console.log('  consolation xp ' + plog(sid) + ' +' + add + ' -> ' + next + flNote); }
-        else ghWarn('consolation xp write failed for ' + plog(sid));
-      } catch (err) { ghWarn('consolation xp error for ' + plog(sid) + ': ' + (err && err.message)); }
+        if (!(r.ok && !(r.json && r.json.result && r.json.result.result && r.json.result.result !== 1))) why = 'HTTP ' + r.status;
+      } catch (err) { why = (err && err.message) || 'error'; }
+      if (!why) {
+        owedSet(sid, null); saveSignals(signals, nowMs);   // off the disk too: a run failing later must not leave it to judge again
+        if (item) { consoledN++; if (fl) floorN++; }
+        if (owN) ow.paid += owN;
+        if (plan.sent === 'moved') ow.moved++;
+        console.log('  consolation xp ' + plog(sid) + ' +' + plan.add + ' -> ' + next + flNote + owNote);
+      } else { owedSent.add(sid); ow.owed++; ghWarn('consolation xp write failed for ' + plog(sid) + ' (' + why + ') -- owed to a later run (Q315)'); }
     }
   } else if (startsRes.consoledSids && startsRes.consoledSids.length && !XP_LB) {
     console.log('  consolation: XP_LB unset -> ' + startsRes.consoledSids.length + ' credits skipped');
   }
   RUN.consoled = consoledN; RUN.disputeFloor = floorN;
+  RUN.owedPaid = ow.paid; RUN.owedLanded = ow.landed; RUN.owedMoved = ow.moved; RUN.owedNew = ow.owed; RUN.owedExpired = owedRes.expired; RUN.owedWaiting = owedRes.waiting;
   // Q184: the 1V1 winners paid by lone1v1Count -- the points of a normal 1V1 win against the silent seat's pre-match rating,
   //   one write per account (several payments add up in order). The consolation XP above was their XP. The base read follows
   //   the settle path: this season's entry, else the previous season soft-reset, else the display-derived seed (no clamp).
@@ -8310,6 +8448,8 @@ async function main() {
     if (failed.length) { ghErr('on-demand base reads failed (' + failed.length + '/' + need.size + ') -- abort run, do NOT settle from base 0'); process.exit(1); }
     console.log('on-demand base reads: ' + need.size + ' players (bulk window incomplete)');
   }
+  const owedXpBase = {};   // Q315: the row the settle reads for an account whose consolation write failed above (owedSent)
+  for (const sid of owedSent) owedXpBase[sid] = xp[sid] | 0;
   const today = Math.floor(Date.now() / 86400000);   // UTC day index (matches client lastWinDay) for the daily-first bonus
   const changed = {}; const changedLp = {}; const changedXp = {}; const changedCp = {}; const changedEndless = {}; const changedEndlessSeason = {}; const changedEndlessTrio = {}; const changedEndlessTrioSeason = {}; const changedEndlessQuad = {}; const changedEndlessQuadSeason = {}; const reveal = {}; const careerDet = {}; const careerTouched = new Set(); let settled = 0, voided = 0, settledEndless = 0, settledPrivate = 0, settledSolo = 0, settledEndlessComp = 0, settledBots = 0;
   const lateCv = [];   // Q228: [entry key, sid, gains] of this run's convictions at a ranked settle (only writes that landed count, below)
@@ -10075,6 +10215,12 @@ async function main() {
     else console.log('  ok xp ' + plog(sid) + ' = ' + changedXp[sid] + (careerDet[sid] ? (' career ' + careerDet[sid][2] + 'g/' + careerDet[sid][3] + 'w/' + careerDet[sid][4] + 'l') : ''));
     return okFlag;
   });
+  // Q315: a consolation write that failed above, then this account's settle XP write landed -- re-tag it on the new row
+  Object.keys(changedXp).forEach((sid, i) => {
+    if (!owedSent.has(sid) || !(wXp[i] && wXp[i].status === 'fulfilled' && wXp[i].value)) return;
+    const h = pid(sid), r = consoleOwedRebase(signals.players[h], h, owedXpBase[sid] | 0, changedXp[sid] | 0);
+    if (r) { sigDirty = true; console.log('  consolation: ' + plog(sid) + (r === 'moved' ? ' owed write re-tagged on the row the settle left' : ' owed write found landed by the settle\'s read') + ' (Q315)'); }
+  });
   const wCp = await mapPool(Object.keys(changedCp), CONCURRENCY, async (sid) => {
     const score = cpClamp(changedCp[sid]);   // Q110: never hand the int32 board an out-of-range score
     if (score !== changedCp[sid]) { RUN.cpClamped = (RUN.cpClamped | 0) + 1; ghWarn('write cp ' + plog(sid) + ': ' + changedCp[sid] + ' outside int32 -> clamped to ' + score + ' (Q110)'); }
@@ -10390,7 +10536,7 @@ async function main() {
 if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
-module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CLASSIC_OWNERS: classicOwners.CLASSIC, CLASSIC_FILE, CHAT_MUTE: chatMute.CHAT_MUTE, CHAT_MUTE_FILE, CHAT_MUTE_LB, CHAT_REPORT_LB, isVoidDisp, voidByConsensus, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, RS_SOLO_VS_TRIO, RS_TRIO_WIN, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, DISPUTE_FLOOR, disputeFloorOf, disputeFloorAdmit, disputeFloorXp, CONFESS_MAGIC, NOTE_MAGIC, NOTE_DISP, reconcileConfessions, SANITY, sanityFlags, sanitySplit, recordSanityFlags, SANITY_RECORD_SLUGS, SANITY_ROSTER_SLUGS, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, rekeyReports, repKeysReady, REP_KEYS, REP_KEYS_VER, CHAT_KEYS, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, trustIndex, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan, postForm, postFormDetails, findOrCreateBoard, isTestBoardName, sandboxOn, ghWarn, ghErr, PT_MODE, PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, ACTIVE_MATCH_LB, ptSeedCp, ptBoardPlan, PRIVATE_XP, isPrivateMt, privateProgressOf, creditXpPrivate, BOT_XP, isBotMt, botTierOf, botTierMult, botSeatSplit, botRanksOf, botRankEffOf, botXpGain, botProgressOf, creditXpBot, DEMO_APPID, ENDLESS_XP, computeXpEndless, creditXpEndless, CAMPAIGN_LB, SEEDCAP_REJECT_LADDER_MIN, seedcapRejectWindowMin, seedcapRejectUntilMin, seedcapRejectActive,
+module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CLASSIC_OWNERS: classicOwners.CLASSIC, CLASSIC_FILE, CHAT_MUTE: chatMute.CHAT_MUTE, CHAT_MUTE_FILE, CHAT_MUTE_LB, CHAT_REPORT_LB, isVoidDisp, voidByConsensus, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, RS_SOLO_VS_TRIO, RS_TRIO_WIN, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, DISPUTE_FLOOR, disputeFloorOf, disputeFloorAdmit, disputeFloorXp, CONSOLE_OWED, owedTag, owedItem, owedItemXp, owedRefund, owedUnsent, consoleOwedTake, consoleOwedPlan, consoleOwedRebase, CONFESS_MAGIC, NOTE_MAGIC, NOTE_DISP, reconcileConfessions, SANITY, sanityFlags, sanitySplit, recordSanityFlags, SANITY_RECORD_SLUGS, SANITY_ROSTER_SLUGS, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, rekeyReports, repKeysReady, REP_KEYS, REP_KEYS_VER, CHAT_KEYS, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, trustIndex, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan, postForm, postFormDetails, findOrCreateBoard, isTestBoardName, sandboxOn, ghWarn, ghErr, PT_MODE, PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, ACTIVE_MATCH_LB, ptSeedCp, ptBoardPlan, PRIVATE_XP, isPrivateMt, privateProgressOf, creditXpPrivate, BOT_XP, isBotMt, botTierOf, botTierMult, botSeatSplit, botRanksOf, botRankEffOf, botXpGain, botProgressOf, creditXpBot, DEMO_APPID, ENDLESS_XP, computeXpEndless, creditXpEndless, CAMPAIGN_LB, SEEDCAP_REJECT_LADDER_MIN, seedcapRejectWindowMin, seedcapRejectUntilMin, seedcapRejectActive,
   ENDLESS_COMP_LB, SAVE_BOX_LB, SOLO_FILE, COMP, soloSanity, soloChainPlan, rerollChain, soloMilestones, soloAdvance, soloRunKey, soloStartAttested, loadSolo, saveSolo, segOrderOf, segStartOf, freshOrder, freshOrderPaced, writerReadyAt, writerClaim,
   ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, SAVE_BOX_LB_DUO, SAVE_BOX_LB_TRIO, teamRunKey, soloMsSlot, groupRecords,
   ENDLESS_COMP_LB_QUAD, SAVE_BOX_LB_QUAD, ENDLESS_LB_QUAD, ENDLESS_MAX_PC, compFamKeyOf,   // client knife 3.7a (O178 four seats)

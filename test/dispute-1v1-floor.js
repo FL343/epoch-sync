@@ -358,7 +358,11 @@ for (const [name, mt, env, want, honest] of [['quick (1)', 1, null, 225, [450, 2
   const mb = SRC.slice(SRC.indexOf('  let consoledN = 0;\n'), SRC.indexOf('  RUN.consoled = consoledN;'));
   T('[6] main: admitted ahead of the writes, the signals on disk first (APPLY_MMR), the floor XP in the payment, counted',
     /const floorRes = XP_LB \? disputeFloorAdmit\(startsRes\.consoleFloor, signals, nowMs\) : /.test(mb) && /if \(floorRes\.dirty\) \{ sigDirty = true; if \(APPLY_MMR\) saveSignals\(signals, nowMs\); \}/.test(mb)
-    && mb.indexOf('saveSignals(signals, nowMs)') < mb.indexOf('readUserEntry(xpId0, sid, ') && /const add = fl \? disputeFloorXp\(fl, /.test(mb) && /const next = \(e \? \(e\.score \| 0\) : 0\) \+ add;/.test(mb)
+    && mb.indexOf('saveSignals(signals, nowMs)') < mb.indexOf('readUserEntry(xpId0, sid, ')
+    // Q315: the floor rides the owed-credit plan -- the admitted writer's item is the floor, its XP disputeFloorXp at the row read
+    && /const item = consoled\.indexOf\(sid\) >= 0 \? owedItem\(fl, fday\) : null;/.test(mb) && /plan = consoleOwedPlan\(h, c, cq0, item, \(it\) => owedItemXp\(it, c, leaves, /.test(mb)
+    && /function owedItemXp\(it, boardXp, leaves, gamesOf\) \{\n  return \(it && it\.cls\) \? disputeFloorXp\(\{ cls: it\.cls, money: it\.mo \| 0, ranked: !!it\.rk \}, boardXp, leaves, gamesOf\(\)\) : CONSOLATION_XP;/.test(SRC)
+    && /const next = c \+ plan\.add;/.test(mb)
     && /RUN\.consoled = consoledN; RUN\.disputeFloor = floorN;/.test(SRC));
   T('[6] the payment writes the XP board only (no rating / points / CP write in the consolation loop)', !/LP_LB|lpBoardId|CP_LB|ratingId/.test(mb));
 }

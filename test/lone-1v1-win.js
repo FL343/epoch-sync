@@ -440,7 +440,7 @@ console.log('=== a ranked 1V1 only its winner wrote: counted on the silent seat,
   const at = (re) => { const m = re.exec(SRC); return m ? m.index : -1; };
   const iVer = at(/const l1Res = lone1v1Count\(lone1v1Verdicts\(startsPending, groups, processed, nowMs, STARTS_MATURITY_MS, confState, confSeen, shardsComplete\)/);
   const iMarks = at(/\n  saveEarlyMarks\(startsRes\.convicted > 0\);/), iSig = at(/\n  if \(APPLY_MMR && l1Res\.pay\.length\) saveSignals\(signals, nowMs\);/);
-  const iCons = at(/\n  if \(startsRes\.consoledSids && startsRes\.consoledSids\.length && XP_LB\) \{/), iPay = at(/\n  else if \(l1Res\.pay\.length\) \{/);
+  const iCons = at(/\n  if \(paySids\.length && XP_LB\) \{/), iPay = at(/\n  else if \(l1Res\.pay\.length\) \{/);   // Q315: iCons = the consoled (+ the owed) accounts
   T('[5] main: the verdicts after reconcileStarts, then the early marks and the signals, then the consolation, then the points',
     iVer > at(/const startsRes = reconcileStarts\(/) && iMarks > iVer && iSig > iMarks && iCons > iSig && iPay > iCons, JSON.stringify([iVer, iMarks, iSig, iCons, iPay]));
   T('[5] main: the paid winners join the consolation list (Q216: but one the void already consoled, x0)', /for \(const p of l1Res\.pay\) if \(!p\.x0 && startsRes\.consoledSids\.indexOf\(p\.sid\) < 0\) startsRes\.consoledSids\.push\(p\.sid\);/.test(SRC));
