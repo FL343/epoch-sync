@@ -1461,8 +1461,16 @@ function dropSeatlessPrivate(recs, starts, processed) {
 //   here; a direct caller leaves it out and the registration runs below as before.
 // notedSet (Q64): "pid|key" of the exit notes read this run (see NOTE_MAGIC); a roster member's sighting is kept in the
 //   entry (p.noted, cumulative like p.settled: a later record of his can rotate the note off its shard before maturity).
-function reconcileStarts(starts, groups, consistentKeys, processed, pending, leavers, now, maturityMs, confState, readComplete, preRegistered, seenKeys, notedSet) {
+// heldKeys (Q294): the consistent keys the host's match header holds this run (sanityHeaderHeld; the verdict takes them out
+//   of consistentKeys -- the normal pipeline never settles them). The entry is marked (p.hh = 1, kept like p.settled: the
+//   records can rotate off before maturity) and at maturity it voids like a disputed key, with two differences:
+//   - nobody is convicted: the header is the host's, the match was broken for everyone in it (and an old held key the job
+//     could not judge before gets no new exit at the upgrade); each would-be hit is counted as spared;
+//   - a writer of a result whose own record carries only header reasons is consoled: his record fails the sanity check on
+//     the host's header alone (a writer breaking his own fields is not, as at the gate).
+function reconcileStarts(starts, groups, consistentKeys, processed, pending, leavers, now, maturityMs, confState, readComplete, preRegistered, seenKeys, notedSet, heldKeys) {
   confState = confState || {};
+  if (heldKeys && heldKeys.size) consistentKeys = new Set([...consistentKeys].filter((k) => !heldKeys.has(k)));   // Q294: held keys are the verdict's
   // Q144: no record of key m on the shards on a complete read (seenKeys: every key read this run, in main) -- nothing of it left
   const gone = (m) => !!seenKeys && readComplete !== false && !seenKeys.has(m);
   const sg = {};
@@ -1519,15 +1527,18 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
       else if (gone(m) && now - (p.t0 || 0) >= maturityMs) { delete pending[m]; cleaned++; RUN.entryGone = (RUN.entryGone | 0) + 1; }   // Q144: its rows are gone
       continue;
     }
+    if (heldKeys && heldKeys.has(m) && p.hh !== 1) p.hh = 1;   // Q294: the host's match header held it (cumulative)
     if (now - (p.t0 || 0) < maturityMs) continue;
     if (readComplete === false) { held++; continue; }
-    const hit = [], spared = [];
+    const hdr = p.hh === 1;   // Q294
+    const hit = [], spared = [], hdrSpared = [];
     for (const seat of Object.keys(p.roster)) {
       const h = p.roster[seat];
       if (p.settled.indexOf(h) >= 0) continue;
       if (!hasOwnStart(p, h)) continue;   // Q69: named by others only -- logged below, not convicted
       if (confState[h + '|' + m]) continue;   // confession already counted this leave (no double exit-rate)
       if (Array.isArray(p.noted) && p.noted.indexOf(h) >= 0) { spared.push(h.slice(0, 8)); continue; }   // Q64: his own exit note -- the match died on him
+      if (hdr) { hdrSpared.push(h.slice(0, 8)); continue; }   // Q294: the host's match header broke the match for everyone in it
       leavers[h] = leavers[h] || { leaves: 0, lastMatch: '' };
       leavers[h].leaves += 1; leavers[h].lastMatch = m;
       hit.push(h.slice(0, 8));
@@ -1538,13 +1549,16 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
     // the board -- real sids are only available from the live records; a writer rotated off
     // their shard within the maturity window keeps the exit-rate exemption via p.settled but
     // forfeits the symbolic credit). Structurally-impossible lone records (sanity bounds) and
-    // roster outsiders earn nothing.
+    // roster outsiders earn nothing. Q294: on a key the host's match header held, a record whose only reasons are header
+    // reasons is the host's doing -- its writer is consoled unless his own fields break a bound (the gate's own list).
+    const hdrOwn = hdr && groups[m] ? new Set(sanityWriterFaults(groups[m]).filter(sanityDropFlags).map((x) => x.sid)) : null;
     if (groups[m]) for (const r of groups[m]) {
       const s = String(r.steamID);
       if (consoledSids.indexOf(s) >= 0) continue;
       const h = pid(s);
       if (!Object.keys(p.roster).some((seat) => p.roster[seat] === h)) continue;   // not on the attested roster
-      if (sanityFlags([r]).length) continue;
+      const rf = sanityFlags([r]);
+      if (rf.length && !(hdr && !hdrOwn.has(s) && rf.every((f) => SANITY_HEADER_SLUGS.indexOf(f) >= 0))) continue;
       consoledSids.push(s);
     }
     const unatt = Object.keys(p.roster).map((seat) => p.roster[seat]).filter((h) => p.settled.indexOf(h) < 0 && !hasOwnStart(p, h) && !confState[h + '|' + m]);
@@ -1554,6 +1568,8 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
     }
     convicted += hit.length;
     if (spared.length) RUN.exitNoteSpared = (RUN.exitNoteSpared | 0) + spared.length;
+    if (hdr) RUN.headerVoid = (RUN.headerVoid | 0) + 1;   // Q294
+    if (hdrSpared.length) RUN.headerSpared = (RUN.headerSpared | 0) + hdrSpared.length;
     processed.add(m);   // idempotent: a super-late settlement of a convicted key is skipped as stale
     voided.push({ m, pids: Object.keys(p.roster).map((seat) => p.roster[seat]), note: pending['~' + m] || null });   // Q216: + the note
     delete pending[m];
@@ -1561,6 +1577,7 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
     if (wasContested) RUN.contestHeldVoid = (RUN.contestHeldVoid | 0) + 1;
     console.log('  start-orphan ' + m + ': started, never settled -> ' + hit.length + ' exit-rate hits (' + hit.join(',') + ')' + (p.settled.length ? ', ' + p.settled.length + ' exempt (wrote a settle record)' : '')
       + (spared.length ? ', ' + spared.length + ' spared (own exit note: ' + spared.join(',') + ', Q64)' : '')
+      + (hdr ? '; the host\'s match header held it (Q294): nobody convicted' + (hdrSpared.length ? ', ' + hdrSpared.length + ' spared (' + hdrSpared.join(',') + ')' : '') : '')
       + (wasContested ? '; contested once (Q127), nobody rated' + (who ? ', contested by ' + who : '') + ' (Q143)' : ''));
   }
   return { registered, convicted, cleaned, held, consoledSids, voided, skEv };
@@ -2866,6 +2883,7 @@ function writeRunSummary() {
       '| sanity whose every shared reason is the host\'s match header, only a writer breaking his own fields flagged, not settled (Q294) | ' + s('sanityHeader', 0) + ' |',
       '| starts pending / exit-rate hits | ' + s('pending', 0) + ' / ' + s('convicted', 0) + ' |',
       '| start-orphan seats spared by their own exit note (Q64) | ' + s('exitNoteSpared', 0) + ' |',
+      '| keys the host\'s match header held voided at maturity / seats spared there (Q294) | ' + s('headerVoid', 0) + ' / ' + s('headerSpared', 0) + ' |',
       '| starts-state notes / endless, friends\' room and bot entries dropped, no record of the key left on the shards (Q144) | ' + s('noteGone', 0) + ' / ' + s('entryGone', 0) + ' |',
       '| processed keys remembered / dropped past the cap (Q144) | ' + s('processedN', 0) + ' / ' + s('processedPruned', 0) + ' |',
       '| solo keys holding segments of more than one account / processed keys reopened for an account not processed under them (Q245) | ' + s('soloMultiOwner', 0) + ' / ' + s('soloReopen', 0) + ' |',
@@ -6917,10 +6935,13 @@ async function main() {
   RUN.unattested = (RUN.unattested | 0) + t2acRes.nostart;   // Q69: the run summary's named-only row counts these too
   const confState = loadConfessions();   // loaded before starts so the orphan verdict can skip confessed keys
   const consistentKeys = new Set(consistentMatches.map(c => c.m));
+  // Q294: a key the host's match header holds (sanityHeaderHeld, the settle gate below) never settles -- the start-orphan
+  //   verdict owns it and voids it at maturity with its records still up (each writer of a result consoled, nobody convicted)
+  const heldKeys = new Set(consistentMatches.filter((c) => !c.solo && sanityHeaderHeld(c.g)).map((c) => c.m));
   const nowMs = Date.now();
   // Q64: exit notes read this run ("pid|key", host-left / level-begin-timeout [Q221] / migrate-disband only) -> the start-orphan verdict spares their writers
   const noted = new Set(notes.filter((n) => NOTE_DISP.has(n.dispCode | 0)).map((n) => pid(String(n.steamID)) + '|' + n.m));
-  const startsRes = reconcileStarts(starts, groups, consistentKeys, processed, startsPending, leavers, nowMs, STARTS_MATURITY_MS, confState, shardsComplete, registeredEarly, seenKeys, noted);   // Q144: + seenKeys; Q64: + noted
+  const startsRes = reconcileStarts(starts, groups, consistentKeys, processed, startsPending, leavers, nowMs, STARTS_MATURITY_MS, confState, shardsComplete, registeredEarly, seenKeys, noted, heldKeys);   // Q144: + seenKeys; Q64: + noted; Q294: + heldKeys
   if (startsRes.registered || startsRes.convicted || startsRes.cleaned || Object.keys(startsPending).length)
     console.log('starts: ' + Object.keys(startsPending).length + ' pending (+' + startsRes.registered + ' new), ' + startsRes.convicted + ' exit-rate hits, ' + startsRes.cleaned + ' cleaned' + (startsRes.held ? ', ' + startsRes.held + ' matured verdict(s) held (incomplete shard read)' : ''));
   // Q184: a ranked 1V1 only its winner wrote (lone1v1Verdicts) -- counted on the silent seat, the winner paid at the gate.
@@ -8591,7 +8612,8 @@ async function main() {
       }
       // Q294: the host's match header (the party / trio bits, the seat count, the type) flags nobody either; a writer whose own
       //   record breaks its own fields (the duration, a second record) is flagged alone. Not settled (no lane takes such a
-      //   header)
+      //   header); a matchmade key is voided at maturity (heldKeys -> reconcileStarts: each writer of a result consoled,
+      //   nobody convicted)
       const hh = sanityHeaderHeld(g, sane, sp);
       if (hh) {
         if (hh.own.length && recordFlag(signals, hh.own.map(x => ({ steamID: x.sid })), c.m, nowMs)) sigDirty = true;

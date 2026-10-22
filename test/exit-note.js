@@ -398,7 +398,7 @@ const e7 = (P) => {
   T('[11] the notes array is touched on five lines only (declared, routed, logged, seen keys, the noted set) -- never a settle group or a hold',
     noteLines.length === 5 && noteLines.every(l => !/leaveConfirmHold|groupRecords|absenceHold|recs\.concat\(notes|recs\.push/.test(l)), JSON.stringify(noteLines));
   T('[11] notes reach one consumer only: the reconcileStarts call, filtered by NOTE_DISP', (code.match(/\bnoted\b/g) || []).length === 2
-    && /const noted = new Set\(notes\.filter\(\(n\) => NOTE_DISP\.has\(n\.dispCode \| 0\)\)\.map\(\(n\) => pid\(String\(n\.steamID\)\) \+ '\|' \+ n\.m\)\);\n\s+const startsRes = reconcileStarts\([^\n]*, seenKeys, noted\);/.test(main),
+    && /const noted = new Set\(notes\.filter\(\(n\) => NOTE_DISP\.has\(n\.dispCode \| 0\)\)\.map\(\(n\) => pid\(String\(n\.steamID\)\) \+ '\|' \+ n\.m\)\);\n\s+const startsRes = reconcileStarts\([^\n]*, seenKeys, noted(?:, heldKeys)?\);/.test(main),   // Q294: + the held keys after it
     String((main.match(/\bnoted\b/g) || []).length));
   T('[11] notes count as a key seen on the shards (Q144)', /\.concat\(confessions\.map\(\(c\) => c\.m\), notes\.map\(\(c\) => c\.m\)\)/.test(main));
   const rs = SRC.slice(SRC.indexOf('function reconcileStarts('), SRC.indexOf('function reconcileStarts(') + 9000);

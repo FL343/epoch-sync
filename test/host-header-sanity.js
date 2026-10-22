@@ -8,7 +8,10 @@
 //   the honest joiners with the host, once per match (three: trust tier 1).
 //   Now (validate.js, sanityHeaderHeld): when every shared-field reason is a header reason (SANITY_HEADER_SLUGS) nobody is
 //   flagged for it; a writer whose own record breaks its own fields (a duration past DUR_CAP, a second record of his) is
-//   flagged alone. The match still does not settle.
+//   flagged alone. The match still does not settle; a matchmade key is voided at the start verdict (two hours on) with its
+//   records still up, like a disputed key: each writer of a result on the attested roster gets the 50 consolation XP (his
+//   record failed the sanity check on the host's header alone), a writer breaking his own fields does not, and nobody is
+//   convicted (a seat that wrote its start and no result is spared: the header broke the match for everyone in it).
 // Over the REAL validate.js main() against an offline board stub (the harness of test/two-voice-dispute.js):
 //   [1] units: sanityHeaderHeld / sanityWriterFaults / SANITY_HEADER_SLUGS on every header reason, what it leaves alone
 //   [2] end to end, the host's header on honest joiners (1V1 / brawl of three, team code / trio bit / party bit / ranked on
@@ -17,6 +20,11 @@
 //   [4] what stays: a shared reason outside the header (scores past the cap) flags every writer, as before
 //   [5] a key the job before flagged: no flag removed, none added
 //   [6] wiring pins
+//   [7] the void at maturity: every writer consoled once and nothing else paid, nothing before maturity, the bot lane left
+//       alone, a seat with a start and no result spared, a writer breaking his own fields not consoled, a score-flagged key
+//       not voided, the VOID receipt on a ranked key; mutants (the job before / each part put back)
+//   [8] the upgrade: a held key the job before matured (and flagged) voids at this job's first run, nobody convicted; a held
+//       key whose results rotate off before maturity is still spared (the mark is kept on the entry)
 // State isolation is structural (every *_FILE var scanned and redirected, cwd = temp dir), like test/seat-gate.js.
 const { spawnSync } = require('child_process');
 const fs = require('fs'), path = require('path'), os = require('os');
@@ -175,7 +183,12 @@ const two = [H, J], three = [H, J, X];
 // mutants: validate.js with the rule before this fix put back
 const BEFORE = {
   header: ['      const hh = sanityHeaderHeld(g, sane, sp);\n', '      const hh = null;\n'],   // the whole-group rule flags every writer
+  held: ['  if (heldKeys && heldKeys.size) consistentKeys = new Set([...consistentKeys].filter((k) => !heldKeys.has(k)));   // Q294: held keys are the verdict\'s\n', ''],   // a held key's verdict waits for its records to go
+  console: ['if (rf.length && !(hdr && !hdrOwn.has(s) && rf.every((f) => SANITY_HEADER_SLUGS.indexOf(f) >= 0))) continue;', 'if (rf.length) continue;'],   // header reasons fail the consolation
+  spare: ["      if (hdr) { hdrSpared.push(h.slice(0, 8)); continue; }   // Q294: the host's match header broke the match for everyone in it\n", ''],   // a held key convicts
+  mark: ['    if (heldKeys && heldKeys.has(m) && p.hh !== 1) p.hh = 1;   // Q294: the host\'s match header held it (cumulative)\n', ''],   // the mark is not kept
 };
+const VOID_BEFORE = ['header', 'held', 'console', 'spare', 'mark'];
 let mutN = 0;
 function mutant(keys, tag) {
   let src = SRC;
@@ -205,14 +218,16 @@ function play(mt, ws, opt, script) {
   });
   const all = st.concat(re).concat(opt.extra || []);
   const env = opt.env || null;
-  const rs = timeline([[0, st, env], [10 * MIN, all, env], [10 * MIN, all, env], [2 * HOUR, all, env]], script, opt.files0);
+  const steps = opt.steps ? opt.steps(st, all, env) : [[0, st, env], [10 * MIN, all, env], [10 * MIN, all, env], [2 * HOUR, all, env]];
+  const rs = timeline(steps, script, opt.files0);
   return { rs, key: hsh + '_1234_' + mt };
 }
-function sum(p, sids) {
-  const rs = p.rs, r = last(rs), o = { ok: allOk(rs, 4) };
+function sum(p, sids, n) {
+  const rs = p.rs, r = last(rs), o = { ok: allOk(rs, n || 4) };
   for (const s of sids) o[s] = { f: fOf(r, s), xp: paidIn(rs, s), lv: leavesOf(r, s), trust: trustIn(rs, s) };
   o.processed = processedOf(r).has(p.key);
   o.line = (/::warning::match=[^\n]*sanity[^\n]*/.exec(outOf(rs)) || [''])[0].replace(/^::warning::/, '');
+  o.verdict = (new RegExp('  start-orphan ' + p.key + ': started, never settled[^\\n]*').exec(outOf(rs)) || [''])[0].trim();
   return o;
 }
 
@@ -332,6 +347,95 @@ for (const [name, mt, ws, honest, opt] of HEADER_CASES) {
   const hb = (/function sanityHeaderHeld\(g, sane, sp\) \{[\s\S]*?\n\}/.exec(SRC) || [''])[0];
   T('[6] sanityHeaderHeld: every shared reason a header reason, the key not split, own = sanityDropFlags', /shared\.some\(\(f\) => SANITY_HEADER_SLUGS\.indexOf\(f\) < 0\)/.test(hb) && /\.drop\.length\) return null/.test(hb) && /sanityWriterFaults\(g\)\.filter\(sanityDropFlags\)/.test(hb));
   T('[6] sanitySplit drops what sanityWriterFaults names (one copy of the per-writer half)', /function sanitySplit\(g\) \{[\s\S]*?const drop = sanityWriterFaults\(g\);[\s\S]*?\n\}/.test(SRC));
+  T('[6] main: held keys = the consistent (not solo) keys sanityHeaderHeld holds, passed to the verdict (which takes them out of its consistent set); confessions keep consistentKeys',
+    /const heldKeys = new Set\(consistentMatches\.filter\(\(c\) => !c\.solo && sanityHeaderHeld\(c\.g\)\)\.map\(\(c\) => c\.m\)\);/.test(SRC)
+      && /const startsRes = reconcileStarts\(starts, groups, consistentKeys, [^\n]*, noted, heldKeys\);/.test(SRC) && /\n      consistentKeys,   \/\/ absolution probe/.test(SRC)
+      && /function reconcileStarts\([^\n]*, notedSet, heldKeys\) \{\n  confState = confState \|\| \{\};\n  if \(heldKeys && heldKeys\.size\) consistentKeys = new Set\(\[\.\.\.consistentKeys\]\.filter\(\(k\) => !heldKeys\.has\(k\)\)\);/.test(SRC));
+  const vb = (/function reconcileStarts\([\s\S]*?\n\}/.exec(SRC) || [''])[0];
+  T('[6] reconcileStarts: the mark is kept on the entry (after the lane exemption), the spare comes after the confession and exit-note checks, the consolation relaxes header reasons only',
+    /\n    if \(heldKeys && heldKeys\.has\(m\) && p\.hh !== 1\) p\.hh = 1;[^\n]*\n    if \(now - \(p\.t0 \|\| 0\) < maturityMs\) continue;/.test(vb)
+      && /p\.noted\.indexOf\(h\) >= 0\) \{ spared\.push[^\n]*\n      if \(hdr\) \{ hdrSpared\.push/.test(vb)
+      && /if \(rf\.length && !\(hdr && !hdrOwn\.has\(s\) && rf\.every\(\(f\) => SANITY_HEADER_SLUGS\.indexOf\(f\) >= 0\)\)\) continue;/.test(vb));
+}
+
+// ---- [7] the void at maturity ----
+{
+  for (const [name, mt, ws, honest, opt] of HEADER_CASES) {
+    const tag = '[7] ' + name, who = [H].concat(honest);
+    const p = play(mt, ws, opt);
+    const now = sum(p, who);
+    if (!now.ok) { bad(tag + ': runs ' + p.rs.map(r => r.code) + ' ' + last(p.rs).out.slice(-1500)); continue; }
+    if (mt === 11) {   // the bot lane: no void and no consolation by design (O156) -- left as it was
+      T(tag + ': the bot lane is not voided, nobody paid or convicted', !now.processed && who.every(s => now[s].xp.length === 0 && now[s].lv === 0), JSON.stringify(now));
+      continue;
+    }
+    T(tag + ': nothing before maturity (the third run, twenty minutes on)', !processedOf(p.rs[2]).has(p.key) && who.every(s => paidIn(p.rs.slice(0, 3), s).length === 0));
+    T(tag + ': voided at maturity, every writer consoled once with 50 XP and paid nothing else, nobody convicted',
+      now.processed && who.every(s => JSON.stringify(now[s].xp) === '[50]' && now[s].lv === 0 && now[s].f === 0), JSON.stringify(now));
+    T(tag + ': the verdict says the host\'s header held it (Q294)', /the host's match header held it \(Q294\): nobody convicted/.test(now.verdict), now.verdict);
+    if (v.appliesLp(mt) && !(opt && opt.env && opt.env.PT_MODE)) T(tag + ': a ranked key -> a VOID receipt for its accounts', new RegExp('receipt ' + p.key + ': never settled -> VOID receipt for ' + who.length + ' account').test(outOf(p.rs)));
+    withMutant(VOID_BEFORE, tag, (sc) => {
+      const old = sum(play(mt, ws, opt, sc), who);
+      T(tag + ' mutant (the job before): not voided, nobody paid', old.ok && !old.processed && who.every(s => old[s].xp.length === 0), JSON.stringify(old));
+    });
+  }
+  {
+    const tag = '[7] a quick brawl of three with a team code (3), the third seat wrote its start and no result';
+    const ws = [[H, 0, three, 3, true], [J, 1, three, 3, true], [X, 2, three, 3, true, false]];
+    const now = sum(play(3, ws), [H, J, X]);
+    T(tag + ': H and J consoled, X spared (no exit, no XP)', now.ok && now.processed && JSON.stringify(now[H].xp) === '[50]' && JSON.stringify(now[J].xp) === '[50]' && now[X].xp.length === 0 && now[X].lv === 0, JSON.stringify(now));
+    T(tag + ': logged as spared', /nobody convicted, 1 spared \(/.test(now.verdict), now.verdict);
+    withMutant(['spare'], tag, (sc) => {
+      const old = sum(play(3, ws, null, sc), [H, J, X]);
+      T(tag + ' mutant (spare put back): X convicted', old.ok && old.processed && old[X].lv === 1, JSON.stringify(old));
+    });
+    // control: the same match with an honest header (quick brawl, mt 1) settles; the void path is not involved
+    const ctl = sum(play(1, ws), [H, J, X]);
+    T(tag + ' control (mt 1, an honest header): settles (no Q294 verdict)', ctl.ok && ctl.processed && !/Q294/.test(ctl.verdict) && !/Q294/.test(ctl.line), JSON.stringify(ctl));
+  }
+  {
+    const tag = '[7] a quick 1V1 with a team code (3), the host\'s own result past DUR_CAP';
+    const ws = [[H, 0, two, 2, true], [J, 1, two, 2, true]];
+    const opt = { mut: (sid, d) => sid === H ? durBad(d) : d };
+    const now = sum(play(3, ws, opt), [H, J]);
+    T(tag + ': voided, J consoled, H (his own fields) not', now.ok && now.processed && JSON.stringify(now[J].xp) === '[50]' && now[H].xp.length === 0 && now[H].lv === 0 && now[H].f === 1 && now[J].f === 0, JSON.stringify(now));
+    withMutant(['console'], tag, (sc) => {
+      const old = sum(play(3, ws, opt, sc), [H, J]);
+      T(tag + ' mutant (header reasons fail the consolation again): J not consoled', old.ok && old.processed && old[J].xp.length === 0, JSON.stringify(old));
+    });
+  }
+  {
+    const tag = '[7] a quick 1V1 with a team code (3), both records claim scores past the cap';
+    const now = sum(play(3, [[H, 0, two, 2, true], [J, 1, two, 2, true]], { sc: [999999, 999999] }), [H, J]);
+    T(tag + ': not held, so not voided while its records are up; nobody paid', now.ok && !now.processed && now[H].xp.length === 0 && now[J].xp.length === 0, JSON.stringify(now));
+  }
+}
+
+// ---- [8] the upgrade ----
+{
+  const tag = '[8] a brawl of three with a team code (3), X wrote only his start; the job before ran past maturity, then this job';
+  const ws = [[H, 0, three, 3, true], [J, 1, three, 3, true], [X, 2, three, 3, true, false]];
+  const five = (st, all, env) => [[0, st, env], [10 * MIN, all, env], [10 * MIN, all, env], [2 * HOUR, all, env], [10 * MIN, all, env]];
+  withMutant(VOID_BEFORE, tag, (sc) => {
+    const p = play(3, ws, { steps: five }, [sc, sc, sc, sc, VALIDATE]);
+    const before = processedOf(p.rs[3]).has(p.key), r4 = p.rs[3];
+    T(tag + ': under the job before the matured key stays held, everyone flagged once, nobody convicted or paid',
+      !before && fOf(r4, H) === 1 && fOf(r4, J) === 1 && leavesOf(r4, X) === 0 && paidIn(p.rs.slice(0, 4), H).length === 0);
+    const now = sum(p, [H, J, X], 5);
+    const r5 = [p.rs[4]];
+    T(tag + ': this job voids it at its first run: H and J consoled, X spared, the old flags kept (none added or removed)',
+      now.ok && now.processed && JSON.stringify(paidIn(r5, H)) === '[50]' && JSON.stringify(paidIn(r5, J)) === '[50]' && paidIn(r5, X).length === 0
+        && now[X].lv === 0 && now[H].f === 1 && now[J].f === 1 && now[X].f === 0, JSON.stringify(now));
+  });
+  const tag2 = '[8] a brawl of three with a team code (3), X wrote only his start, the results rotate off before maturity';
+  const gone = (st, all, env) => [[0, st, env], [10 * MIN, all, env], [10 * MIN, all, env], [2 * HOUR, st, env]];
+  const now = sum(play(3, ws, { steps: gone }), [H, J, X]);
+  T(tag2 + ': voided with nobody convicted (the mark kept on the entry), nobody consoled (no record left)',
+    now.ok && now.processed && now[X].lv === 0 && [H, J, X].every(s => now[s].xp.length === 0) && /nobody convicted, 1 spared/.test(now.verdict), JSON.stringify(now));
+  withMutant(['mark'], tag2, (sc) => {
+    const old = sum(play(3, ws, { steps: gone }, sc), [H, J, X]);
+    T(tag2 + ' mutant (the mark not kept): X convicted', old.ok && old.processed && old[X].lv === 1, JSON.stringify(old));
+  });
 }
 
 console.log('=== ' + (failN === 0 ? 'PASS' : 'FAIL') + ' -- ' + failN + ' fail (host-header-sanity) ===');
