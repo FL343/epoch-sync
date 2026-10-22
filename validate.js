@@ -1771,7 +1771,9 @@ function lone1v1Count(claims, signals, now, sidOfPid) {
 // if a bound turns out wrong and is loosened later, still-visible records self-heal.
 // Q109 (2026-10): a bound on ONE record's own fields (duration / seat / roster / a second record of the same account) drops
 // just that record and flags just its writer (a roster reason or the seat flags nobody: SANITY_HOST_SLUGS, Q292); the rest
-// settles -- see sanitySplit.
+// settles -- see sanitySplit. A bound on the match header every writer carries from the host's START_GAME (the type code's
+// party / trio bits, the seat count: SANITY_HEADER_SLUGS) holds the match and flags only a writer whose own record breaks
+// its own fields (cloud audit Q294) -- see sanityHeaderHeld.
 const SANITY = {
   SCORE_CAP: Number(process.env.SANITY_SCORE_CAP || 450000),     // re-derived 2026-09-16 (client knife 3.9 second-stage wheel): see the NOTE block below
   SCORE_FLOOR: Number(process.env.SANITY_SCORE_FLOOR || -50000), // shop overdraft is legal (classic rule) but bounded by shop prices
@@ -2137,6 +2139,48 @@ const SANITY_RECORD_SLUGS = ['duration', 'seat', 'self-seat', 'sid-range', 'dup-
 const SANITY_ROSTER_SLUGS = ['self-seat', 'sid-range', 'dup-sid'];
 const SANITY_HOST_SLUGS = SANITY_ROSTER_SLUGS.concat(['seat']);   // Q292: the reasons a host's broadcast can put on a joiner's record
 const sanityDropFlags = (x) => x.why.some((f) => SANITY_HOST_SLUGS.indexOf(f) < 0);
+// cloud audit Q294: the match header is the host's too. An honest joiner's client takes the entry and mode, the party / trio
+//   bits and the seat table from START_GAME unchecked (mvp/src/net/mp.js onStartGame) and result-reporter mtCodeOf builds the
+//   type code from them, so a modded host's broadcast puts the same impossible header on every writer's record: a party or a
+//   trio bit on seats that do not exist ('mask-range' / 'trio-range' / 'unit-overlap'), a seat count the lane does not seat
+//   ('pc', a team code on a 1V1 or a brawl of three), a type the job does not run ('mt', a ranked code on the demo job), a
+//   bot match with no bot seat ('nobot'). Every record agrees, so the whole-group rule flagged every writer: the honest
+//   joiners with the host, once per match (three: trust tier 1), and none of them earned the 50 consolation XP either (each
+//   one's own record failed the sanity check). These are the only shared-field reasons an honest client can carry from the
+//   host (an endless / friends' room code never carries party bits [mtCodeOf returns the bare base], a team code never
+//   carries a party field, a bot tier is one of the job's codes), and on two or more writers' word alone the job cannot tell
+//   the host from his joiners -- the host chooses the seat table, so 'seat 0' is whoever he puts there (architecture
+//   decision 10: let a cheat through rather than wrong an honest player).
+const SANITY_HEADER_SLUGS = ['mt', 'pc', 'mask-range', 'trio-range', 'unit-overlap', 'nobot'];
+// the per-writer half of sanitySplit: every writer whose own records break a bound of their own ({ sid, why, recs }; why =
+//   recordSanityFlags of each of his records, 'dup-writer' first when he wrote the key twice)
+function sanityWriterFaults(g) {
+  const base = baseMt(g[0].d[2] | 0), pc = g[0].d[8] | 0;
+  const bySid = new Map();
+  for (const r of g) { const s = String(r.steamID); if (!bySid.has(s)) bySid.set(s, []); bySid.get(s).push(r); }
+  const out = [];
+  for (const [sid, recs] of bySid) {
+    const why = recs.length > 1 ? ['dup-writer'] : [];
+    for (const r of recs) for (const f of recordSanityFlags(r, base, pc)) if (why.indexOf(f) < 0) why.push(f);
+    if (why.length) out.push({ sid, why, recs });
+  }
+  return out;
+}
+// Q294: the whole-group rule's case the host's header decides: sanityFlags' shared-field reasons (all but the per-record
+//   SANITY_RECORD_SLUGS) are header reasons only, at least one. Returns null for any other group, else { flags, own: the
+//   writers whose own records break their own fields (the duration, a second record: sanityDropFlags) -- the only ones
+//   flagged; a seat or table reason is the host's, Q292 }. sp: sanitySplit(g) when the caller has it (a key it splits is
+//   not the whole-group rule's; with a header reason it never splits). Two writers at least: a lone writer's header is his
+//   own word (the bot lane's one human is the host himself) and the whole-group rule flags him as before.
+function sanityHeaderHeld(g, sane, sp) {
+  if (!g || !g.length) return null;
+  if (new Set(g.map((r) => String(r.steamID))).size < 2) return null;
+  const flags = sane || sanityFlags(g);
+  const shared = flags.filter((f) => SANITY_RECORD_SLUGS.indexOf(f) < 0);
+  if (!shared.length || shared.some((f) => SANITY_HEADER_SLUGS.indexOf(f) < 0)) return null;
+  if ((sp || sanitySplit(g)).drop.length) return null;
+  return { flags, own: sanityWriterFaults(g).filter(sanityDropFlags) };
+}
 // the per-record half of sanityFlags (same bounds, every reason of the record rather than the first)
 function recordSanityFlags(r, base, pc) {
   const out = [];
@@ -2158,16 +2202,8 @@ function sanitySplit(g) {
   const flags = sanityFlags(g);
   const whole = { flags, drop: [], keep: g };
   if (!flags.length || flags.some(f => SANITY_RECORD_SLUGS.indexOf(f) < 0)) return whole;
-  const base = baseMt(g[0].d[2] | 0), pc = g[0].d[8] | 0;
-  if (base === ENDLESS.MT) return whole;
-  const bySid = new Map();
-  for (const r of g) { const s = String(r.steamID); if (!bySid.has(s)) bySid.set(s, []); bySid.get(s).push(r); }
-  const drop = [];
-  for (const [sid, recs] of bySid) {
-    const why = recs.length > 1 ? ['dup-writer'] : [];
-    for (const r of recs) for (const f of recordSanityFlags(r, base, pc)) if (why.indexOf(f) < 0) why.push(f);
-    if (why.length) drop.push({ sid, why, recs });
-  }
+  if (baseMt(g[0].d[2] | 0) === ENDLESS.MT) return whole;
+  const drop = sanityWriterFaults(g);
   if (!drop.length) return whole;
   const gone = new Set(drop.map(x => x.sid));
   const keep = g.filter(r => !gone.has(String(r.steamID)));
@@ -2827,6 +2863,7 @@ function writeRunSummary() {
       '| flagged inconsistent / sanity | ' + s('flagged', 0) + ' / ' + s('sanity', 0) + ' |',
       '| sanity on one record only: dropped, rest settles / too few writers left (Q109) | ' + s('sanityDrop', 0) + ' / ' + s('sanityDropHeld', 0) + ' |',
       '| sanity whose every reason is the host\'s seat or table, nobody flagged, not settled (Q292) | ' + s('sanityHost', 0) + ' |',
+      '| sanity whose every shared reason is the host\'s match header, only a writer breaking his own fields flagged, not settled (Q294) | ' + s('sanityHeader', 0) + ' |',
       '| starts pending / exit-rate hits | ' + s('pending', 0) + ' / ' + s('convicted', 0) + ' |',
       '| start-orphan seats spared by their own exit note (Q64) | ' + s('exitNoteSpared', 0) + ' |',
       '| starts-state notes / endless, friends\' room and bot entries dropped, no record of the key left on the shards (Q144) | ' + s('noteGone', 0) + ' / ' + s('entryGone', 0) + ' |',
@@ -8552,6 +8589,18 @@ async function main() {
         ghWarn('match=' + c.m + ': sanity [' + sane.join(',') + '] -- the host\'s seat or table, nobody flagged (Q292), not settled: ' + g.map(r => plog(r.steamID) + '@' + r.shard).join(' '));
         continue;
       }
+      // Q294: the host's match header (the party / trio bits, the seat count, the type) flags nobody either; a writer whose own
+      //   record breaks its own fields (the duration, a second record) is flagged alone. Not settled (no lane takes such a
+      //   header)
+      const hh = sanityHeaderHeld(g, sane, sp);
+      if (hh) {
+        if (hh.own.length && recordFlag(signals, hh.own.map(x => ({ steamID: x.sid })), c.m, nowMs)) sigDirty = true;
+        for (const x of hh.own) trustTouched.add(x.sid);
+        RUN.sanityHeader = (RUN.sanityHeader | 0) + 1;
+        ghWarn('match=' + c.m + ': sanity [' + sane.join(',') + '] -- the host\'s match header, ' + (hh.own.length ? 'only ' + hh.own.map(x => plog(x.sid) + '[' + x.why.join(',') + ']').join(' ') + ' flagged (own fields)' : 'nobody flagged')
+          + ' (Q294), not settled: ' + g.map(r => plog(r.steamID) + '@' + r.shard).join(' '));
+        continue;
+      }
       if (!sp.drop.length) {
         recordFlag(signals, g, c.m, nowMs); sigDirty = true;
         for (const r of g) trustTouched.add(String(r.steamID));   // trust-tier candidates
@@ -10248,7 +10297,7 @@ Object.assign(module.exports, { flagPlayer, flagsInWindow, stampLegacyFlags, TRU
 Object.assign(module.exports, { noteOwnStarts, hasOwnStart, OWN_START_CAP });   // cloud audit Q69 own-record evidence for leaver verdicts
 Object.assign(module.exports, { leaverXpRecordOnlyUntil, LEAVER_XP_RECORD_ONLY, LEAVER_XP_RECORD_ONLY_MAX_MS });   // M194 / W57 demo Next Fest: leaves recorded, XP not discounted
 Object.assign(module.exports, { NL_OPP_CAP, NL_REPEAT });   // cloud audit Q161 named-only losing seats counted on the account
-Object.assign(module.exports, { PAIR_DISPUTE, pairDispute1v1, pairDisputeTable, pairDisputeCount, SANITY_HOST_SLUGS });   // cloud audit Q289 / Q290 / Q291 / Q292 a key of two voices whose writers disagree
+Object.assign(module.exports, { PAIR_DISPUTE, pairDispute1v1, pairDisputeTable, pairDisputeCount, SANITY_HOST_SLUGS, SANITY_HEADER_SLUGS, sanityHeaderHeld, sanityWriterFaults });   // cloud audit Q289 / Q290 / Q291 / Q292 a key of two voices whose writers disagree
 Object.assign(module.exports, { ffaPlaceOf, ffaLowerHalf });   // cloud audit Q174 named-only lower-half FFA seats counted on the account
 Object.assign(module.exports, { leaveConfirmHold, startRosterGaps, LEAVE_CONFIRM_MS, LEAVE_CONFIRM_MIN_MS });   // cloud audit Q121 leave confirmation
 Object.assign(module.exports, { LATE_RESULT_MS, LATE_CAP, lateShadow });   // cloud audit Q228 a convicted leave whose own result comes in late
