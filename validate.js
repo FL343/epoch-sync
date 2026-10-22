@@ -1479,6 +1479,7 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
   const voided = [];   // O480: keys this verdict processed without a settle ({ m, pids: the attested roster }) -> VOID receipts (main)
   const consoledSids = [];   // interrupted-match consolation: real sids of still-visible settle writers at verdict time (in-memory only, never persisted -- state stays HMAC-keyed)
   const skEv = [];   // O181: the win streak events of these verdicts ({ p, mh, t0, kind }); the XP state is loaded later in main
+  const consoleFloor = {};   // Q308: sid -> the floor of the disputed 1V1 he is consoled for ({ m, cls, money, ranked }; main pays it)
   // 1) register new pending entries
   const registered = preRegistered == null ? registerStartRosters(starts, processed, pending, now, readComplete) : preRegistered;
   // 2) upkeep + maturity verdicts for pending entries
@@ -1558,6 +1559,7 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
     //   type code with its party / trio bits is part of the key, so the starts that seated the roster carry it too); a
     //   writer gains nothing by putting one on his own record (a seat count of his own only makes his voice disagree, and a
     //   clean record pays the same 50 here), and the roster takes two start votes.
+    const c0 = consoledSids.length;   // Q308: this key's consoled writers = consoledSids.slice(c0)
     const ownFault = groups[m] ? new Set(sanityWriterFaults(groups[m]).filter(sanityDropFlags).map((x) => x.sid)) : null;
     if (groups[m]) for (const r of groups[m]) {
       const s = String(r.steamID);
@@ -1568,6 +1570,10 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
       if (rf.length && !(!ownFault.has(s) && rf.every((f) => SANITY_HEADER_SLUGS.indexOf(f) >= 0))) continue;
       consoledSids.push(s);
     }
+    // Q308: a disputed 1V1 -- its consoled writers are paid the loser's XP (main, DISPUTE_FLOOR); a writer already consoled
+    //   for another key of this verdict keeps that one (one consolation per account per run, as before)
+    const fl = consoledSids.length > c0 ? disputeFloorOf(p, groups[m]) : null;
+    if (fl) for (const s of consoledSids.slice(c0)) if (fl.has(s)) consoleFloor[s] = Object.assign({ m }, fl.get(s));
     const unatt = Object.keys(p.roster).map((seat) => p.roster[seat]).filter((h) => p.settled.indexOf(h) < 0 && !hasOwnStart(p, h) && !confState[h + '|' + m]);
     if (unatt.length) {
       RUN.unattested = (RUN.unattested | 0) + unatt.length;
@@ -1587,7 +1593,7 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
       + (hdr ? '; the host\'s match header held it (Q294): nobody convicted' + (hdrSpared.length ? ', ' + hdrSpared.length + ' spared (' + hdrSpared.join(',') + ')' : '') : '')
       + (wasContested ? '; contested once (Q127), nobody rated' + (who ? ', contested by ' + who : '') + ' (Q143)' : ''));
   }
-  return { registered, convicted, cleaned, held, consoledSids, voided, skEv };
+  return { registered, convicted, cleaned, held, consoledSids, consoleFloor, voided, skEv };
 }
 // ---- a ranked 1V1 whose loser wrote nothing (cloud audit Q184) ----
 // A 1V1 key needs two start votes to register a roster and two writers to settle. A loser who writes nothing for the match
@@ -2937,6 +2943,7 @@ function writeRunSummary() {
       '| endless co-op groups held (records disagree on the roster, Q113) | ' + s('endlessHeld', 0) + ' |',
       '| endless keys without a seat gate whose records disagree, nobody flagged (Q128) | ' + s('endlessUngated', 0) + ' |',
       '| keys of two voices (a 1V1, a friends\' room / endless run / bot match of two) whose writers disagree, nobody flagged for it (Q289 / Q291) / of them a writer flagged alone for his own record\'s duration / accounts newly at ' + PAIR_DISPUTE.LOOK + ' different dispute opponents (record only) | ' + s('pairDispute', 0) + ' / ' + s('pairDisputeOwn', 0) + ' / ' + s('pairDisputeLook', 0) + ' |',
+      '| voided disputed 1V1s: writers paid the loser\'s XP instead of the flat ' + CONSOLATION_XP + ' (Q308) / kept at ' + CONSOLATION_XP + ', past ' + DISPUTE_FLOOR.DAY_CAP + ' such payments in a day | ' + s('disputeFloor', 0) + ' / ' + s('disputeFloorCapped', 0) + ' |',
       '| start rosters split by a later start / confirmed (Q118) | ' + s('lateSplit', 0) + ' / ' + s('confirmed', 0) + ' |',
       '| contested matchmade keys voided, no start roster / held to maturity (Q127) | ' + s('contestVoid', 0) + ' / ' + s('contestHeldVoid', 0) + ' |',
       "| friends' room / bot match keys no longer held by start records alone, a contest past maturity (Q200) | " + s('contestLifted', 0) + ' |',
@@ -3388,6 +3395,78 @@ const STARTS_MATURITY_MS = Number(process.env.STARTS_MATURITY_MS || 2 * 3600 * 1
 // the start, a burned exit-rate on it, a 2h maturity wait) earns far less than honest play.
 // Competitive values (LP/MMR) never move here. Client mirrors the same constant (lockstep-pinned).
 const CONSOLATION_XP = Number(process.env.CONSOLATION_XP || 50);
+// ---- a voided 1V1 its two players disputed: each the loser's XP, not the flat 50 (cloud audit Q308) ----
+// A quick / ranked 1V1 whose two writers wrote results that disagree cannot be decided on their word alone (Q289 / Q291:
+//   nobody flagged, the dispute counted on both): it is voided at the start verdict and each writer of a usable result got
+//   CONSOLATION_XP. A modded loser who wrote himself the win so lost nothing he would have kept, while the honest winner lost
+//   400 XP (quick: a win of 450 -> 50) or 475 XP and his points (ranked: 525 -> 50). Until a signed result decides such a
+//   match (O226 / roadmap 5.8; the user's call, workbench ASK_USER A42), each consoled writer of it is paid the XP of the
+//   LOSER of a 1V1 instead: the second place of the settle formula (computeXpGain rank 2 = base + 45 + the money bonus,
+//   x1.25 ranked), with the leaver factor and the level boost the settle path applies, never below CONSOLATION_XP. Nothing
+//   else moves: no win or loss, no games count, no points, no rating, no streak, no daily first win.
+//   - money: the LOWEST score any record of the two players gives the player's attested seat. A modder's own claim for
+//     himself is never taken (the honest record gives him what he really had: he is paid at most what losing honestly pays
+//     him); he can lower the honest player's money to nothing (the money-less tier, 145 quick / 181 ranked), never below 50;
+//   - class: the player's own records only (dispClassOf; an abandoner's own record pays 0 -> the 50 as before);
+//   - only a matchmade key whose attested start table has exactly two seats, two different accounts on them, both of whom
+//     wrote for the key, with score vectors that differ. A key both agreed on is the settle path's (or, held by a bad
+//     header, Q294's 50); a lone writer's is the lone-1V1 path's (Q184 / Q216); a brawl of three or more keeps the 50
+//     (one result cannot be taken over another there either, and no place in it is "the loser's"). The ranked tier only on
+//     base type 2 off the demo job (which runs no ranked); any other code on a two-seat table is the host's broadcast
+//     (Q292: a team code, a trio bit -- no real match of two has one) and is paid the quick tier, never more;
+//   - at most DISPUTE_FLOOR.DAY_CAP such payments a UTC day per account (signals.players[pid].fq day / .fqn count), the
+//     flat 50 over it. The void path has no one-match-at-a-time mark (writerReadyAt): two accounts of one owner writing
+//     staggered disputed keys were paid 50 per run each; the cap keeps that from becoming a loser's XP per run. An honest
+//     player meets a disputed 1V1 rarely (a modded opponent, a rare timing fault), three in one day hardly ever.
+const DISPUTE_FLOOR = { DAY_CAP: Number(process.env.DISPUTE_FLOOR_DAY_CAP || 3) };
+const DISPUTE_CLS_ORDER = { abandoner: 0, innocent: 1, valid: 2 };
+// the floor of one voided key (p = its pending start entry, g = its records) -> Map(sid -> { cls, money, ranked }) for the
+//   two writers, or null when the key is not a disputed 1V1
+function disputeFloorOf(p, g) {
+  if (!p || !p.roster || !g || !g.length) return null;
+  const mt = p.mt != null ? (p.mt | 0) : (g[0].d[2] | 0);
+  if (!isMatchmadeMt(mt)) return null;
+  const seats = Object.keys(p.roster);
+  if (seats.length !== 2) return null;
+  const seatOf = new Map();   // pid -> its attested seat
+  for (const k of seats) { const h = p.roster[k]; if (!h || h === '0' || seatOf.has(h)) return null; seatOf.set(h, k | 0); }
+  const own = new Map();   // sid -> his own records
+  for (const r of g) { const s = String(r.steamID); if (!seatOf.has(pid(s))) continue; if (!own.has(s)) own.set(s, []); own.get(s).push(r); }
+  if (own.size !== 2) return null;
+  const both = [].concat(...own.values());
+  const vec = (r) => JSON.stringify(r.d.slice(10, 10 + Math.max(0, r.d[8] | 0)));
+  if (new Set(both.map(vec)).size < 2) return null;
+  const out = new Map();
+  for (const [s, recs] of own) {
+    const seat = seatOf.get(pid(s));
+    let money = Infinity, cls = 'valid';
+    for (const r of both) { const x = (seat >= 0 && seat < (r.d[8] | 0) && r.d.length > 10 + seat) ? (r.d[10 + seat] | 0) : 0; if (x < money) money = x; }
+    for (const r of recs) { const c = dispClassOf(r.dispCode); if (DISPUTE_CLS_ORDER[c] < DISPUTE_CLS_ORDER[cls]) cls = c; }
+    out.set(s, { cls, money: Math.max(0, money), ranked: baseMt(mt) === 2 && !PT_MODE });
+  }
+  return out;
+}
+// main: which of them are paid the floor this run -- at most DAY_CAP a UTC day per account, counted on the signals ahead
+//   of the writes -> { admitted: Map(sid -> floor), capped: [sids], dirty }
+function disputeFloorAdmit(consoleFloor, signals, now) {
+  const res = { admitted: new Map(), capped: [], dirty: false };
+  const day = Math.floor(now / 86400000);
+  for (const s of Object.keys(consoleFloor || {})) {
+    const p = sigPlayer(signals, pid(s), now);
+    res.dirty = true;
+    if ((p.fq | 0) !== day) { p.fq = day; p.fqn = 0; }
+    if ((p.fqn | 0) >= DISPUTE_FLOOR.DAY_CAP) { res.capped.push(s); continue; }
+    p.fqn = (p.fqn | 0) + 1;
+    res.admitted.set(s, consoleFloor[s]);
+  }
+  return res;
+}
+// the XP of one admitted writer: the leaver factor (record-only on the demo's fest window) and the level boost of the
+//   board value before this credit, as creditXp applies them; no supporter, streak or daily first; never below the 50
+function disputeFloorXp(fl, boardXp, leaves, games) {
+  const factor = LEAVER_XP_RECORD_ONLY ? 1 : effectiveLeaverFactor(leaves | 0, games | 0);
+  return Math.max(CONSOLATION_XP, computeXpGain(fl.cls, 1, fl.money, !!fl.ranked, false, factor, xpBoostMult(xpLevelOf(boardXp | 0), false, 0)));
+}
 function loadStarts() { try { return JSON.parse(fs.readFileSync(STARTS_FILE, 'utf8')) || {}; } catch (e) { return {}; } }
 function saveStarts(s) { try { writeStateFile(STARTS_FILE, JSON.stringify(s, null, 0)); } catch (e) { ghWarn('write ' + STARTS_FILE + ' failed: ' + (e && e.message)); } }
 // ============================================================
@@ -7010,6 +7089,13 @@ async function main() {
   // write preserves the entry's existing details verbatim (career 0xCA payload must survive).
   // One-shot by design (rides the processed gate); a failed write is logged and forfeited.
   let consoledN = 0;
+  // Q308: the writers of a disputed 1V1 this verdict voided are paid the loser's XP instead of the 50, within the day cap
+  //   (counted on the signals, on disk ahead of the writes)
+  const floorRes = XP_LB ? disputeFloorAdmit(startsRes.consoleFloor, signals, nowMs) : { admitted: new Map(), capped: [], dirty: false };
+  if (floorRes.dirty) { sigDirty = true; if (APPLY_MMR) saveSignals(signals, nowMs); }
+  for (const s of floorRes.capped) console.log('  consolation: ' + plog(s) + ' past ' + DISPUTE_FLOOR.DAY_CAP + ' disputed-1V1 floors today -- the flat ' + CONSOLATION_XP + ' (Q308)');
+  RUN.disputeFloorCapped = floorRes.capped.length;
+  let floorN = 0, xsFloor = null;
   if (startsRes.consoledSids && startsRes.consoledSids.length && XP_LB) {
     const xpLb0 = ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).find(x => String(x.name || x.Name) === XP_LB);
     const xpId0 = xpLb0 ? (xpLb0.id || xpLb0.ID) : null;
@@ -7017,18 +7103,22 @@ async function main() {
     else for (const sid of startsRes.consoledSids) {
       try {
         const e = await readUserEntry(xpId0, sid, 'xp');
-        const next = (e ? (e.score | 0) : 0) + CONSOLATION_XP;
+        const fl = floorRes.admitted.get(sid);   // Q308: a disputed 1V1's writer -- the loser's XP
+        const h = pid(sid);
+        const add = fl ? disputeFloorXp(fl, e ? (e.score | 0) : 0, (leavers[h] && leavers[h].leaves) || 0, ((xsFloor || (xsFloor = loadXp()))[h] || {}).games) : CONSOLATION_XP;
+        const flNote = fl ? ' (Q308: a disputed ' + (fl.ranked ? 'ranked' : 'quick') + ' 1V1, the loser\'s XP, money ' + fl.money + ')' : '';
+        const next = (e ? (e.score | 0) : 0) + add;
         const det = e ? decodeDetails(e.detailData) : null;
-        if (!APPLY_MMR) { console.log('  (dry-run) consolation xp ' + plog(sid) + ' = ' + next); consoledN++; continue; }
+        if (!APPLY_MMR) { console.log('  (dry-run) consolation xp ' + plog(sid) + ' = ' + next + flNote); consoledN++; if (fl) floorN++; continue; }
         const r = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: xpId0, steamid: sid, score: next, scoremethod: 'ForceUpdate', format: 'json' }, (det && det.length) ? det : null);
-        if (r.ok && !(r.json && r.json.result && r.json.result.result && r.json.result.result !== 1)) { consoledN++; console.log('  consolation xp ' + plog(sid) + ' +' + CONSOLATION_XP + ' -> ' + next); }
+        if (r.ok && !(r.json && r.json.result && r.json.result.result && r.json.result.result !== 1)) { consoledN++; if (fl) floorN++; console.log('  consolation xp ' + plog(sid) + ' +' + add + ' -> ' + next + flNote); }
         else ghWarn('consolation xp write failed for ' + plog(sid));
       } catch (err) { ghWarn('consolation xp error for ' + plog(sid) + ': ' + (err && err.message)); }
     }
   } else if (startsRes.consoledSids && startsRes.consoledSids.length && !XP_LB) {
     console.log('  consolation: XP_LB unset -> ' + startsRes.consoledSids.length + ' credits skipped');
   }
-  RUN.consoled = consoledN;
+  RUN.consoled = consoledN; RUN.disputeFloor = floorN;
   // Q184: the 1V1 winners paid by lone1v1Count -- the points of a normal 1V1 win against the silent seat's pre-match rating,
   //   one write per account (several payments add up in order). The consolation XP above was their XP. The base read follows
   //   the settle path: this season's entry, else the previous season soft-reset, else the display-derived seed (no clamp).
@@ -10300,7 +10390,7 @@ async function main() {
 if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
-module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CLASSIC_OWNERS: classicOwners.CLASSIC, CLASSIC_FILE, CHAT_MUTE: chatMute.CHAT_MUTE, CHAT_MUTE_FILE, CHAT_MUTE_LB, CHAT_REPORT_LB, isVoidDisp, voidByConsensus, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, RS_SOLO_VS_TRIO, RS_TRIO_WIN, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, CONFESS_MAGIC, NOTE_MAGIC, NOTE_DISP, reconcileConfessions, SANITY, sanityFlags, sanitySplit, recordSanityFlags, SANITY_RECORD_SLUGS, SANITY_ROSTER_SLUGS, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, rekeyReports, repKeysReady, REP_KEYS, REP_KEYS_VER, CHAT_KEYS, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, trustIndex, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan, postForm, postFormDetails, findOrCreateBoard, isTestBoardName, sandboxOn, ghWarn, ghErr, PT_MODE, PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, ACTIVE_MATCH_LB, ptSeedCp, ptBoardPlan, PRIVATE_XP, isPrivateMt, privateProgressOf, creditXpPrivate, BOT_XP, isBotMt, botTierOf, botTierMult, botSeatSplit, botRanksOf, botRankEffOf, botXpGain, botProgressOf, creditXpBot, DEMO_APPID, ENDLESS_XP, computeXpEndless, creditXpEndless, CAMPAIGN_LB, SEEDCAP_REJECT_LADDER_MIN, seedcapRejectWindowMin, seedcapRejectUntilMin, seedcapRejectActive,
+module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CLASSIC_OWNERS: classicOwners.CLASSIC, CLASSIC_FILE, CHAT_MUTE: chatMute.CHAT_MUTE, CHAT_MUTE_FILE, CHAT_MUTE_LB, CHAT_REPORT_LB, isVoidDisp, voidByConsensus, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, RS_SOLO_VS_TRIO, RS_TRIO_WIN, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, DISPUTE_FLOOR, disputeFloorOf, disputeFloorAdmit, disputeFloorXp, CONFESS_MAGIC, NOTE_MAGIC, NOTE_DISP, reconcileConfessions, SANITY, sanityFlags, sanitySplit, recordSanityFlags, SANITY_RECORD_SLUGS, SANITY_ROSTER_SLUGS, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, rekeyReports, repKeysReady, REP_KEYS, REP_KEYS_VER, CHAT_KEYS, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, trustIndex, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan, postForm, postFormDetails, findOrCreateBoard, isTestBoardName, sandboxOn, ghWarn, ghErr, PT_MODE, PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, ACTIVE_MATCH_LB, ptSeedCp, ptBoardPlan, PRIVATE_XP, isPrivateMt, privateProgressOf, creditXpPrivate, BOT_XP, isBotMt, botTierOf, botTierMult, botSeatSplit, botRanksOf, botRankEffOf, botXpGain, botProgressOf, creditXpBot, DEMO_APPID, ENDLESS_XP, computeXpEndless, creditXpEndless, CAMPAIGN_LB, SEEDCAP_REJECT_LADDER_MIN, seedcapRejectWindowMin, seedcapRejectUntilMin, seedcapRejectActive,
   ENDLESS_COMP_LB, SAVE_BOX_LB, SOLO_FILE, COMP, soloSanity, soloChainPlan, rerollChain, soloMilestones, soloAdvance, soloRunKey, soloStartAttested, loadSolo, saveSolo, segOrderOf, segStartOf, freshOrder, freshOrderPaced, writerReadyAt, writerClaim,
   ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, SAVE_BOX_LB_DUO, SAVE_BOX_LB_TRIO, teamRunKey, soloMsSlot, groupRecords,
   ENDLESS_COMP_LB_QUAD, SAVE_BOX_LB_QUAD, ENDLESS_LB_QUAD, ENDLESS_MAX_PC, compFamKeyOf,   // client knife 3.7a (O178 four seats)

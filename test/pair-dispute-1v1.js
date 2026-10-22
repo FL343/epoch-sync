@@ -9,7 +9,8 @@
 //   Now (pairDispute1v1 / pairDisputeCount, validate.js): nobody is flagged for the disagreement; a writer whose own record
 //   breaks its duration bound is flagged alone (Q292: the seat is the host's, not a bound of the writer's own any more); the
 //   dispute is counted on both players (pd / pdo / pdk, record-only). Nothing settles, nothing is paid: a 1V1 with two voices
-//   cannot be decided, only no longer flags the honest one (architecture decision 10). Since Q291 / Q292 the rule is chosen by
+//   cannot be decided, only no longer flags the honest one (architecture decision 10). (The void at the start verdict pays each
+//   writer the XP of a 1V1's loser since Q308 instead of the flat 50: test/dispute-1v1-floor.js.) Since Q291 / Q292 the rule is chosen by
 //   the writers and the tables, not the match type: the other lanes of two (friends' room, endless, bot match) and the host's
 //   reshaped broadcasts are in test/two-voice-dispute.js.
 // Over the REAL validate.js main() against an offline board stub (the harness of test/lone-1v1-spoiled.js):
@@ -25,7 +26,8 @@
 //       seat in his roster, his record twice)
 //   [7] scope: a 3-player brawl keeps the old rule (every writer flagged); a friends' room 1V1 now takes this rule (Q291)
 //   [8] an old key main already flagged: no flag removed, nothing paid, counted once
-//   [9] two accounts of one owner disputing each other: nothing settles, nothing is paid, nothing to gain
+//   [9] two accounts of one owner disputing each other: nothing settles, one consolation per account and run (Q308: the 1V1
+//       loser's XP, no more than losing the match pays)
 //   [10] wiring pins
 // State isolation is structural (every *_FILE var scanned and redirected, cwd = temp dir), like test/seat-gate.js.
 const { spawnSync } = require('child_process');
@@ -284,9 +286,10 @@ for (const [mt, name] of [[2, 'ranked'], [1, 'quick']]) {
     const ms = timeline(steps, sc);
     T(tag + ' mutant: the old rule -> the honest winner flagged with the loser (Q289)', allOk(ms, 4) && fOf(last(ms), W) === 1 && fOf(last(ms), L) === 1,
       JSON.stringify([fOf(last(ms), W), fOf(last(ms), L)]));
-    T(tag + ': never settled, voided at the start verdict as before -- the same consolation XP for both as under the old rule ([50] each), no points, no trust write',
+    const FL = mt === 2 ? '[281]' : '[225]';   // Q308: the void pays each writer the 1V1 loser's XP (145 + 4000 / 50, x1.25 ranked) instead of 50
+    T(tag + ': never settled, voided at the start verdict as before -- the same consolation XP for both as under the old rule (Q308: the 1V1 loser\'s, ' + FL + ' each), no points, no trust write',
       allOk(ms, 4) && processedOf(last(rs)).has(m.key) && JSON.stringify([paidIn(rs, W), paidIn(rs, L)]) === JSON.stringify([paidIn(ms, W), paidIn(ms, L)])
-      && JSON.stringify(paidIn(rs, W)) === '[50]' && JSON.stringify(paidIn(rs, L)) === '[50]' && trustIn(rs, W).length + trustIn(rs, L).length === 0
+      && JSON.stringify(paidIn(rs, W)) === FL && JSON.stringify(paidIn(rs, L)) === FL && trustIn(rs, W).length + trustIn(rs, L).length === 0
       && /start-orphan [^\n]*: started, never settled/.test(rs[3].out) && (mt !== 2 || /receipt [^\n]*: never settled -> VOID receipt/.test(rs[3].out)), JSON.stringify([paidIn(rs, W), paidIn(rs, L), paidIn(ms, W), paidIn(ms, L)]));
   });
   if (mt === 2) withMutant('    if (old && hasKey(old.pdk, m)) continue;\n', '    if (false) continue;\n', tag + 'twice', (sc) => {
@@ -423,8 +426,8 @@ for (const [mt, name] of [[2, 'ranked'], [1, 'quick']]) {
   const rs = timeline(steps);
   let old = null;
   withMutant(OLD[0], OLD[1], '9', (sc) => { old = timeline(steps, sc); });
-  T('[9] five disputes between two accounts: no rating, points or CP; the void\'s consolation XP the same as under the old rule; no trust write',
-    allOk(rs, 4) && old && allOk(old, 4) && [X, Y].every(s => paidIn(rs, s).every(x => x % 50 === 0) && JSON.stringify(paidIn(rs, s)) === JSON.stringify(paidIn(old, s))
+  T('[9] five disputes between two accounts: no rating, points or CP; the void\'s consolation XP the same as under the old rule (one per account and run, Q308: the ranked 1V1 loser\'s 281); no trust write',
+    allOk(rs, 4) && old && allOk(old, 4) && [X, Y].every(s => JSON.stringify(paidIn(rs, s)) === '[281]' && JSON.stringify(paidIn(rs, s)) === JSON.stringify(paidIn(old, s))
       && of(last(rs), 6, s).length + of(last(rs), 7, s).length + of(last(rs), 8, s).length === 0) && trustIn(rs, X).length + trustIn(rs, Y).length === 0,
     JSON.stringify([paidIn(rs, X), paidIn(rs, Y), old && paidIn(old, X)]));
   eq('[9] neither flagged now (the old rule flagged both 5 times), 5 disputes counted, one opponent', [fOf(last(rs), X), fOf(last(rs), Y), old && fOf(last(old), X), pdOf(last(rs), X), pdoOf(last(rs), X).length], [0, 0, 5, 5, 1]);

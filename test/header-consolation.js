@@ -17,7 +17,8 @@
 //       nothing else paid, nobody flagged, the seats that wrote no result leavers (as on an honest header); mutant (the rule
 //       before) -> the joiner gets nothing
 //   [2] two voices that disagree on a bad header (trio bit / team code): both writers consoled, nobody flagged or convicted,
-//       as on an honest header; mutant -> nobody paid
+//       as on an honest header (Q308: a disputed 1V1 pays the loser's XP, 225 on a quick key, a team code on a two-seat table
+//       the quick tier too); mutant -> nobody paid
 //   [3] what still earns nothing: his own duration past DUR_CAP (two guards: dropping both pays him), a second record of his,
 //       scores past the cap (not a header reason), a record of an account outside the roster (the seat gate drops it first);
 //       mutants (each guard dropped) -> paid
@@ -230,6 +231,7 @@ function sum(p, sids) {
   return o;
 }
 const J50 = (o, s) => JSON.stringify(o[s].xp) === '[50]';
+const J225 = (o, s) => JSON.stringify(o[s].xp) === '[225]';   // Q308: a disputed quick 1V1's writer -- the loser's XP (145 + 4000 / 50)
 const none = (o, s) => o[s].xp.length === 0;
 
 // ---- [1] the lone joiner: the host sends a bad header and writes no result ----
@@ -282,13 +284,13 @@ for (const [name, mt] of [['a trio bit (0x101)', 0x101], ['a team code (3)', 3]]
   const tag = '[2] a quick 1V1 with ' + name + ', the host\'s scores disagree with the joiner\'s';
   const ws = [[H, 0, two, 2, true, true, [9000, 4000]], [J, 1, two, 2, true, true, [4000, 7000]]];
   const now = sum(play(mt, ws), [H, J]);
-  T(tag + ': voided, both consoled once, nobody flagged or convicted', now.ok && now.processed && J50(now, J) && J50(now, H) && [H, J].every((s) => now[s].f === 0 && now[s].lv === 0), JSON.stringify(now));
+  T(tag + ': voided, both consoled once (Q308: the 1V1 loser\'s XP), nobody flagged or convicted', now.ok && now.processed && J225(now, J) && J225(now, H) && [H, J].every((s) => now[s].f === 0 && now[s].lv === 0), JSON.stringify(now));
   withMutant(['held'], tag, (sc) => {
     const old = sum(play(mt, ws, null, sc), [H, J]);
     T(tag + ' mutant (the rule before): nobody paid', old.ok && old.processed && none(old, J) && none(old, H), JSON.stringify(old));
   });
   const ctl = sum(play(1, ws), [H, J]);
-  T(tag + ' control (mt 1, an honest header): both consoled the same', ctl.ok && ctl.processed && J50(ctl, J) && J50(ctl, H) && [H, J].every((s) => ctl[s].f === 0 && ctl[s].lv === 0), JSON.stringify(ctl));
+  T(tag + ' control (mt 1, an honest header): both consoled the same', ctl.ok && ctl.processed && J225(ctl, J) && J225(ctl, H) && [H, J].every((s) => ctl[s].f === 0 && ctl[s].lv === 0), JSON.stringify(ctl));
 }
 
 // ---- [3] what still earns nothing ----
