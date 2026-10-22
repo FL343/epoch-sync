@@ -2809,7 +2809,7 @@ function writeRunSummary() {
       '| win streak events landing before matches already counted (a late settle; its own tier counts what came before it) / stale (older than the fold, ignored) / absences frozen (the first in a week) / absences that broke a streak (O181) | ' + s('streakLate', 0) + ' / ' + s('streakStale', 0) + ' / ' + s('streakAbsFreeze', 0) + ' / ' + s('streakAbsBreak', 0) + ' |',
       '| ranked 1V1s only the winner wrote (Q184): counted on the silent seat / waiting for a second opponent / paid (points written) / not counted, no signals of his own / over the weekly cap | ' + s('lone1v1', '0 / 0 / 0 / 0 / 0') + ' (' + s('lone1v1Paid', 0) + ') |',
       '| team-gamble host charges / at trust threshold | ' + s('t2lh', '0/0') + ' |',
-      '| gamble-frame refusals naming the host (Q61): strikes, only he flagged / of them judged, record only / held for a seat with no record / named, not a strike, every writer flagged as before | ' + s('gtac', '0 / 0 / 0 / 0') + ' |',
+      '| gamble-frame refusals naming the host (Q61): strikes, only he flagged / of them judged, record only / held for a seat with no record / named, not a strike, left to the flag rules below | ' + s('gtac', '0 / 0 / 0 / 0') + ' |',
       '| reports seen / counted | ' + s('repSeen', 0) + ' / ' + s('repCounted', 0) + ' |',
       '| trust writes / deletes | ' + s('trustW', 0) + ' / ' + s('trustD', 0) + ' |',
       '| endless rating rows written / deleted / tier cuts (O103) | ' + s('ratingW', 0) + ' / ' + s('ratingD', 0) + ' / ' + s('tiercut', '-') + ' |',
@@ -6226,7 +6226,7 @@ function applyGambleAccusations(gr, signals, processed, now, vecOf, opts) {
     if (signals.gtav[m]) { ig.splice(i, 1); continue; }   // struck on an earlier run: the verdict stands, nobody else flagged
     if (ga.why) {
       res.other++;
-      console.log('  gamble accusation ' + m + ': not counted (' + ga.why + ') -- every writer flagged as before');
+      console.log('  gamble accusation ' + m + ': not counted (' + ga.why + ') -- left to the flag rules below (every writer flagged; a quick / ranked 1V1: nobody, Q289)');
       continue;
     }
     if (ga.absent.length) {

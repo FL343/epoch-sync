@@ -18,7 +18,8 @@
 //   [7] a seat with no record: held (nobody flagged) until the absence grace, then struck; a late untagged record
 //       written the host's way keeps the old path
 //   [8] framing shapes that keep the old path: one party names its host; writers below the named seat (the host
-//       among them) name a joiner; a 2P match (one writer names); ranked team brawl with a team naming the host alone
+//       among them) name a joiner; a 2P match (one writer names: no strike, and since Q289 nobody flagged); ranked team
+//       brawl with a team naming the host alone
 //   [9] codes outside this pass (true 2v2, friends' room): the tag changes nothing
 //   [10] wiring pins, pruneSignals
 //   [11] the state stays bounded: strikes kept per account, a verdict goes with its key's flag, a hold with its key
@@ -348,7 +349,9 @@ let r5;
   const two = forged(1, 0x802, [A, B]);
   const m2 = keyOf(two[0].d);
   const r2 = runCron(boardsWith(two), { STARTS_FILE: { [m2]: startOf(1, [A, B], FLOOR + 5 * 60000) } });
-  T('[8] 2P: one writer names the host: no strike, both flagged as before', !strikesOf(r2, A) && fOf(r2, A) === 1 && fOf(r2, B) === 1 && /not counted \(one writer names him\)/.test(r2.out));
+  // a quick 1V1: one voice against the other cannot be judged -- no strike (one writer is not enough), and since Q289 nobody
+  // flagged for the disagreement either (a dispute counted on both, test/pair-dispute-1v1.js)
+  T('[8] 2P: one writer names the host: no strike, nobody flagged (Q289), the dispute counted on both', !strikesOf(r2, A) && fOf(r2, A) === 0 && fOf(r2, B) === 0 && /not counted \(one writer names him\)/.test(r2.out) && new RegExp('pair-dispute ' + m2 + ': ').test(r2.out) && [A, B].every(s => (((sigOf(r2).players || {})[v.pid(s)] || {}).pd | 0) === 1), r2.out.slice(-600));
   const tb = forged(4, 0x803, R4, { skip: [1] });
   const mt = keyOf(tb[0].d);
   const rt = runCron(boardsWith(tb), { STARTS_FILE: { [mt]: startOf(4, R4, FLOOR + 5 * 60000) } });
