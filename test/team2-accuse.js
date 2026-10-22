@@ -37,6 +37,8 @@
 //        played (two keys, disjoint namers) never strike or judge him (control: with his own start, judged); a start
 //        read this run counts for a pending entry from an older build; a host whose own record was read before
 //        (stored 'nocost') is not struck as 'left' when it rotates off (review 3, shape 1b); mutation self-checks
+//   [26] O462 start proof on (START_PROOF_GATE=1): [3]'s shape on a key every seat's own start proves -- the same
+//        strike on the host alone as with the gate off, nothing dropped
 // A key about to record a new strike while a roster seat has no record waits one grace period (R1-B2-04 hold):
 //   runCron follows such a run with the next one a grace period later, like the cron's own next run would.
 // Runs the REAL validate.js main() against an offline board stub (test/team2-lone-dissent.js harness).
@@ -816,6 +818,34 @@ const deferredOf = (r) => (r.out.match(/strike deferred/g) || []).length;
   const ta = SRC.slice(SRC.indexOf('function team2Accusations'), SRC.indexOf('function t2acVerdict'));
   T('[20b] unsettled / costly are the host\'s (roster seat 0) alone; a backed losing side naming a non-host who quit does not count', /host = seatOf\[sid\] === 0/.test(ta) && /else if \(!host\) nc = 'host';/.test(ta) && /if \(backed && !host && accusers\.every\(x => teamOf\(x\) !== W\)\) nc = 'quit';/.test(ta) && /const backed = W != null && new Set\(claims\.map\(r => String\(r\.steamID\)\)\)\.size >= 2;/.test(ta));
   T('[20b] the run summary reports deferred strikes', /t2acRes\.held \? ' \(' \+ t2acRes\.held \+ ' deferred\)' : ''/.test(SRC));
+}
+
+// ---- [26] O462 start proof switched on (START_PROOF_GATE=1): the Q43 shape on a proven key is judged the same ----
+//   [3]'s ranked 2v2 (host A left after the reveals, B / C / D refuse and name him), its match id and seed cut from the
+//   host's n, every seat's own start on the boards with the host's block: the key proves its table, nobody is off it, so
+//   the strike falls on A alone exactly as with the gate off.
+{
+  const SP = v.startProof;
+  const sha = (s) => require('crypto').createHash('sha256').update(String(s), 'utf8').digest('hex');
+  const N26 = 'fedcba9876543210fedcba9876543210';
+  const pm = SP.bind(N26, 4, [].concat(...R4.map(sidPair)), sha);
+  const h26 = SP.hash32(pm.matchId), s26 = pm.runSeed;
+  const seeded = (d) => { const x = d.slice(); x[4] = s26; return x; };
+  const st26 = (seat) => { const d = [0xB2, 2, 6, h26, s26, seat, 0, 0, 4, 0, 0, 0, 0, 0, 0]; for (const s of R4) { const p = sidPair(s); d.push(p[0], p[1]); } return d.concat(SP.tail(N26)); };
+  const recs = refusal(6, 0x300, R4, [1, 2, 3], 1).map((x) => { const d = seeded(x.d); d[3] = h26; return { sid: x.sid, d }; })
+    .concat(R4.map((sid, seat) => ({ sid, d: st26(seat) })));
+  const m26 = h26 + '_' + s26 + '_6';
+  const files = () => ({ STARTS_FILE: { [m26]: startOf(6, h26, R4, FLOOR + 5 * 60000) } });
+  const on = runCron(boardsWith(recs, ALL), files(), { START_PROOF_GATE: '1' }), off = runCron(boardsWith(recs, ALL), files(), null);
+  const outOn = (on.first ? on.first.out : '') + on.out;
+  T('[26] runs exit 0', on.code === 0 && off.code === 0, (on.out + off.out).slice(-600));
+  T('[26] gate on: the key proven in enforce mode, nothing dropped', /\[start-proof\] mode=enforce keys=1 proven=1 ok=4 bad=0 none=0 drop\(pf\)=0 drop\(pr\)=0 drop\(ps\)=0/.test(outOn),
+    outOn.split('\n').filter((l) => /start-proof/.test(l)).join(' | '));
+  T('[26] gate on: one strike on A (three accusers), verdict free; only A flagged; not settled (Q43 as before)', acOf(on, A).length === 1 && acOf(on, A)[0].a.length === 3
+    && avOf(on, m26, A) && avOf(on, m26, A).v === 'free' && fOf(on, A) === 1 && [B, C, D].every((s) => fOf(on, s) === 0 && acOf(on, s).length === 0) && !processedOf(on).has(m26),
+    JSON.stringify([acOf(on, A), avOf(on, m26, A), [A, B, C, D].map((s) => fOf(on, s))]));
+  const same = (r) => JSON.stringify([acOf(r, A).map((x) => x.a.length), (avOf(r, m26, A) || {}).v, [A, B, C, D].map((s) => fOf(r, s)), [A, B, C, D].map((s) => leavesOf(r, s)), processedOf(r).has(m26), posts(r, POINTS).length]);
+  T('[26] gate on and gate off: the same strike, flags, exit rate, nothing settled or written', same(on) === same(off), same(on) + ' vs ' + same(off));
 }
 
 if (failN) { console.log('team2-accuse: ' + failN + ' FAILED'); process.exit(1); }

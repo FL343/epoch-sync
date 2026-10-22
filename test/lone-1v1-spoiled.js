@@ -21,12 +21,14 @@
 //       dispute check -> paid); a start alone (S6b / S6d, as before); the winner's own record bad; a third writer; a
 //       contest void on an incomplete read (mutant: no read check -> claimed); V held on an incomplete read; a confession
 //   [5] wiring pins
+//   [6] O462 start proof on (START_PROOF_GATE=1): V / U on a key the winner's own start proves -- decided and paid the same
+//       as with the gate off, nothing dropped
 // State isolation is structural (every *_FILE var scanned and redirected, cwd = temp dir), like test/seat-gate.js.
 const { spawnSync } = require('child_process');
 const fs = require('fs'), path = require('path'), os = require('os');
 const SCRUB = ['PT_MODE', 'STRICT_BOARDS', 'APPLY_MMR', 'ALLOW_TEST', 'DEMO_APPID', 'RANKED_LB', 'LP_LB', 'XP_LB', 'STARTS_MATURITY_MS', 'CONFESS_PRUNE_MS',
   'SEEDCAP_ENFORCE', 'SEEDCAP_REJECT', 'GITHUB_STEP_SUMMARY', 'LEDGER_SHARDS', 'PT_SHARD_COUNT', 'ABSENT_GRACE_MS', 'READ_RETRY_MS', 'SANITY_MIN_START_AGE_MS',
-  'SHARD_STRICT_BODY', 'CP_LB', 'TRUST_LB', 'REPORT_LB', 'START_CONFIRM_MS', 'SIG_PAIR_WINDOW_MS'];
+  'SHARD_STRICT_BODY', 'CP_LB', 'TRUST_LB', 'REPORT_LB', 'START_CONFIRM_MS', 'SIG_PAIR_WINDOW_MS', 'START_PROOF_GATE'];
 for (const k of SCRUB) delete process.env[k];
 process.env.STATE_SALT = 's';   // same salt as the child runs below, so v.pid() addresses their state rows
 const v = require(path.join(__dirname, '..', 'validate.js'));
@@ -393,6 +395,35 @@ console.log('=== a ranked 1V1 whose loser wrote only records the job cannot use:
     && /voided\.push\(\{ m, pids: Object\.keys\(p\.roster\)\.map\(\(seat\) => p\.roster\[seat\]\), note: pending\['~' \+ m\] \|\| null \}\);/.test(SRC));
   T('[5] main: the voided keys\' claims join the verdicts\' ahead of the count', /lone1v1Verdicts\(startsPending, groups, processed, nowMs, STARTS_MATURITY_MS, confState, confSeen, shardsComplete\)\n    \.concat\(lone1v1VoidClaims\(startsRes\.voided, groups, startsRes\.consoledSids, confState, confSeen, shardsComplete\)\)/.test(SRC));
   T('[5] lone1v1Verdicts: lone1v1Claim, else lone1v1Spoiled (not strict)', /const c = lone1v1Claim\(e, key, groups\[key\], confState, confSeen\) \|\| lone1v1Spoiled\(e, key, groups\[key\], confState, confSeen, false, null\);/.test(SRC));
+}
+
+// ---- [6] O462 start proof switched on (START_PROOF_GATE=1): a proven key is decided the same way ----
+//   The winner's own start carries the host's block, so the key proves its table [winner, L]; the loser sits on it, so his
+//   bad result stays and Q216 decides as without the proof. Each shape is run twice on the same records: gate on, gate off.
+{
+  const SP = v.startProof;
+  const sha = (s) => require('crypto').createHash('sha256').update(String(s), 'utf8').digest('hex');
+  const N6 = '00112233445566778899aabbccddeeff';
+  for (const [tag, shape, wi] of [['V', 'V', 5], ['U', 'U', 6]]) {
+    const W6 = O[wi], ro = [W6, L];
+    const m6 = SP.bind(N6, 2, [].concat(...ro.map(sidPair)), sha);
+    const h6 = SP.hash32(m6.matchId);
+    const seeded = (d) => { const x = d.slice(); x[4] = m6.runSeed; return x; };
+    const st = [{ sid: W6, d: seeded(v1start(h6, 0, ro)).concat(SP.tail(N6)) }];
+    const re = [{ sid: W6, d: seeded(v1settle(h6, 0, ro, 0)) }].concat(SHAPES[shape](h6, W6).res.map((d) => ({ sid: L, d: seeded(d) })));
+    const steps = (env) => [[0, st, env], [10 * MIN, st.concat(re), env], [2 * HOUR, st.concat(re), env]];
+    const gate0 = () => { const f = sigOn([L]); Object.assign(f.SIGNALS_FILE.players[v.pid(L)], { l1: 1, l1o: [v.pid(O[9])] }); return f; };
+    const on = timeline(steps({ START_PROOF_GATE: '1' }), null, gate0()), off = timeline(steps(null), null, gate0());
+    const cnt = (rs) => { const s = sigOf(last(rs), L) || {}; return [s.l1, s.l1o, s.f | 0, fOf(last(rs), W6), leavesOf(last(rs), L)]; };   // counts only (the rows carry wall-clock stamps)
+    T('[6] ' + tag + ' proven, gate on: the key proven in enforce mode, nothing dropped', allOk(on, 3) && /\[start-proof\] mode=enforce keys=1 proven=1 ok=1 /.test(on[2].out)
+      && !/\[start-proof\] mode=enforce [^\n]* drop\((pf|pr|ps)\)=[1-9]/.test(outOf(on)) && /drop\(pf\)=0 drop\(pr\)=0 drop\(ps\)=0/.test(on[2].out), outOf(on).split('\n').filter((l) => /start-proof/.test(l)).join(' | '));
+    T('[6] ' + tag + ' proven, gate on: counted on L at the gate, the winner paid once, nobody flagged or charged (Q216 as before)', LINE216.test(on[2].out) && /winner paid/.test(on[2].out)
+      && ptsIn(on, W6).length === 1 && JSON.stringify(xpIn(on, W6)) === '[50]' && sigOf(last(on), L).l1 === 2 && fOf(last(on), W6) === 0 && leavesOf(last(on), L) === 0,
+      outOf(on).split('\n').filter((l) => /lone-1v1|contest-void|start-proof/.test(l)).join(' | '));
+    T('[6] ' + tag + ' proven: gate on and gate off pay the same points and XP', allOk(off, 3) && JSON.stringify(ptsIn(on, W6)) === JSON.stringify(ptsIn(off, W6))
+      && JSON.stringify(xpIn(on, W6)) === JSON.stringify(xpIn(off, W6)) && JSON.stringify(cnt(on)) === JSON.stringify(cnt(off)),
+      JSON.stringify([ptsIn(on, W6), ptsIn(off, W6), xpIn(on, W6), xpIn(off, W6), cnt(on), cnt(off)]));
+  }
 }
 
 console.log('=== ' + (failN === 0 ? 'PASS' : 'FAIL') + ' -- ' + failN + ' fail (lone-1v1-spoiled) ===');
