@@ -67,9 +67,9 @@ writers seated there first, then the roster) count as one host, so a modded pair
 hosting cannot convict a victim either. A refusal first seen after a match's verdict that no
 longer fits the shape does not overturn it: that account is excused (flagged once, never struck). When a whole team
 is absent from such a settle, the present team is rated against the absent team's pre-match
-ratings. A refusal that names a seat on the agreeing side (the client's accusation tag after
-the roster) is not a team dissent: it is the victims of a host who never settled, and the
-group is left for the accusation pass.
+ratings. A match the accusation pass charges (two or more refusers name the same account and
+it cost them something: he left, nobody claimed a rank, or a namer sits on the side the claims
+say won) is left to that pass; names that cost the refusers nothing do not stop a team dissent.
 
 **Sanity bounds** catch what consensus can't: colluding clients writing *identical*
 impossible records. Only calibration-free structural/physical bounds are enforced —

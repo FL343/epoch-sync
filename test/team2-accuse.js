@@ -692,15 +692,16 @@ const deferredOf = (r) => (r.out.match(/strike deferred/g) || []).length;
   // a real leaver's accomplice cannot hide him by copying a record either: control stays struck
   const left = (h, R) => refusal(6, h, R, [1, 2, 3], 1).concat([{ sid: R[1], d: t2(6, h, 1, [R[1], R[0], R[2], R[3]], { rank: 0 }) }]);
   T('[24] control: the host left, his teammate copies a doctored record: still a left strike', (() => { const e = acc(left(0xF44, [A, B, C, D]), A); return e && e.strike && e.why === 'left'; })(), JSON.stringify(acc(left(0xF44, [A, B, C, D]), A)));
-  // the honest host's own record rotates off his shard a day later (he kept playing): still no strike. Today this rests
-  //   on a side effect -- the hold takes the key off the consistent list, the start attestation (hours old) matures it
-  //   through the orphan verdict on the same run, and he is exempt there as a writer seen before. A change to that order
-  //   (Q66 / Q56) must keep this green.
+  // the honest host's own record rotates off his shard a day later (he kept playing): still no strike. The losers who
+  //   named him paid nothing for it (their side lost), so the key is not this pass's: the team dissent pass (Q56, with
+  //   Q63) owns it from the first run and strikes the two refusers; once it holds a verdict this pass skips the key, and
+  //   the host whose record rotated off is never charged. A change to that order (Q66 / Q56) must keep this green.
   const R = [A, B, C, D], h = 0xF45, m = keyOf(t2(6, h, 0, R));
   const recs = match(6, h, R, { 2: { rank: 0, tag: TAG | 1 }, 3: { rank: 0, tag: TAG | 1 } });
   const q1 = runCron(boardsWith(recs, ALL2), { STARTS_FILE: { [m]: startOf(6, h, R, FLOOR + 5 * 60000) } });
   const q2 = runCron(boardsWith(recs.filter(x => x.sid !== A), ALL2), advance(q1.state, 86400000));
-  T('[24] the honest host\'s record rotates off a day later: no strike, no -100, the key processed', q1.code === 0 && q2.code === 0 && acOf(q2, A).length === 0 && !t2acIsStrikeOf(q2, m, A) && scoreTo(q2, POINTS, A) == null && leavesOf(q2, A) === 0 && processedOf(q2).has(m), q2.out.slice(-500));
+  T('[24] the honest host\'s record rotates off a day later: no strike, no -100, never a leaver', q1.code === 0 && q2.code === 0 && acOf(q2, A).length === 0 && !t2acIsStrikeOf(q2, m, A) && !avOf(q2, m, A) && scoreTo(q2, POINTS, A) == null && leavesOf(q2, A) === 0, q2.out.slice(-500));
+  T('[24] ... the key is the team dissent pass\'s from the first run (Q63): the two losers who named him struck there once', owns(q1, m) && owns(q2, m) && strikesOf(q2, C) === 1 && strikesOf(q2, D) === 1 && strikesOf(q2, A) === 0, q1.out.slice(-500));
   // the hold counts accounts too: a loser's extra copy that claims the absent seat cannot make the gap disappear and
   //   skip the wait (counted per record, seat 0 reads present, nothing is held, and the honest host whose record lands
   //   a minute late is struck on the first run as a leaver)

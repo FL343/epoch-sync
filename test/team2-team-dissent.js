@@ -10,7 +10,7 @@
 //       with Q63 (the after-q43 patch) which keys the Q43 accusation pass owns (team2AccusedKey)
 //   [2] verdict rule: linked opposing hosts (t2ldVerdict x)
 //   [3] pass level: per-dissenter verdicts, excused set, sticky reuse, rotation, late arrivals, Q43-tagged groups
-//       ([3j], by mode; with Q63 the first decider owns the key [3j4] and a group this pass does not take stays
+//       ([3j], by mode; with Q63 the first decider owns the key [3j4] [3j4b] and a group this pass does not take stays
 //       the Q43 pass's [3j5]), refusals first seen after a verdict set aside ([3k]-[3p]), the R7b case by mode ([3q])
 //       (applyTeam2LoneDissent)
 //   [4] ranked 2v2, the whole other team refuses for the first time: free, both struck, only they flagged; at
@@ -243,8 +243,12 @@ const signalsWith = (t2ld) => ({ players: {}, flagged: {}, t2ld });
     T('[1] Q63: the winning side naming the host (they threw away a win): Q43\'s', v.team2TeamDissent(win, vecOf) !== null && v.team2AccusedKey(win, {}, mOf(win)) === true);
     const one = named(match(6, 0x122, R4, { 0: W1, 1: W1, 2: { rank: 0 }, 3: { rank: 0 } }), { 2: TAG | 1 });
     T('[1] Q63: one winner naming the host (below the Q43 minimum): not Q43\'s', v.team2AccusedKey(one, {}, mOf(one)) === false);
+    // the losing side naming a non-host who wrote nothing: the Q43 pass counts it as a quit and charges nobody
+    //   (a non-host settles nothing; his leave is the leaver paths' business), so the refusers are this pass's
     const left = named(match(9, 0x123, R6, { 3: { rank: 0 }, 4: { rank: 0 } }, [1]), { 3: TAG | 2, 4: TAG | 2 });
-    T('[1] Q63: 3v3, two refusers naming a host teammate who wrote nothing: found by the detector, Q43\'s (he left)', v.team2TeamDissent(left, vecOf) !== null && v.team2AccusedKey(left, {}, mOf(left)) === true);
+    const la = v.team2Accusations(left);
+    T('[1] Q63: 3v3, two losers naming a non-host winner who wrote nothing: found by the detector, not Q43\'s (counted as a quit)', v.team2TeamDissent(left, vecOf) !== null
+      && v.team2AccusedKey(left, {}, mOf(left)) === false && la.length === 1 && la[0].nc === 'quit' && !la[0].strike, JSON.stringify(la));
     const st = (val) => ({ t2av: { [mOf(lose) + '|' + v.pid(A)]: { t: 1, v: val } } });
     T('[1] Q63: a strike the Q43 pass stored on an earlier run keeps the key Q43\'s; its record-only verdicts do not', v.team2AccusedKey(lose, st('free'), mOf(lose)) === true
       && v.team2AccusedKey(lose, st('judge'), mOf(lose)) === true && v.team2AccusedKey(lose, st('nocost'), mOf(lose)) === false && v.team2AccusedKey(lose, st('lone'), mOf(lose)) === false
@@ -356,18 +360,32 @@ const signalsWith = (t2ld) => ({ players: {}, flagged: {}, t2ld });
     const sgJ3 = { players: {}, flagged: {}, t2ld: { [pC]: [old(E, [E, F])] }, t2av: { [jj.m + '|' + v.pid(A)]: { t: now - 60000, v: 'free' } } };
     T('[3j3] Q63: a strike the Q43 pass stored on this key earlier: untouched, even for names that cost nothing now', untouched(pass(gJ, sgJ3), sgJ3, 1));
     // j4) whoever decides first owns the key: 3v3, E and F refuse naming B (costs them nothing) -- a team dissent,
-    //     both fresh: free. Then B's record rotates off, so the same names now read 'left' (a Q43 strike). The
-    //     stored verdict stands: still free, nobody struck again, B not flagged (the Q43 pass skips the key too)
+    //     both fresh: free. Then B's record rotates off: the losers now name a non-host who left, which the Q43
+    //     pass only counts (a quit). The stored verdict stands: still free, nobody struck again, B not flagged.
+    //     [3j4b] the same with the host A named and rotating off: the names now read 'left' (a Q43 strike), and
+    //     still the stored verdict keeps the key -- the Q43 pass skips it, A is never struck
     const gJ4 = recsOf(match(9, 0x309, R6, { 4: { rank: 0, tail: TAG | 2 }, 5: { rank: 0, tail: TAG | 2 } }));
     const sgJ4 = { players: {}, flagged: {}, t2ld: {} };
     const j4 = pass(gJ4, sgJ4);
     T('[3j4] first sight, names costing nothing: a team dissent, free, E and F struck', j4.res.free === 1 && sgJ4.t2ld[pE].length === 1 && sgJ4.t2ld[pF].length === 1 && sgJ4.t2lv[j4.m].v === 'free');
     const gJ4b = gJ4.filter(r => r.steamID !== B);
-    T('[3j4] B rotated off: the same names are now a Q43 strike', v.team2AccusedKey(gJ4b, {}, j4.m) === true);
+    T('[3j4] B rotated off: still not Q43\'s (the losers name a non-host who left: counted as a quit)', v.team2AccusedKey(gJ4b, {}, j4.m) === false
+      && (v.team2Accusations(gJ4b)[0] || {}).nc === 'quit');
     const j4b = pass(gJ4b, sgJ4);
     T('[3j4] ... the stored verdict stands: free again, no new strike, B not flagged', j4b.res.free === 1 && j4b.gr.inconsistentGroups.length === 0 && sgJ4.t2ld[pE].length === 1 && sgJ4.t2ld[pF].length === 1 && !(sgJ4.players[v.pid(B)] || {}).f && sgJ4.t2lv[j4.m].v === 'free');
     v.applyTeam2Accusations({ groups: { [j4.m]: gJ4b }, consistentMatches: [], inconsistentGroups: [] }, sgJ4, new Set(), now);
     T('[3j4] ... and the Q43 pass leaves it too (B not struck)', !((sgJ4.t2ac || {})[v.pid(B)] || []).length && !(sgJ4.players[v.pid(B)] || {}).f);
+    const gJ4h = recsOf(match(9, 0x30B, R6, { 4: { rank: 0, tail: TAG | 1 }, 5: { rank: 0, tail: TAG | 1 } }));
+    const sgJ4h = { players: {}, flagged: {}, t2ld: {} };
+    const j4h = pass(gJ4h, sgJ4h);
+    T('[3j4b] first sight, naming the host who settled (costs them nothing): a team dissent, free, E and F struck', v.team2AccusedKey(gJ4h, {}, j4h.m) === false
+      && j4h.res.free === 1 && sgJ4h.t2ld[pE].length === 1 && sgJ4h.t2ld[pF].length === 1 && sgJ4h.t2lv[j4h.m].v === 'free');
+    const gJ4hb = gJ4h.filter(r => r.steamID !== A);
+    T('[3j4b] A rotated off: the same names are now a Q43 strike', v.team2AccusedKey(gJ4hb, {}, j4h.m) === true);
+    pass(gJ4hb, sgJ4h);
+    v.applyTeam2Accusations({ groups: { [j4h.m]: gJ4hb }, consistentMatches: [], inconsistentGroups: [] }, sgJ4h, new Set(), now);
+    T('[3j4b] ... the stored verdict keeps the key: no new team strike, the Q43 pass leaves it (A not struck, not flagged)', sgJ4h.t2ld[pE].length === 1 && sgJ4h.t2ld[pF].length === 1
+      && sgJ4h.t2lv[j4h.m].v === 'free' && !((sgJ4h.t2ac || {})[v.pid(A)] || []).length && !((sgJ4h.t2av || {})[j4h.m + '|' + v.pid(A)]) && !(sgJ4h.players[v.pid(A)] || {}).f);
     // j5) a group this pass does not take stays the Q43 pass's: the agreeing side split (A says his team won, B says
     //     the other one did), C and D refuse naming A. No team dissent here; the Q43 pass counts the names once
     //     (nocost: A's claim stands, the losers paid nothing) and a rerun of both passes counts nothing more

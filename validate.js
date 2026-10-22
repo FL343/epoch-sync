@@ -3383,23 +3383,10 @@ function team2HostTeam(roster, ts, rest) {
 //   - all on ONE team, at most teamSize of them and at most as many as the agreeing accounts;
 //   - the agreeing accounts (2+) write one vector, one winner, pass sanity, are not void by consensus, and
 //     include the host (roster seat 0 -- an unmodded blocker is a joiner; the host blocking kills the match);
-//   - the agreeing writers' roster names each dissenter at his own seat (distinct, not an agreeing seat, in range);
-//   - no dissenter's refusal NAMES an agreeing seat (client Q43: one int after the roster, T2BY_TAG | seat mask,
-//     written only on evidence a blocker of his own link cannot produce). Such a group is a host refusing to settle,
-//     not a team refusing the result: it belongs to the Q43 accusation pass (which skips any key decided here), and
-//     striking the people who named him would charge the victims. A tag on a record out of bounds testifies to
-//     nothing (same rule as Q43) and does not move the group.
+//   - the agreeing writers' roster names each dissenter at his own seat (distinct, not an agreeing seat, in range).
+// Names on the refusals (client Q43: one int after the roster, T2BY_TAG | seat mask) do not move the shape: a
+// key the Q43 accusation pass charges is left to it by the pass below (team2AccusedKey, Q63).
 // Returns null or { ds: [{ sid, seat, recs, opp }] (seat order), rest, win, host, hostTeam } (real ids).
-const T2_NAME_TAG = 0x74320000;   // client Q43 result-reporter.js T2BY_TAG (same value as the Q43 cron pass)
-function team2NamesSeat(r, seats) {
-  const d = r.d, pc = d[8] | 0, at = 11 + 3 * pc, seat = d[5] | 0;
-  if (pc < 2 || pc > 6 || d.length <= at || (d[6] | 0) !== 0) return false;
-  const tag = d[at] | 0;
-  if ((tag & ~0x3F) !== T2_NAME_TAG) return false;
-  if (sanityFlags([r]).some(f => f !== 'rank-conflict')) return false;
-  const bits = tag & 0x3F & ~(1 << seat);
-  return seats.some(s => (bits & (1 << s)) !== 0);
-}
 function team2TeamDissent(g, vecOf) {
   if (!g || g.length < 4 || !isSubScoreMt(g[0].d[2] | 0)) return null;
   const ts = teamSizeOfMt(g[0].d[2] | 0);
@@ -3428,7 +3415,6 @@ function team2TeamDissent(g, vecOf) {
     ds.push({ sid: s, seat, recs, opp: teamOfSeat(seat, ts) !== teamOfSeat(0, ts) ? 1 : 0 });
   }
   if (ds.some(d => teamOfSeat(d.seat, ts) !== teamOfSeat(ds[0].seat, ts))) return null;   // one team's refusal, never a cross-team set
-  if (ds.some(d => d.recs.some(r => team2NamesSeat(r, taken)))) return null;   // they name the other side: Q43's
   ds.sort((a, b) => a.seat - b.seat);
   return { ds, rest, win, host, hostTeam: team2HostTeam(roster, ts, rest) };
 }
@@ -3441,6 +3427,19 @@ function team2Dissent(g, vecOf) {
   }
   const td = team2TeamDissent(g, vecOf);
   return td ? Object.assign(td, { lone: false }) : null;
+}
+// Q63: a key the Q43 accusation pass charges is the accused's, not a team refusing the result -- a host who took
+// the reveals and never settled, named by the people he cut. It charges a key when two or more refusers name the
+// same account and the naming cost them something (team2Accusations: he left, nobody claimed a rank, or a namer
+// sits on the winning side the claims agree on), and keeps a strike once stored (signals.t2av). Names that cost
+// nothing -- the refusers' own team lost -- Q43 only counts: those refusers are struck here like any team refusal
+// (a free "lose -> void" otherwise: type a name). Asked at first sight only; once this pass has a verdict, the
+// Q43 pass skips the key and the verdict stands.
+function team2AccusedKey(g, signals, m) {
+  if (team2Accusations(g).some(e => e.strike)) return true;
+  const av = (signals && signals.t2av) || {};
+  for (const k of Object.keys(av)) if (k.slice(0, k.lastIndexOf('|')) === m && t2acIsStrike(av[k])) return true;
+  return false;
 }
 // prior = the dissenter's stored strikes ({ m, t, h, o, x? }); cur = this match's strike. -> 'free' | 'settle'
 // Opposing-host strikes count once per group of LINKED hosts: the same host, or a host who sat on the other
@@ -3538,6 +3537,7 @@ function applyTeam2LoneDissent(gr, signals, processed, now, vecOf) {
     const prevLt = (prev && Array.isArray(prev.lt)) ? prev.lt.map(String) : [];
     const stillHere = () => g.some(r => prevP.indexOf(pid(String(r.steamID))) >= 0);
     let td = team2Dissent(g, vecOf);
+    if (!prev && td && team2AccusedKey(g, signals, m)) td = null;   // Q63: the Q43 accusation pass owns it
     if (prev && !(td && td.ds.some(d => prevP.indexOf(pid(d.sid)) >= 0))) {   // refusals first seen after the verdict do not overturn it
       const lt = team2LateRefusers(g, prevP);
       if (lt.length) {
@@ -9651,7 +9651,7 @@ module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CLASSIC_OWN
   ENDLESS_LB_SOLO, SAVE_BOX_LB_CASUAL, CASUAL_LIVES,   // client knife 3.7a (O218 casual solo lane)
   soloClockBack,   // cloud audit Q242 a verified solo segment whose guard clock went back (counted, never a reason to reject)
   T2LD, team2LoneDissent, t2ldVerdict, applyTeam2LoneDissent,   // cloud audit Q51 team-gamble lone dissent
-  team2TeamDissent, team2Dissent, team2HostTeam, team2NamesSeat, T2_NAME_TAG, team2LateRefusers,   // cloud audit Q56 team-gamble team dissent
+  team2TeamDissent, team2Dissent, team2HostTeam, team2AccusedKey, team2LateRefusers,   // cloud audit Q56 team-gamble team dissent (+ Q63)
   T2BY_TAG, T2AC, team2Accusations, t2acVerdict, applyTeam2Accusations,   // cloud audit Q43 team-gamble accusations
   ENDLESS_LB_CLASSIC_SOLO, SAVE_BOX_LB_CLASSIC, CLASSIC, classicGoalAt, classicGoalFor, packClassicScore,   // client knife 3.9b N2 (O216 classic lane)
   ENDLESS_LB_CLASSIC_DUO, ENDLESS_LB_CLASSIC_TRIO, ENDLESS_LB_CLASSIC_QUAD, SAVE_BOX_LB_CLASSIC_DUO, SAVE_BOX_LB_CLASSIC_TRIO, SAVE_BOX_LB_CLASSIC_QUAD,   // client knife 3.9b N3 (team classic lane)
