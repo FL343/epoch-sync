@@ -198,9 +198,11 @@ function advance(state, ms) {
 }
 const SID = (n) => '7656119800' + String(n).padStart(7, '0');
 const sidPair = (sid) => { const b = BigInt(sid); return [Number(b & 0xFFFFFFFFn) | 0, Number((b >> 32n) & 0xFFFFFFFFn) | 0]; };
-// a ranked 1V1 result written by the player at `seat`, with the score vector he claims
+// a friends'-room 2P result (type 10) written by the player at `seat`, with the score vector he claims: two of them that
+//   disagree flag both writers once. A ranked 1V1 (this fixture before) no longer flags its two writers for disagreeing
+//   (Q289, test/pair-dispute-1v1.js); the flag bookkeeping tested here is the same for both
 function result(hash, seat, ros, scores) {
-  const d = [0xB1, 3, 2, hash | 0, 1234, seat, 1 + seat, (6 << 1) | (seat === 0 ? 1 : 0), 2, 720, scores[0], scores[1], 0];
+  const d = [0xB1, 3, 10, hash | 0, 1234, seat, 1 + seat, (6 << 1) | (seat === 0 ? 1 : 0), 2, 720, scores[0], scores[1], 0];
   for (const s of ros) { const p = sidPair(s); d.push(p[0], p[1]); }
   return d;
 }

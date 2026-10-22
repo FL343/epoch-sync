@@ -214,8 +214,11 @@ function between(state, ms) {
   return files;
 }
 const sidPair = (sid) => { const b = BigInt(sid); return [Number(b & 0xFFFFFFFFn) | 0, Number((b >> 32n) & 0xFFFFFFFFn) | 0]; };
-function mm(hash, seat, alt) {   // matchmade 2P quick settle record; alt = seat 1's copy disagrees on the score vector
-  const d = [0xB1, 3, 1, hash | 0, 1234, seat, seat === 0 ? 1 : 2, (6 << 1) | (seat === 0 ? 1 : 0), 2, 720, 9000, alt ? 4001 : 4000, 0];
+// a friends'-room 2P settle record (type 10); alt = seat 1's copy disagrees on the score vector. Two writers who disagree
+//   are flagged once each; on a quick / ranked 1V1 they no longer are (Q289, test/pair-dispute-1v1.js), so this fixture
+//   (a matchmade quick 1V1 before) is a friends' room now -- the flag bookkeeping it tests is the same
+function mm(hash, seat, alt) {
+  const d = [0xB1, 3, 10, hash | 0, 1234, seat, seat === 0 ? 1 : 2, (6 << 1) | (seat === 0 ? 1 : 0), 2, 720, 9000, alt ? 4001 : 4000, 0];
   for (const s of [A, B]) { const p = sidPair(s); d.push(p[0], p[1]); }
   return d;
 }
