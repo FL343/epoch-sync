@@ -61,6 +61,17 @@ const streakPlan = require('./streak-plan.js');
 //     on disk before it) that would leave such a row, ahead of the write and on disk: a run that dies once Steam took it
 //     leaves the next run no l to read that row as behind (writeLpRow opt.once).
 //     LP_LAST_HOLD_MS=0 turns it off (nothing kept, nothing taken: the job of before O481).
+//   xw / cw: { b, v, t, n } -- an XP / CP write of the settle that failed (cloud audit Q318; main: rowWaiting / rowAfterWrite /
+//     rowAhead / rowRetry): the board name, the absolute score, the first failure, the tries. Until Q318 such a write was logged
+//     and forfeited -- the match processed all the same, so the honest player lost his XP of it (its daily first win with it: the
+//     day is spent in the XP state) or his CP for good. Now it waits like w: every reader of that board in this job takes v as
+//     his row (the consolation's base, the settle's, the wallet a redeem debits), the next run writes it again (absolute:
+//     idempotent, right whether or not Steam kept the failed one; a quiet run retries it on its own), and a write of his on that
+//     board that lands supersedes it. An XP write carries the career block rebuilt from the XP state, as every XP write does
+//     (fillCareerDetails), so no details are kept. A write of his on that board that this job makes before the retry (a
+//     consolation, a redeem debit) moves v to the row it is about to leave, on disk ahead of it: a run that dies once Steam took
+//     that write leaves the next run that row, not the one before it. Past PENDING_W_MAX_MS dropped, warned, like w. (A score
+//     next to a pid tells no more than w / l do, or the XP state's career counts that his public XP row shows.)
 const PENDING_WRITES_FILE = process.env.PENDING_WRITES_FILE || 'pending-writes.json';
 const CRON_PULSE_LB = process.env.CRON_PULSE_LB || '';   // O480 cron_pulse board name (unset: cron_pulse, cron_pulse_test in a sandbox run; see writePulse)
 const RECEIPT_HOLD_MS = Math.max(0, Number(process.env.RECEIPT_HOLD_MS || 6 * 3600 * 1000));
@@ -90,8 +101,8 @@ function lpLastLive(l, now) {
 function loadPendingWrites() {
   try { const o = JSON.parse(fs.readFileSync(PENDING_WRITES_FILE, 'utf8')); return (o && typeof o === 'object' && !Array.isArray(o)) ? o : {}; } catch (e) { return {}; }
 }
-// pure: drop queued receipts past the hold (and beyond the cap), failed writes past the fuse, a last write past its hold (quietly:
-//   its job is done), then empty entries; returns { receipts, writes } dropped
+// pure: drop queued receipts past the hold (and beyond the cap), failed writes past the fuse (points w, Q318's XP / CP xw / cw), a
+//   last write past its hold (quietly: its job is done), then empty entries; returns { receipts, writes } dropped
 function prunePendingWrites(s, now) {
   let dropped = 0, droppedW = 0;
   for (const k of Object.keys(s)) {
@@ -108,6 +119,15 @@ function prunePendingWrites(s, now) {
         droppedW++;
         console.log('::warning::points write of ' + String(k).slice(0, 8) + ' dropped after ' + ((w && w.n) | 0) + ' failed tries over ' + Math.round(PENDING_W_MAX_MS / 86400000) + ' days (value ' + (w && w.v) + ')');
         delete e.w;
+      }
+    }
+    for (const f of ['xw', 'cw']) {   // Q318: the settle's XP / CP writes that failed, the same fuse
+      if (!e || e[f] == null) continue;
+      const w = e[f];
+      if (!w || typeof w !== 'object' || typeof w.b !== 'string' || !Number.isFinite(Number(w.v)) || now - (Number(w.t) || 0) > PENDING_W_MAX_MS) {
+        droppedW++;
+        console.log('::warning::' + (f === 'xw' ? 'xp' : 'cp') + ' write of ' + String(k).slice(0, 8) + ' dropped after ' + ((w && w.n) | 0) + ' failed tries over ' + Math.round(PENDING_W_MAX_MS / 86400000) + ' days (value ' + (w && w.v) + ', Q318)');
+        delete e[f];
       }
     }
     if (e && e.l != null && !lpLastLive(e.l, now)) delete e.l;
@@ -2804,10 +2824,11 @@ function recordMatchSignals(s, g, parts, rankOf, matchType, isVoid, now) {
 // single 429 on one shard used to fail that shard read with zero retries). The other 4xx
 // are semantic (bad key / missing board) and still surface immediately. Writes (postForm*)
 // are single-shot within a run, and a settled match stays processed whether its writes landed
-// or not (nothing settles twice). A points write of the settle that fails waits in the
-// points-row backlog (PENDING_WRITES_FILE: its absolute value, retried next run, O480); every
+// or not (nothing settles twice). A points, XP or CP write of the settle that fails waits in the
+// backlog (PENDING_WRITES_FILE: its absolute value, retried next run; points O480, XP / CP Q318); every
 // other failed write is logged and forfeited (until O480 the points write was forfeited too,
-// while this comment said it self-healed) -- but a consolation XP write, owed to a later run (Q315, CONSOLE_OWED).
+// while this comment said it self-healed; until Q318 the XP and CP writes) -- but a consolation XP write,
+// owed to a later run (Q315, CONSOLE_OWED).
 const transientStatus = (st) => st >= 500 || st === 408 || st === 429;
 const READ_RETRY_MS = Math.max(0, Number(process.env.READ_RETRY_MS || 8000));   // backoff step (env: offline tests only)
 async function getJson(url) {
@@ -2958,6 +2979,7 @@ function writeRunSummary() {
       '| page-cap hits | ' + RUN.cap + ' |',
       '| points receipts written / queued for a later write; cron pulse (O480) | ' + s('receipts', 0) + ' / ' + s('receiptsQueued', 0) + '; ' + s('pulse', '-') + ' |',
       '| points rows read without the last write of this job, that write taken instead ([stale-read], O481) | ' + s('staleRead', 0) + ' |',
+      '| settle XP / CP writes that failed, waiting for a later run / waiting writes that landed (Q318) | ' + s('rowQueued', 0) + ' / ' + s('rowRetried', 0) + ' |',
       '| solo segments held by the key policy (other channel / retired key; new this run) | ' + s('keyHeld', 0) + ' (' + s('keyHeldNew', 0) + ') |',
       '| duration | ' + ((Date.now() - (RUN.t0 || Date.now())) / 1000).toFixed(1) + 's |',
       '',
@@ -6864,6 +6886,87 @@ async function main() {
     if (n) { console.log('receipts: ' + n + ' queued for their player\'s next points write (no points write of his this run)'); RUN.receiptsQueued = (RUN.receiptsQueued | 0) + n; }
     return n;
   };
+  // ---- Q318: the settle's XP / CP writes that failed (backlog xw / cw, see PENDING_WRITES_FILE; test/settle-write-owed.js) ----
+  //   rowWrote: field -> sid -> the score of a write of his on that board that landed this run (a consolation, a retry, a redeem
+  //   debit): a read of seconds later may not show it (O481), the settle and the redeems build on it instead
+  const ROW_LB = { xw: XP_LB || null, cw: CP_LB || null }, ROW_NAME = { xw: 'xp', cw: 'cp' };
+  const rowWrote = { xw: {}, cw: {} };
+  // his write of that board waiting for its retry (meant for the board this job writes), or null
+  const rowWaiting = (f, sid) => { const e = lpBacklog[pid(String(sid))], w = e && e[f]; return (w && ROW_LB[f] && w.b === ROW_LB[f]) ? w : null; };
+  // the waiting writes this run can name: pid -> sid through the rows given and the records / starts read this run (sidByPid);
+  //   one meant for another board (the board's name changed) is dropped, warned
+  const rowPendingSids = (f, rowSids) => {
+    const byPid = new Map();
+    for (const s of (rowSids || [])) byPid.set(pid(String(s)), String(s));
+    const out = [];
+    for (const k of Object.keys(lpBacklog)) {
+      const w = lpBacklog[k][f];
+      if (!w || !ROW_LB[f]) continue;
+      if (w.b !== ROW_LB[f]) {
+        ghWarn(ROW_NAME[f] + ' write of ' + k.slice(0, 8) + ' for board ' + w.b + ' dropped: this job writes ' + ROW_LB[f] + ' (value ' + w.v + ', ' + (w.n | 0) + ' tries, Q318)');
+        delete lpBacklog[k][f]; if (!Object.keys(lpBacklog[k]).length) delete lpBacklog[k]; backlogDirty = true;
+        continue;
+      }
+      const sid = byPid.get(k) || sidByPid.get(k) || null;   // (called after sidByPid exists: the board reads, the quiet exits)
+      if (sid) out.push(String(sid));
+    }
+    return out;
+  };
+  // after a write of his on that board (the score it carried): landed, it supersedes his waiting write (true: the backlog moved)
+  //   and stands for his row the rest of the run (rowWrote); failed, it waits for the next run -- already waiting, one more try
+  const rowAfterWrite = (f, sid, score, landed) => {
+    const k = pid(String(sid)), e = lpBacklog[k];
+    if (landed) {
+      rowWrote[f][String(sid)] = score | 0;
+      if (!e || !e[f]) return false;
+      RUN.rowRetried = (RUN.rowRetried | 0) + 1;
+      console.log('  ' + ROW_NAME[f] + ' write of ' + plog(sid) + ' that failed before (' + (e[f].n | 0) + ' tries) landed: ' + (score | 0) + ' (Q318)');
+      delete e[f]; if (!Object.keys(e).length) delete lpBacklog[k]; backlogDirty = true;
+      return true;
+    }
+    if (!ROW_LB[f]) return false;
+    const b = lpBacklog[k] = lpBacklog[k] || {}, was = b[f];
+    b[f] = { b: ROW_LB[f], v: score | 0, t: (was && Number(was.t)) || Date.now(), n: ((was && was.n) | 0) + 1 };
+    backlogDirty = true; RUN.rowQueued = (RUN.rowQueued | 0) + 1;
+    console.log('  ' + ROW_NAME[f] + ' write of ' + plog(sid) + ' failed -- ' + (score | 0) + ' waits for the next run (try ' + b[f].n + ', Q318)');
+    return true;
+  };
+  const rowSaveNow = () => { if (APPLY_MMR) savePendingWrites(JSON.parse(JSON.stringify(lpBacklog)), nowMs, true); };   // a pruned copy, quietly
+  // a write of his on that board this job is about to make while one of his waits (a consolation, a redeem debit): the waiting
+  //   value moves to the row this write will leave, on disk ahead of it. A run that dies once Steam took it leaves the next run
+  //   that row; one that dies before it went out, that row too (the write is absolute and carries the waiting value)
+  const rowAhead = (f, sid, score) => {
+    const w = rowWaiting(f, sid);
+    if (!w || !APPLY_MMR) return;
+    w.v = score | 0; backlogDirty = true;
+    rowSaveNow();
+  };
+  const rowLanded = (f, sid, score) => { if (rowAfterWrite(f, sid, score, true)) rowSaveNow(); };
+  // a quiet run (no consistent / no fresh match) writes the waiting XP / CP rows itself (a settling run does it with its own
+  //   writes); a player this run cannot name, or a board missing from the listing, waits for a run that can
+  const rowRetry = async () => {
+    if (!APPLY_MMR) return;
+    const list = (lr.json && lr.json.response && lr.json.response.leaderboards) || [];
+    const idOf = (nm) => { const x = nm ? list.find((y) => String(y.name || y.Name) === nm) : null; return x ? (x.id || x.ID) : null; };
+    let xs = null;
+    for (const f of ['xw', 'cw']) {
+      const bid = idOf(ROW_LB[f]);
+      if (!bid) continue;
+      for (const sid of rowPendingSids(f, [])) {
+        const w = rowWaiting(f, sid);
+        if (!w) continue;
+        const score = f === 'cw' ? cpClamp(w.v) : (w.v | 0);
+        const det = f === 'xw' ? careerBlockOf((xs || (xs = loadXp()))[pid(sid)]) : null;   // the career block, as on every XP write
+        let landed = false;
+        try {
+          const r = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: bid, steamid: sid, score, scoremethod: 'ForceUpdate', format: 'json' }, (det && det.length) ? det : null);
+          landed = r.ok && !(r.json && r.json.result && r.json.result.result && r.json.result.result !== 1);
+          if (!landed) ghWarn(ROW_NAME[f] + ' write retry of ' + plog(sid) + ' failed HTTP ' + r.status + ' (Q318)');
+        } catch (e) { ghWarn(ROW_NAME[f] + ' write retry of ' + plog(sid) + ': ' + (e && e.message) + ' (Q318)'); }
+        rowAfterWrite(f, sid, score, landed);
+      }
+    }
+  };
   // ---- O480 cron_pulse (test/cron-pulse.js) ----
   //   One row on its own board per channel app id (a sandbox run: cron_pulse_test): score = the unix minute this run reached its
   //   end -- every successful exit writes it, a run that fails before writes nothing -- and details [0xCC, RULES_VER]
@@ -7217,9 +7320,10 @@ async function main() {
       const item = consoled.indexOf(sid) >= 0 ? owedItem(fl, fday) : null;
       const flNote = fl ? ' (Q308: a disputed ' + (fl.ranked ? 'ranked' : 'quick') + ' 1V1, the loser\'s XP, money ' + fl.money + ')' : '';
       let e, c, plan;
+      const xwP = rowWaiting('xw', sid);   // Q318: a settle XP write of his that failed in an earlier run is his row (the board shows the one before)
       try {
-        e = await readUserEntry(xpId0, sid, 'xp');
-        c = e ? (e.score | 0) : 0;
+        e = xwP ? null : await readUserEntry(xpId0, sid, 'xp');
+        c = xwP ? (xwP.v | 0) : (e ? (e.score | 0) : 0);
         const leaves = (leavers[h] && leavers[h].leaves) || 0;
         plan = consoleOwedPlan(h, c, cq0, item, (it) => owedItemXp(it, c, leaves, () => ((xsFloor || (xsFloor = loadXp()))[h] || {}).games));
       } catch (err) {
@@ -7233,12 +7337,13 @@ async function main() {
       const owNote = owN ? ' (Q315: + ' + owN + ' owed by an earlier run)' : '';
       if (!plan.add) { if (APPLY_MMR && cq0) owedSet(sid, null); continue; }
       const next = c + plan.add;
-      const det = e ? decodeDetails(e.detailData) : null;
+      const det = xwP ? careerBlockOf((xsFloor || (xsFloor = loadXp()))[h]) : (e ? decodeDetails(e.detailData) : null);   // Q318: the block rebuilt, as the settle does
       if (!APPLY_MMR) { console.log('  (dry-run) consolation xp ' + plog(sid) + ' = ' + next + flNote + owNote); if (item) { consoledN++; if (fl) floorN++; } continue; }
       // on disk before it is sent: a run that dies after Steam took it leaves the next run h1 (landed), one that dies before, h0
       const keepT = cq0 && (plan.sent === 'paid' || plan.sent === 'moved' || ((cq0.u || []).length));
       const sent = { t: keepT ? cq0.t : nowMs, u: [], s: { a: plan.add, h0: owedTag(h, c), h1: owedTag(h, next), d: plan.days } };
       owedSet(sid, sent); saveSignals(signals, nowMs);
+      rowAhead('xw', sid, next);   // Q318: a waiting settle XP write moves to this row, on disk ahead of it (after the owed entry: see rowAhead)
       let why = null;
       try {
         const r = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: xpId0, steamid: sid, score: next, scoremethod: 'ForceUpdate', format: 'json' }, (det && det.length) ? det : null);
@@ -7246,6 +7351,7 @@ async function main() {
       } catch (err) { why = (err && err.message) || 'error'; }
       if (!why) {
         owedSet(sid, null); saveSignals(signals, nowMs);   // off the disk too: a run failing later must not leave it to judge again
+        rowLanded('xw', sid, next);   // Q318: supersedes a waiting settle XP write; the settle's read of his row takes this one
         if (item) { consoledN++; if (fl) floorN++; }
         if (owN) ow.paid += owN;
         if (plan.sent === 'moved') ow.moved++;
@@ -7745,7 +7851,10 @@ async function main() {
         }
         if (!anyNew) continue;
         let bal;
+        const cwP = rowWaiting('cw', w.sid);   // Q318: a settle CP write of his that failed is his wallet
         if (cpVals && cpVals[w.sid] != null) bal = cpVals[w.sid] | 0;
+        else if (rowWrote.cw[w.sid] != null) bal = rowWrote.cw[w.sid] | 0;   // Q318: written this run (a retry), a read may not show it yet
+        else if (cwP) bal = cwP.v | 0;
         else { const e = await readUserEntry(cpIdF, w.sid, 'wallet'); bal = e ? (e.score | 0) : 0; }
         const gateOkByBit = {};
         for (const bitStr of Object.keys(REDEEM_CATALOG)) {
@@ -7765,10 +7874,11 @@ async function main() {
         if (!gOk) { ghWarn('grant write failed ' + plog(w.sid) + ': HTTP ' + gw.status + ' (deferred, no debit)'); continue; }
         grantedBy[w.sid] = newMask; grantSeen[w.sid] = newMask;
         nBits += plan.bits.length; nPlayers++;
+        rowAhead('cw', w.sid, plan.balance);   // Q318: a waiting settle CP write moves to the balance this debit leaves, on disk ahead of it
         const dw = await postForm('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: cpIdF, steamid: w.sid, score: plan.balance, scoremethod: 'ForceUpdate', format: 'json' });
         const dOk = dw.ok && !(dw.json && dw.json.result && dw.json.result.result && dw.json.result.result !== 1);
         if (!dOk) ghWarn('wallet debit failed ' + plog(w.sid) + ': HTTP ' + dw.status + ' (bits granted -- one-shot undercharge, cannot loop)');
-        else if (cpVals) cpVals[w.sid] = plan.balance;
+        else { if (cpVals) cpVals[w.sid] = plan.balance; rowLanded('cw', w.sid, plan.balance); }
         console.log('  redeem ' + plog(w.sid) + ': granted bits [' + plan.bits.join(' ') + '] debit -' + (bal - plan.balance) + ' -> ' + plan.balance + (dOk ? '' : ' (debit failed)'));
       }
       if (nPlayers) { RUN.redeems = nPlayers + 'p/' + nBits + 'b'; console.log('redeems: ' + nBits + ' bits across ' + nPlayers + ' players'); }
@@ -8124,7 +8234,7 @@ async function main() {
   const PT_MODE_MAIL_OFF = false;
 
   RUN.consistent = consistentMatches.length;
-  if (consistentMatches.length === 0) { console.log('no consistent matches'); await lpRetry(); persistStartsSide(); await maintainTrust(); { const st0 = loadSolo(); await maintainRating(st0, new Set()); if (await maintainCup(st0, null) && APPLY_MMR) saveSolo(st0, nowMs); } await processRedeems(null); await processCampaignGrants(); await processCampaignEndless(); await processChatMute(); await writePulse(); await processSupporters(null, []); await processClassicOwners(null, []); writeRunSummary(); return; }
+  if (consistentMatches.length === 0) { console.log('no consistent matches'); await lpRetry(); await rowRetry(); persistStartsSide(); await maintainTrust(); { const st0 = loadSolo(); await maintainRating(st0, new Set()); if (await maintainCup(st0, null) && APPLY_MMR) saveSolo(st0, nowMs); } await processRedeems(null); await processCampaignGrants(); await processCampaignEndless(); await processChatMute(); await writePulse(); await processSupporters(null, []); await processClassicOwners(null, []); writeRunSummary(); return; }
   // cloud audit Q245: the solo chain memory is read before the fresh list -- a processed solo key the done memory remembers
   //   per owner comes back for a writer the lane never processed under it (soloReopenOwners); every other processed key
   //   stays out as before
@@ -8137,7 +8247,7 @@ async function main() {
   }
   RUN.fresh = fresh.length;
   console.log(consistentMatches.length + ' consistent, ' + fresh.length + ' fresh (settled ' + (consistentMatches.length - fresh.length) + ')');
-  if (fresh.length === 0) { console.log('no fresh matches, skip'); await lpRetry(); persistStartsSide(); await maintainTrust(); { const st0 = loadSolo(); await maintainRating(st0, new Set()); if (await maintainCup(st0, null) && APPLY_MMR) saveSolo(st0, nowMs); } await processRedeems(null); await processCampaignGrants(); await processCampaignEndless(); await processChatMute(); await writePulse(); await processSupporters(null, []); await processClassicOwners(null, []); writeRunSummary(); return; }
+  if (fresh.length === 0) { console.log('no fresh matches, skip'); await lpRetry(); await rowRetry(); persistStartsSide(); await maintainTrust(); { const st0 = loadSolo(); await maintainRating(st0, new Set()); if (await maintainCup(st0, null) && APPLY_MMR) saveSolo(st0, nowMs); } await processRedeems(null); await processCampaignGrants(); await processCampaignEndless(); await processChatMute(); await writePulse(); await processSupporters(null, []); await processClassicOwners(null, []); writeRunSummary(); return; }
 
   // playtest channel: no rating board exists (and must not -- lock layer 3); the TrueSkill
   // update block below is skipped wholesale, so the id is never consulted.
@@ -8150,6 +8260,7 @@ async function main() {
   if (!lpId && !PT_MODE) { strictBoard('points board not found'); ghWarn('points board not found (pre-create with onlytrustedwrites) -> skip points this run'); }
   const lp = {}, lpDet = {};   // lpDet = existing detail bytes per player, so an unread reveal survives a later normal-match LP update
   const lpRetrySids = [];   // O480: failed points writes of earlier runs retried with this run's points writes
+  const xpRetrySids = [], cpRetrySids = [];   // Q318: the same for the XP / CP writes of the settle
   let lpComplete = true;
   if (lpId) {
     const br = await readBoardAll(lpId, 'points board');
@@ -8180,6 +8291,11 @@ async function main() {
     const br = await readBoardAll(xpId, 'xp board');
     xpComplete = br.complete;
     for (const e of br.ents) xp[e.steamID] = e.score | 0;
+    // Q318: an XP row this job wrote earlier this run (a consolation) reads as written -- the read may not show a write of seconds
+    //   ago; a settle XP write of an earlier run that failed (the backlog's xw) is the player's row, and goes again with this
+    //   run's XP writes (xpRetrySids)
+    for (const sid of Object.keys(rowWrote.xw)) xp[sid] = rowWrote.xw[sid];
+    for (const sid of rowPendingSids('xw', Object.keys(xp))) { const w = rowWaiting('xw', sid); if (w) { xp[sid] = w.v | 0; xpRetrySids.push(sid); } }
   }
   const xpState = xpId ? loadXp() : {};
   if (xpId && streakEarly.length) {   // O181: this run's early streak events (see streakEarlyFile)
@@ -8203,6 +8319,8 @@ async function main() {
     const br = await readBoardAll(cpId, 'cp board');
     cpComplete = br.complete;
     for (const e of br.ents) cp[e.steamID] = e.score | 0;
+    // Q318: a settle CP write of an earlier run that failed (the backlog's cw) is the player's wallet, written again (cpRetrySids)
+    for (const sid of rowPendingSids('cw', Object.keys(cp))) { const w = rowWaiting('cw', sid); if (w) { cp[sid] = w.v | 0; cpRetrySids.push(sid); } }
   }
   const enLb = ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).find(x => String(x.name || x.Name) === ENDLESS_LB);
   const enId = enLb ? (enLb.id || enLb.ID) : null;
@@ -10201,6 +10319,9 @@ async function main() {
       st.g = gains.reduce((a, y) => a + (lpOk.has(y[0]) ? y[1] : 0), 0);
     }
   }
+  // Q318: the waiting XP / CP writes of earlier runs go with this run's writes (a player this run credits carries his inside)
+  for (const sid of xpRetrySids) if (rowWaiting('xw', sid) && changedXp[sid] == null) changedXp[sid] = xp[sid] | 0;
+  for (const sid of cpRetrySids) if (rowWaiting('cw', sid) && changedCp[sid] == null) changedCp[sid] = cp[sid] | 0;
   const careerRewrites = careerEnsureWrites(careerTouched, changedXp, xp);   // 5.4a: cells moved, XP did not (day cap) -> rewrite the row, same score
   if (careerRewrites) console.log('career: ' + careerRewrites + ' xp row(s) rewritten at the same score to publish new career cells');
   const careerRefilled = fillCareerDetails(changedXp, careerDet, xpState);   // 5.4a S0: no xp write without the career block
@@ -10221,6 +10342,16 @@ async function main() {
     const h = pid(sid), r = consoleOwedRebase(signals.players[h], h, owedXpBase[sid] | 0, changedXp[sid] | 0);
     if (r) { sigDirty = true; console.log('  consolation: ' + plog(sid) + (r === 'moved' ? ' owed write re-tagged on the row the settle left' : ' owed write found landed by the settle\'s read') + ' (Q315)'); }
   });
+  // Q318: an XP write that failed waits for the next run (the backlog's xw), one that landed supersedes a waiting one. A failed
+  //   consolation write of the account (Q315) is re-tagged on the value that waits -- the next run's base for him -- as on the
+  //   row a landed settle write left: found there landed (the settle read it back), it is dropped; otherwise it is paid on top
+  Object.keys(changedXp).forEach((sid, i) => {
+    const landed = !!(wXp[i] && wXp[i].status === 'fulfilled' && wXp[i].value);
+    rowAfterWrite('xw', sid, changedXp[sid] | 0, landed);
+    if (landed || !owedSent.has(sid) || !rowWaiting('xw', sid)) return;
+    const h = pid(sid), r = consoleOwedRebase(signals.players[h], h, owedXpBase[sid] | 0, changedXp[sid] | 0);
+    if (r) { sigDirty = true; console.log('  consolation: ' + plog(sid) + (r === 'moved' ? ' owed write re-tagged on the XP write that waits for the next run' : ' owed write found landed by the settle\'s read') + ' (Q315, Q318)'); }
+  });
   const wCp = await mapPool(Object.keys(changedCp), CONCURRENCY, async (sid) => {
     const score = cpClamp(changedCp[sid]);   // Q110: never hand the int32 board an out-of-range score
     if (score !== changedCp[sid]) { RUN.cpClamped = (RUN.cpClamped | 0) + 1; ghWarn('write cp ' + plog(sid) + ': ' + changedCp[sid] + ' outside int32 -> clamped to ' + score + ' (Q110)'); }
@@ -10230,6 +10361,9 @@ async function main() {
     else console.log('  ok cp ' + plog(sid) + ' = ' + score);
     return okFlag;
   });
+  // Q318: a CP write that failed waits for the next run (the backlog's cw); the backlog on disk ahead of the processed save below
+  Object.keys(changedCp).forEach((sid, i) => rowAfterWrite('cw', sid, cpClamp(changedCp[sid]), !!(wCp[i] && wCp[i].status === 'fulfilled' && wCp[i].value)));
+  if (backlogDirty) savePendingWrites(lpBacklog, nowMs, true);
   // details carry the exact best-run team score (the packed tiebreak is /1000-saturated) and, since 2026-09-10 (client
   //   knife 3.5d), [1] = the perk build word of that best run (3 slots x [id 7 | lv 2]; 0 = pre-perk writer / warm-up).
   //   The hub draws it as three perk icons next to the row; the build comes from the same replay-verified record that
