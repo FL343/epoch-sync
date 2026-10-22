@@ -137,7 +137,10 @@ summary, and marked on the writers as the `un` signal; it still shields its team
 team ladders like any absent seat. Cost: a real leaver whose start upload failed, who quit
 before level 1, or whose client suppresses the write goes unpunished (an honest quitter still
 confesses; a loading-screen drop was never meant to count; a suppressed write is a modified
-client).
+client). The team-gamble accusation pass asks the same: an accused who wrote no settle record
+is struck as having left only with his own start attestation for the key (pending entry, or
+one read this run); otherwise the names are record-only (`nostart`, the namers' `un`), and a
+host whose own record was read on the key before is not struck when it rotates off.
 
 It also maintains a separate **cumulative progression ladder** (`XP_LB`, optional): a
 per-game points total that only accrues. Each present record earns points derived from

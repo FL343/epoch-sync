@@ -2149,6 +2149,13 @@ function pruneSignals(s, now) {
     if (live.length) s.t2ld[k] = live; else delete s.t2ld[k];
   }
   for (const k of Object.keys(s.t2lv || {})) if (now - ((s.t2lv[k] && s.t2lv[k].t) || 0) > SIG_PAIR_WINDOW_MS) delete s.t2lv[k];
+  // Q43 accusation strikes: same shape (window-aged strikes, flag-lived per-key verdicts)
+  for (const k of Object.keys(s.t2ac || {})) {
+    const live = (s.t2ac[k] || []).filter(e => e && now - (Number(e.t) || 0) <= T2AC.WINDOW_MS);
+    if (live.length) s.t2ac[k] = live; else delete s.t2ac[k];
+  }
+  for (const k of Object.keys(s.t2av || {})) if (now - ((s.t2av[k] && s.t2av[k].t) || 0) > SIG_PAIR_WINDOW_MS) delete s.t2av[k];
+  for (const k of Object.keys(s.t2ah || {})) if (now - (Number(s.t2ah[k]) || 0) > SIG_PAIR_WINDOW_MS) delete s.t2ah[k];
   const pk = Object.keys(s.pairs);
   if (pk.length > SIG_PAIRS_CAP) {   // size fuse: same escalation path as skill.json growth -> external storage
     ghWarn('signals pairs ' + pk.length + ' > cap ' + SIG_PAIRS_CAP + ' -- oldest evicted; plan the move to external state storage');
@@ -2644,6 +2651,7 @@ function writeRunSummary() {
       '| endless rating rows written / deleted / tier cuts (O103) | ' + s('ratingW', 0) + ' / ' + s('ratingD', 0) + ' / ' + s('tiercut', '-') + ' |',
       '| Gold Rush Cup (O180): settled / honor rows written / deleted / carrier | ' + s('cup', '-') + ' / ' + s('cupHonorW', 0) + ' / ' + s('cupHonorD', 0) + ' / ' + s('cupCarrier', '-') + ' |',
       '| team-gamble lone / team dissent unsettled / settled | ' + s('t2ld', '0/0') + ' |',
+      '| team-gamble accusation strikes / judged as leaver | ' + s('t2ac', '0/0') + ' |',
       '| board writes rating/points/xp | ' + s('writes', '0/0 0/0 0/0') + ' |',
       '| endless settles / cp+board writes | ' + s('endless', 0) + ' (+' + s('endlessComp', 0) + ' team comp, +' + s('solo', 0) + ' solo) / ' + s('writesEndless', '0/0 0/0') + ' |',
       '| endless seats named by others only / CP not charged | ' + s('endlessNamedOnly', 0) + ' / ' + s('endlessNamedOnlyCp', 0) + ' |',
@@ -3022,8 +3030,9 @@ async function reconcileConfessions(confs, groups, processed, confState, leavers
     if (confState[key]) continue;                                        // upkeep handled below (state is sticky; shard entries get overwritten)
     if (dispClassOf(c.dispCode) !== 'abandoner') continue;               // only self-harm disp codes count
     if (processed.has(c.m)) { confState[key] = { t0: now, mt: c.mt | 0, done: 1 }; continue; }   // consensus path already owned this match
-    if (settledBy(c.m, c.p)) { confState[key] = { t0: now, mt: c.mt | 0, done: 1 }; continue; }  // already came back and finished before first sighting
+    if (!c.nf && settledBy(c.m, c.p)) { confState[key] = { t0: now, mt: c.mt | 0, done: 1 }; continue; }  // already came back and finished before first sighting
     const st = confState[key] = { t0: now, mt: c.mt | 0, ded: 0, ex: 1 };
+    if (c.nf) { st.nf = 1; console.log('  confess ' + c.m + ': ' + plog(String(c.steamID)) + ' from a team-gamble accusation verdict (never forgiven)'); }   // Q43: his own record on the key proves nothing (he wrote it)
     leavers[c.p] = leavers[c.p] || { leaves: 0, lastMatch: '' };
     leavers[c.p].leaves += 1; leavers[c.p].lastMatch = c.m;
     res.exitHits++;
@@ -3049,7 +3058,7 @@ async function reconcileConfessions(confs, groups, processed, confState, leavers
   //    confessor's own settle record in this run's groups.
   for (const key of Object.keys(confState)) {
     const st = confState[key];
-    if (st.done || st.refunded) continue;
+    if (st.done || st.refunded || st.nf) continue;
     const i = key.indexOf('|');
     const p = key.slice(0, i), m = key.slice(i + 1);
     // forgiveness window (Q228: a conviction's entry waits LATE_RESULT_MS, and a record past it refunds nothing)
@@ -3646,6 +3655,274 @@ function applyTeam2LoneDissent(gr, signals, processed, now, vecOf) {
     const j = judge(c);
     if (j === 'drop') ig.splice(i, 1);
     else if (j) { ig.splice(i, 1); cm.push(j); }
+  }
+  return res;
+}
+// ===== Q43 team-gamble accusations (cloud audit follow-up to the gamble commit-reveal fix) =====
+// After the commit-reveal fix a host can no longer pick the gamble outcome, but he can still refuse it: take the
+// reveals, see the roll, then never send a verifiable settle frame -- stall, quit, or drop the game connection and let
+// a teammate take over and roll again. Every joiner who revealed then flags the round and writes rank 0, so the match
+// never settles -- and before this pass nobody was charged for it (a cold reconnect is not a quit; the rank-conflict
+// path flags every writer alike). The client now names WHO it holds responsible: a refusal record (rank claim 0) may
+// carry one extra int right after the roster, T2BY_TAG | seat bitmask, naming the seat whose host took its reveal and
+// never settled, or sent a frame that did not verify. Unattributable refusals (listed as forfeiting, own link dropped)
+// carry no tag, nor does any honest record -- the record layout is byte-identical to before for both.
+//   The tag is the refuser's own word, and refusing a match his team lost costs him nothing: a modified client types
+//   any seat, and an unmodified one earns the 'stall' ground by filtering the settle frame out of its own traffic
+//   (heartbeats still pass, so the named host looks alive). So the names alone never convict; an accusation is
+//   COUNTED only when the accusers could not stage it for free (team2Accusations -> why):
+//     left      -- the accused wrote no record on the key at all (quit or crashed; no accuser can make that happen).
+//                  Not when a backed result (two or more distinct sane seated claimers agreeing on the winner W) puts
+//                  every accuser on the losing side and the accused is not the host (roster seat 0): a losing side
+//                  that names someone who quit anyway -- its own teammate, or a winner -- would void its loss for
+//                  free. An honest joiner only ever names a host, so the losing host who settles the winners only
+//                  and quits is still counted (cloud audit Q43 review 2). And not before the absent seat is
+//                  evidence: see the hold below;
+//     unsettled -- the accused is the host (roster seat 0), every other seat wrote and nobody wrote a sane rank
+//                  claim: no player at all got a settle frame that verified, which only the host who rolled can
+//                  cause (an honest host writes his own claim);
+//     costly    -- the accused is the host, the sane seated rank claims agree on a winner W and an accuser sits on
+//                  W: he threw away a win. If the host wrote a claim, it is among them, so he himself says the
+//                  accuser's team won (a claim against W makes W null). This is also the host who lost, withheld
+//                  the opponents' settle frame to void the match, and wrote the true loss with his teammate.
+//   unsettled / costly are the host's alone: only he can keep a verifiable settle frame from a player, so a non-host
+//   who wrote a record never withheld one (without this, a modded host and two accounts of his frame an honest
+//   teammate or opponent at no cost). Anything else (most often: the accusers sit on the losing side; or the claims
+//   conflict) is a record-only counter (v 'nocost', players[p].an) and the key stays on its old path for the
+//   lone / team dissent passes; so is a lone accusation (v 'lone', players[p].al: the lone-dissent pass owns those
+//   shapes). A strike = one key where at least MIN_ACC distinct writers name the same account AND the accusation
+//   counts. One strike per (account, key); a record-only verdict is re-read on later runs (a late refusal can turn
+//   it into a strike), a strike is sticky and later accusers on the same key join its accuser set.
+//   Hold (R1-B2-04, review 2): a key about to record a new strike while a roster seat has no record waits like a
+//   settle group does (absenceHold): until a run has read every record shard and the gap has stood for
+//   ABSENT_GRACE_MS (first sighting in signals.t2ah). A strike is sticky and a judge confession never forgiven, so a
+//   finisher whose record lands late (upload retry) or sits on a shard this run failed to read must not be struck as
+//   gone. A held key also stays off the settle and flag paths that run (the rank-conflict path would flag every
+//   writer, and recordFlag counts a key once).
+//   Verdict per strike, decided at first sight and sticky (signals.t2av): judge when inside WINDOW_MS this strike and
+//   K-1 earlier ones have pairwise disjoint accuser sets -- two matches with entirely different people saying the same
+//   thing (greedy; exact for the default K = 2). One account (or the same group) naming him again never convicts.
+//   A judge verdict pushes a synthetic abandon confession (user-quit) for him: exit rate, and for ranked codes the
+//   leaver points penalty -- marked never-forgiven (his own record on the key proves nothing; he wrote it himself).
+//   A struck key leaves the settle and flag paths (only the accused is flagged, the people he voided stay clean) and
+//   matures through the start orphan verdict like a lone-dissent free key: anyone who wrote no settle record -- the
+//   host who left -- takes the ordinary orphan exit-rate hit, unless a confession already counted it.
+// Trust floor: a player who finished the match (wrote a record) can be struck only as the host, and only by writers
+// who throw away a win his own claim confirms -- two of them per key, in two keys with disjoint writers. The same
+// shape arises honestly when both winners' clients lose the large settle frame while heartbeats pass (the 'stall'
+// ground) and the host's team lost: rare, and the records cannot tell it from a host who settled his own side only.
+// A player who left is struck when two writers name him, except by a backed losing side naming a non-host. Honest
+// collateral: a host whose game dies between taking the reveals and sending the frame is named once (first strike
+// free); a second, unrelated crash inside the window convicts. Not covered (left to the dissent passes / the old
+// flag path): a modded host whose teammate writes the same false claim beside his, or whose own claim conflicts
+// with his teammate's; a host who took over after a migration (not roster seat 0) and keeps the frame but writes a
+// record, or settles only the winners and quits on the losing side.
+// Own evidence (cloud audit Q69): a roster is what the other accounts wrote. Two accounts that own the game can make
+// up a key and name anyone, so 'left' also needs the accused's OWN start attestation for the key (pend.started, or
+// one read this run); without it the names are record-only ('nostart': no row for him, the namers' `un` counter).
+// A host whose own record was already read here (a stored record-only 'nocost': for seat 0 only his own record
+// yields one) is not upgraded to 'left' when that record rotates off his shard (Q43 review 3, shape 1b).
+const T2BY_TAG = 0x74320000;   // client result-reporter.js T2BY_TAG (same value, pinned both sides)
+const T2AC = {
+  MIN_ACC: Math.max(2, Number(process.env.T2AC_MIN_ACC || 2)),
+  K: Math.max(1, Number(process.env.T2AC_K || 2)),
+  WINDOW_MS: Number(process.env.T2AC_WINDOW_MS || 30 * 86400000),
+  DISP: 5,   // synthetic confession disp: user-quit (abandoner class)
+};
+// g = one key's settle records (any shape). Returns [{ sid, accusers: [real ids], why, nc, strike }], one per accused
+// account: why = 'left' | 'unsettled' | 'costly' | '' (not counted, see above); nc = why not, for the log ('quit': a
+// backed losing side names a non-host who left; 'host': he wrote a record and is not the host; 'free': the names cost
+// the namers nothing); strike = the accusation counts and has at least MIN_ACC accusers (absent-seat hold aside);
+// host = he sits at seat 0. own (optional, Q69): sid -> did he write his own start attestation for this key (see Own
+// evidence above); a seat that wrote no settle record and no start reads nc 'nostart'. Omitted (unit use, the dissent
+// passes' shape question): every seat reads as having started.
+// Pure: the dissent passes can ask it whether a key belongs to this pass.
+// One account, one testimony (cloud audit Q43 review 3): an account's extra copies of its record (other shards) add no
+//   roster votes, accusations or claims. Counted per record, two accounts that each copy a refusal naming a doctored
+//   roster onto a few more shards outvote the honest writers seat by seat (rosterConsensus / detectLeavers count
+//   records; the settle path's dup-writer check never runs here), and an honest finisher reads as the host who
+//   settled nobody. Keeps each account's first record in read order.
+function firstPerAccount(g) {
+  const seen = new Set();
+  return (g || []).filter(r => { const s = String(r.steamID); if (seen.has(s)) return false; seen.add(s); return true; });
+}
+function team2Accusations(g, own) {
+  g = firstPerAccount(g);
+  if (!g || !g.length || !isSubScoreMt(g[0].d[2] | 0)) return [];
+  if (new Set(g.map(r => String(r.steamID))).size < 2) return [];   // a key one account wrote alone proves no match
+  const roster = rosterConsensus(g);
+  const by = new Map();
+  for (const r of g) {
+    const d = r.d, pc = d[8] | 0, at = 11 + 3 * pc, seat = d[5] | 0, me = String(r.steamID);
+    if (pc < 2 || pc > 6 || d.length <= at || (d[6] | 0) !== 0) continue;   // refusal shape only (rank claim 0)
+    const tag = d[at] | 0;
+    if ((tag & ~0x3F) !== T2BY_TAG) continue;
+    if (String(roster[seat]) !== me) continue;   // the accuser sits where the writers say he sat
+    if (sanityFlags([r]).some(f => f !== 'rank-conflict')) continue;   // a record out of bounds testifies to nothing
+    const bits = tag & 0x3F & ~(1 << seat);
+    for (let s = 0; s < pc; s++) {
+      if (!(bits & (1 << s))) continue;
+      const acc = roster[s];
+      if (acc == null || String(acc) === '0' || String(acc) === me) continue;
+      if (!by.has(String(acc))) by.set(String(acc), new Set());
+      by.get(String(acc)).add(me);
+    }
+  }
+  if (!by.size) return [];
+  const ts = teamSizeOfMt(g[0].d[2] | 0), n = 2 * ts;
+  const seatOf = {};
+  for (let s = 0; s < n; s++) if (roster[s] != null) seatOf[String(roster[s])] = s;
+  const wrote = new Set(g.map(r => String(r.steamID)));
+  // sane rank claims by writers sitting where the writers say they sat (an outsider's claim backs nobody)
+  const claims = g.filter(r => { const k = r.d[6] | 0; return k >= 1 && k <= n && String(roster[r.d[5] | 0]) === String(r.steamID) && !sanityFlags([r]).length; });
+  const W = claims.length ? team2WinTeamOf(claims) : null;   // null: nobody claimed, or the claims conflict
+  const teamOf = (sid) => (seatOf[sid] == null ? -1 : teamOfSeat(seatOf[sid], ts));
+  const othersAllWrote = (sid) => { for (let s = 0; s < n; s++) if (String(roster[s]) !== sid && !wrote.has(String(roster[s]))) return false; return true; };
+  // backed: two or more distinct sane seated claimers agree on the winner -- one colluding claim cannot fake it
+  const backed = W != null && new Set(claims.map(r => String(r.steamID))).size >= 2;
+  return Array.from(by, ([sid, a]) => {
+    const accusers = Array.from(a), host = seatOf[sid] === 0;
+    let why = '', nc = 'free';
+    if (!wrote.has(sid)) {
+      if (own && !own(sid)) nc = 'nostart';   // Q69: named by the others only, no record of his own for this key
+      else if (backed && !host && accusers.every(x => teamOf(x) !== W)) nc = 'quit';   // the losers name a non-host who quit
+      else why = 'left';
+    } else if (!host) nc = 'host';   // unsettled / costly are the host's alone
+    else if (!claims.length) why = othersAllWrote(sid) ? 'unsettled' : '';
+    else if (W != null && accusers.some(x => teamOf(x) === W)) why = 'costly';
+    return { sid, accusers, why, nc: why ? '' : nc, strike: !!why && accusers.length >= T2AC.MIN_ACC, host };
+  });
+}
+// prior = the accused's stored strikes ({ m, t, a: [accuser pids] }); cur = this key's strike. -> 'free' | 'judge'
+function t2acVerdict(prior, cur, now) {
+  const live = (prior || []).filter(e => e && e.m !== cur.m && now - (Number(e.t) || 0) <= T2AC.WINDOW_MS)
+    .sort((x, y) => (Number(x.t) || 0) - (Number(y.t) || 0));
+  const used = new Set(cur.a || []);
+  let n = 1;
+  for (const e of live) {
+    const a = e.a || [];
+    if (a.length && a.every(x => !used.has(x))) { n++; for (const x of a) used.add(x); }
+  }
+  return n >= T2AC.K ? 'judge' : 'free';
+}
+// One run's pass, after the lone-dissent pass (a key it decided is left alone) and before the consistent-key set.
+//   Mutates gr.consistentMatches / gr.inconsistentGroups (struck and held keys leave both). hold = { complete (every
+//   record shard read this run), graceMs, starts (startsPending: pend.agreed / pend.started), startRecs
+//   (this run's start attestations, Q69), contested (applyRosterContest's keys, Q75: left alone, no strike, no hold
+//   stamp) }; without it nothing waits and no own evidence is asked (unit use).
+//   Returns { dirty, strikes, judged, lone, nocost, nostart, held, touched: [real ids], confess: [synthetic confessions
+//   for reconcileConfessions] }.
+// A stored verdict is a strike only as 'free' / 'judge'; 'lone', 'nocost' and 'nostart' are record-only.
+function t2acIsStrike(e) { return !!e && (e.v === 'free' || e.v === 'judge'); }
+function applyTeam2Accusations(gr, signals, processed, now, hold) {
+  const res = { dirty: false, strikes: 0, judged: 0, lone: 0, nocost: 0, nostart: 0, held: 0, touched: [], confess: [] };
+  signals.t2ac = signals.t2ac || {}; signals.t2av = signals.t2av || {}; signals.t2ah = signals.t2ah || {};
+  const heldKeys = new Set();   // keys whose new strike waits for a full read + the absent-seat grace (see Hold above)
+  const t2lv = signals.t2lv || {};
+  const struck = new Set();   // keys holding a strike (any run): they leave the settle / flag paths
+  for (const k of Object.keys(signals.t2av)) if (t2acIsStrike(signals.t2av[k])) struck.add(k.slice(0, k.lastIndexOf('|')));
+  const flagNow = {};         // key -> accused real ids struck on this run (the flag goes to them alone)
+  const startBy = {};         // Q69: key -> real ids that wrote their own start attestation, read this run
+  if (hold) for (const r of hold.startRecs || []) { const sm = r.d[3] + '_' + r.d[4] + '_' + r.d[2]; (startBy[sm] = startBy[sm] || new Set()).add(String(r.steamID)); }
+  for (const m of Object.keys(gr.groups || {})) {
+    if (processed.has(m) || t2lv[m]) continue;   // settled, or the lone-dissent pass decided this key
+    if (hold && hold.contested && hold.contested.has(m)) continue;   // Q75: two accounts named for one seat -- nobody's testimony counts
+    const g = firstPerAccount(gr.groups[m]);   // one account, one testimony (also for the hold's absent seats)
+    const pend = hold && hold.starts && hold.starts[m];
+    // Q69: did the accused write his own start attestation for this key (see Own evidence above)
+    const own = hold ? (sid) => hasOwnStart(pend, pid(String(sid))) || !!(startBy[m] && startBy[m].has(String(sid))) : null;
+    const acc = team2Accusations(g, own);
+    // a missing record is evidence only after a full read and the grace (absenceHold, R1-B2-04); writers already seen
+    //   agreeing on this match (pend.agreed) rotated off their shard, they did not leave
+    if (hold && acc.some(e => e.strike && !t2acIsStrike(signals.t2av[m + '|' + pid(e.sid)]))) {
+      const agreed = (pend && pend.agreed) || [];
+      const absent = absentRosterSeats(g).filter(x => agreed.indexOf(pid(String(x.steamID))) < 0);
+      if (absent.length) {
+        const st = { absentAt: Number(signals.t2ah[m]) || 0 };
+        const ah = absenceHold(absent, st, now, hold.complete, hold.graceMs);
+        if (signals.t2ah[m] !== st.absentAt) { signals.t2ah[m] = st.absentAt; res.dirty = true; }
+        if (ah.hold) {
+          heldKeys.add(m); res.held++;
+          console.log('  team2 accusation ' + m + ': seat' + (absent.length > 1 ? 's ' : ' ') + absent.map(x => x.seat).join(',') + ' wrote no record -- '
+            + (ah.hold === 'read' ? 'not every record shard was read this run' : 'grace ' + Math.round(ah.waitMs / 1000) + 's left') + ', strike deferred');
+          continue;
+        }
+      }
+    }
+    for (const e of acc) {
+      const h = pid(e.sid), k = m + '|' + h;
+      const prev = signals.t2av[k];
+      const ap = e.accusers.map(s => pid(s)).sort();
+      if (!e.strike) {
+        // record only: a lone accusation (al), or names that cost the namers nothing while the accused's own claim
+        //   stands (an). Each counted once per (account, key); 'lone' may later read 'nocost' when a second name lands.
+        //   Q69 'nostart': named by the others only -- no row for him (he may never have played), the namers' `un`
+        //   counter; re-read on later runs (his start may sit on a shard this run did not read), so a full read only
+        const mark = e.nc === 'nostart' ? 'nostart' : ap.length < T2AC.MIN_ACC ? 'lone' : 'nocost';
+        if (mark === 'nostart' && hold && hold.complete === false) continue;
+        if (!prev || (prev.v === 'nostart' && mark !== 'nostart') || (prev.v === 'lone' && mark === 'nocost')) {
+          signals.t2av[k] = { t: now, v: mark };
+          if (mark === 'nostart') {
+            res.nostart++;
+            for (const s of e.accusers) { const w = sigPlayer(signals, pid(s), now); w.un = (w.un | 0) + 1; }
+            console.log('  team2 accusation ' + m + ': ' + ap.length + ' writer' + (ap.length > 1 ? 's name ' : ' names ') + plog(e.sid)
+              + ' -> not counted (he never wrote his own record for this match, Q69; record only)');
+            res.dirty = true;
+            continue;
+          }
+          const sp = sigPlayer(signals, h, now);
+          if (mark === 'lone') { sp.al = (sp.al | 0) + 1; res.lone++; }
+          else {
+            sp.an = (sp.an | 0) + 1; res.nocost++;
+            console.log('  team2 accusation ' + m + ': ' + ap.length + ' writers name ' + plog(e.sid) + ' -> not counted ('
+              + (e.nc === 'quit' ? 'the losing side names a non-host who left' : e.nc === 'host' ? 'he wrote a record and is not the host' : 'naming cost them nothing')
+              + '; record only)');
+          }
+          res.dirty = true;
+        }
+        continue;
+      }
+      // Q69 / Q43 review 3 (1b): the host's own record for this key was read here before (a stored 'nocost': for seat 0
+      //   only his own record yields one); 'left' now means it rotated off his shard, not that he left
+      if (!t2acIsStrike(prev) && e.host && e.why === 'left' && prev && prev.v === 'nocost') {
+        if (!prev.r) {
+          prev.r = 1; res.dirty = true;
+          console.log('  team2 accusation ' + m + ': ' + ap.length + ' writers name ' + plog(e.sid) + ' (left) -> not counted (his own record for this match was read before, Q69)');
+        }
+        continue;
+      }
+      if (!t2acIsStrike(prev)) {
+        const list = signals.t2ac[h] || (signals.t2ac[h] = []);
+        const cur = { m, t: now, a: ap };
+        const v = t2acVerdict(list, cur, now);
+        list.push(cur);
+        signals.t2av[k] = { t: now, v };
+        const sp = sigPlayer(signals, h, now); sp.ac = (sp.ac | 0) + 1;
+        res.dirty = true; res.strikes++;
+        console.log('  team2 accusation ' + m + ': ' + ap.length + ' writers name ' + plog(e.sid) + ' (' + e.why + ') -> strike, verdict ' + v);
+        if (v === 'judge') {
+          signals.t2av[k].c = 1;
+          res.judged++;
+          res.confess.push({ steamID: e.sid, m, mt: g[0].d[2] | 0, dispCode: T2AC.DISP, nf: 1 });
+        }
+        (flagNow[m] = flagNow[m] || []).push(e.sid);
+      } else {
+        // later records joined the key: their writers join the stored strike's accuser set; the verdict stays
+        const s = (signals.t2ac[h] || []).find(x => x && x.m === m);
+        if (s) {
+          const u = Array.from(new Set((s.a || []).concat(ap))).sort();
+          if (u.length !== (s.a || []).length) { s.a = u; res.dirty = true; }
+        }
+      }
+      res.touched.push(e.sid);
+      struck.add(m);
+    }
+  }
+  for (const m of Object.keys(flagNow)) if (recordFlag(signals, flagNow[m].map(sid => ({ steamID: sid })), m, now)) res.dirty = true;
+  const keep = (c) => processed.has(c.m) || t2lv[c.m] || (!struck.has(c.m) && !heldKeys.has(c.m));
+  for (const list of [gr.consistentMatches, gr.inconsistentGroups]) {
+    if (!list) continue;
+    for (let i = list.length - 1; i >= 0; i--) if (!keep(list[i])) list.splice(i, 1);
   }
   return res;
 }
@@ -6079,6 +6356,15 @@ async function main() {
   for (const sid of t2ldRes.touched) trustTouched.add(String(sid));
   if (t2ldRes.free || t2ldRes.settle) console.log('team2 lone dissent: ' + t2ldRes.free + ' left unsettled (dissenter flagged), ' + t2ldRes.settle + ' settling from the agreeing records');
   RUN.t2ld = t2ldRes.free + '/' + t2ldRes.settle;
+  // Q43: refusal records naming who voided the gamble strike that account; a judge verdict becomes a never-forgiven
+  //   synthetic abandon confession (handled with the real ones below); struck keys leave the settle / flag paths
+  const t2acRes = applyTeam2Accusations(gr, signals, processed, Date.now(), { complete: shardsComplete, graceMs: ABSENT_GRACE_MS, starts: startsPending, startRecs: starts, contested: rcRes.contested });
+  if (t2acRes.dirty) sigDirty = true;
+  for (const sid of t2acRes.touched) trustTouched.add(String(sid));
+  for (const c of t2acRes.confess) confessions.push(c);
+  if (t2acRes.strikes || t2acRes.judged || t2acRes.lone || t2acRes.nocost || t2acRes.nostart || t2acRes.held) console.log('team2 accusations: ' + t2acRes.strikes + ' strikes (' + t2acRes.judged + ' judged as leaver), ' + t2acRes.lone + ' lone, ' + t2acRes.nocost + ' not counted (record only), ' + t2acRes.nostart + ' named by others only (Q69), ' + t2acRes.held + ' deferred');
+  RUN.t2ac = t2acRes.strikes + '/' + t2acRes.judged + ((t2acRes.lone || t2acRes.nocost) ? ' (record only: ' + t2acRes.nocost + ' not counted, ' + t2acRes.lone + ' lone)' : '') + (t2acRes.held ? ' (' + t2acRes.held + ' deferred)' : '');
+  RUN.unattested = (RUN.unattested | 0) + t2acRes.nostart;   // Q69: the run summary's named-only row counts these too
   const confState = loadConfessions();   // loaded before starts so the orphan verdict can skip confessed keys
   const consistentKeys = new Set(consistentMatches.map(c => c.m));
   const nowMs = Date.now();
@@ -9366,6 +9652,7 @@ module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CLASSIC_OWN
   soloClockBack,   // cloud audit Q242 a verified solo segment whose guard clock went back (counted, never a reason to reject)
   T2LD, team2LoneDissent, t2ldVerdict, applyTeam2LoneDissent,   // cloud audit Q51 team-gamble lone dissent
   team2TeamDissent, team2Dissent, team2HostTeam, team2NamesSeat, T2_NAME_TAG, team2LateRefusers,   // cloud audit Q56 team-gamble team dissent
+  T2BY_TAG, T2AC, team2Accusations, t2acVerdict, applyTeam2Accusations,   // cloud audit Q43 team-gamble accusations
   ENDLESS_LB_CLASSIC_SOLO, SAVE_BOX_LB_CLASSIC, CLASSIC, classicGoalAt, classicGoalFor, packClassicScore,   // client knife 3.9b N2 (O216 classic lane)
   ENDLESS_LB_CLASSIC_DUO, ENDLESS_LB_CLASSIC_TRIO, ENDLESS_LB_CLASSIC_QUAD, SAVE_BOX_LB_CLASSIC_DUO, SAVE_BOX_LB_CLASSIC_TRIO, SAVE_BOX_LB_CLASSIC_QUAD,   // client knife 3.9b N3 (team classic lane)
   ENDLESS_COMP_LB_OVERALL, overallScore, overallScoreMean, overallDominant,   // knife 3.5d composite ladder
