@@ -320,7 +320,7 @@ const part7 = (h) => {
 {
   const iG = SRC.indexOf('const seatGate = applySeatGate(recs, starts, startsPending, processed);');
   const iC = SRC.indexOf('const rcRes = applyRosterContest(gr, starts, startsPending, signals, processed, Date.now());');
-  const iD = SRC.indexOf('const t2ldRes = applyTeam2LoneDissent(gr, signals, processed, Date.now(), vecOf);');
+  const iD = SRC.indexOf('const t2ldRes = applyTeam2LoneDissent(gr, signals, processed, Date.now(), vecOf');   // (+ own evidence, Q286)
   const iS = SRC.indexOf('const startsRes = reconcileStarts(starts, groups, consistentKeys,');
   T('[9] the contest pass runs after the seat gate, before the team-gamble dissent pass (when in the tree) and the start cross-check', iG > 0 && iC > iG && (iD < 0 || iD > iC) && iS > iC);
   T('[9] contested writers go to the trust-tier candidates, signals saved', /for \(const sid of rcRes\.touched\) trustTouched\.add\(sid\);/.test(SRC) && /if \(rcRes\.dirty\) sigDirty = true;/.test(SRC));

@@ -659,7 +659,7 @@ let r4;
     && (Q63 ? typeof v.team2AccusedKey === 'function' && v.team2NamesSeat === undefined : typeof v.team2NamesSeat === 'function'));
   const pass = SRC.slice(SRC.indexOf('function applyTeam2LoneDissent'), SRC.indexOf('function leaverLpPenalty'));
   T('[11] the pass detects through team2Dissent', /(?:const|let) td = team2Dissent\(g, vecOf\)/.test(pass));
-  if (Q63) T('[11] Q63: the pass leaves a key the Q43 pass charges, at first sight only', /if \(!prev && td && team2AccusedKey\(g, signals, m\)\) td = null;/.test(pass));
+  if (Q63) T('[11] Q63: the pass leaves a key the Q43 pass charges, at first sight only', /if \(!prev && td && team2AccusedKey\(g, signals, m(?:, ownOf \? ownOf\(m\) : undefined)?\)\) td = null;/.test(pass));   // (+ own evidence, Q286)
   const loop = SRC.slice(SRC.indexOf('const leavers0 = detectLeavers(g)'), SRC.indexOf('processed.add(c.m); settled++;'));
   T('[11] the settle loop reads the excused set from the entry', /const t2ex = new Set\(Array\.isArray\(c\.t2ex\)/.test(loop));
   T('[11] excused: no placement seed, no conviction', /if \(t2ex\.has\(pid\(String\(x\.steamID\)\)\)\) continue;/.test(loop) && /team-gamble dissent not yet due -- excused/.test(loop));

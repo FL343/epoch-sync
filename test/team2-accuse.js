@@ -368,7 +368,7 @@ const m4 = keyOf(t2(6, 0x400, 0, R4b));
 
 // ---- [11] wiring pins ----
 {
-  const iQ51 = SRC.indexOf('applyTeam2LoneDissent(gr, signals, processed, Date.now(), vecOf)');
+  const iQ51 = SRC.indexOf('applyTeam2LoneDissent(gr, signals, processed, Date.now(), vecOf');   // (+ own evidence, Q286)
   const iPass = SRC.indexOf('applyTeam2Accusations(gr, signals, processed, Date.now(), { complete: shardsComplete, graceMs: ABSENT_GRACE_MS, starts: startsPending, startRecs: starts');   // + contested (Q75)
   const iKeys = SRC.indexOf('const consistentKeys = new Set(consistentMatches.map(c => c.m));');
   const iConf = SRC.indexOf('confRes = await reconcileConfessions(confessions,');
@@ -789,7 +789,7 @@ const deferredOf = (r) => (r.out.match(/strike deferred/g) || []).length;
   // mutation self-checks: each guard removed -> its scenario strikes A again
   const mutants = [
     ['own-start gate removed', "if (own && !own(sid)) nc = 'nostart';", "if (false) nc = 'nostart';", (mod) => { const x = pass(mod, [{ steamID: B, d: startD(1) }]); return x.res.strikes === 1; }],
-    ['start records of this run ignored', "if (hold) for (const r of hold.startRecs || [])", "if (false) for (const r of hold.startRecs || [])", (mod) => { const x = pass(mod, aStart); return x.res.strikes === 0; }],
+    ['start records of this run ignored', "for (const r of (ev && ev.startRecs) || [])", "for (const r of [])", (mod) => { const x = pass(mod, aStart); return x.res.strikes === 0; }],
     ['1b rule removed', "if (!t2acIsStrike(prev) && e.host && e.why === 'left' && prev && prev.v === 'nocost') {", "if (false) {", (mod) => { const x = pass(mod, aStart, { v: 'nocost' }); return x.res.strikes === 1; }],
   ];
   for (const [label, from, to, check] of mutants) {

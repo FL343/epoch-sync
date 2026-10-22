@@ -351,7 +351,7 @@ let r3;
 
 // ---- [11] wiring pins ----
 {
-  const iPass = SRC.indexOf('applyTeam2LoneDissent(gr, signals, processed, Date.now(), vecOf)');
+  const iPass = SRC.indexOf('applyTeam2LoneDissent(gr, signals, processed, Date.now(), vecOf');   // (+ own evidence, Q286)
   const iGroup = SRC.indexOf('const gr = groupRecords(recs'), iProc = SRC.indexOf('const processed = loadProcessed();');
   const iKeys = SRC.indexOf('const consistentKeys = new Set(consistentMatches.map(c => c.m));');
   const iStarts = SRC.indexOf('const startsRes = reconcileStarts(starts, groups, consistentKeys');

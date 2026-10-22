@@ -3435,11 +3435,30 @@ function team2Dissent(g, vecOf) {
 // nothing -- the refusers' own team lost -- Q43 only counts: those refusers are struck here like any team refusal
 // (a free "lose -> void" otherwise: type a name). Asked at first sight only; once this pass has a verdict, the
 // Q43 pass skips the key and the verdict stands.
-function team2AccusedKey(g, signals, m) {
-  if (team2Accusations(g).some(e => e.strike)) return true;
+// Own evidence (cloud audit Q286): the Q43 pass asks a seat that wrote nothing for his own start attestation (Q69 /
+// A06: without one the names are record-only 'nostart'), so this question asks the same evidence. Without it every
+// such seat read as having played: two winners refusing and naming a 3v3 seat that dropped before level 1 (no start,
+// no settle) made this say "Q43 charges it", the dissent pass stepped aside, the Q43 pass only counted the names, and
+// the key fell to the rank-conflict path -- every truthful writer flagged, the two refusers never struck.
+// own = t2OwnEvidence(..)(m), passed on a run that read every record shard; omitted (unit use, or a partial read) every
+// seat reads as having started: the key goes to the Q43 pass, which holds a 'nostart' key on a partial read (Q285), and
+// a later full read asks again (no verdict was stored here).
+function team2AccusedKey(g, signals, m, own) {
+  if (team2Accusations(g, own).some(e => e.strike)) return true;
   const av = (signals && signals.t2av) || {};
   for (const k of Object.keys(av)) if (k.slice(0, k.lastIndexOf('|')) === m && t2acIsStrike(av[k])) return true;
   return false;
+}
+// Q69 own-start evidence, one reading for the Q43 accusation pass and the Q63 question above (cloud audit Q286).
+// ev = { starts (startsPending: pend.started), startRecs (this run's start attestations) } -> m -> (sid -> did he write
+// his own start attestation for key m: noted in its pending entry, or one read this run).
+function t2OwnEvidence(ev) {
+  const startBy = {};   // key -> real ids that wrote their own start attestation, read this run
+  for (const r of (ev && ev.startRecs) || []) { const sm = r.d[3] + '_' + r.d[4] + '_' + r.d[2]; (startBy[sm] = startBy[sm] || new Set()).add(String(r.steamID)); }
+  return (m) => {
+    const pend = ev && ev.starts && ev.starts[m];
+    return (sid) => hasOwnStart(pend, pid(String(sid))) || !!(startBy[m] && startBy[m].has(String(sid)));
+  };
 }
 // prior = the dissenter's stored strikes ({ m, t, h, o, x? }); cur = this match's strike. -> 'free' | 'settle'
 // Opposing-host strikes count once per group of LINKED hosts: the same host, or a host who sat on the other
@@ -3526,9 +3545,12 @@ function team2LateRefusers(g, known) {   // pids of accounts outside `known` tha
   for (const [h, rs] of by) if (known.indexOf(h) < 0 && team2Refused(rs, ts)) out.push(h);
   return out;
 }
-function applyTeam2LoneDissent(gr, signals, processed, now, vecOf) {
+// ev (optional, Q286) = { complete, starts, startRecs }: the own-start evidence the Q63 question asks (team2AccusedKey),
+//   on a full read only; omitted (unit use) every seat reads as having started.
+function applyTeam2LoneDissent(gr, signals, processed, now, vecOf, ev) {
   const res = { dirty: false, free: 0, settle: 0, touched: [], hosts: 0, hostsAt: 0 };
   signals.t2ld = signals.t2ld || {}; signals.t2lv = signals.t2lv || {};
+  const ownOf = (ev && ev.complete !== false) ? t2OwnEvidence(ev) : null;
   const judge = (c) => {   // -> null (leave as is) | 'drop' | replacement consistent entry
     const m = c.m, prev = signals.t2lv[m];
     let g = c.g, late = null;
@@ -3537,7 +3559,7 @@ function applyTeam2LoneDissent(gr, signals, processed, now, vecOf) {
     const prevLt = (prev && Array.isArray(prev.lt)) ? prev.lt.map(String) : [];
     const stillHere = () => g.some(r => prevP.indexOf(pid(String(r.steamID))) >= 0);
     let td = team2Dissent(g, vecOf);
-    if (!prev && td && team2AccusedKey(g, signals, m)) td = null;   // Q63: the Q43 accusation pass owns it
+    if (!prev && td && team2AccusedKey(g, signals, m, ownOf ? ownOf(m) : undefined)) td = null;   // Q63: the Q43 accusation pass owns it (Q286: same own evidence)
     if (prev && !(td && td.ds.some(d => prevP.indexOf(pid(d.sid)) >= 0))) {   // refusals first seen after the verdict do not overturn it
       const lt = team2LateRefusers(g, prevP);
       if (lt.length) {
@@ -3822,15 +3844,14 @@ function applyTeam2Accusations(gr, signals, processed, now, hold) {
   const struck = new Set();   // keys holding a strike (any run): they leave the settle / flag paths
   for (const k of Object.keys(signals.t2av)) if (t2acIsStrike(signals.t2av[k])) struck.add(k.slice(0, k.lastIndexOf('|')));
   const flagNow = {};         // key -> accused real ids struck on this run (the flag goes to them alone)
-  const startBy = {};         // Q69: key -> real ids that wrote their own start attestation, read this run
-  if (hold) for (const r of hold.startRecs || []) { const sm = r.d[3] + '_' + r.d[4] + '_' + r.d[2]; (startBy[sm] = startBy[sm] || new Set()).add(String(r.steamID)); }
+  const ownOf = hold ? t2OwnEvidence(hold) : null;   // Q69: the own-start evidence, shared with team2AccusedKey (Q286)
   for (const m of Object.keys(gr.groups || {})) {
     if (processed.has(m) || t2lv[m]) continue;   // settled, or the lone-dissent pass decided this key
     if (hold && hold.contested && hold.contested.has(m)) continue;   // Q75: two accounts named for one seat -- nobody's testimony counts
     const g = firstPerAccount(gr.groups[m]);   // one account, one testimony (also for the hold's absent seats)
     const pend = hold && hold.starts && hold.starts[m];
     // Q69: did the accused write his own start attestation for this key (see Own evidence above)
-    const own = hold ? (sid) => hasOwnStart(pend, pid(String(sid))) || !!(startBy[m] && startBy[m].has(String(sid))) : null;
+    const own = ownOf ? ownOf(m) : null;
     const acc = team2Accusations(g, own);
     // a missing record is evidence only after a full read and the grace (absenceHold, R1-B2-04); writers already seen
     //   agreeing on this match (pend.agreed) rotated off their shard, they did not leave
@@ -3859,7 +3880,17 @@ function applyTeam2Accusations(gr, signals, processed, now, hold) {
         //   Q69 'nostart': named by the others only -- no row for him (he may never have played), the namers' `un`
         //   counter; re-read on later runs (his start may sit on a shard this run did not read), so a full read only
         const mark = e.nc === 'nostart' ? 'nostart' : ap.length < T2AC.MIN_ACC ? 'lone' : 'nocost';
-        if (mark === 'nostart' && hold && hold.complete === false) continue;
+        if (mark === 'nostart' && hold && hold.complete === false) {
+          // ... and until then the key is held off the settle / flag paths, like the strike hold above (cloud audit Q285):
+          //   left on them, the rank-conflict path flagged every refuser -- the people he cut -- and the full read that
+          //   finds his start strikes him with their flags already counted (recordFlag counts a key once)
+          if (!heldKeys.has(m)) {
+            heldKeys.add(m); res.held++;
+            console.log('  team2 accusation ' + m + ': ' + ap.length + ' writer' + (ap.length > 1 ? 's name ' : ' names ') + plog(e.sid)
+              + ' -- no own start of his read, not every record shard was read this run, deferred (Q285)');
+          }
+          continue;
+        }
         if (!prev || (prev.v === 'nostart' && mark !== 'nostart') || (prev.v === 'lone' && mark === 'nocost')) {
           signals.t2av[k] = { t: now, v: mark };
           if (mark === 'nostart') {
@@ -6348,7 +6379,7 @@ async function main() {
   // Q51: a mode-2 group with exactly one dissenting writer strikes him; at the K-th strike it settles from
   //   the agreeing records (he is a consensus leaver), otherwise it stays unsettled with only him flagged.
   //   Q56: two or three teammates refusing together are struck one by one the same way (any one due settles it)
-  const t2ldRes = applyTeam2LoneDissent(gr, signals, processed, Date.now(), vecOf);
+  const t2ldRes = applyTeam2LoneDissent(gr, signals, processed, Date.now(), vecOf, { complete: shardsComplete, starts: startsPending, startRecs: starts });   // Q286: + own evidence
   if (t2ldRes.dirty) sigDirty = true;
   // Q57: hosts charged for opposing seats dropping out of their gamble (in touched below; the trust pass re-tiers them)
   if (t2ldRes.hosts) console.log('team2 dissent hosts: ' + t2ldRes.hosts + ' charges, ' + t2ldRes.hostsAt + ' at the trust threshold');
@@ -9652,7 +9683,7 @@ module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CLASSIC_OWN
   soloClockBack,   // cloud audit Q242 a verified solo segment whose guard clock went back (counted, never a reason to reject)
   T2LD, team2LoneDissent, t2ldVerdict, applyTeam2LoneDissent,   // cloud audit Q51 team-gamble lone dissent
   team2TeamDissent, team2Dissent, team2HostTeam, team2AccusedKey, team2LateRefusers,   // cloud audit Q56 team-gamble team dissent (+ Q63)
-  T2BY_TAG, T2AC, team2Accusations, t2acVerdict, applyTeam2Accusations,   // cloud audit Q43 team-gamble accusations
+  T2BY_TAG, T2AC, team2Accusations, t2acVerdict, applyTeam2Accusations, t2OwnEvidence,   // cloud audit Q43 team-gamble accusations (+ Q285 / Q286)
   ENDLESS_LB_CLASSIC_SOLO, SAVE_BOX_LB_CLASSIC, CLASSIC, classicGoalAt, classicGoalFor, packClassicScore,   // client knife 3.9b N2 (O216 classic lane)
   ENDLESS_LB_CLASSIC_DUO, ENDLESS_LB_CLASSIC_TRIO, ENDLESS_LB_CLASSIC_QUAD, SAVE_BOX_LB_CLASSIC_DUO, SAVE_BOX_LB_CLASSIC_TRIO, SAVE_BOX_LB_CLASSIC_QUAD,   // client knife 3.9b N3 (team classic lane)
   ENDLESS_COMP_LB_OVERALL, overallScore, overallScoreMean, overallDominant,   // knife 3.5d composite ladder
