@@ -6104,6 +6104,10 @@ function ptBoardPlan(names, cfg) {
 //     one unit, a team of a team code is one) -- one party cannot frame its host alone;
 //   - every other seat of the roster wrote a record (they all name him) -- a seat with no record holds the key, nobody
 //     flagged, until a complete read past the absence grace still lacks it (absenceHold; the seat left).
+//   Q282: the two counts (MIN_ACC writers, MIN_UNITS units) are checked last, and while a roster seat has no record a
+//     short count holds the key the same way (the missing record may name him too); a complete read past the grace
+//     that still lacks it takes the old path. Before, a run that read only part of the records took the old path at
+//     once: the honest writer it read was flagged, and the strike on the next run could not take that back.
 // A strike flags only the named seat (instead of every writer) and records it (signals.gtac[host] = [{ m, t, a }]); the
 // key stays unsettled as before (the start-orphan verdict ends it). Record-only signals beside it: players[host].gs
 // (strikes on him), players[host].gx (judged strikes), players[writer].ga (strikes his record named the host in) -- a
@@ -6158,7 +6162,8 @@ function oneRecordPerAccount(g) {
   return out;
 }
 // g = one inconsistent group. null = no record of it names anybody (not this pass's); { why } = not a strike (the
-//   old path); { h, host, acc, absent } = the strike shape (absent: roster seats with no record, for the hold)
+//   old path); { why, absent } = too few writers name him so far (Q282: held while a seat in absent has no record, then
+//   the old path); { h, host, acc, absent } = the strike shape (absent: roster seats with no record, for the hold)
 function gambleAccusation(g, vecOf) {
   const recs = oneRecordPerAccount(g);
   if (!recs.length || !gambleMtOk(recs[0].d[2] | 0)) return null;
@@ -6167,7 +6172,6 @@ function gambleAccusation(g, vecOf) {
   const rest = recs.filter(r => gambleTagOf(r) === 0);
   if (rest.length !== 1) return { why: rest.length ? rest.length + ' records name nobody' : 'every record names somebody' };
   const host = rest[0], h = host.d[5] | 0, mt = host.d[2] | 0, pc = host.d[8] | 0;
-  if (acc.length < GTAC.MIN_ACC) return { why: 'one writer names him' };
   if (!acc.every(r => (gambleTagOf(r) >> h) & 1)) return { why: 'the writers name different seats' };
   const roster = rosterConsensus(recs);
   if (roster[h] == null || String(roster[h]) !== String(host.steamID)) return { why: 'the named seat is not his on the roster' };
@@ -6185,9 +6189,13 @@ function gambleAccusation(g, vecOf) {
   const hostAs = Object.assign({}, host, { d: host.d.slice(0, 10).concat(acc[0].d.slice(10, 10 + pc), host.d.slice(10 + pc)) });
   const sf = sanityFlags(acc.concat([hostAs]));
   if (sf.length) return { why: 'sanity ' + sf.join(',') };
-  const units = new Set(acc.map(r => gambleUnitOf(mt, r.d[5] | 0)));
-  if (units.size < GTAC.MIN_UNITS) return { why: 'the writers who name him queued as ' + units.size + ' unit' };
   const absent = Object.keys(roster).map(Number).filter(s => !seats.has(s)).sort((a, b) => a - b);
+  // Q282: the two counts come last -- a seat with no record yet can still meet them (its record not written yet, or on a
+  //   shard this run did not read), so a short count says which seats are absent and the pass holds it like a strike
+  //   (absent: [] -- every seat wrote -- keeps the old path at once)
+  if (acc.length < GTAC.MIN_ACC) return { why: 'one writer names him', absent };
+  const units = new Set(acc.map(r => gambleUnitOf(mt, r.d[5] | 0)));
+  if (units.size < GTAC.MIN_UNITS) return { why: 'the writers who name him queued as ' + units.size + ' unit', absent };
   return { h, host, acc, absent };
 }
 // prior = the named account's stored strikes ({ m, t, a: [writer pids] }); cur = this key's. -> 'free' | 'judge':
@@ -6223,6 +6231,26 @@ function applyGambleAccusations(gr, signals, processed, now, vecOf, opts) {
     if (processed.has(m)) continue;   // a settled key is history (Q114 below: nobody flagged)
     const ga = gambleAccusation(g, vecOf);
     if (!ga) continue;
+    // Q282: too few writers name him while a roster seat has no record -- the missing record may be one more voice
+    //   naming him, not yet written or on a shard this run did not read. The old path here flagged the writers this run
+    //   happened to read, and a strike on a later run (every record read) could not take that back (a key is flagged
+    //   once, recordFlag). Held like the strike shape: nobody flagged until a complete read past the absence grace still
+    //   lacks the seat; then the old path, as before. The hold defers flags only: the key settles or ends exactly as
+    //   without it (an inconsistent key never settles; the start-orphan verdict ends it at maturity, Q114 flags nobody).
+    if (ga.why && ga.absent && ga.absent.length && !signals.gtav[m]) {
+      const pend = { absentAt: Number(signals.gtah[m]) || 0 };
+      const ah = absenceHold(ga.absent, pend, now, !!o.complete, o.graceMs);
+      if (signals.gtah[m] !== pend.absentAt) { signals.gtah[m] = pend.absentAt; res.dirty = true; }
+      heldNow.add(m);   // the stamp stays while the key keeps a seat with no record: past the grace, every later run takes the old path at once
+      if (ah.hold) {
+        res.held++;
+        ig.splice(i, 1);
+        console.log('  gamble accusation ' + m + ': not counted yet (' + ga.why + '), seat(s) ' + ga.absent.join(',') + ' wrote no record -- '
+          + (ah.hold === 'read' ? 'not every record shard was read this run' : 'grace ' + Math.ceil(ah.waitMs / 1000) + 's left') + ', nobody flagged yet (Q282)');
+        continue;
+      }
+      ga.why += '; seat(s) ' + ga.absent.join(',') + ' still wrote no record past the grace';
+    }
     if (signals.gtav[m]) { ig.splice(i, 1); continue; }   // struck on an earlier run: the verdict stands, nobody else flagged
     if (ga.why) {
       res.other++;
@@ -6257,12 +6285,14 @@ function applyGambleAccusations(gr, signals, processed, now, vecOf, opts) {
       for (const r of ga.acc) { const ap = sigPlayer(signals, pid(String(r.steamID)), now); ap.ga = (ap.ga | 0) + 1; }   // record only: who names hosts
     }
     if (v === 'judge') res.judged++;
+    const firstFlag = !signals.flagged[m];   // Q282: recordFlag flags a key once; an earlier run's old path keeps its flags
     if (recordFlag(signals, [ga.host], m, now)) res.touched.push(hid);
     res.strikes++; res.dirty = true;
     ig.splice(i, 1);
     console.log('  gamble accusation ' + m + ': ' + ga.acc.length + ' writers (seat ' + ga.acc.map(r => r.d[5] | 0).sort((a, b) => a - b).join(',')
       + ') name seat ' + ga.h + ' = ' + plog(hid) + (ga.absent.length ? ' (seat ' + ga.absent.join(',') + ' wrote no record)' : '')
-      + ' -> strike, verdict ' + v + (v === 'judge' ? ' (record only)' : '') + '; only he is flagged');
+      + ' -> strike, verdict ' + v + (v === 'judge' ? ' (record only)' : '')
+      + (firstFlag ? '; only he is flagged' : '; the key was flagged on an earlier run (its writers then), nobody flagged again'));
   }
   // a hold lives only while its key is on the shards in that shape: on a complete read, the stamps of keys not held this
   //   run go (a key written for one run and dropped must not leave its stamp behind for 45 days -- Q166's file growth)
