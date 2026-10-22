@@ -3,7 +3,8 @@
 // Q130: a matchmade match seats a Steam account at every seat below its seat count, so a matchmade start record that
 //   leaves a seat empty is its writer's own lie: it keeps its seat claim but does not vote; the other players' starts
 //   register the roster when it seats every such writer at the seat he wrote from (one other start is then enough); the
-//   writer is flagged once per key. Voters who name another table (an alt at another player's seat) are outvoted when
+//   writer was flagged once per key -- since cloud audit Q292 nobody is (the start is written from the host's broadcast
+//   seat table, so a modded host blanked every honest joiner's start; test/two-voice-dispute.js). Voters who name another table (an alt at another player's seat) are outvoted when
 //   one table is plainly the players' (no disputed seat, one seat count, the majority roster seats every voter at his own
 //   seat, at least two voters name it word for word and more than name anything else) -- unsplit, nobody flagged. A later
 //   start does not split a provisional roster when its writer is seated at his own seat by it, or when it is blank.
@@ -12,16 +13,16 @@
 //   roster) is left out entirely. START_CONFIRM_MS is four minutes (Q130; five before).
 // End-to-end over the REAL validate.js main() against an offline board stub (the harness of test/late-start-roster.js):
 //   [1] 1V1 ranked: the loser's start leaves the winner's seat empty, honest result -> registered from the winner's start
-//       alone, settles normally, the loser flagged once (once per key and writer), the winner not
+//       alone, settles normally, nobody flagged (Q292; Q130 flagged the loser once)
 //   [2] the same with the winner as the liar, who overwrites his blank start with an honest one before the end -> settles
-//       normally, the liar flagged once
+//       normally, nobody flagged (Q292; Q130 flagged the liar once)
 //   [3] 4-player ranked FFA: one player's start names an alt at another player's seat (a full roster) -> outvoted,
 //       registered unsplit, settles normally, nobody flagged
 //   [4] 2V2: both losers name alts at the winners' seats (2 to 2) -> split, held for good, voided at maturity, nobody
 //       rated or flagged, the winners no leavers
 //   [5] late lie: 1V1, the roster registered and still provisional, the loser rewrites his own start naming an alt at the
 //       winner's seat -> no split, confirmed at four minutes, settles normally; [5b] an outside account's blank start read
-//       in the provisional time -> no split, settles normally, the outside account flagged once
+//       in the provisional time -> no split, settles normally, nobody flagged (Q292; Q130 flagged the outside account)
 //   [6] sticky: 1V1, an outside account starts from the winner's seat before the first look (disputed), the real result
 //       arrives, the outside row is withdrawn before any settle -> held for good (no points), voided, nobody flagged;
 //       [6b] the outside row stays up past maturity (no start roster ever registers): the key voids from its note
@@ -234,8 +235,9 @@ T('[0] START_CONFIRM_MS: four minutes by default, three at least (Q130)', W === 
   T('[1] no split, no contest, no note of one', !SPLIT.test(outOf(rs)) && !Q75.test(outOf(rs)) && !(noteOf(rs[0], key) || {}).c);
   T('[1] settles normally: the winner gains, the loser loses, nobody convicted', processedOf(rs[1]).has(key) && up(rs, P1) && down(rs, P2)
     && [P1, P2].every(s => leavesOf(last(rs), s) === 0), pts(rs, [P1, P2]));
-  T('[1] the loser is flagged once (once per key and writer, also after the settle), the winner not', fOf(rs[0], P2) === 1 && fOf(last(rs), P2) === 1 && fOf(last(rs), P1) === 0
-    && flaggedKeys(rs[0]).indexOf(key + '|blank|' + v.pid(P2)) >= 0 && flaggedKeys(rs[0]).filter(k => k.indexOf(key) === 0).length === 1,
+  T('[1] Q292: nobody flagged for the blank start (the loser neither: it may be the host\'s table he was sent), no flag key of it, logged',
+    fOf(rs[0], P2) === 0 && fOf(last(rs), P2) === 0 && fOf(last(rs), P1) === 0 && flaggedKeys(rs[0]).filter(k => k.indexOf(key) === 0).length === 0
+    && /start-blank [^\n]* wrote a start that leaves a seat empty -- it does not vote, nobody flagged \(the seat table is the host's, Q292\)/.test(rs[0].out),
     flags(last(rs), [P1, P2]) + ' ' + JSON.stringify(flaggedKeys(rs[0])));
 }
 
@@ -252,7 +254,7 @@ T('[0] START_CONFIRM_MS: four minutes by default, three at least (Q130)', W === 
   T('[2] the honest overwrite names the registered roster: no split, no contest', !SPLIT.test(outOf(rs)) && !Q75.test(outOf(rs)) && !(pendOf(rs[1], key) || {}).split);
   T('[2] settles normally: the liar (the winner) gains, the loser loses, nobody convicted', processedOf(rs[2]).has(key) && up(rs, P1) && down(rs, P2)
     && [P1, P2].every(s => leavesOf(last(rs), s) === 0), pts(rs, [P1, P2]));
-  T('[2] the liar is flagged once, the loser not', fOf(last(rs), P1) === 1 && fOf(last(rs), P2) === 0 && flaggedKeys(last(rs)).indexOf(key + '|blank|' + v.pid(P1)) >= 0,
+  T('[2] Q292: nobody flagged (the liar neither), no flag key of the blank start', fOf(last(rs), P1) === 0 && fOf(last(rs), P2) === 0 && flaggedKeys(last(rs)).indexOf(key + '|blank|' + v.pid(P1)) < 0,
     flags(last(rs), [P1, P2]));
 }
 
@@ -316,7 +318,7 @@ T('[0] START_CONFIRM_MS: four minutes by default, three at least (Q130)', W === 
     && !(pendOf(rs[1], key) || {}).split, JSON.stringify(pendOf(rs[1], key)) + ' ' + rs[1].out.slice(-600));
   T('[5b] settles normally: P1 gains, P2 loses, the outside account gets nothing', processedOf(rs[2]).has(key) && up(rs, P1) && down(rs, P2) && none(rs, X)
     && [P1, P2].every(s => leavesOf(last(rs), s) === 0), pts(rs, [P1, P2, X]));
-  T('[5b] the outside account is flagged once, the players not', fOf(last(rs), X) === 1 && fOf(last(rs), P1) === 0 && fOf(last(rs), P2) === 0, flags(last(rs), [P1, P2, X]));
+  T('[5b] Q292: nobody flagged (the outside account neither; it gets nothing either way)', fOf(last(rs), X) === 0 && fOf(last(rs), P1) === 0 && fOf(last(rs), P2) === 0, flags(last(rs), [P1, P2, X]));
 }
 
 // ---- [6] sticky: an outside start from the winner's seat before the first look, withdrawn before any settle ----

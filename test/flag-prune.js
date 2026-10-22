@@ -27,6 +27,9 @@
 //       still holds it -- fm keeps the last 32, so how many of the last three runs count again is not pinned here)
 //   [8] main() (Q166 rework): one account keeps its blank start of one matchmade key on the shards for three hours: its
 //       flag is never armed, f 1 (not dropped and counted again)
+//   Q292 (cloud audit): a blank start flags nobody any more -- [7] / [8] write the blank flags with the job before it on
+//       their first run (the flags on file in production) and pin how those prune; [7] then counts nothing new (f stays,
+//       the flags drain by their writer), [8] under this job from the start flags nobody
 // State isolation is structural (every *_FILE var redirected, cwd = temp dir), like test/state-prune.js.
 const { spawnSync } = require('child_process');
 const fs = require('fs'), path = require('path'), os = require('os'), crypto = require('crypto');
@@ -122,6 +125,16 @@ const KEY_ID = 2099020101;
   fs.writeFileSync(kf, JSON.stringify(j, null, 2));
 }
 const VALIDATE = path.join(TREE, 'validate.js');
+// cloud audit Q292: a matchmade start that leaves a seat empty flags nobody any more (the joiner's seat table is the host's).
+//   OLD_BLANK = the job before it, which flagged the writer once per key (m|blank|pid): the flags it wrote are on file in
+//   production and still prune by their writer (Q166 rework), so [7] / [8] write them with it on their first run
+const OLD_BLANK = path.join(TREE, '.old-blank-rule.js');
+{
+  const from = "      if (!signals.flagged[k]) console.log('  start-blank ' + m + ': ' + plog(r.steamID) + '@' + (r.d[5] | 0) + ' wrote a start that leaves a seat empty -- it does not vote, nobody flagged (the seat table is the host\\'s, Q292)');\n";
+  const src = fs.readFileSync(VALIDATE, 'utf8');
+  if (src.split(from).length !== 2) { console.log('  FAIL  OLD_BLANK anchor not found exactly once'); process.exit(1); }
+  fs.writeFileSync(OLD_BLANK, src.replace(from, '      if (recordFlag(signals, [r], k, Date.now())) sigDirty = true;\n'));
+}
 const FILE_VARS = Array.from(new Set(Array.from(SRC.matchAll(/process\.env\.([A-Z0-9_]+_FILE)\b/g), m => m[1]))).filter((k) => k !== 'RECOVER_FILE');
 const STUB = [
   "const fs = require('fs');",
@@ -151,7 +164,7 @@ const STUB = [
   '};',
 ].join('\n');
 const hexLE = (arr) => arr.map(n => { const b = ((n | 0) >>> 0).toString(16).padStart(8, '0'); return b.slice(6, 8) + b.slice(4, 6) + b.slice(2, 4) + b.slice(0, 2); }).join('');
-function runCron(boards, files, env) {
+function runCron(boards, files, env, script) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'flag-prune-'));
   try {
     const stub = path.join(dir, 'stub.js'); fs.writeFileSync(stub, STUB);
@@ -168,7 +181,7 @@ function runCron(boards, files, env) {
       STUB_FIXTURE: fxPath, GITHUB_STEP_SUMMARY: sumPath, CONCURRENCY: '1', STRICT_BOARDS: '0', READ_RETRY_MS: '0',
       SEASON_NOW: '2026-10-01T00:00:00Z', RECOVER_FILE: path.join(dir, 'no-recover.json'),
     }, stateEnv, env || {});
-    const r = spawnSync(process.execPath, ['-r', stub, VALIDATE], { env: e, encoding: 'utf8', cwd: dir, timeout: 180000, maxBuffer: 64 * 1024 * 1024 });
+    const r = spawnSync(process.execPath, ['-r', stub, script || VALIDATE], { env: e, encoding: 'utf8', cwd: dir, timeout: 180000, maxBuffer: 64 * 1024 * 1024 });
     const state = {};
     for (const k of FILE_VARS) { try { state[k] = JSON.parse(fs.readFileSync(stateEnv[k], 'utf8')); } catch (err) {} }
     return { code: r.status, out: (r.stdout || '') + (r.stderr || ''), state };
@@ -229,12 +242,12 @@ function boardsWith(recs) {
     { id: 21, name: 'endless_comp_solo', entries: [] }, { id: 22, name: 'endless_board_solo', entries: [] });
   return boards;
 }
-// steps: [[ms since the previous run, recs (or a function of the run index), env?], ...]
+// steps: [[ms since the previous run, recs (or a function of the run index), env?, script?], ...]
 function timeline(steps) {
   const out = []; let state = null;
-  steps.forEach(([ms, recs, env], i) => {
+  steps.forEach(([ms, recs, env, script], i) => {
     if (out.length && out[out.length - 1].code !== 0) return;
-    const r = runCron(boardsWith(typeof recs === 'function' ? recs(i) : recs), state ? advance(state, ms) : null, env || null);
+    const r = runCron(boardsWith(typeof recs === 'function' ? recs(i) : recs), state ? advance(state, ms) : null, env || null, script || null);
     out.push(r); state = r.state;
   });
   return out;
@@ -353,27 +366,29 @@ function start(hash, seed, seat, roster) {
   const acct = Array.from({ length: N }, (_, a) => SID(1660 + a));
   const keys = Array.from({ length: 50 * N }, (_, j) => 0x166e000 + j);
   const steps = [];
+  // run 0 under the job before Q292 (OLD_BLANK: every blank start flagged, the flags on file today); runs 1.. under this job
   for (let run = 0; run < RUNS; run++) steps.push([30 * MIN, () => {
     const rows = [];
     for (let a = 0; a < N; a++) { const g = (a + run) % N; for (let sh = 0; sh < 50; sh++) rows.push({ shard: sh, sid: acct[a], d: start(keys[g * 50 + sh], 4242, 0, [acct[a], null]) }); }
     return rows;
-  }]);
+  }, null, run === 0 ? OLD_BLANK : null]);
   const rs = timeline(steps);
   if (!brk(rs, RUNS, '[7]')) {
     const mine = (r, a) => flags(r).filter((k) => k.endsWith('|blank|' + v.pid(acct[a]))).length;
     const n = rs.map((r) => flags(r).length);
     console.log('  flags after each run ' + JSON.stringify(n) + ' · per account at the end ' + JSON.stringify(acct.map((_, a) => mine(rs[RUNS - 1], a))) + ' · f ' + JSON.stringify(acct.map((x) => fOf(rs[RUNS - 1], x))));
-    T('[7] every blank start flagged when written (the first run: 50 per account)', n[0] === 50 * N && acct.every((_, a) => mine(rs[0], a) === 50), String(n[0]));
-    T('[7] each account keeps at most its live 50 plus two runs of arms (150), 900 in all (before: 50N^2 = 1800)',
-      rs.every((r) => acct.every((_, a) => mine(r, a) <= 150)) && Math.max(...n) <= 150 * N && n.slice(-4).every((x) => x === n[n.length - 1]), JSON.stringify(n));
-    T('[7] the arms are flags (a writer whose start of the key is off)', arms(rs[RUNS - 1]).length > 0 && arms(rs[RUNS - 1]).every((k) => k.indexOf('|blank|') > 0 && (sigOf(rs[RUNS - 1]).flagged || {})[k] != null));
-    // Q98: the six first runs write 300 different keys (each counted once: f 50 a run up to 300); the last three write
-    //   keys again whose flags were dropped -- not counted again while the writer's fm still holds the match (fm keeps
-    //   the last 32), so f there sits between 300 and 450 and only never goes down. No pin on the 32 cap.
+    T('[7] the job before Q292: every blank start flagged when written (the first run: 50 per account)', n[0] === 50 * N && acct.every((_, a) => mine(rs[0], a) === 50), String(n[0]));
+    const first = new Set(flags(rs[0]));
+    T('[7] Q292: no blank start flags anybody after it (no flag key a run later that the first run did not write), logged "nobody flagged"',
+      rs.slice(1).every((r) => flags(r).every((k) => first.has(k))) && rs.slice(1).every((r) => /start-blank [^\n]* wrote a start that leaves a seat empty -- it does not vote, nobody flagged \(the seat table is the host's, Q292\)/.test(r.out)),
+      JSON.stringify(n));
+    // the flags already written prune by their writer (Q166 rework): each account's run-0 keys are another account's from
+    //   run 1 on -- armed on run 1, dropped an hour later (run 3), none left
+    eq('[7] the flags on file: armed when their writer\'s own start is off (run 1), dropped an hour later (run 3)', [n[1], arms(rs[1]).length, n[2], n[3], n[RUNS - 1]], [50 * N, 50 * N, 50 * N, 0, 0]);
+    T('[7] the arms are flags (a writer whose start of the key is off)', arms(rs[1]).length > 0 && arms(rs[1]).every((k) => k.indexOf('|blank|') > 0 && (sigOf(rs[1]).flagged || {})[k] != null));
+    // f: the run-0 count stays (no flag removed), nothing is counted after it
     const fs7 = acct.map((x) => rs.map((r) => fOf(r, x)));
-    T('[7] f: every key counted once when first written (50 a run, 300 after six runs), at most 50 more a run, never fewer',
-      fs7.every((f) => f.slice(0, 6).every((y, i) => y === 50 * (i + 1)) && f.every((y, i) => i === 0 || (y >= f[i - 1] && y - f[i - 1] <= 50)) && f[RUNS - 1] >= 300 && f[RUNS - 1] <= 50 * RUNS),
-      JSON.stringify(fs7));
+    T('[7] f: 50 each from the first run, never more, never fewer', fs7.every((f) => f.every((y) => y === 50)), JSON.stringify(fs7));
   }
 }
 
@@ -381,14 +396,17 @@ function start(hash, seed, seat, roster) {
 {
   const W = SID(1670), K = 0x166f1;
   const d = start(K, 4242, 0, [W, null]);
-  const steps = [];
-  for (let run = 0; run < 7; run++) steps.push([30 * MIN, [{ shard: 3, sid: W, d }]]);
+  const steps = [], now = [];
+  for (let run = 0; run < 7; run++) { steps.push([30 * MIN, [{ shard: 3, sid: W, d }], null, run === 0 ? OLD_BLANK : null]); now.push([30 * MIN, [{ shard: 3, sid: W, d }]]); }
   const rs = timeline(steps);
   if (!brk(rs, 7, '[8]')) {
     const k = keyOf(d) + '|blank|' + v.pid(W);
+    // the flag the job before Q292 wrote on run 0 stays while the blank start is on the shards (Q166 rework)
     eq('[8] flagged / armed per run', rs.map((r) => (flags(r).indexOf(k) >= 0 ? 'F' : '-') + (arms(r).indexOf(k) >= 0 ? 'A' : '-')), ['F-', 'F-', 'F-', 'F-', 'F-', 'F-', 'F-']);
     eq('[8] f 1 (flagged once, not dropped and counted again)', fOf(rs[6], W), 1);
   }
+  const ns = timeline(now);
+  if (!brk(ns, 7, '[8] Q292')) eq('[8] Q292: the same blank start under this job from the start: never flagged, f 0', [ns.map((r) => flags(r).length), fOf(ns[6], W)], [[0, 0, 0, 0, 0, 0, 0], 0]);
 }
 
 try { fs.rmSync(TREE, { recursive: true, force: true }); } catch (e) {}

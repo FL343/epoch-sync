@@ -880,6 +880,13 @@ function lateStartSplit(p, recs, m) {
 // enough (the liar's own writing is the second account on the key); otherwise (an outside account at a seat the roster
 // gives somebody else) the key goes on as before. A friends' room, a bot match and an endless run seat bots or nobody at
 // some seats ('0' in the roster) and are not judged here.
+// cloud audit Q292: such a start is no longer flagged. The start is written from the host's START_GAME (the seat table,
+// the seat count = its length, the joiner's own seat index; mvp/src/net/mp.js onStartGame takes them unchecked), so a modded
+// host who sends one empty seat more, or hands a joiner a seat index the table skips, makes every honest joiner's start
+// blank -- each was flagged once per match (three: trust tier 1), the host writing a full start of his own was not. The
+// start still votes nowhere and keeps its seat claim (Q80), so its writer gains nothing by it; the flag was all it cost,
+// and it cost the honest joiner the same (architecture decision 10). Counted on the run (RUN.blankStarts) and logged; the
+// blank flags already written stay until they age out or their start leaves the shards (Q166).
 function isMatchmadeMt(mt) { const b = baseMt(mt); return b === 1 || b === 2 || isTeamMt(mt); }
 function blankSeatStart(r) {
   if (r.d.length < 9) return false;   // no seat count (the job reads a start only with d.length >= 10; old unit fixtures)
@@ -1252,7 +1259,7 @@ function capContests(starts, recs, pending, processed, now, readComplete) {
         const r = list[i], m = r && r.d ? keyOf(r) : null, o = m && out.get(m);
         if (o && o.has(pid(String(r.steamID)))) {
           res.dropped++; (lines.get(m) || lines.set(m, []).get(m)).push(plog(r.steamID) + '@' + (r.d[5] | 0) + (list === starts ? 's' : ''));
-          if (list === starts && blankSeatStart(r)) { noteBlankStarts(m, [r]); if (!pending[m]) RUN.blankStarts = (RUN.blankStarts | 0) + 1; }   // Q130 flags its writer as before
+          if (list === starts && blankSeatStart(r)) { noteBlankStarts(m, [r]); if (!pending[m]) RUN.blankStarts = (RUN.blankStarts | 0) + 1; }   // Q130 logged as before (Q292: nobody flagged)
           continue;
         }
         list[w++] = r;
@@ -1763,7 +1770,8 @@ function lone1v1Count(claims, signals, now, sidOfPid) {
 // until real-traffic data exists. A flagged match is NOT settled and NOT marked processed:
 // if a bound turns out wrong and is loosened later, still-visible records self-heal.
 // Q109 (2026-10): a bound on ONE record's own fields (duration / seat / roster / a second record of the same account) drops
-// just that record and flags just its writer (a roster reason flags nobody: SANITY_ROSTER_SLUGS); the rest settles -- see sanitySplit.
+// just that record and flags just its writer (a roster reason or the seat flags nobody: SANITY_HOST_SLUGS, Q292); the rest
+// settles -- see sanitySplit.
 const SANITY = {
   SCORE_CAP: Number(process.env.SANITY_SCORE_CAP || 450000),     // re-derived 2026-09-16 (client knife 3.9 second-stage wheel): see the NOTE block below
   SCORE_FLOOR: Number(process.env.SANITY_SCORE_FLOOR || -50000), // shop overdraft is legal (classic rule) but bounded by shop prices
@@ -2119,10 +2127,16 @@ const SANITY_RECORD_SLUGS = ['duration', 'seat', 'self-seat', 'sid-range', 'dup-
 //   outside the Steam id range lands in every honest joiner's record, and a cold rejoin adopts the receipt's table whole. The
 //   flag fell on the joiners who carried the table, never on the host. Dropping the record already takes what it could earn (no
 //   XP / CP, ranked at its seat like a clean one, no leaver either way), so a flag deterred nothing a clean roster would not give
-//   more of -- like a seat-gate drop (Q124) and a held key (Q114). Duration, seat range and a second record of one account are
-//   the writer's own fields and still flag him.
+//   more of -- like a seat-gate drop (Q124) and a held key (Q114). Duration and a second record of one account are the
+//   writer's own fields and still flag him.
+// cloud audit Q292: the seat range joins them. A joiner's seat index is the host's too (mvp/src/net/mp.js onStartGame takes
+//   it from START_GAME with the seat table and the seat count, unchecked): a modded host who handed an honest joiner a seat
+//   outside the table had the joiner's record dropped AND the joiner flagged alone, once per match (three matches: trust
+//   tier 1); the host was not flagged. The drop already takes what the record could earn and keeps him ranked at his
+//   consensus seat, so a flag on it deterred nothing.
 const SANITY_ROSTER_SLUGS = ['self-seat', 'sid-range', 'dup-sid'];
-const sanityDropFlags = (x) => x.why.some((f) => SANITY_ROSTER_SLUGS.indexOf(f) < 0);
+const SANITY_HOST_SLUGS = SANITY_ROSTER_SLUGS.concat(['seat']);   // Q292: the reasons a host's broadcast can put on a joiner's record
+const sanityDropFlags = (x) => x.why.some((f) => SANITY_HOST_SLUGS.indexOf(f) < 0);
 // the per-record half of sanityFlags (same bounds, every reason of the record rather than the first)
 function recordSanityFlags(r, base, pc) {
   const out = [];
@@ -2812,6 +2826,7 @@ function writeRunSummary() {
       '| consistent / fresh | ' + s('consistent', 0) + ' / ' + s('fresh', 0) + ' |',
       '| flagged inconsistent / sanity | ' + s('flagged', 0) + ' / ' + s('sanity', 0) + ' |',
       '| sanity on one record only: dropped, rest settles / too few writers left (Q109) | ' + s('sanityDrop', 0) + ' / ' + s('sanityDropHeld', 0) + ' |',
+      '| sanity whose every reason is the host\'s seat or table, nobody flagged, not settled (Q292) | ' + s('sanityHost', 0) + ' |',
       '| starts pending / exit-rate hits | ' + s('pending', 0) + ' / ' + s('convicted', 0) + ' |',
       '| start-orphan seats spared by their own exit note (Q64) | ' + s('exitNoteSpared', 0) + ' |',
       '| starts-state notes / endless, friends\' room and bot entries dropped, no record of the key left on the shards (Q144) | ' + s('noteGone', 0) + ' / ' + s('entryGone', 0) + ' |',
@@ -6819,11 +6834,17 @@ async function main() {
   //   clean) and gains nothing by the records (dropped).
   // Q75: a key whose records name two different accounts for one seat is held out of every pass below (nobody rated,
   //   nobody convicted, nobody flagged: Q114 review) -- an outside account's record no longer counts as a vote
-  // Q130: a matchmade start that leaves a seat empty is its writer's own lie -- flagged once per key and writer
-  for (const [m, r] of BLANK_STARTS) {
-    if (processed.has(m)) continue;
-    if (recordFlag(signals, [r], m + '|blank|' + pid(String(r.steamID)), Date.now())) sigDirty = true;
-    trustTouched.add(String(r.steamID));
+  // Q130: a matchmade start that leaves a seat empty votes nowhere. Q292: nobody is flagged for it any more (the joiner's
+  //   table is the host's broadcast); once per key and writer it is logged
+  {
+    const seenBlank = new Set();
+    for (const [m, r] of BLANK_STARTS) {
+      if (processed.has(m)) continue;
+      const k = m + '|blank|' + pid(String(r.steamID));
+      if (seenBlank.has(k)) continue;
+      seenBlank.add(k);
+      if (!signals.flagged[k]) console.log('  start-blank ' + m + ': ' + plog(r.steamID) + '@' + (r.d[5] | 0) + ' wrote a start that leaves a seat empty -- it does not vote, nobody flagged (the seat table is the host\'s, Q292)');
+    }
   }
   BLANK_STARTS.length = 0;
   const rcRes = applyRosterContest(gr, starts, startsPending, signals, processed, Date.now());
@@ -8516,7 +8537,7 @@ async function main() {
     // marked processed (self-heals if a bound is later loosened). Runs before XP/VOID so garbage
     // never feeds any ledger output or signal stats beyond the flag counter itself.
     // Q109: a reason on one record's own fields (sanitySplit) drops that writer's record and flags him alone (a roster reason
-    //   alone flags nobody, rework 2: SANITY_ROSTER_SLUGS); the rest
+    //   or the seat alone flags nobody, rework 2: SANITY_ROSTER_SLUGS; Q292: SANITY_HOST_SLUGS); the rest
     //   settles when two or more writers are left (the bot lane: one), and the dropped writer keeps his consensus seat in
     //   the ranking (dropSeat below) -- no rating dodge by breaking one's own record -- but earns nothing from it (XP / CP
     //   read the records) and is no absent seat / leaver (he wrote one).
@@ -8524,6 +8545,13 @@ async function main() {
     let dropSeat = null;   // Q109: dropped writer sid -> consensus seat (-1 = none: not rated, still no leaver; a kept writer's seat is never taken)
     if (sane.length) {
       const sp = sanitySplit(g);
+      // Q292: the whole-group rule (an endless key always takes it) flags nobody when every reason is the host's seat or
+      //   table: an honest endless joiner the host gave a seat outside the table was flagged with the host; not settled
+      if (!sp.drop.length && sane.every((f) => SANITY_HOST_SLUGS.indexOf(f) >= 0)) {
+        RUN.sanityHost = (RUN.sanityHost | 0) + 1;
+        ghWarn('match=' + c.m + ': sanity [' + sane.join(',') + '] -- the host\'s seat or table, nobody flagged (Q292), not settled: ' + g.map(r => plog(r.steamID) + '@' + r.shard).join(' '));
+        continue;
+      }
       if (!sp.drop.length) {
         recordFlag(signals, g, c.m, nowMs); sigDirty = true;
         for (const r of g) trustTouched.add(String(r.steamID));   // trust-tier candidates
@@ -8531,7 +8559,7 @@ async function main() {
         ghWarn('match=' + c.m + ': sanity-flagged [' + sane.join(',') + '] -- not settled: ' + g.map(r => plog(r.steamID) + '@' + r.shard).join(' '));
         continue;
       }
-      const flagDrop = sp.drop.filter(sanityDropFlags);   // rework 2: a roster reason alone flags nobody (SANITY_ROSTER_SLUGS)
+      const flagDrop = sp.drop.filter(sanityDropFlags);   // rework 2: a roster reason alone flags nobody (SANITY_ROSTER_SLUGS); Q292: nor the seat
       if (flagDrop.length && recordFlag(signals, flagDrop.map(x => ({ steamID: x.sid })), c.m, nowMs)) sigDirty = true;
       for (const x of flagDrop) trustTouched.add(x.sid);
       const keepN = new Set(sp.keep.map(r => String(r.steamID))).size;
@@ -8545,7 +8573,8 @@ async function main() {
       const gro0 = seatGateRoster(startsPending[c.m]), pcW = g[0].d[8] | 0;
       const witnessN = (keepN && gro0) ? sp.drop.filter((x) => x.recs.some((r) => { const s = r.d[5] | 0; return s >= 0 && s < pcW && gro0[s] === pid(x.sid); })).length : 0;
       const enough = keepN + witnessN >= 2 || (keepN >= 1 && isBotMt(matchType));
-      const who = sp.drop.map(x => plog(x.sid) + '[' + x.why.join(',') + ']' + (sanityDropFlags(x) ? '' : ' (roster reason: not flagged)')).join(' ');
+      const who = sp.drop.map(x => plog(x.sid) + '[' + x.why.join(',') + ']' + (sanityDropFlags(x) ? ''
+        : x.why.every((f) => SANITY_ROSTER_SLUGS.indexOf(f) >= 0) ? ' (roster reason: not flagged)' : ' (the host\'s seat or table: not flagged, Q292)')).join(' ');
       const flagWord = flagDrop.length === sp.drop.length ? 'its writer flagged' : flagDrop.length ? 'its writer flagged unless marked' : 'nobody flagged';
       if (!enough) {
         RUN.sanityDropHeld = (RUN.sanityDropHeld | 0) + 1;
@@ -10219,7 +10248,7 @@ Object.assign(module.exports, { flagPlayer, flagsInWindow, stampLegacyFlags, TRU
 Object.assign(module.exports, { noteOwnStarts, hasOwnStart, OWN_START_CAP });   // cloud audit Q69 own-record evidence for leaver verdicts
 Object.assign(module.exports, { leaverXpRecordOnlyUntil, LEAVER_XP_RECORD_ONLY, LEAVER_XP_RECORD_ONLY_MAX_MS });   // M194 / W57 demo Next Fest: leaves recorded, XP not discounted
 Object.assign(module.exports, { NL_OPP_CAP, NL_REPEAT });   // cloud audit Q161 named-only losing seats counted on the account
-Object.assign(module.exports, { PAIR_DISPUTE, pairDispute1v1, pairDisputeTable, pairDisputeCount });   // cloud audit Q289 / Q290 / Q291 / Q292 a key of two voices whose writers disagree
+Object.assign(module.exports, { PAIR_DISPUTE, pairDispute1v1, pairDisputeTable, pairDisputeCount, SANITY_HOST_SLUGS });   // cloud audit Q289 / Q290 / Q291 / Q292 a key of two voices whose writers disagree
 Object.assign(module.exports, { ffaPlaceOf, ffaLowerHalf });   // cloud audit Q174 named-only lower-half FFA seats counted on the account
 Object.assign(module.exports, { leaveConfirmHold, startRosterGaps, LEAVE_CONFIRM_MS, LEAVE_CONFIRM_MIN_MS });   // cloud audit Q121 leave confirmation
 Object.assign(module.exports, { LATE_RESULT_MS, LATE_CAP, lateShadow });   // cloud audit Q228 a convicted leave whose own result comes in late

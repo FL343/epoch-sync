@@ -17,7 +17,8 @@
 //       an incomplete read, endless and friends' room keys, no table, two tables) and the ledger's size bound
 //   [1] one account at seat 0 of four 4-player ranked keys in one run: three void as before, the fourth settles and rates
 //       its four players, the account's records of it left out (contest-cap line), nobody flagged, nobody an exit; [1c] past
-//       the cap, a start that leaves a seat empty: left out, its writer still flagged once (Q130)
+//       the cap, a start that leaves a seat empty: left out, its writer flagged nobody since cloud audit Q292 (the joiner's
+//       seat table is the host's; before it Q130 flagged him once)
 //   [2] the same account over runs: keys 1-3 void, key 4 settles; a day later his ledger is empty again and a fifth key
 //       voids; the ledger slot is no key note (survives every pass, no line names it)
 //   [3] past the cap, one seat more while the roster is provisional (the Q118 late split): no split, settles; counted once;
@@ -336,7 +337,7 @@ const K1 = [0, 1, 2, 3].map((k) => four(0x2080 + k, quad(2000 + 10 * k)));
 const OS1 = K1.map((g) => ({ sid: O1, d: startF(g.h, 0, [O1, g.pl[1], g.pl[2], g.pl[3]]) }));
 const S1 = cat(...K1.map((g) => g.S)), R1 = cat(...K1.map((g) => g.R));
 const steps1 = [[0, S1.concat(OS1)], [5 * MIN, S1], [5 * MIN, S1.concat(R1)], [GRACE, S1.concat(R1)], [3 * HOUR, S1.concat(R1)]];
-// [1c] past the cap, a start that leaves a seat empty at a player's seat (Q130 flags its writer)
+// [1c] past the cap, a start that leaves a seat empty at a player's seat (Q130 flagged its writer; Q292: nobody)
 const O1c = acct(2095), K1c = four(0x2095, quad(2050)), OS1c = { sid: O1c, d: startF(K1c.h, 0, [O1c, K1c.pl[1], K1c.pl[2], '0']) };
 const steps1c = [[0, K1c.S.concat([OS1c])], [5 * MIN, K1c.S], [5 * MIN, K1c.S.concat(K1c.R)], [GRACE, K1c.S.concat(K1c.R)], [3 * HOUR, K1c.S.concat(K1c.R)]];
 // [2] the same account over runs, then a day later
@@ -409,9 +410,10 @@ const noKeyNote = (rs) => !/[^\n]*#contest-cap/.test(outOf(rs).replace(/\(Q208\)
 }
 {
   const rs = timeline(steps1c, null, capInit([O1c], 3));
-  T('[1c] past the cap, a start leaving a seat empty at a player\'s seat: left out, the key settles, its writer still flagged once (Q130), the players not',
-    allOk(rs, steps1c.length) && rated(rs, K1c.pl) && capLines(outOf(rs), K1c.key).length === 1 && fOf(last(rs), O1c) === 1
-    && flaggedKeys(last(rs)).indexOf(K1c.key + '|blank|' + v.pid(O1c)) >= 0 && noFlags(last(rs), K1c.pl) && noExits(last(rs), K1c.pl), outOf(rs).slice(-900));
+  T('[1c] past the cap, a start leaving a seat empty at a player\'s seat: left out, the key settles, its writer not flagged (Q292; Q130 flagged him once), the players not',
+    allOk(rs, steps1c.length) && rated(rs, K1c.pl) && capLines(outOf(rs), K1c.key).length === 1 && fOf(last(rs), O1c) === 0
+    && flaggedKeys(last(rs)).indexOf(K1c.key + '|blank|' + v.pid(O1c)) < 0 && noFlags(last(rs), K1c.pl) && noExits(last(rs), K1c.pl)
+    && /start-blank [^\n]* wrote a start that leaves a seat empty -- it does not vote, nobody flagged/.test(outOf(rs)), outOf(rs).slice(-900));
 }
 {
   const rs = timeline(steps2), n = steps2.length, out = outOf(rs);
