@@ -10,9 +10,9 @@
 //       when nothing is armed
 //   [2] main(): one account, 50 forged solo segments a run for two hours at the five-minute cadence: the flags stop
 //       growing (before: +50 a run); every forged key is counted once (f) as before
-//   [3] main(): a key whose two players disagree, its records kept on the shards for three hours: flagged once, never
+//   [3] main(): a key whose three players disagree, its records kept on the shards for three hours: flagged once, never
 //       armed, f 1 each
-//   [4] main(): the same key once its records left: armed, dropped an hour later; both records written back: flagged
+//   [4] main(): the same key once its records left: armed, dropped an hour later; the records written back: flagged
 //       again, its players not counted again (Q98: one match flags a player once, his fm remembers it); a key still on
 //       the shards in the same runs untouched
 //   [5] main(): its records gone while a shard fails to read: nothing armed for two hours; the first complete read arms,
@@ -198,11 +198,13 @@ function advance(state, ms) {
 }
 const SID = (n) => '7656119800' + String(n).padStart(7, '0');
 const sidPair = (sid) => { const b = BigInt(sid); return [Number(b & 0xFFFFFFFFn) | 0, Number((b >> 32n) & 0xFFFFFFFFn) | 0]; };
-// a friends'-room 2P result (type 10) written by the player at `seat`, with the score vector he claims: two of them that
-//   disagree flag both writers once. A ranked 1V1 (this fixture before) no longer flags its two writers for disagreeing
-//   (Q289, test/pair-dispute-1v1.js); the flag bookkeeping tested here is the same for both
+// a friends'-room result (type 10, one seat per account of `ros`) written by the player at `seat`, with the score vector he
+//   claims: three of them that disagree flag every writer once. Two voices no longer flag anybody for disagreeing -- a
+//   ranked 1V1 (this fixture first, Q289, test/pair-dispute-1v1.js), a friends' room of two (this fixture next, Q291,
+//   test/two-voice-dispute.js) -- so the keys here have three writers; the flag bookkeeping tested here is the same
 function result(hash, seat, ros, scores) {
-  const d = [0xB1, 3, 10, hash | 0, 1234, seat, 1 + seat, (6 << 1) | (seat === 0 ? 1 : 0), 2, 720, scores[0], scores[1], 0];
+  const pc = ros.length;
+  const d = [0xB1, 3, 10, hash | 0, 1234, seat, 1 + seat, (6 << 1) | (seat === 0 ? 1 : 0), pc, 720].concat(scores.slice(0, pc), [0]);
   for (const s of ros) { const p = sidPair(s); d.push(p[0], p[1]); }
   return d;
 }
@@ -265,36 +267,36 @@ const keyOf = (d) => d[3] + '_' + d[4] + '_' + d[2];
 
 // ---- [3] + [4] main(): a disagreeing key kept on the shards / one whose records leave and come back ----
 {
-  const P = SID(1), Q = SID(2), C = SID(3), D = SID(4);
-  const pair = (h, a, b) => [{ sid: a, d: result(h, 0, [a, b], [6100, 3900]) }, { sid: b, d: result(h, 1, [a, b], [6100, 3800]) }];
+  const P = SID(1), Q = SID(2), C = SID(3), D = SID(4), R = SID(5), E = SID(6);
+  const trio = (h, a, b, c) => [a, b, c].map((sid, i) => ({ sid, d: result(h, i, [a, b, c], [6100, 3900 - 100 * i, 2000]) }));
   const K1 = 0x166a1, K2 = 0x166b2;
-  const kept = pair(K2, C, D);
+  const kept = trio(K2, C, D, E);
   const steps = [
-    [0, pair(K1, P, Q).concat(kept)],            // 0: both keys flagged
-    [30 * MIN, pair(K1, P, Q).concat(kept)],     // 1: still on the shards
-    [30 * MIN, kept],                            // 2: K1's records gone -> armed
-    [30 * MIN, kept],                            // 3: 30 minutes into the hour -> kept
-    [40 * MIN, kept],                            // 4: 70 minutes -> dropped
-    [5 * MIN, pair(K1, P, Q).concat(kept)],      // 5: both write K1 back -> flagged again, not counted again (Q98)
-    [60 * MIN, pair(K1, P, Q).concat(kept)],     // 6: still on the shards
+    [0, trio(K1, P, Q, R).concat(kept)],            // 0: both keys flagged
+    [30 * MIN, trio(K1, P, Q, R).concat(kept)],     // 1: still on the shards
+    [30 * MIN, kept],                               // 2: K1's records gone -> armed
+    [30 * MIN, kept],                               // 3: 30 minutes into the hour -> kept
+    [40 * MIN, kept],                               // 4: 70 minutes -> dropped
+    [5 * MIN, trio(K1, P, Q, R).concat(kept)],      // 5: all three write K1 back -> flagged again, not counted again (Q98)
+    [60 * MIN, trio(K1, P, Q, R).concat(kept)],     // 6: still on the shards
   ];
   const rs = timeline(steps);
   if (!brk(rs, steps.length, '[3]/[4]')) {
-    const k1 = keyOf(result(K1, 0, [P, Q], [0, 0])), k2 = keyOf(result(K2, 0, [C, D], [0, 0]));
+    const k1 = keyOf(result(K1, 0, [P, Q, R], [0, 0, 0])), k2 = keyOf(result(K2, 0, [C, D, E], [0, 0, 0]));
     const has = (r, k) => flags(r).indexOf(k) >= 0, armed = (r, k) => arms(r).indexOf(k) >= 0;
     T('[3] the disagreeing key is flagged once, never armed, kept three hours on the shards, f 1 each',
-      rs.every((r) => has(r, k2) && !armed(r, k2)) && fOf(rs[6], C) === 1 && fOf(rs[6], D) === 1, JSON.stringify([fOf(rs[6], C), fOf(rs[6], D)]));
+      rs.every((r) => has(r, k2) && !armed(r, k2)) && [C, D, E].every((x) => fOf(rs[6], x) === 1), JSON.stringify([fOf(rs[6], C), fOf(rs[6], D), fOf(rs[6], E)]));
     eq('[4] K1 flagged / armed per run', rs.map((r) => (has(r, k1) ? 'F' : '-') + (armed(r, k1) ? 'A' : '-')), ['F-', 'F-', 'FA', 'FA', '--', 'F-', 'F-']);
-    eq('[4] f of K1\'s players per run (not counted again when both wrote it back: Q98, one match flags a player once)', rs.map((r) => [fOf(r, P), fOf(r, Q)]), [[1, 1], [1, 1], [1, 1], [1, 1], [1, 1], [1, 1], [1, 1]]);
+    eq('[4] f of K1\'s players per run (not counted again when they wrote it back: Q98, one match flags a player once)', rs.map((r) => [fOf(r, P), fOf(r, Q), fOf(r, R)]), [[1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1]]);
     T('[4] no flagOff field before anything was armed', !('flagOff' in sigOf(rs[0])) && !('flagOff' in sigOf(rs[1])));
   }
 }
 
 // ---- [5] main(): the records leave while a shard fails to read ----
 {
-  const P = SID(11), Q = SID(12);
+  const P = SID(11), Q = SID(12), R = SID(13);
   const K = 0x166c3;
-  const both = [{ sid: P, d: result(K, 0, [P, Q], [6100, 3900]) }, { sid: Q, d: result(K, 1, [P, Q], [6100, 3800]) }];
+  const both = [P, Q, R].map((sid, i) => ({ sid, d: result(K, i, [P, Q, R], [6100, 3900 - 100 * i, 2000]) }));
   const fail = { STUB_FAIL: JSON.stringify({ shard_7: 500 }) };
   const steps = [
     [0, both],
@@ -315,9 +317,9 @@ const keyOf = (d) => d[3] + '_' + d[4] + '_' + d[2];
 // ---- [6] main(): the records leave while the one-shot recovery pools are configured (their rows are not part of the
 //   shards' completeness): nothing armed; once the recovery file is past, the reads arm and drop ----
 {
-  const P = SID(21), Q = SID(22);
+  const P = SID(21), Q = SID(22), R = SID(23);
   const K = 0x166d4;
-  const both = [{ sid: P, d: result(K, 0, [P, Q], [6100, 3900]) }, { sid: Q, d: result(K, 1, [P, Q], [6100, 3800]) }];
+  const both = [P, Q, R].map((sid, i) => ({ sid, d: result(K, i, [P, Q, R], [6100, 3900 - 100 * i, 2000]) }));
   const rf = path.join(TREE, 'q166-recover.json');
   fs.writeFileSync(rf, JSON.stringify({ channel: 'demo', until: '2099-01-01T00:00:00Z', boards: ['lbtest_pool'], keys: ['2026100101'] }));
   const rec = { DEMO_APPID: '1', RECOVER_FILE: rf };

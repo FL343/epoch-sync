@@ -423,14 +423,15 @@ const settledHonest = (tag, rs, key, settleRun) => {
   } finally { try { fs.unlinkSync(script); } catch (e) {} }
 }
 {
-  // control: an unsettled key whose two records disagree (no start roster) still flags both writers once. A friends' room
-  //   (type 10): a quick / ranked 1V1 no longer flags its two writers for disagreeing (Q289, test/pair-dispute-1v1.js)
-  const h = 0x9031, R = [P1, P2];
-  const room = (d) => { const x = d.slice(); x[2] = 10; return x; };
-  const recs = [{ sid: P1, d: room(v1settle(h, 0, R, 0)) }, { sid: P2, d: room(v1settle(h, 1, R, 1)) }];
+  // control: an unsettled key whose three records disagree (no start roster) still flags every writer once. A friends' room
+  //   of three (type 10): two voices no longer flag their writers for disagreeing -- a quick / ranked 1V1 (Q289,
+  //   test/pair-dispute-1v1.js), a friends' room of two (Q291, test/two-voice-dispute.js)
+  const h = 0x9031, R = [P1, P2, P3];
+  const room = (seat, sc) => rec(0xB1, 10, h, seat, seat + 1, seat === 0, R, sc);
+  const recs = [{ sid: P1, d: room(0, [7000, 5000, 4000]) }, { sid: P2, d: room(1, [7000, 5100, 4000]) }, { sid: P3, d: room(2, [7000, 5000, 4100]) }];
   const rs = timeline([[0, recs], [6 * MIN, recs]]);
-  T('[5] control: an inconsistent group on an unsettled key flags its writers once, as before', allOk(rs, 2) && fOf(last(rs), P1) === 1 && fOf(last(rs), P2) === 1
-    && lateMismatchN(rs) === 0 && !processedOf(last(rs)).has(keyOf(recs[0].d)), JSON.stringify([fOf(last(rs), P1), fOf(last(rs), P2)]));
+  T('[5] control: an inconsistent group on an unsettled key flags its writers once, as before', allOk(rs, 2) && R.every((s) => fOf(last(rs), s) === 1)
+    && lateMismatchN(rs) === 0 && !processedOf(last(rs)).has(keyOf(recs[0].d)), JSON.stringify(R.map((s) => fOf(last(rs), s))));
 }
 
 // ---- [6] wiring pins ----
@@ -446,7 +447,7 @@ const settledHonest = (tag, rs, key, settleRun) => {
     && /const sig = \(r\) => \(r\.d\[8\] \| 0\) \+ '\|' \+ rosterCanon\(r\.roster\);/.test(SRC));
   const main = SRC.slice(SRC.indexOf('const registeredEarly = registerStartRosters('));
   T('[6] main: registration (and the later-start check) runs before the seat gate', main.indexOf('registerStartRosters(') < main.indexOf('applySeatGate('));
-  T('[6] main: the inconsistent-group flag loop skips settled keys before recordFlag (Q128: ungated endless keys between; Q289: 1V1 disputes)',
+  T('[6] main: the inconsistent-group flag loop skips settled keys before recordFlag (Q128: ungated endless keys between; Q289 / Q291: disputes of two voices)',
     /for \(const \{ m, g \} of inconsistentGroups\) \{[\s\S]{0,700}?if \(processed\.has\(m\)\) \{[\s\S]{0,300}?continue;\n\s+\}\n[\s\S]{0,3200}?if \(recordFlag\(signals, g, m, nowMs\)\)/.test(main));
   T('[6] summary rows', /start rosters split by a later start \/ confirmed \(Q118\)/.test(SRC) && /settled keys with records that disagree, nobody flagged \(Q114\)/.test(SRC));
 }

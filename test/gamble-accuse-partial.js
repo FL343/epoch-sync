@@ -12,7 +12,11 @@
 //   [3] reads that are not complete hold even past the grace; a complete read with every record strikes
 //   [4] the seat never writes: past the grace on a complete read the old path flags the writers read, as before; later
 //       runs take the old path at once (the stamp stays, no new hold); the record arriving after that is a strike on the
-//       host, the earlier flags stay, and the log says so (no "only he is flagged"); the stamp goes with the key
+//       host, the earlier flags stay, and the log says so (no "only he is flagged"); the stamp goes with the key. On a 4P
+//       FFA with a premade pair at seats 2-3 and seat 1 the one that never writes: three writers read, one queue unit naming
+//       the host, so the old path is the whole-group rule.
+//       [4b] the same on a 3P FFA, seat 2 never writes: two writers read are two voices (Q291), so the old path flags
+//       nobody; the late record is a strike, only the host flagged
 //   [5] every seat wrote and the count is still short: the old path at once, no hold (a premade trio names its host; 2P)
 //   [6] the hold does not hold the match: at maturity the start verdict ends the key the same as without the tags
 //   [7] mutation self-checks
@@ -102,10 +106,22 @@ function partialThenFull(script) {
   const r2 = run(full, advance(r1.state, 60000), null, script);
   return { m, r1, r2 };
 }
-// [4] the third seat never writes; past the grace; one more run; then its record after all; then the key off the shards
-function neverThenLate(script) {
-  const part = forged(1, 0x2804, R3, { skip: [2] }), full = forged(1, 0x2804, R3), m = H.keyOf(full[0].d);
-  const r1 = first(part, 1, R3, null, script);
+// [2]'s shape for the mutation check: 4P with a premade pair at seats 2-3, the host and the pair read first (three writers,
+//   one queue unit), B one minute later -- its old path flags (on [1]'s 3P FFA the two writers read are two voices, Q291:
+//   the old path flags nobody there either, with or without the hold)
+function partialThenFull4(script) {
+  const full = forged(PAIR_MT, 0x2809, R4), m = H.keyOf(full[0].d);
+  const r1 = first(forged(PAIR_MT, 0x2809, R4, { skip: [1] }), PAIR_MT, R4, null, script);
+  const r2 = run(full, advance(r1.state, 60000), null, script);
+  return { m, r1, r2 };
+}
+// [4] one seat never writes; past the grace; one more run; then its record after all; then the key off the shards.
+//   four = 4P with a premade pair at seats 2-3, seat 1 the one (three writers read: the old path flags them); else 3P FFA,
+//   seat 2 the one (two writers read: two voices, nobody flagged on the old path)
+function neverThenLate(script, four) {
+  const ros = four ? R4 : R3, mt = four ? PAIR_MT : 1, skip = [four ? 1 : 2];
+  const part = forged(mt, 0x2804, ros, { skip }), full = forged(mt, 0x2804, ros), m = H.keyOf(full[0].d);
+  const r1 = first(part, mt, ros, null, script);
   const r2 = run(part, advance(r1.state, GRACE + 60000), null, script);
   const r3 = run(part, advance(r2.state, 60000), null, script);
   const r4 = run(full, advance(r3.state, 60000), null, script);
@@ -152,23 +168,35 @@ function neverThenLate(script) {
 
 // ---- [4] the seat never writes (or writes too late) ----
 { try {
-  const { m, r1, r2, r3, r4, r5 } = neverThenLate();
-  T('[4] run 1: held, nobody flagged', fs3(r1, R3) === '0/0/0' && /nobody flagged yet \(Q282\)/.test(r1.out));
-  T('[4] past the grace on a complete read: the old path -- the writers read are flagged (A and B), no strike',
-    fs3(r2, R3) === '1/1/0' && !strikesOf(r2, A) && new RegExp('gamble accusation ' + m + ': not counted \\(one writer names him; seat\\(s\\) 2 still wrote no record past the grace\\)').test(r2.out),
-    fs3(r2, R3) + ' ' + r2.out.slice(-600));
-  // the old code, the same records, one complete read: the same two flags
-  const old = first(forged(1, 0x2804, R3, { skip: [2], noTag: true }), 1, R3);
-  T('[4] ... the same flags as the same records without the tag (the old path, nothing held)', fs3(old, R3) === fs3(r2, R3) && !/gamble accusation/.test(old.out), fs3(old, R3));
+  const { m, r1, r2, r3, r4, r5 } = neverThenLate(null, true);
+  T('[4] run 1: held, nobody flagged', fs3(r1, R4) === '0/0/0/0' && /nobody flagged yet \(Q282\)/.test(r1.out), fs3(r1, R4) + ' ' + r1.out.slice(-600));
+  T('[4] past the grace on a complete read: the old path -- the writers read are flagged (A, C and D), no strike',
+    fs3(r2, R4) === '1/0/1/1' && !strikesOf(r2, A) && new RegExp('gamble accusation ' + m + ': not counted \\(the writers who name him queued as 1 unit; seat\\(s\\) 1 still wrote no record past the grace\\)').test(r2.out),
+    fs3(r2, R4) + ' ' + r2.out.slice(-600));
+  // the old code, the same records, one complete read: the same three flags
+  const old = first(forged(PAIR_MT, 0x2804, R4, { skip: [1], noTag: true }), PAIR_MT, R4);
+  T('[4] ... the same flags as the same records without the tag (the old path, nothing held)', fs3(old, R4) === fs3(r2, R4) && !/gamble accusation/.test(old.out), fs3(old, R4));
   T('[4] one more run: the old path at once (no new hold, the stamp kept), no second flag',
-    fs3(r3, R3) === '1/1/0' && !/not counted yet/.test(r3.out) && /still wrote no record past the grace/.test(r3.out) && stampOf(r3, m) > 0 && stampOf(r3, m) === stampOf(r2, m) - 60000,
-    fs3(r3, R3) + ' ' + r3.out.slice(-600));
+    fs3(r3, R4) === '1/0/1/1' && !/not counted yet/.test(r3.out) && /still wrote no record past the grace/.test(r3.out) && stampOf(r3, m) > 0 && stampOf(r3, m) === stampOf(r2, m) - 60000,
+    fs3(r3, R4) + ' ' + r3.out.slice(-600));
   T('[4] the record arrives after all: a strike on the host (gs 1), the flags of the earlier run stay',
-    strikesOf(r4, A) === 1 && (spOf(r4, A).gs | 0) === 1 && fs3(r4, R3) === '1/1/0' && !stampOf(r4, m), fs3(r4, R3) + ' ' + r4.out.slice(-600));
+    strikesOf(r4, A) === 1 && (spOf(r4, A).gs | 0) === 1 && fs3(r4, R4) === '1/0/1/1' && !stampOf(r4, m), fs3(r4, R4) + ' ' + r4.out.slice(-600));
   T('[4] ... logged as flagged on an earlier run, not "only he is flagged"',
     /-> strike, verdict free; the key was flagged on an earlier run \(its writers then\), nobody flagged again/.test(r4.out) && !/only he is flagged/.test(r4.out), r4.out.slice(-600));
-  T('[4] the key off the shards on a complete read: no stamp left, no flag added', !stampOf(r5, m) && fs3(r5, R3) === '1/1/0');
+  T('[4] the key off the shards on a complete read: no stamp left, no flag added', !stampOf(r5, m) && fs3(r5, R4) === '1/0/1/1');
 } catch (e) { bad('[4] threw: ' + (e && e.stack)); } }
+
+// ---- [4b] the same on a 3P FFA: the old path with two writers read is a dispute of two voices (Q291) ----
+{ try {
+  const { m, r1, r2, r3, r4 } = neverThenLate();
+  T('[4b] run 1: held, nobody flagged', fs3(r1, R3) === '0/0/0' && /nobody flagged yet \(Q282\)/.test(r1.out));
+  T('[4b] past the grace on a complete read: the old path, two voices -- nobody flagged (Q291), no strike',
+    fs3(r2, R3) === '0/0/0' && !strikesOf(r2, A) && new RegExp('gamble accusation ' + m + ': not counted \\(one writer names him; seat\\(s\\) 2 still wrote no record past the grace\\)').test(r2.out)
+    && new RegExp('pair-dispute ' + m + ': 2 records of two voices disagree -- nobody flagged').test(r2.out), fs3(r2, R3) + ' ' + r2.out.slice(-600));
+  T('[4b] one more run: the same, nobody flagged', fs3(r3, R3) === '0/0/0' && /still wrote no record past the grace/.test(r3.out), fs3(r3, R3));
+  T('[4b] the record arrives after all: a strike on the host, only he is flagged (the accuser B never was)',
+    strikesOf(r4, A) === 1 && fs3(r4, R3) === '1/0/0' && /-> strike, verdict free; only he is flagged/.test(r4.out), fs3(r4, R3) + ' ' + r4.out.slice(-600));
+} catch (e) { bad('[4b] threw: ' + (e && e.stack)); } }
 
 // ---- [5] every seat wrote: a short count takes the old path at once ----
 { try {
@@ -201,9 +229,11 @@ console.log('-- [7] mutation self-checks --');
   const SRC = H.SRC;
   let nth = 0;
   const writeMutant = (from, to) => { const f = path.join(H.ROOT, '.mutant-gamble-partial-' + process.pid + '-' + (nth++) + '.js'); fs.writeFileSync(f, SRC.replace(from, to)); return f; };
-  const heldFirst = (script) => { const { r1, r2 } = partialThenFull(script); return fs3(r1, R3) === '0/0/0' && fs3(r2, R3) === '1/0/0'; };
-  const stampKept = (script) => { const { r3 } = neverThenLate(script); return !/not counted yet/.test(r3.out) && fs3(r3, R3) === '1/1/0'; };
-  const lateLog = (script) => { const { r4 } = neverThenLate(script); return !/only he is flagged/.test(r4.out) && /nobody flagged again/.test(r4.out); };
+  // (4P with a premade pair, three writers read: on a 3P FFA with two read, the two-voice rule [Q291] flags nobody with or
+  //   without the hold)
+  const heldFirst = (script) => { const { r1, r2 } = partialThenFull4(script); return fs3(r1, R4) === '0/0/0/0' && fs3(r2, R4) === '1/0/0/0'; };
+  const stampKept = (script) => { const { r3 } = neverThenLate(script, true); return !/not counted yet/.test(r3.out) && fs3(r3, R4) === '1/0/1/1'; };
+  const lateLog = (script) => { const { r4 } = neverThenLate(script, true); return !/only he is flagged/.test(r4.out) && /nobody flagged again/.test(r4.out); };
   const allWroteOld = (script) => { const t = forged(TRIO_MT, 0x2808, R4); const r = first(t, TRIO_MT, R4, null, script); return fs3(r, R4) === '1/1/1/1' && !/not counted yet/.test(r.out); };
   const mutants = [
     ['no hold for a short count (Q61 as it was)', 'if (ga.why && ga.absent && ga.absent.length && !signals.gtav[m]) {', 'if (false) {', heldFirst],

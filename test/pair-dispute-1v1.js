@@ -7,21 +7,23 @@
 //           U / S6 (a table naming the winner twice) are held by the roster contest / voided before the flag loop -- nobody
 //           flagged there, before or now
 //   Now (pairDispute1v1 / pairDisputeCount, validate.js): nobody is flagged for the disagreement; a writer whose own record
-//   breaks a bound on its own fields (duration, seat) is flagged alone; the dispute is counted on both players (pd / pdo /
-//   pdk, record-only). Nothing settles, nothing is paid: a 1V1 with two voices cannot be decided, only no longer flags the
-//   honest one (architecture decision 10).
+//   breaks its duration bound is flagged alone (Q292: the seat is the host's, not a bound of the writer's own any more); the
+//   dispute is counted on both players (pd / pdo / pdk, record-only). Nothing settles, nothing is paid: a 1V1 with two voices
+//   cannot be decided, only no longer flags the honest one (architecture decision 10). Since Q291 / Q292 the rule is chosen by
+//   the writers and the tables, not the match type: the other lanes of two (friends' room, endless, bot match) and the host's
+//   reshaped broadcasts are in test/two-voice-dispute.js.
 // Over the REAL validate.js main() against an offline board stub (the harness of test/lone-1v1-spoiled.js):
-//   [1] units: pairDispute1v1 (match types, the anchor, own-field reasons, writers, the table), pairDisputeCount (once per
-//       key, distinct opponents, LOOK, the caps)
+//   [1] units: pairDispute1v1 (any match type since Q291, two writers or a table of two, the duration reason, writers, the
+//       tables), pairDisputeCount (once per key, distinct opponents, LOOK, the caps)
 //   [2] Q289: a clean ranked / quick 1V1 dispute -- nobody flagged, counted once on both, nothing paid; mutant (no Q289 = the
 //       old rule) -> both flagged
-//   [3] Q290: V with the win claimed -- the loser flagged alone, the winner not; mutant (no own-field reasons) -> loser free;
+//   [3] Q290: V with the win claimed -- the loser flagged alone, the winner not; mutant (no duration reason) -> loser free;
 //       U / S6 with the win claimed -- held before the loop, nobody flagged, as before
 //   [4] one loser, three disputes against one honest winner: the winner stays at f 0 and gets no trust tier; mutant -> tier 1
 //   [5] three different opponents: LOOK logged, counted in the summary row, still nobody flagged
 //   [6] what the loser writes cannot move the key back under the old rule (a seat count of 3, another account at his own
 //       seat in his roster, his record twice)
-//   [7] scope: a 3-player brawl, a friends' room and a 2V2 key keep their rules (writers flagged as before)
+//   [7] scope: a 3-player brawl keeps the old rule (every writer flagged); a friends' room 1V1 now takes this rule (Q291)
 //   [8] an old key main already flagged: no flag removed, nothing paid, counted once
 //   [9] two accounts of one owner disputing each other: nothing settles, nothing is paid, nothing to gain
 //   [10] wiring pins
@@ -176,7 +178,7 @@ const MIN = 60000, HOUR = 3600 * 1000;
 const allOk = (rs, n) => rs.length === n && rs.every(r => r.code === 0);
 const last = (rs) => rs[rs.length - 1];
 const outOf = (rs) => rs.map(r => r.out).join('');
-const row289 = (r) => { const m = /\| quick \/ ranked 1V1 keys whose two writers disagree, nobody flagged for it \(Q289\) [^|]*\| ([0-9]+) \/ ([0-9]+) \/ ([0-9]+) \|/.exec(r.summary); return m ? m.slice(1).map(Number) : null; };
+const row289 = (r) => { const m = /\| keys of two voices \(a 1V1, a friends' room \/ endless run \/ bot match of two\) whose writers disagree, nobody flagged for it \(Q289 \/ Q291\) [^|]*\| ([0-9]+) \/ ([0-9]+) \/ ([0-9]+) \|/.exec(r.summary); return m ? m.slice(1).map(Number) : null; };
 const mutant = (from, to, tag) => {
   if (SRC.split(from).length !== 2) { bad(tag + ' mutant: anchor not found exactly once'); return null; }
   const script = path.join(__dirname, '..', '.mutant-pair-dispute-1v1-' + process.pid + '-' + tag.replace(/[^a-z0-9]/gi, '') + '.js');
@@ -209,8 +211,8 @@ const claim = (mt, h, w, lo) => v1settle(mt, h, 1, [w, lo], 1);   // the loser's
   const PD = v.PAIR_DISPUTE;
   T('[1] exported', typeof v.pairDispute1v1 === 'function' && typeof v.pairDisputeCount === 'function' && !!PD);
   if (PD) {   // (without the fix the units are skipped, the runs below still show what it changes)
-  T('[1] PAIR_DISPUTE: 8 opponents kept, keys kept > the shard count (50 + 14), LOOK 3, own reasons duration + seat',
-    PD.OPP_CAP === 8 && PD.KEYS_CAP === 64 && PD.LOOK === 3 && JSON.stringify(PD.OWN) === '["duration","seat"]', JSON.stringify(PD));
+  T('[1] PAIR_DISPUTE: 8 opponents kept, keys kept > the shard count (50 + 14), LOOK 3, own reason the duration only (Q292: the seat is the host\'s)',
+    PD.OPP_CAP === 8 && PD.KEYS_CAP === 64 && PD.LOOK === 3 && JSON.stringify(PD.OWN) === '["duration"]', JSON.stringify(PD));
   // a record as main() hands it to the flag loop: details, writer, decoded roster (seat -> sid)
   const R = (sid, d) => ({ steamID: sid, d, roster: v.decodeRoster(d) });
   const h = 0x2890;
@@ -218,18 +220,24 @@ const claim = (mt, h, w, lo) => v1settle(mt, h, 1, [w, lo], 1);   // the loser's
   const res = (g) => { const x = v.pairDispute1v1(g); return x && { own: x.own.map(o => o.sid + ':' + o.why.join(',')), rest: x.rest.map(o => o.sid).sort(), pair: x.pair && x.pair.slice().sort() }; };
   const WL = [W, L].sort();
   eq('[1] ranked (2) and quick (1) dispute: a pair, nobody own', [res(dispute(2)), res(dispute(1))], [{ own: [], rest: WL, pair: WL }, { own: [], rest: WL, pair: WL }]);
-  eq('[1] other match types (team 3 / 6, endless 7, friends\' room 10, bot 11, quick and ranked with a party bit): not this rule',
-    [3, 6, 7, 10, 11, 0x11, 0x12, 0].map(mt => res(dispute(mt))), [null, null, null, null, null, null, null, null]);
+  eq('[1] Q291 / Q292: every other match type (team 3 / 6, endless 7, friends\' room 10, bot 11, quick and ranked with a party bit, 0) with two voices: a pair, nobody own',
+    [3, 6, 7, 10, 11, 0x11, 0x12, 0].map(mt => res(dispute(mt))), [3, 6, 7, 10, 11, 0x11, 0x12, 0].map(() => ({ own: [], rest: WL, pair: WL })));
   eq('[1] empty / missing group: null', [v.pairDispute1v1([]), v.pairDispute1v1(null)], [null, null]);
-  // no anchor: no two-seat record seating its own writer at seat 0 or 1
+  // no table of two seating its writer: two writers are still two voices (Q292: the seat count and the table are the host's);
+  //   a pair when every table that seats its own writer names both, none when no record seats its writer
   const three = [R(W, rec(0xB1, 2, h, 0, 1, true, [W, L, X])), R(L, rec(0xB1, 2, h, 1, 1, true, [W, L, X], [4000, 7000, 5000]))];
   const notSelf = [R(W, v1settle(2, h, 0, [L, W], 0)), R(L, v1settle(2, h, 1, [L, W], 1))];
-  eq('[1] no anchor (three-seat records; nobody at his own seat): not this rule', [res(three), res(notSelf)], [null, null]);
+  eq('[1] two writers, no table of two (three-seat records naming both; nobody at his own seat): two voices -- a pair / no pair, nobody flagged',
+    [res(three), res(notSelf)], [{ own: [], rest: WL, pair: WL }, { own: [], rest: WL, pair: null }]);
+  const three3 = three.concat([R(X, rec(0xB1, 2, h, 2, 1, true, [W, L, X], [4000, 5000, 7000]))]);
+  eq('[1] three writers on three-seat tables: three voices, not this rule (the old rule)', res(three3), null);
+  eq('[1] one writer\'s own records disagreeing with each other: not two voices, not this rule',
+    res([R(L, v1settle(2, h, 1, [W, L], 1)), R(L, v1settle(2, h, 1, [W, L], 0))]), null);
   const g1 = [R(W, v1settle(2, h, 0, [W, L], 0)), R(L, rec(0xB1, 2, h, 1, 1, true, [W, L, X], [4000, 7000, 5000]))];
-  eq('[1] the loser\'s record says three seats: W\'s record anchors, a pair (his seat count cannot move the key back)', res(g1), { own: [], rest: WL, pair: WL });
+  eq('[1] the loser\'s record says three seats: two voices, a pair (his seat count cannot move the key back)', res(g1), { own: [], rest: WL, pair: WL });
   eq('[1] V: his duration past DUR_CAP -> flagged alone, no pair', res([R(W, v1settle(2, h, 0, [W, L], 0)), R(L, durBad(v1settle(2, h, 1, [W, L], 1)))]), { own: [L + ':duration'], rest: [W], pair: null });
   const seatBad = v1settle(2, h, 1, [W, L], 1); seatBad[5] = 5;
-  eq('[1] his seat outside his own seat count -> flagged alone', res([R(W, v1settle(2, h, 0, [W, L], 0)), R(L, seatBad)]), { own: [L + ':seat'], rest: [W], pair: null });
+  eq('[1] Q292: his seat outside his own seat count (the host hands the joiner his seat) -> nobody flagged, a pair', res([R(W, v1settle(2, h, 0, [W, L], 0)), R(L, seatBad)]), { own: [], rest: WL, pair: WL });
   eq('[1] roster reasons flag nobody (another account at his seat; a name twice): a pair',
     [res([R(W, v1settle(2, h, 0, [W, L], 0)), R(L, v1settle(2, h, 1, [W, X], 1))]), res([R(W, v1settle(2, h, 0, [W, L], 0)), R(L, v1settle(2, h, 1, [W, W], 1))])],
     [{ own: [], rest: WL, pair: WL }, { own: [], rest: WL, pair: WL }]);
@@ -269,8 +277,8 @@ for (const [mt, name] of [[2, 'ranked'], [1, 'quick']]) {
   if (!allOk(rs, 4)) { bad(tag + ': runs ' + rs.map(r => r.code) + ' ' + last(rs).out.slice(-1500)); continue; }
   eq(tag + ': nobody flagged (winner, loser) on any run, the key never in the flag memory', [rs.map(r => fOf(r, W) + fOf(r, L)), rs.some(r => flaggedOf(r).indexOf(m.key) >= 0)], [[0, 0, 0, 0], false]);
   eq(tag + ': counted once on both, each the other\'s opponent', [pdOf(last(rs), W), pdOf(last(rs), L), pdoOf(last(rs), W), pdoOf(last(rs), L)], [1, 1, [v.pid(L)], [v.pid(W)]]);
-  T(tag + ': logged on each run it is read, "(already)" once counted', /pair-dispute [^\n]*: 2 records of a 1V1 disagree -- nobody flagged for the disagreement, counted on both players \(Q289\)/.test(rs[1].out)
-    && /counted on both players \(already\) \(Q289\)/.test(rs[2].out));
+  T(tag + ': logged on each run it is read, "(already)" once counted', /pair-dispute [^\n]*: 2 records of two voices disagree -- nobody flagged for the disagreement, counted on both players \(Q289 \/ Q291\)/.test(rs[1].out)
+    && /counted on both players \(already\) \(Q289 \/ Q291\)/.test(rs[2].out));
   eq(tag + ': summary row (disputes / flagged alone / LOOK)', [row289(rs[1]), row289(rs[2])], [[1, 0, 0], [1, 0, 0]]);
   withMutant(OLD[0], OLD[1], tag, (sc) => {
     const ms = timeline(steps, sc);
@@ -297,7 +305,7 @@ for (const [mt, name] of [[2, 'ranked'], [1, 'quick']]) {
   else {
     eq('[3] V + win claimed: the loser flagged alone (his duration), the winner not', [fOf(last(rs), W), fOf(last(rs), L)], [0, 1]);
     eq('[3] V: no dispute counted (one writer left after his own record)', [pdOf(last(rs), W), pdOf(last(rs), L)], [0, 0]);
-    T('[3] V: logged "flagged alone", summary row', /records of a 1V1 disagree -- nobody flagged for the disagreement, [0-9a-f]+[^\n]*\(duration on his own record\) flagged alone \(Q289\)/.test(rs[1].out)
+    T('[3] V: logged "flagged alone", summary row', /records of two voices disagree -- nobody flagged for the disagreement, [0-9a-f]+[^\n]*\(duration on his own record\) flagged alone \(Q289 \/ Q291\)/.test(rs[1].out)
       && JSON.stringify(row289(rs[1])) === '[1,1,0]', JSON.stringify(row289(rs[1])) + ' ' + (/pair-dispute [^\n]*/.exec(rs[1].out) || [''])[0]);
     withMutant(OLD[0], OLD[1], '3V', (sc) => {
       const ms = timeline(steps, sc);
@@ -305,9 +313,9 @@ for (const [mt, name] of [[2, 'ranked'], [1, 'quick']]) {
       T('[3] V: paid as under the old rule (the start verdict is not this rule\'s)', allOk(ms, 4) && JSON.stringify([paidIn(rs, W), paidIn(rs, L)]) === JSON.stringify([paidIn(ms, W), paidIn(ms, L)]),
         JSON.stringify([paidIn(rs, W), paidIn(rs, L), paidIn(ms, W), paidIn(ms, L)]));
     });
-    withMutant("OWN: ['duration', 'seat'] }", 'OWN: [] }', '3own', (sc) => {
+    withMutant("OWN: ['duration'] }", 'OWN: [] }', '3own', (sc) => {
       const ms = timeline(steps, sc);
-      T('[3] V mutant: no own-field reasons -> the loser goes free of the flag his own record earns', allOk(ms, 4) && fOf(last(ms), L) === 0 && fOf(last(ms), W) === 0, JSON.stringify([fOf(last(ms), W), fOf(last(ms), L)]));
+      T('[3] V mutant: no duration reason -> the loser goes free of the flag his own record earns', allOk(ms, 4) && fOf(last(ms), L) === 0 && fOf(last(ms), W) === 0, JSON.stringify([fOf(last(ms), W), fOf(last(ms), L)]));
     });
   }
   // U / S6 with the win claimed: a table naming the winner twice (and in S6 a start of his on it)
@@ -347,7 +355,7 @@ for (const [mt, name] of [[2, 'ranked'], [1, 'quick']]) {
   if (!allOk(rs, 4)) bad('[5] runs ' + rs.map(r => r.code) + ' ' + last(rs).out.slice(-1500));
   else {
     eq('[5] three opponents: nobody flagged, W counted 3 against 3', [fOf(last(rs), W)].concat(O.slice(0, 3).map(s => fOf(last(rs), s)), [pdOf(last(rs), W), pdoOf(last(rs), W).length]), [0, 0, 0, 0, 3, 3]);
-    T('[5] LOOK logged once (no Steam id in the line), summary row', (outOf(rs).match(/has now disputed 1V1 results with 3 different opponents -- record only, nobody flagged \(Q289\)/g) || []).length === 1
+    T('[5] LOOK logged once (no Steam id in the line), summary row', (outOf(rs).match(/has now disputed results of two with 3 different opponents -- record only, nobody flagged \(Q289 \/ Q291\)/g) || []).length === 1
       && JSON.stringify(row289(rs[1])) === '[3,0,1]' && JSON.stringify(row289(rs[2])) === '[3,0,0]' && !/pair-dispute: 7656/.test(outOf(rs)),
       JSON.stringify([row289(rs[1]), row289(rs[2])]));
   }
@@ -382,10 +390,14 @@ for (const [mt, name] of [[2, 'ranked'], [1, 'quick']]) {
   const re = [r3(X, 0), r3(Y, 1), r3(Z, 2, [4000, 5000, 7000])];
   const rs = timeline([[0, st], [10 * MIN, st.concat(re)]]);
   eq('[7] 3-player quick brawl with one dissenter: every writer flagged once, as before', allOk(rs, 2) && ro.map(s => fOf(last(rs), s)), [1, 1, 1]);
-  // a friends' room (10) with two writers who disagree: both flagged, as before (README: a residual of its own)
+  // a friends' room (10) with two writers who disagree: Q291 -- two voices, nobody flagged, counted on both (was: both flagged)
   const m10 = match(10, 0x28d1, W, L, claim(10, 0x28d1, W, L));
   const r10 = timeline(stepsOf([m10]).slice(0, 2));
-  eq('[7] friends\' room 1V1 dispute: both flagged, as before', allOk(r10, 2) && [fOf(last(r10), W), fOf(last(r10), L), pdOf(last(r10), W)], [1, 1, 0]);
+  eq('[7] friends\' room 1V1 dispute (Q291): nobody flagged, counted on both', allOk(r10, 2) && [fOf(last(r10), W), fOf(last(r10), L), pdOf(last(r10), W)], [0, 0, 1]);
+  withMutant(OLD[0], OLD[1], '7room', (sc) => {
+    const o10 = timeline(stepsOf([m10]).slice(0, 2), sc);
+    eq('[7] friends\' room 1V1 dispute, the old rule: both flagged', allOk(o10, 2) && [fOf(last(o10), W), fOf(last(o10), L)], [1, 1]);
+  });
 }
 
 // ---- [8] an old key main already flagged ----
@@ -427,9 +439,10 @@ for (const [mt, name] of [[2, 'ranked'], [1, 'quick']]) {
   T('[10] the dispute branch: only the own-field writers reach recordFlag, the count dirties the signals, no other write',
     (blk.match(/recordFlag\(/g) || []).length === 1 && /recordFlag\(signals, \[\]\.concat\(\.\.\.pd1\.own\.map\(\(x\) => x\.recs\)\), m, nowMs\)/.test(blk)
     && /if \(cnt\.n\) sigDirty = true;/.test(blk) && !/creditXp|writeLp|postForm|processed\.add|flagPlayer/.test(blk));
-  T('[10] pairDispute1v1 reads its own-field reasons from recordSanityFlags, on match types 1 and 2 only',
-    /if \(mt !== 1 && mt !== 2\) return null;/.test(SRC) && /recordSanityFlags\(r, mt, r\.d\[8\] \| 0\)\) if \(PAIR_DISPUTE\.OWN\.indexOf\(f\) >= 0/.test(SRC));
-  T('[10] summary row', /'\| quick \/ ranked 1V1 keys whose two writers disagree, nobody flagged for it \(Q289\) \/ [\s\S]{0,200}?' \+ PAIR_DISPUTE\.LOOK \+ ' different dispute opponents \(record only\) \| ' \+ s\('pairDispute', 0\) \+ ' \/ ' \+ s\('pairDisputeOwn', 0\) \+ ' \/ ' \+ s\('pairDisputeLook', 0\)/.test(SRC));
+  T('[10] pairDispute1v1 reads its own-field reasons from recordSanityFlags on the base match type, any match type (Q291 / Q292)',
+    !/if \(mt !== 1 && mt !== 2\) return null;/.test(SRC) && /const base = baseMt\(g\[0\]\.d\[2\] \| 0\);/.test(SRC)
+    && /recordSanityFlags\(r, base, r\.d\[8\] \| 0\)\) if \(PAIR_DISPUTE\.OWN\.indexOf\(f\) >= 0/.test(SRC));
+  T('[10] summary row', /'\| keys of two voices \(a 1V1, a friends\\' room \/ endless run \/ bot match of two\) whose writers disagree, nobody flagged for it \(Q289 \/ Q291\) \/ [\s\S]{0,200}?' \+ PAIR_DISPUTE\.LOOK \+ ' different dispute opponents \(record only\) \| ' \+ s\('pairDispute', 0\) \+ ' \/ ' \+ s\('pairDisputeOwn', 0\) \+ ' \/ ' \+ s\('pairDisputeLook', 0\)/.test(SRC));
 }
 
 console.log('=== ' + (failN === 0 ? 'PASS' : 'FAIL') + ' -- ' + failN + ' fail (pair-dispute-1v1) ===');

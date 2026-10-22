@@ -2161,55 +2161,74 @@ function sanitySplit(g) {
   if (keep.length && sanityFlags(keep).length) return whole;
   return { flags, drop, keep };
 }
-// ---- a quick / ranked 1V1 whose two writers disagree (cloud audit Q289 / Q290) ----
+// ---- a key with two voices whose writers disagree (cloud audit Q289 / Q290; any match type since Q291 / Q292) ----
 // A 1V1 has two writers and no third voice. When their records disagree on a field both must carry alike -- the scores, the
 // seat count -- the job cannot tell which one is true: the match stays unsettled (that much a 1V1 cannot avoid), and the
 // whole-group rule flagged BOTH writers once per key. A modded loser who writes a clean record giving himself the win (Q289),
 // or a record of his own the job cannot use with the same claim (Q290: a duration past DUR_CAP and no start of his), kept his
 // loss off his points, and the honest winner lost the win AND took a forgery flag; three such matches against one opponent
 // put that opponent on trust tier 1 (TRUST_T.F1), in matchmaking today on quick (match type 1) as well as ranked.
-// pairDispute1v1(g) takes such a key off the whole-group rule:
-//   - the key is a plain quick or ranked brawl (match type 1 or 2: party bits, teams, friends' rooms, bot matches and endless
-//     keep their rules) and one of its records is a two-seat record that seats its own writer at seat 0 or 1 -- every honest
-//     1V1 record is, so the loser cannot move the key back under the old rule by what he writes himself;
-//   - a writer whose own record fails a bound on its own fields -- a duration past DUR_CAP, a seat outside the record's own
-//     seat count -- is flagged alone, as sanitySplit flags him on a consistent key (Q109; the duration flag Q216 keeps for V).
-//     The roster reasons and a second record of one account flag nobody here: the first are the host's table (Q109 rework 2),
-//     the second proves nothing about which claim is true;
+// The same two voices meet outside matchmaking (Q291): a friends' room of two (type 10), an endless run of two on a seat gate
+// (type 7; strangers from the party board as well), a bot match with two humans (type 11, the bots' seats are empty on the
+// table). And the match type, the seat count and the seat of an honest joiner's record are the HOST's (Q292): the joiner's
+// client takes the party / trio bits, the entry and mode, the seat table and his own seat index from the host's START_GAME
+// (mvp/src/net/mp.js onStartGame) and writes them unchecked -- a modded host who lost and claims the win could add a party
+// bit, a trio bit or an empty third seat to the broadcast, so the key was not "a type 1 / 2 key with a two-seat record" and
+// fell back to the old rule; or hand the joiner a seat index outside the table, so the joiner's record "broke a bound of its
+// own" and he was flagged alone (Q109 counted the seat as the writer's fault).
+// pairDispute1v1(g) takes such a key off the whole-group rule, whatever its match type:
+//   - two voices: exactly two accounts wrote for the key, or two or more did and one of its records seats its own writer, at
+//     a seat inside its own seat count, on a table that names no more than two accounts (an empty seat or a bot's names
+//     nobody; one account's own records disagreeing with each other keep the old rule). The host's broadcast changes the
+//     joiner's match type, seat count, seat and table, never how many accounts write, so neither player moves the key back
+//     under the old rule by the fields the host gives -- only a third account that writes a record of its own does, and the
+//     key then has three voices (the old rule, as for any match of three, unless a record seats its writer on a table of
+//     two);
+//   - a writer whose own record fails the duration bound (past DUR_CAP, or below zero) is flagged alone, as sanitySplit flags
+//     him on a consistent key (Q109; the duration flag Q216 keeps for V). The duration is the writer's own clock (O360); the
+//     seat is not (Q292: the host hands the joiner his seat index), nor are the roster reasons (the host's table, Q109 rework
+//     2); a second record of one account proves nothing about which claim is true -- none of these flag anybody here;
 //   - nobody else is flagged for the disagreement, however many writers are left (on a two-seat table the contest and the
 //     seat gate hold or drop anybody else's record before this point; were one let through, flagging the players for it
 //     would hand him the old harm);
-//   - when exactly two writers are left and they are the two accounts the anchor record's table seats, the dispute is counted
-//     on both (pd += 1 once per key, pdo = the distinct opponents, at most OPP_CAP; pdk = the keys counted, newest KEYS_CAP --
-//     more than the shard count, so a key still on the shards is never counted twice). Record-only, like Q184's l1: no
-//     trust input, no points, no XP, no leave. An account first reaching LOOK different dispute opponents is logged (no id
-//     in the summary) -- the data for a later look, never a verdict: an honest player who meets two modded opponents would
-//     reach it too, and on two writers' word alone the job cannot know who lied (architecture decision 10: let a cheat
-//     through rather than wrong an honest player).
-// Nothing settles here, nothing is paid and nothing moves for anybody: the only change is a flag less. The key ends as any
-// disputed matchmade key does, before and after this: voided at the start verdict once STARTS_MATURITY_MS old (a VOID
-// receipt, CONSOLATION_XP to each writer of a result). A colluding pair gains nothing a dispute did not give it before, and
-// the flags already written stay until they age out (TRUST_F_WINDOW_MS) -- no key is judged again.
-const PAIR_DISPUTE = { OPP_CAP: 8, KEYS_CAP: LEDGER_SHARDS + 14, LOOK: 3, OWN: ['duration', 'seat'] };
+//   - when exactly two writers are left and every record that seats its own writer names both of them on its table (one
+//     such record at least -- so an outside account who writes a table of his own without the player does not make a pair,
+//     whatever the order of the records; a third account the host adds to the table does not stop it), the dispute is
+//     counted on both (pd += 1 once per key, pdo = the distinct opponents, at most OPP_CAP; pdk = the keys counted, newest
+//     KEYS_CAP -- more than the shard count, so a key still on the shards is never counted twice).
+//     Record-only, like Q184's l1: no trust input, no points, no XP, no leave. An account first reaching LOOK different
+//     dispute opponents is logged (no id in the summary) -- the data for a later look, never a verdict: an honest player who
+//     meets two modded opponents would reach it too, and on two writers' word alone the job cannot know who lied
+//     (architecture decision 10: let a cheat through rather than wrong an honest player).
+// Nothing settles here, nothing is paid and nothing moves for anybody: the only change is a flag less. The key ends as a
+// disputed key of its lane does, before and after this: a matchmade one voided at the start verdict once STARTS_MATURITY_MS
+// old (a VOID receipt, CONSOLATION_XP to each writer of a result), a friends' room / bot match / endless run left unsettled
+// (its own lane's rules). A colluding pair gains nothing a dispute did not give it before, and the flags already written stay
+// until they age out (TRUST_F_WINDOW_MS) -- no key is judged again.
+const PAIR_DISPUTE = { OPP_CAP: 8, KEYS_CAP: LEDGER_SHARDS + 14, LOOK: 3, OWN: ['duration'] };
+// the accounts a record's table names (empty seats and bots name nobody) when it seats its own writer inside its own seat
+//   count, else null
+function pairDisputeTable(r) {
+  const s = r.d[5] | 0, pc = r.d[8] | 0, ros = r.roster || {};
+  if (s < 0 || s >= pc || ros[s] == null || String(ros[s]) !== String(r.steamID)) return null;
+  const ids = [];
+  for (const k of Object.keys(ros)) { const x = String(ros[k]); if (ids.indexOf(x) < 0) ids.push(x); }
+  return ids;
+}
 function pairDispute1v1(g) {
   if (!g || !g.length) return null;
-  const mt = g[0].d[2] | 0;
-  if (mt !== 1 && mt !== 2) return null;   // (the match type is in the key)
-  const anchor = g.find((r) => {
-    const s = r.d[5] | 0;
-    return (r.d[8] | 0) === 2 && (s === 0 || s === 1) && r.roster && r.roster[s] != null && String(r.roster[s]) === String(r.steamID);
-  });
-  if (!anchor) return null;
+  const base = baseMt(g[0].d[2] | 0);   // (the match type is in the key)
   const by = new Map();
   for (const r of g) { const s = String(r.steamID); if (!by.has(s)) by.set(s, []); by.get(s).push(r); }
+  const tables = g.map(pairDisputeTable).filter(Boolean);
+  if (by.size < 2 || (by.size !== 2 && !tables.some((t) => t.length <= 2))) return null;   // one writer's own records: not two voices
   const own = [], rest = [];
   for (const [sid, recs] of by) {
     const why = [];
-    for (const r of recs) for (const f of recordSanityFlags(r, mt, r.d[8] | 0)) if (PAIR_DISPUTE.OWN.indexOf(f) >= 0 && why.indexOf(f) < 0) why.push(f);
+    for (const r of recs) for (const f of recordSanityFlags(r, base, r.d[8] | 0)) if (PAIR_DISPUTE.OWN.indexOf(f) >= 0 && why.indexOf(f) < 0) why.push(f);
     (why.length ? own : rest).push({ sid, why, recs });
   }
-  const tbl = [anchor.roster[0], anchor.roster[1]].map((x) => (x != null ? String(x) : ''));
-  const pair = rest.length === 2 && tbl[0] && tbl[1] && tbl[0] !== tbl[1] && rest.every((x) => tbl.indexOf(x.sid) >= 0) ? [rest[0].sid, rest[1].sid] : null;
+  const pair = rest.length === 2 && tables.length && tables.every((t) => rest.every((x) => t.indexOf(x.sid) >= 0)) ? [rest[0].sid, rest[1].sid] : null;
   return { own, rest, pair };
 }
 // the count of one dispute on both accounts of the pair, once per key -> { n: accounts newly counted, look: [sids at LOOK] }
@@ -2840,7 +2859,7 @@ function writeRunSummary() {
       '| records off their start-roster seat, not counted / start keys with a seat claimed twice / start rosters the voters split, no seat gate (Q80) | ' + s('offSeat', 0) + ' / ' + s('disputed', 0) + ' / ' + s('split', 0) + ' |',
       '| endless co-op groups held (records disagree on the roster, Q113) | ' + s('endlessHeld', 0) + ' |',
       '| endless keys without a seat gate whose records disagree, nobody flagged (Q128) | ' + s('endlessUngated', 0) + ' |',
-      '| quick / ranked 1V1 keys whose two writers disagree, nobody flagged for it (Q289) / of them a writer flagged alone for his own record\'s duration or seat / accounts newly at ' + PAIR_DISPUTE.LOOK + ' different dispute opponents (record only) | ' + s('pairDispute', 0) + ' / ' + s('pairDisputeOwn', 0) + ' / ' + s('pairDisputeLook', 0) + ' |',
+      '| keys of two voices (a 1V1, a friends\' room / endless run / bot match of two) whose writers disagree, nobody flagged for it (Q289 / Q291) / of them a writer flagged alone for his own record\'s duration / accounts newly at ' + PAIR_DISPUTE.LOOK + ' different dispute opponents (record only) | ' + s('pairDispute', 0) + ' / ' + s('pairDisputeOwn', 0) + ' / ' + s('pairDisputeLook', 0) + ' |',
       '| start rosters split by a later start / confirmed (Q118) | ' + s('lateSplit', 0) + ' / ' + s('confirmed', 0) + ' |',
       '| contested matchmade keys voided, no start roster / held to maturity (Q127) | ' + s('contestVoid', 0) + ' / ' + s('contestHeldVoid', 0) + ' |',
       "| friends' room / bot match keys no longer held by start records alone, a contest past maturity (Q200) | " + s('contestLifted', 0) + ' |',
@@ -6254,7 +6273,7 @@ function applyGambleAccusations(gr, signals, processed, now, vecOf, opts) {
     if (signals.gtav[m]) { ig.splice(i, 1); continue; }   // struck on an earlier run: the verdict stands, nobody else flagged
     if (ga.why) {
       res.other++;
-      console.log('  gamble accusation ' + m + ': not counted (' + ga.why + ') -- left to the flag rules below (every writer flagged; a quick / ranked 1V1: nobody, Q289)');
+      console.log('  gamble accusation ' + m + ': not counted (' + ga.why + ') -- left to the flag rules below (every writer flagged; a key of two voices: nobody, Q289 / Q291)');
       continue;
     }
     if (ga.absent.length) {
@@ -7049,8 +7068,9 @@ async function main() {
       console.log('  ungated-mismatch ' + m + ': ' + g.length + ' records disagree on an endless key without a seat gate -- nobody flagged (Q128)');
       continue;
     }
-    // Q289 / Q290: a quick / ranked 1V1 -- two voices, no majority: nobody flagged for the disagreement; a writer whose own
-    //   record breaks a bound on its own fields is flagged alone, the two players' dispute is counted on both (record-only)
+    // Q289 / Q290 / Q291 / Q292: two voices (a 1V1, a friends' room / endless run / bot match of two), no majority: nobody
+    //   flagged for the disagreement; a writer whose own record's duration breaks its bound is flagged alone, the two
+    //   players' dispute is counted on both (record-only)
     const pd1 = pairDispute1v1(g);
     if (pd1) {
       RUN.pairDispute = (RUN.pairDispute | 0) + 1;
@@ -7063,11 +7083,11 @@ async function main() {
       if (pd1.pair) {
         cnt = pairDisputeCount(signals, pd1.pair, m, nowMs);
         if (cnt.n) sigDirty = true;
-        for (const sid of cnt.look) { RUN.pairDisputeLook = (RUN.pairDisputeLook | 0) + 1; console.log('  pair-dispute: ' + plog(sid) + ' has now disputed 1V1 results with ' + PAIR_DISPUTE.LOOK + ' different opponents -- record only, nobody flagged (Q289)'); }
+        for (const sid of cnt.look) { RUN.pairDisputeLook = (RUN.pairDisputeLook | 0) + 1; console.log('  pair-dispute: ' + plog(sid) + ' has now disputed results of two with ' + PAIR_DISPUTE.LOOK + ' different opponents -- record only, nobody flagged (Q289 / Q291)'); }
       }
-      console.log('  pair-dispute ' + m + ': ' + g.length + ' records of a 1V1 disagree -- nobody flagged for the disagreement'
+      console.log('  pair-dispute ' + m + ': ' + g.length + ' records of two voices disagree -- nobody flagged for the disagreement'
         + (pd1.own.length ? ', ' + pd1.own.map((x) => plog(x.sid) + ' (' + x.why.join(',') + ' on his own record)').join(', ') + ' flagged alone' : '')
-        + (pd1.pair ? ', counted on both players' + (cnt && !cnt.n ? ' (already)' : '') : '') + ' (Q289)');
+        + (pd1.pair ? ', counted on both players' + (cnt && !cnt.n ? ' (already)' : '') : '') + ' (Q289 / Q291)');
       continue;
     }
     if (recordFlag(signals, g, m, nowMs)) sigDirty = true;
@@ -10199,7 +10219,7 @@ Object.assign(module.exports, { flagPlayer, flagsInWindow, stampLegacyFlags, TRU
 Object.assign(module.exports, { noteOwnStarts, hasOwnStart, OWN_START_CAP });   // cloud audit Q69 own-record evidence for leaver verdicts
 Object.assign(module.exports, { leaverXpRecordOnlyUntil, LEAVER_XP_RECORD_ONLY, LEAVER_XP_RECORD_ONLY_MAX_MS });   // M194 / W57 demo Next Fest: leaves recorded, XP not discounted
 Object.assign(module.exports, { NL_OPP_CAP, NL_REPEAT });   // cloud audit Q161 named-only losing seats counted on the account
-Object.assign(module.exports, { PAIR_DISPUTE, pairDispute1v1, pairDisputeCount });   // cloud audit Q289 / Q290 a quick / ranked 1V1 whose two writers disagree
+Object.assign(module.exports, { PAIR_DISPUTE, pairDispute1v1, pairDisputeTable, pairDisputeCount });   // cloud audit Q289 / Q290 / Q291 / Q292 a key of two voices whose writers disagree
 Object.assign(module.exports, { ffaPlaceOf, ffaLowerHalf });   // cloud audit Q174 named-only lower-half FFA seats counted on the account
 Object.assign(module.exports, { leaveConfirmHold, startRosterGaps, LEAVE_CONFIRM_MS, LEAVE_CONFIRM_MIN_MS });   // cloud audit Q121 leave confirmation
 Object.assign(module.exports, { LATE_RESULT_MS, LATE_CAP, lateShadow });   // cloud audit Q228 a convicted leave whose own result comes in late

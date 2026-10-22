@@ -13,7 +13,7 @@
 //   [6] wiring pins: every write of f goes through flagPlayer; trustPlan reads flagsInWindow; main stamps after load
 //   [7] REAL validate.js main() over an offline board stub (test/team2-lone-dissent.js harness):
 //       a) one inconsistent group on the shards for 92 days (three runs 46 days apart) -> one flag each, no tier write
-//       b) three flagged groups -> tier 1 written; 91 days of play later, no new flag -> both board entries deleted
+//       b) three flagged groups -> tier 1 written; 91 days of play later, no new flag -> every board entry deleted
 //       c) a legacy f=3 row (no stamps) on tier 1: the first run stamps and persists it (tier kept), 91 days later deleted
 const { spawnSync } = require('child_process');
 const fs = require('fs'), path = require('path'), os = require('os');
@@ -214,12 +214,14 @@ function between(state, ms) {
   return files;
 }
 const sidPair = (sid) => { const b = BigInt(sid); return [Number(b & 0xFFFFFFFFn) | 0, Number((b >> 32n) & 0xFFFFFFFFn) | 0]; };
-// a friends'-room 2P settle record (type 10); alt = seat 1's copy disagrees on the score vector. Two writers who disagree
-//   are flagged once each; on a quick / ranked 1V1 they no longer are (Q289, test/pair-dispute-1v1.js), so this fixture
-//   (a matchmade quick 1V1 before) is a friends' room now -- the flag bookkeeping it tests is the same
-function mm(hash, seat, alt) {
-  const d = [0xB1, 3, 10, hash | 0, 1234, seat, seat === 0 ? 1 : 2, (6 << 1) | (seat === 0 ? 1 : 0), 2, 720, 9000, alt ? 4001 : 4000, 0];
-  for (const s of [A, B]) { const p = sidPair(s); d.push(p[0], p[1]); }
+// a friends'-room 3P settle record (type 10); each seat's copy disagrees on its own score (seat s adds 1 to seat s's score).
+//   Three writers who disagree are flagged once each. Two voices no longer are -- a quick / ranked 1V1 (this fixture first,
+//   Q289, test/pair-dispute-1v1.js), a friends' room of two (this fixture next, Q291, test/two-voice-dispute.js) -- so this
+//   fixture is a friends' room of three now; the flag bookkeeping it tests is the same
+function mm(hash, seat) {
+  const sc = [9000, 4000, 3000]; if (seat) sc[seat] += 1;
+  const d = [0xB1, 3, 10, hash | 0, 1234, seat, seat + 1, (6 << 1) | (seat === 0 ? 1 : 0), 3, 720].concat(sc, [0]);
+  for (const s of [A, B, C]) { const p = sidPair(s); d.push(p[0], p[1]); }
   return d;
 }
 function boardsWith(recs, trust) {
@@ -228,33 +230,33 @@ function boardsWith(recs, trust) {
   const used = {};
   for (const r of recs) { used[r.sid] = used[r.sid] || 0; boards[used[r.sid]++].entries.push({ steamID: r.sid, score: 1, details: r.d }); }
   boards.push({ id: 5, name: 'progress', entries: [] }, { id: 6, name: 'rating', entries: [] },
-    { id: 7, name: 'points', entries: [{ steamID: A, score: 2000 }, { steamID: B, score: 2000 }] }, { id: 8, name: 'cp_bank', entries: [] },
+    { id: 7, name: 'points', entries: [{ steamID: A, score: 2000 }, { steamID: B, score: 2000 }, { steamID: C, score: 2000 }] }, { id: 8, name: 'cp_bank', entries: [] },
     { id: 9, name: 'trust_tier', entries: Object.keys(trust || {}).map(sid => ({ steamID: sid, score: trust[sid] })) });
   return boards;
 }
-const flaggedPair = (hash) => [{ sid: A, d: mm(hash, 0) }, { sid: B, d: mm(hash, 1, true) }];
+const flaggedTrio = (hash) => [{ sid: A, d: mm(hash, 0) }, { sid: B, d: mm(hash, 1) }, { sid: C, d: mm(hash, 2) }];
 const trustWrites = (r) => r.posts.filter(p => /SetLeaderboardScore/.test(p.url) && /leaderboardid=9(&|$)/.test(p.body)).map(p => /steamid=([0-9]+)/.exec(p.body)[1] + '=' + /score=(-?[0-9]+)/.exec(p.body)[1]).sort();
 const trustDeletes = (r) => r.posts.filter(p => /DeleteLeaderboardScore/.test(p.url) && /leaderboardid=9(&|$)/.test(p.body)).map(p => /steamid=([0-9]+)/.exec(p.body)[1]).sort();
 const rowOf = (r, sid) => (((r.state.SIGNALS_FILE || {}).players || {})[v.pid(sid)] || {});
-const AB = [A, B].sort().join(' ');
+const ABC = [A, B, C].sort().join(' ');
 { // [7a]
-  const recs = flaggedPair(0x7A01);
+  const recs = flaggedTrio(0x7A01);
   const r1 = runCron(boardsWith(recs), {});
   const r2 = runCron(boardsWith(recs), between(r1.state, 46 * DAY));
   const r3 = runCron(boardsWith(recs), between(r2.state, 46 * DAY));
   T('[7a] three runs exit 0', r1.code === 0 && r2.code === 0 && r3.code === 0, [r1.code, r2.code, r3.code].join('/') + ' ' + r3.out.slice(-300));
-  T('[7a] first run: one flag each, keyed by the match', rowOf(r1, A).f === 1 && rowOf(r1, B).f === 1 && Object.keys(rowOf(r1, A).fm || {}).length === 1);
-  T('[7a] 92 days of the same records on the shards: still one flag each', rowOf(r3, A).f === 1 && rowOf(r3, B).f === 1, rowOf(r3, A).f + '/' + rowOf(r3, B).f);
+  T('[7a] first run: one flag each, keyed by the match', [A, B, C].every((s) => rowOf(r1, s).f === 1) && Object.keys(rowOf(r1, A).fm || {}).length === 1);
+  T('[7a] 92 days of the same records on the shards: still one flag each', [A, B, C].every((s) => rowOf(r3, s).f === 1), [A, B, C].map((s) => rowOf(r3, s).f).join('/'));
   T('[7a] no trust write on any run', trustWrites(r1).length + trustWrites(r2).length + trustWrites(r3).length === 0, trustWrites(r3).join(' '));
 }
 { // [7b]
-  const recs = [].concat(flaggedPair(0x7B01), flaggedPair(0x7B02), flaggedPair(0x7B03));
+  const recs = [].concat(flaggedTrio(0x7B01), flaggedTrio(0x7B02), flaggedTrio(0x7B03));
   const r1 = runCron(boardsWith(recs), {});
-  T('[7b] three flagged matches -> tier 1 written for both', trustWrites(r1).join(' ') === [A + '=1', B + '=1'].sort().join(' '), trustWrites(r1).join(' ') + ' ' + r1.out.slice(-300));
-  const r2 = runCron(boardsWith([], { [A]: 1, [B]: 1 }), between(r1.state, 89 * DAY));
+  T('[7b] three flagged matches -> tier 1 written for all three', trustWrites(r1).join(' ') === [A + '=1', B + '=1', C + '=1'].sort().join(' '), trustWrites(r1).join(' ') + ' ' + r1.out.slice(-300));
+  const r2 = runCron(boardsWith([], { [A]: 1, [B]: 1, [C]: 1 }), between(r1.state, 89 * DAY));
   T('[7b] day 89, still playing: nothing changes', r2.code === 0 && trustWrites(r2).length === 0 && trustDeletes(r2).length === 0, trustDeletes(r2).join(' '));
-  const r3 = runCron(boardsWith([], { [A]: 1, [B]: 1 }), between(r1.state, 91 * DAY));
-  T('[7b] day 91, still playing, no new flag: both entries deleted', r3.code === 0 && trustDeletes(r3).join(' ') === AB, 'deletes [' + trustDeletes(r3).join(' ') + '] ' + r3.out.slice(-300));
+  const r3 = runCron(boardsWith([], { [A]: 1, [B]: 1, [C]: 1 }), between(r1.state, 91 * DAY));
+  T('[7b] day 91, still playing, no new flag: every entry deleted', r3.code === 0 && trustDeletes(r3).join(' ') === ABC, 'deletes [' + trustDeletes(r3).join(' ') + '] ' + r3.out.slice(-300));
   T('[7b] the lifetime count is kept (f=3)', rowOf(r3, A).f === 3);
 }
 { // [7c]

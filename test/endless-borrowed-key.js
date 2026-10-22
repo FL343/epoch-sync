@@ -39,8 +39,10 @@
 //       hold removed / remembered word not checked / this run's starts not checked / own word not required / testimony not
 //       remembered / endless keys register on a partial read / off-seat writers flagged by the seat gate again, Q124)
 //   [7] Q128 (REVIEW-2 of Q113, A5 / A5b): an outside settle that disagrees on an endless key without a seat gate (split at
-//       registration, split by a later start inside the provisional window, never registered) flags nobody; control: a gated
-//       key whose own players disagree still flags both; wiring; mutant (the endless skip removed -> V and W flagged again)
+//       registration, split by a later start inside the provisional window, never registered) flags nobody; a gated key whose
+//       two players disagree flags nobody either since Q291 (two voices, the dispute counted on both), a gated key of three
+//       whose players disagree still flags them all; wiring; mutant (the endless skip removed -> on a run of three, V and W
+//       flagged again)
 // State isolation is structural (every *_FILE var scanned and redirected, cwd = temp dir), like test/endless-own-record.js.
 const { spawnSync } = require('child_process');
 const fs = require('fs'), path = require('path'), os = require('os');
@@ -670,14 +672,17 @@ console.log('-- [6] mutation self-checks --');
 //   inconsistent and V and W were flagged once each (the run does not settle while his record stays). Now nobody is
 //   flagged on an endless key the gate does not cover; on a gated key a player's own disagreeing result still flags both.
 const xSettle = (h, ros, seat, sc) => { const d = settle7(h, seat, ros, 0, { endDepth: 3 }); d[10 + seat] = sc; return d; };
-function ungatedA5(script, late) {
-  const [V, W, X] = R4(700), h = late ? 0x1702 : 0x1701, S = starts(h, [V, W]);
-  const PX = [{ sid: X, d: start7(h, 1, [V, X]) }];
-  const F = settles(h, [V, W], 0, null, { endDepth: 3 }).concat([{ sid: X, d: xSettle(h, [V, X], 1, 999) }]);
+// three: a run of V, W and Y (R4's fourth id), X's start and settle on a table of three [V, X, Y] -- no table of two in the key,
+//   so only the Q128 skip keeps the players free (on a run of two the two-voice rule, Q291, frees them as well)
+function ungatedA5(script, late, three) {
+  const [V, W, X, Y] = R4(three ? 740 : 700), h = (late ? 0x1702 : 0x1701) + (three ? 0x40 : 0), ros = three ? [V, W, Y] : [V, W], xr = three ? [V, X, Y] : [V, X];
+  const S = starts(h, ros);
+  const PX = [{ sid: X, d: start7(h, 1, xr) }];
+  const F = settles(h, ros, 0, null, { endDepth: 3 }).concat([{ sid: X, d: xSettle(h, xr, 1, 999) }]);
   // A5: X's start is read with theirs (split at registration); A5b: a run later, inside the provisional window (Q118)
   const steps = late ? [S, S.concat(PX), S.concat(PX, F), S.concat(PX, F), S.concat(PX, F)] : [S.concat(PX), S.concat(PX, F), S.concat(PX, F), S.concat(PX, F)];
-  const p = timeline(steps, [V, W], { script, gaps: late ? [0, 4 * 60000] : null });
-  return { p, V, W, X, h };
+  const p = timeline(steps, ros, { script, gaps: late ? [0, 4 * 60000] : null });
+  return { p, V, W, X, Y, h };
 }
 const seatGateRosterOf = (p, h) => v.seatGateRoster(pendOf(p.last, h));
 const ungatedN = (p) => sumOf(p, /\| endless keys without a seat gate whose records disagree, nobody flagged \(Q128\) \| ([0-9]+) \|/);
@@ -692,6 +697,13 @@ for (const late of [false, true]) {
   T(tag + ' nothing settles while X\'s record stays, nobody charged', !processedOf(p.last).has(keyOf(h)) && [V, W, X].every(s => cpWrites(p, s).length === 0));
 }
 {
+  // [7] A5 on a run of three (the shape of the mutant below): the same answer from the Q128 skip alone
+  const { p, V, W, X, Y, h } = ungatedA5(null, false, true);
+  T('[7] A5 three: split at registration, the disagreeing group logged, nobody flagged (V, W, X, Y)', allZero(p) && (pendOf(p.last, h) || {}).split === 1
+    && /ungated-mismatch [^\n]*nobody flagged \(Q128\)/.test(p.all) && !/pair-dispute /.test(p.all) && [V, W, X, Y].every(s => flagsOf(p, s) === 0),
+    JSON.stringify([V, W, X, Y].map(s => flagsOf(p, s))) + ' ' + p.all.slice(-600));
+}
+{
   // [7c] no start read at all (the key never registered): the same outside settle, the same answer
   const [V, W, X] = R4(710), h = 0x1711;
   const F = settles(h, [V, W], 0, null, { endDepth: 3 }).concat([{ sid: X, d: xSettle(h, [V, X], 1, 999) }]);
@@ -700,13 +712,27 @@ for (const late of [false, true]) {
     JSON.stringify([V, W, X].map(s => flagsOf(p, s))) + ' ' + JSON.stringify(pendOf(p.last, h)));
 }
 {
-  // [7d] control: a gated key (V and W's starts agree) where W writes a result of his own that disagrees: both flagged once
+  // [7d] a gated key (V and W's starts agree) where W writes a result of his own that disagrees. Before Q291 both were flagged
+  //   once (the whole-group rule); a run of two has two voices and nobody to tell which is true: nobody flagged, the dispute
+  //   counted on both (record only), nothing settles -- and it is the two-voice rule that answers, not the Q128 skip
   const [V, W] = R4(720), h = 0x1721, S = starts(h, [V, W]);
   const F = [{ sid: V, d: settle7(h, 0, [V, W], 0, { endDepth: 3 }) }, { sid: W, d: xSettle(h, [V, W], 1, 999) }];
   const p = timeline([S, S.concat(F), S.concat(F)], [V, W]);
-  T('[7d] control: a gated key whose players disagree still flags both once, nothing settles', allZero(p) && !!seatGateRosterOf(p, h)
-    && flagsOf(p, V) === 1 && flagsOf(p, W) === 1 && ungatedN(p) === 0 && !processedOf(p.last).has(keyOf(h)),
-    JSON.stringify([flagsOf(p, V), flagsOf(p, W)]) + ' ' + JSON.stringify(pendOf(p.last, h)));
+  const pdOf = (sid) => (((sig(p).players || {})[v.pid(sid)]) || {}).pd | 0;
+  T('[7d] a gated key whose two players disagree: nobody flagged (Q291), the dispute counted on both, nothing settles', allZero(p) && !!seatGateRosterOf(p, h)
+    && flagsOf(p, V) === 0 && flagsOf(p, W) === 0 && pdOf(V) === 1 && pdOf(W) === 1 && ungatedN(p) === 0
+    && new RegExp('pair-dispute ' + keyOf(h) + ': ').test(p.all) && !processedOf(p.last).has(keyOf(h)),
+    JSON.stringify([flagsOf(p, V), flagsOf(p, W), pdOf(V), pdOf(W)]) + ' ' + JSON.stringify(pendOf(p.last, h)));
+}
+{
+  // [7e] control: a gated key of three (V, W and Y's starts agree) where W writes a result of his own that disagrees: three
+  //   voices, the whole-group rule as before -- every writer flagged once, nothing settles
+  const [V, W, Y] = R4(730), h = 0x1731, S = starts(h, [V, W, Y]);
+  const F = settles(h, [V, W, Y], 0, [0, 2], { endDepth: 3 }).concat([{ sid: W, d: xSettle(h, [V, W, Y], 1, 999) }]);
+  const p = timeline([S, S.concat(F), S.concat(F)], [V, W, Y]);
+  T('[7e] control: a gated key of three whose players disagree still flags all three once, nothing settles', allZero(p) && !!seatGateRosterOf(p, h)
+    && [V, W, Y].every(s => flagsOf(p, s) === 1) && ungatedN(p) === 0 && !/pair-dispute /.test(p.all) && !processedOf(p.last).has(keyOf(h)),
+    JSON.stringify([V, W, Y].map(s => flagsOf(p, s))) + ' ' + JSON.stringify(pendOf(p.last, h)));
 }
 {
   T('[7] wiring: after the settled-key skip, before recordFlag; summary row', /RUN\.lateMismatch = [\s\S]{0,300}?continue;\n\s+\}\n[\s\S]{0,900}?if \(isEndlessMt\(g\[0\]\.d\[2\] \| 0\) && !seatGateRoster\(startsPending\[m\]\)\) \{[\s\S]{0,300}?continue;\n\s+\}\n(?:[\s\S]{0,400}?const pd1 = pairDispute1v1\(g\);[\s\S]{0,1600}?continue;\n\s+\}\n)?\s+if \(recordFlag\(signals, g, m, nowMs\)\)/.test(SRC)
@@ -717,8 +743,8 @@ for (const late of [false, true]) {
     const script = path.join(__dirname, '..', '.mutant-endless-borrowed-q128-' + process.pid + '.js');
     try {
       fs.writeFileSync(script, SRC.replace(from, 'if (false) {'));
-      const x = ungatedA5(script, false);
-      T('[7] mutant: the endless skip removed -> V and W flagged again', flagsOf(x.p, x.V) === 1 && flagsOf(x.p, x.W) === 1, JSON.stringify([flagsOf(x.p, x.V), flagsOf(x.p, x.W)]));
+      const x = ungatedA5(script, false, true);
+      T('[7] mutant: the endless skip removed -> on a run of three, V and W flagged again', flagsOf(x.p, x.V) === 1 && flagsOf(x.p, x.W) === 1, JSON.stringify([flagsOf(x.p, x.V), flagsOf(x.p, x.W)]));
     } finally { try { fs.unlinkSync(script); } catch (e) {} }
   }
 }
