@@ -1551,14 +1551,21 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
     // forfeits the symbolic credit). Structurally-impossible lone records (sanity bounds) and
     // roster outsiders earn nothing. Q294: on a key the host's match header held, a record whose only reasons are header
     // reasons is the host's doing -- its writer is consoled unless his own fields break a bound (the gate's own list).
-    const hdrOwn = hdr && groups[m] ? new Set(sanityWriterFaults(groups[m]).filter(sanityDropFlags).map((x) => x.sid)) : null;
+    // cloud audit Q297: on every key that reaches this void, not only a held one. A modded host who sends a bad header and
+    //   writes no result of his own (a 1V1: one writer is no consistent group, so the key is never held), or writes scores
+    //   of his own that disagree (two voices, Q291), left the honest joiner without the 50 he got from the same match on an
+    //   honest header. A header reason on a roster member's record is the host's broadcast whoever is left to write (the
+    //   type code with its party / trio bits is part of the key, so the starts that seated the roster carry it too); a
+    //   writer gains nothing by putting one on his own record (a seat count of his own only makes his voice disagree, and a
+    //   clean record pays the same 50 here), and the roster takes two start votes.
+    const ownFault = groups[m] ? new Set(sanityWriterFaults(groups[m]).filter(sanityDropFlags).map((x) => x.sid)) : null;
     if (groups[m]) for (const r of groups[m]) {
       const s = String(r.steamID);
       if (consoledSids.indexOf(s) >= 0) continue;
       const h = pid(s);
       if (!Object.keys(p.roster).some((seat) => p.roster[seat] === h)) continue;   // not on the attested roster
       const rf = sanityFlags([r]);
-      if (rf.length && !(hdr && !hdrOwn.has(s) && rf.every((f) => SANITY_HEADER_SLUGS.indexOf(f) >= 0))) continue;
+      if (rf.length && !(!ownFault.has(s) && rf.every((f) => SANITY_HEADER_SLUGS.indexOf(f) >= 0))) continue;
       consoledSids.push(s);
     }
     const unatt = Object.keys(p.roster).map((seat) => p.roster[seat]).filter((h) => p.settled.indexOf(h) < 0 && !hasOwnStart(p, h) && !confState[h + '|' + m]);

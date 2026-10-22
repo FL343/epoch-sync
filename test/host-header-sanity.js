@@ -184,7 +184,7 @@ const two = [H, J], three = [H, J, X];
 const BEFORE = {
   header: ['      const hh = sanityHeaderHeld(g, sane, sp);\n', '      const hh = null;\n'],   // the whole-group rule flags every writer
   held: ['  if (heldKeys && heldKeys.size) consistentKeys = new Set([...consistentKeys].filter((k) => !heldKeys.has(k)));   // Q294: held keys are the verdict\'s\n', ''],   // a held key's verdict waits for its records to go
-  console: ['if (rf.length && !(hdr && !hdrOwn.has(s) && rf.every((f) => SANITY_HEADER_SLUGS.indexOf(f) >= 0))) continue;', 'if (rf.length) continue;'],   // header reasons fail the consolation
+  console: ['if (rf.length && !(!ownFault.has(s) && rf.every((f) => SANITY_HEADER_SLUGS.indexOf(f) >= 0))) continue;', 'if (rf.length) continue;'],   // header reasons fail the consolation (Q297: on every voided key)
   spare: ["      if (hdr) { hdrSpared.push(h.slice(0, 8)); continue; }   // Q294: the host's match header broke the match for everyone in it\n", ''],   // a held key convicts
   mark: ['    if (heldKeys && heldKeys.has(m) && p.hh !== 1) p.hh = 1;   // Q294: the host\'s match header held it (cumulative)\n', ''],   // the mark is not kept
 };
@@ -355,7 +355,7 @@ for (const [name, mt, ws, honest, opt] of HEADER_CASES) {
   T('[6] reconcileStarts: the mark is kept on the entry (after the lane exemption), the spare comes after the confession and exit-note checks, the consolation relaxes header reasons only',
     /\n    if \(heldKeys && heldKeys\.has\(m\) && p\.hh !== 1\) p\.hh = 1;[^\n]*\n    if \(now - \(p\.t0 \|\| 0\) < maturityMs\) continue;/.test(vb)
       && /p\.noted\.indexOf\(h\) >= 0\) \{ spared\.push[^\n]*\n      if \(hdr\) \{ hdrSpared\.push/.test(vb)
-      && /if \(rf\.length && !\(hdr && !hdrOwn\.has\(s\) && rf\.every\(\(f\) => SANITY_HEADER_SLUGS\.indexOf\(f\) >= 0\)\)\) continue;/.test(vb));
+      && /if \(rf\.length && !\(!ownFault\.has\(s\) && rf\.every\(\(f\) => SANITY_HEADER_SLUGS\.indexOf\(f\) >= 0\)\)\) continue;/.test(vb));   // Q297: on every voided key (test/header-consolation.js)
 }
 
 // ---- [7] the void at maturity ----
