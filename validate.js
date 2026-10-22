@@ -72,6 +72,20 @@ const streakPlan = require('./streak-plan.js');
 //     consolation, a redeem debit) moves v to the row it is about to leave, on disk ahead of it: a run that dies once Steam took
 //     that write leaves the next run that row, not the one before it. Past PENDING_W_MAX_MS dropped, warned, like w. (A score
 //     next to a pid tells no more than w / l do, or the XP state's career counts that his public XP row shows.)
+//   ew: { [board]: { v, ts, bd?, tm?, t, n } } -- an endless BEST write that failed (cloud audit Q319; main: ebAfter / ebLay /
+//     ebRetry), per board this job writes a best to (casual solo / duo / trio / quad, classic solo / duo / trio / quad, competitive
+//     solo / duo / trio / quad, the season twins, this week's cup boards): the packed best, the row's details (ts = [0], the team
+//     score or bank; bd = [1], the build; tm = the roster of the team block as pids -- the block holds SteamIDs, never kept here),
+//     the first failure, the tries. Until Q319 such a write was logged and forfeited: the match processed, the board kept the best
+//     before it, a later run between the two went up as a "new best", and the composite rows read from these boards missed it too.
+//     These boards keep a BEST, not a balance, so the waiting value is never written as it stands: it is laid over his row read
+//     this run only where it is higher (both are runs this job settled; a row as high or higher -- a later run of his landed, or
+//     the failed write did land after all -- ends the wait), and what goes out is the higher of the two. Laid, every reader of the
+//     board in this run takes it as his row: a run he settles now beats it or is not written (the comparison every settle makes),
+//     the chain rule and the pacing read it as his settled depth, the composite rows count it. A write of his on that board that
+//     lands at or above it ends the wait; one that fails waits instead (the higher of the two). A quiet run writes it on its own
+//     (ebRetry). Dropped (warned) past PENDING_W_MAX_MS, and when its board is no longer one this job writes (the season turned,
+//     the week closed: those standings were taken without it).
 const PENDING_WRITES_FILE = process.env.PENDING_WRITES_FILE || 'pending-writes.json';
 const CRON_PULSE_LB = process.env.CRON_PULSE_LB || '';   // O480 cron_pulse board name (unset: cron_pulse, cron_pulse_test in a sandbox run; see writePulse)
 const RECEIPT_HOLD_MS = Math.max(0, Number(process.env.RECEIPT_HOLD_MS || 6 * 3600 * 1000));
@@ -101,8 +115,9 @@ function lpLastLive(l, now) {
 function loadPendingWrites() {
   try { const o = JSON.parse(fs.readFileSync(PENDING_WRITES_FILE, 'utf8')); return (o && typeof o === 'object' && !Array.isArray(o)) ? o : {}; } catch (e) { return {}; }
 }
-// pure: drop queued receipts past the hold (and beyond the cap), failed writes past the fuse (points w, Q318's XP / CP xw / cw), a
-//   last write past its hold (quietly: its job is done), then empty entries; returns { receipts, writes } dropped
+// pure: drop queued receipts past the hold (and beyond the cap), failed writes past the fuse (points w, Q318's XP / CP xw / cw,
+//   Q319's endless bests ew), a last write past its hold (quietly: its job is done), then empty entries; returns { receipts, writes }
+//   dropped
 function prunePendingWrites(s, now) {
   let dropped = 0, droppedW = 0;
   for (const k of Object.keys(s)) {
@@ -129,6 +144,18 @@ function prunePendingWrites(s, now) {
         console.log('::warning::' + (f === 'xw' ? 'xp' : 'cp') + ' write of ' + String(k).slice(0, 8) + ' dropped after ' + ((w && w.n) | 0) + ' failed tries over ' + Math.round(PENDING_W_MAX_MS / 86400000) + ' days (value ' + (w && w.v) + ', Q318)');
         delete e[f];
       }
+    }
+    if (e && e.ew != null) {   // Q319: the endless best writes that failed, per board, the same fuse
+      const m = (e.ew && typeof e.ew === 'object' && !Array.isArray(e.ew)) ? e.ew : {};
+      for (const b of Object.keys(m)) {
+        const w = m[b];
+        if (!w || typeof w !== 'object' || !Number.isFinite(Number(w.v)) || now - (Number(w.t) || 0) > PENDING_W_MAX_MS) {
+          droppedW++;
+          console.log('::warning::endless best write of ' + String(k).slice(0, 8) + ' on ' + b + ' dropped after ' + ((w && w.n) | 0) + ' failed tries over ' + Math.round(PENDING_W_MAX_MS / 86400000) + ' days (value ' + (w && w.v) + ', Q319)');
+          delete m[b];
+        }
+      }
+      if (Object.keys(m).length) e.ew = m; else delete e.ew;
     }
     if (e && e.l != null && !lpLastLive(e.l, now)) delete e.l;
     if (!e || typeof e !== 'object' || !Object.keys(e).length) delete s[k];
@@ -2825,10 +2852,11 @@ function recordMatchSignals(s, g, parts, rankOf, matchType, isVoid, now) {
 // are semantic (bad key / missing board) and still surface immediately. Writes (postForm*)
 // are single-shot within a run, and a settled match stays processed whether its writes landed
 // or not (nothing settles twice). A points, XP or CP write of the settle that fails waits in the
-// backlog (PENDING_WRITES_FILE: its absolute value, retried next run; points O480, XP / CP Q318); every
+// backlog (PENDING_WRITES_FILE: its absolute value, retried next run; points O480, XP / CP Q318), as does
+// an endless best write of the settle (its best, laid over the row read next run only where higher, Q319); every
 // other failed write is logged and forfeited (until O480 the points write was forfeited too,
-// while this comment said it self-healed; until Q318 the XP and CP writes) -- but a consolation XP write,
-// owed to a later run (Q315, CONSOLE_OWED).
+// while this comment said it self-healed; until Q318 the XP and CP writes, until Q319 the endless bests) -- but a
+// consolation XP write, owed to a later run (Q315, CONSOLE_OWED).
 const transientStatus = (st) => st >= 500 || st === 408 || st === 429;
 const READ_RETRY_MS = Math.max(0, Number(process.env.READ_RETRY_MS || 8000));   // backoff step (env: offline tests only)
 async function getJson(url) {
@@ -2980,6 +3008,7 @@ function writeRunSummary() {
       '| points receipts written / queued for a later write; cron pulse (O480) | ' + s('receipts', 0) + ' / ' + s('receiptsQueued', 0) + '; ' + s('pulse', '-') + ' |',
       '| points rows read without the last write of this job, that write taken instead ([stale-read], O481) | ' + s('staleRead', 0) + ' |',
       '| settle XP / CP writes that failed, waiting for a later run / waiting writes that landed (Q318) | ' + s('rowQueued', 0) + ' / ' + s('rowRetried', 0) + ' |',
+      '| endless best writes that failed, waiting for a later run / waiting writes that landed or were found on the board / dropped, board no longer written (Q319) | ' + s('ebQueued', 0) + ' / ' + s('ebDone', 0) + ' / ' + s('ebDropped', 0) + ' |',
       '| solo segments held by the key policy (other channel / retired key; new this run) | ' + s('keyHeld', 0) + ' (' + s('keyHeldNew', 0) + ') |',
       '| duration | ' + ((Date.now() - (RUN.t0 || Date.now())) / 1000).toFixed(1) + 's |',
       '',
@@ -6967,6 +6996,135 @@ async function main() {
       }
     }
   };
+  // ---- Q319: the endless best writes that failed (backlog ew, see PENDING_WRITES_FILE; test/endless-best-owed.js) ----
+  //   ebBoards: the boards of this run's settle (filled once their reads are done: name, id, best map, write pool, complete read,
+  //   usable this run, the weekly roster mirror); empty on a quiet run. ebLaid: name|sid -> his row and roster mirror before a
+  //   waiting write was laid over them (a seedcap correction of that very run puts them back).
+  const ebBoards = [], ebLaid = new Map();
+  // the boards this job writes a best to in this run (a waiting write meant for any other is dropped): lifetime ladders, the season
+  //   twins from season 1 on, this week's cup boards from the cup's first edition on (never on the playtest channel)
+  const ebNamesNow = (week) => {
+    const out = new Set([ENDLESS_LB, ENDLESS_LB_TRIO, ENDLESS_LB_QUAD, ENDLESS_LB_SOLO, ENDLESS_COMP_LB, ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, ENDLESS_COMP_LB_QUAD,
+      ENDLESS_LB_CLASSIC_SOLO, ENDLESS_LB_CLASSIC_DUO, ENDLESS_LB_CLASSIC_TRIO, ENDLESS_LB_CLASSIC_QUAD]);
+    if (seasonId >= 1) for (const b of [ENDLESS_LB, ENDLESS_LB_TRIO, ENDLESS_LB_QUAD, ENDLESS_LB_SOLO, ENDLESS_COMP_LB, ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, ENDLESS_COMP_LB_QUAD]) out.add(seasonBoardName(b, seasonId));
+    if (!PT_MODE && cupEdition(week) >= 1) for (const b of [ENDLESS_COMP_LB, ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, ENDLESS_COMP_LB_QUAD]) out.add(cupWeekBoardName(b, week));
+    return out;
+  };
+  const ebDrop = (k, name) => {
+    const e = lpBacklog[k];
+    if (!e || !e.ew || typeof e.ew !== 'object') return;
+    delete e.ew[name]; if (!Object.keys(e.ew).length) delete e.ew; if (!Object.keys(e).length) delete lpBacklog[k];
+    backlogDirty = true;
+  };
+  // pid -> sid: the records / starts read this run (sidByPid), else the rows of this run's best boards (built once, when needed)
+  let ebRowNames = null;
+  const ebSid = (k) => {
+    if (sidByPid.has(k)) return sidByPid.get(k);
+    if (!ebRowNames) { ebRowNames = new Map(); for (const d of ebBoards) for (const s of Object.keys(d.best)) { const h = pid(s); if (!ebRowNames.has(h)) ebRowNames.set(h, s); } }
+    return ebRowNames.get(k) || null;
+  };
+  // the write-pool entry a waiting write stands for ({ s, ts, build?, team? }); the team block only when every seat can be named
+  const ebEntry = (k, name, was) => {
+    const w = { s: was.v | 0, ts: was.ts | 0 };
+    if (was.bd != null) w.build = was.bd >>> 0;
+    if (Array.isArray(was.tm) && was.tm.length) {
+      const team = was.tm.map((h) => ebSid(String(h)));
+      if (team.every(Boolean)) w.team = team.map(String);
+      else console.log('  endless best write of ' + String(k).slice(0, 8) + ' on ' + name + ': a seat of its team cannot be named this run -- written without the team block (Q319)');
+    }
+    return w;
+  };
+  // after a write of his on that board (its pool entry): landed at or above the waiting value, the wait ends; failed, the higher of
+  //   the two waits for the next run (already waiting: one more try)
+  const ebAfter = (name, sid, w, landed) => {
+    const k = pid(String(sid)), e = lpBacklog[k], was = e && e.ew && e.ew[name];
+    if (landed) {
+      if (!was || (w.s | 0) < (was.v | 0)) return;
+      RUN.ebDone = (RUN.ebDone | 0) + 1;
+      console.log('  endless best write of ' + plog(sid) + ' on ' + name + ' that failed before (' + (was.n | 0) + ' tries) landed: ' + (w.s | 0) + ' (Q319)');
+      ebDrop(k, name);
+      return;
+    }
+    RUN.ebQueued = (RUN.ebQueued | 0) + 1;
+    if (was && (was.v | 0) >= (w.s | 0)) {
+      was.n = (was.n | 0) + 1; backlogDirty = true;
+      console.log('  endless best write of ' + plog(sid) + ' on ' + name + ' failed again -- ' + (was.v | 0) + ' waits for the next run (try ' + was.n + ', Q319)');
+      return;
+    }
+    const b = lpBacklog[k] = lpBacklog[k] || {};
+    const m = b.ew = (b.ew && typeof b.ew === 'object' && !Array.isArray(b.ew)) ? b.ew : {};
+    const nw = { v: w.s | 0, ts: w.ts | 0 };
+    if (w.build != null) nw.bd = w.build >>> 0;
+    if (Array.isArray(w.team) && w.team.length) nw.tm = w.team.map((s) => pid(String(s)));
+    nw.t = (was && Number(was.t)) || Date.now(); nw.n = ((was && was.n) | 0) + 1;
+    m[name] = nw; backlogDirty = true;
+    console.log('  endless best write of ' + plog(sid) + ' on ' + name + ' failed -- ' + nw.v + ' waits for the next run (try ' + nw.n + ', Q319)');
+  };
+  // after a write pool went out: every entry, by the outcome of its write (rs: mapPool's results in key order; null = none went out)
+  const ebAfterPool = (name, pool, rs) => Object.keys(pool || {}).forEach((sid, i) => ebAfter(name, sid, pool[sid], !!(rs && rs[i] && rs[i].status === 'fulfilled' && rs[i].value)));
+  // a waiting write of his on board d against his row read this run (null: none): higher, it is laid over the row and goes out with
+  //   this run's writes; not higher, the wait is over
+  const ebLay = (k, d, sid, row) => {
+    const was = lpBacklog[k].ew[d.name];
+    if (row != null && (row | 0) >= (was.v | 0)) {
+      RUN.ebDone = (RUN.ebDone | 0) + 1;
+      console.log('  endless best write of ' + plog(sid) + ' on ' + d.name + ' (' + (was.v | 0) + ', ' + (was.n | 0) + ' tries) found on the board: row ' + (row | 0) + ' (Q319)');
+      ebDrop(k, d.name);
+      return;
+    }
+    ebLaid.set(d.name + '|' + sid, { row: row == null ? null : row | 0, team: d.weekTeam ? d.weekTeam[sid] : undefined });
+    d.best[sid] = was.v | 0;
+    d.pool[sid] = ebEntry(k, d.name, was);
+    if (d.weekTeam) d.weekTeam[sid] = d.pool[sid].team ? d.pool[sid].team.slice() : null;
+    console.log('  endless best write of ' + plog(sid) + ' on ' + d.name + ' waits since an earlier run (' + (was.n | 0) + ' tries): ' + (was.v | 0) + ' over the row ' + (row == null ? '(none)' : row | 0) + ', written with this run (Q319)');
+  };
+  // a seedcap correction of the run that set a waiting write of his on board d: the wait ends; laid this run (and not beaten by a
+  //   run of this tick), the maps go back to the row read -- the older best, not the convicted run's: nothing on the board to delete
+  //   (true); otherwise the correction goes on as before (false)
+  const ebCancel = (d, sid, packed) => {
+    const k = pid(String(sid)), e = lpBacklog[k], was = e && e.ew && e.ew[d.name];
+    if (!was || (was.v | 0) !== (packed | 0)) return false;
+    ebDrop(k, d.name);
+    console.log('  endless best write of ' + plog(sid) + ' on ' + d.name + ' (' + (packed | 0) + ') dropped: a seedcap correction of that run (Q319)');
+    const lk = d.name + '|' + sid, prev = ebLaid.get(lk);
+    if (!prev) return false;
+    ebLaid.delete(lk);
+    if (d.best[sid] !== (packed | 0)) return false;
+    if (prev.row == null) delete d.best[sid]; else d.best[sid] = prev.row;
+    delete d.pool[sid];
+    if (d.weekTeam) { if (prev.team === undefined) delete d.weekTeam[sid]; else d.weekTeam[sid] = prev.team; }
+    return true;
+  };
+  // a quiet run (no consistent / no fresh match) writes the waiting endless bests itself, each against his row read right before it;
+  //   a player this run cannot name, or a board missing from the listing, waits for a run that can
+  const ebRetry = async () => {
+    if (!APPLY_MMR) return;
+    const list = (lr.json && lr.json.response && lr.json.response.leaderboards) || [];
+    const idOf = (nm) => { const x = list.find((y) => String(y.name || y.Name) === nm); return x ? (x.id || x.ID) : null; };
+    const names = ebNamesNow(cupWeekId(seasonNowMs()));
+    for (const k of Object.keys(lpBacklog)) {
+      const ew = lpBacklog[k] && lpBacklog[k].ew;
+      if (!ew || typeof ew !== 'object') continue;
+      for (const name of Object.keys(ew)) {
+        if (!names.has(name)) { RUN.ebDropped = (RUN.ebDropped | 0) + 1; ghWarn('endless best write of ' + k.slice(0, 8) + ' on ' + name + ' dropped: no longer a board this job writes (value ' + ew[name].v + ', ' + (ew[name].n | 0) + ' tries, Q319)'); ebDrop(k, name); continue; }
+        const sid = sidByPid.get(k), bid = idOf(name);
+        if (!sid || !bid) continue;
+        const was = ew[name];
+        let row = null;
+        try { const e = await readUserEntry(bid, sid, 'endless best retry'); row = e ? e.score | 0 : null; }
+        catch (e) { ghWarn('endless best retry of ' + plog(sid) + ' on ' + name + ': row read failed (' + (e && e.message) + ') -- waits (Q319)'); continue; }
+        if (row != null && row >= (was.v | 0)) { RUN.ebDone = (RUN.ebDone | 0) + 1; console.log('  endless best write of ' + plog(sid) + ' on ' + name + ' found on the board: row ' + row + ' (Q319)'); ebDrop(k, name); continue; }
+        const w = ebEntry(k, name, was);
+        let landed = false;
+        try {
+          const r = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: bid, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, ladderDetails(w));
+          landed = r.ok && !(r.json && r.json.result && r.json.result.result && r.json.result.result !== 1);
+          if (!landed) ghWarn('endless best write retry of ' + plog(sid) + ' on ' + name + ' failed HTTP ' + r.status + ' (Q319)');
+        } catch (e) { ghWarn('endless best write retry of ' + plog(sid) + ' on ' + name + ': ' + (e && e.message) + ' (Q319)'); }
+        ebAfter(name, sid, w, landed);
+      }
+    }
+  };
   // ---- O480 cron_pulse (test/cron-pulse.js) ----
   //   One row on its own board per channel app id (a sandbox run: cron_pulse_test): score = the unix minute this run reached its
   //   end -- every successful exit writes it, a run that fails before writes nothing -- and details [0xCC, RULES_VER]
@@ -8234,7 +8392,7 @@ async function main() {
   const PT_MODE_MAIL_OFF = false;
 
   RUN.consistent = consistentMatches.length;
-  if (consistentMatches.length === 0) { console.log('no consistent matches'); await lpRetry(); await rowRetry(); persistStartsSide(); await maintainTrust(); { const st0 = loadSolo(); await maintainRating(st0, new Set()); if (await maintainCup(st0, null) && APPLY_MMR) saveSolo(st0, nowMs); } await processRedeems(null); await processCampaignGrants(); await processCampaignEndless(); await processChatMute(); await writePulse(); await processSupporters(null, []); await processClassicOwners(null, []); writeRunSummary(); return; }
+  if (consistentMatches.length === 0) { console.log('no consistent matches'); await ebRetry(); await lpRetry(); await rowRetry(); persistStartsSide(); await maintainTrust(); { const st0 = loadSolo(); await maintainRating(st0, new Set()); if (await maintainCup(st0, null) && APPLY_MMR) saveSolo(st0, nowMs); } await processRedeems(null); await processCampaignGrants(); await processCampaignEndless(); await processChatMute(); await writePulse(); await processSupporters(null, []); await processClassicOwners(null, []); writeRunSummary(); return; }
   // cloud audit Q245: the solo chain memory is read before the fresh list -- a processed solo key the done memory remembers
   //   per owner comes back for a writer the lane never processed under it (soloReopenOwners); every other processed key
   //   stays out as before
@@ -8247,7 +8405,7 @@ async function main() {
   }
   RUN.fresh = fresh.length;
   console.log(consistentMatches.length + ' consistent, ' + fresh.length + ' fresh (settled ' + (consistentMatches.length - fresh.length) + ')');
-  if (fresh.length === 0) { console.log('no fresh matches, skip'); await lpRetry(); await rowRetry(); persistStartsSide(); await maintainTrust(); { const st0 = loadSolo(); await maintainRating(st0, new Set()); if (await maintainCup(st0, null) && APPLY_MMR) saveSolo(st0, nowMs); } await processRedeems(null); await processCampaignGrants(); await processCampaignEndless(); await processChatMute(); await writePulse(); await processSupporters(null, []); await processClassicOwners(null, []); writeRunSummary(); return; }
+  if (fresh.length === 0) { console.log('no fresh matches, skip'); await ebRetry(); await lpRetry(); await rowRetry(); persistStartsSide(); await maintainTrust(); { const st0 = loadSolo(); await maintainRating(st0, new Set()); if (await maintainCup(st0, null) && APPLY_MMR) saveSolo(st0, nowMs); } await processRedeems(null); await processCampaignGrants(); await processCampaignEndless(); await processChatMute(); await writePulse(); await processSupporters(null, []); await processClassicOwners(null, []); writeRunSummary(); return; }
 
   // playtest channel: no rating board exists (and must not -- lock layer 3); the TrueSkill
   // update block below is skipped wholesale, so the id is never consulted.
@@ -8716,6 +8874,50 @@ async function main() {
     if (f) f.weekTeam[sid] = w.team ? w.team.map(String) : null;
     console.log('  weekly best (' + (f ? f.low : 'solo') + ', ' + cupWeekNow + '): ' + plog(sid) + ' -> board ' + packed);
   };
+  // Q319: the endless best writes of earlier runs that failed (backlog ew) are laid over the rows read above before anything settles
+  //   (ebLay: only where higher). The board list must name every best pool the write phase sends (test/endless-best-owed.js pins it).
+  {
+    const ebAdd = (name, id, best, pool, complete, ok, weekTeam) => ebBoards.push({ name: String(name), id: id || null, best, pool, complete: complete !== false, ok: !!ok, weekTeam: weekTeam || null });
+    ebAdd(ENDLESS_LB, enId, endlessBest, changedEndless, enComplete, enId);
+    ebAdd(ENDLESS_LB_TRIO, enTrioId, endlessTrioBest, changedEndlessTrio, enTrioComplete, enTrioId);
+    ebAdd(ENDLESS_LB_QUAD, enQuadId, endlessQuadBest, changedEndlessQuad, enQuadComplete, enQuadId);
+    ebAdd(ENDLESS_LB_SOLO, enSoloId, endlessSoloBest, changedEndlessSolo, enSoloComplete, enSoloId);
+    ebAdd(ENDLESS_COMP_LB, compId, compBest, changedComp, compComplete, compId);
+    ebAdd(ENDLESS_LB_CLASSIC_SOLO, enClassicSoloId, endlessClassicSoloBest, changedEndlessClassicSolo, enClassicSoloComplete, enClassicSoloId);
+    for (const F of Object.values(classicFam)) ebAdd(F.name, F.id, F.best, F.changed, F.complete, F.id);
+    for (const f of Object.values(compFam)) ebAdd(f.name, f.id, f.best, f.changed, f.complete, f.id);
+    if (seasonId >= 1) {
+      ebAdd(seasonBoardName(ENDLESS_LB, seasonId), enSeasonId, endlessSeasonBest, changedEndlessSeason, enSeasonComplete, enSeasonId);
+      ebAdd(seasonBoardName(ENDLESS_LB_TRIO, seasonId), enTrioSeasonId, endlessTrioSeasonBest, changedEndlessTrioSeason, enTrioSeasonComplete, enTrioSeasonId);
+      ebAdd(seasonBoardName(ENDLESS_LB_QUAD, seasonId), enQuadSeasonId, endlessQuadSeasonBest, changedEndlessQuadSeason, enQuadSeasonComplete, enQuadSeasonId);
+      ebAdd(seasonBoardName(ENDLESS_LB_SOLO, seasonId), enSoloSeasonId, endlessSoloSeasonBest, changedEndlessSoloSeason, enSoloSeasonComplete, enSoloSeasonId);
+      ebAdd(seasonBoardName(ENDLESS_COMP_LB, seasonId), compSeasonId, compSeasonBest, changedCompSeason, compSeasonComplete, compSeasonId);
+      for (const f of Object.values(compFam)) ebAdd(seasonBoardName(f.name, seasonId), f.seasonId, f.seasonBest, f.seasonChanged, f.seasonComplete, f.seasonId);
+    }
+    if (!PT_MODE && cupEdition(cupWeekNow) >= 1) {   // this week's boards: usable once read (a board not created yet holds no row)
+      ebAdd(cupWeekBoardName(ENDLESS_COMP_LB, cupWeekNow), compWeekId, compWeekBest, changedCompWeek, !cupWeekPartial.has(0), cupWeekOk);
+      for (const f of Object.values(compFam)) ebAdd(cupWeekBoardName(f.name, cupWeekNow), f.weekId, f.weekBest, f.weekChanged, !cupWeekPartial.has(f.pc), cupWeekOk, f.weekTeam);
+    }
+    const names = ebNamesNow(cupWeekNow), byName = new Map(ebBoards.map((d) => [d.name, d]));
+    for (const nm of names) if (!byName.has(nm)) ghWarn('endless best board ' + nm + ' missing from the Q319 board list -- its waiting writes are dropped (fix the list)');
+    for (const k of Object.keys(lpBacklog)) {
+      const ew = lpBacklog[k] && lpBacklog[k].ew;
+      if (!ew || typeof ew !== 'object') continue;
+      for (const name of Object.keys(ew)) {
+        const d = byName.get(name);
+        if (!names.has(name) || !d) { RUN.ebDropped = (RUN.ebDropped | 0) + 1; ghWarn('endless best write of ' + k.slice(0, 8) + ' on ' + name + ' dropped: no longer a board this job writes (value ' + ew[name].v + ', ' + (ew[name].n | 0) + ' tries, Q319)'); ebDrop(k, name); continue; }
+        if (!d.ok) { console.log('  endless best write of ' + k.slice(0, 8) + ' on ' + name + ': board not read this run -- waits (Q319)'); continue; }
+        const sid = ebSid(k);
+        if (!sid) { console.log('  endless best write of ' + k.slice(0, 8) + ' on ' + name + ': player not named this run -- waits (Q319)'); continue; }
+        let row = d.best[sid] != null ? d.best[sid] | 0 : null;
+        if (row == null && !d.complete && d.id) {   // the read stopped at the page cap: his row may sit beyond it
+          try { const e = await readUserEntry(d.id, sid, 'endless best ' + name); row = e ? e.score | 0 : null; }
+          catch (e) { ghWarn('endless best write of ' + plog(sid) + ' on ' + name + ': row read failed (' + (e && e.message) + ') -- waits (Q319)'); continue; }
+        }
+        ebLay(k, d, sid, row);
+      }
+    }
+  }
   const soloPub = loadJobPubTable(nowMs) || {};
   const soloPubRec = recCfg ? (loadJobPubTable(nowMs, recCfg.keys) || {}) : soloPub;   // R1-A5-07: only RECOVERED segments (demo, until the file's date) keep the recovery keys
   const soloAllowDev = /_test$/.test(ENDLESS_COMP_LB);   // dev-key records only ever land on a *_test ladder
@@ -10246,6 +10448,9 @@ async function main() {
           console.log('  seedcap correction ' + cor.id + ': removed the run from ' + plog(sidC) + '\'s ' + famR + ' rating history');
         }
         for (const [bidC, bestMapC, labelC] of targets) {
+          // Q319: a waiting write of that run (it failed then) ends; laid over his row this run, the row read is the older best -- kept
+          const dC = bestMapC ? ebBoards.find((d) => d.best === bestMapC) : null;
+          if (dC && ebCancel(dC, sidC, packedC)) { console.log('  seedcap correction ' + cor.id + ': ' + labelC + ' ' + plog(sidC) + ' -- the run never reached the board, his row there stays'); continue; }
           if (!bidC || !bestMapC || bestMapC[sidC] == null || bestMapC[sidC] !== packedC) continue;
           const resC = await postForm('/ISteamLeaderboards/DeleteLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: bidC, steamid: sidC, format: 'json' });
           if (resC.ok) { delete bestMapC[sidC]; console.log('  seedcap correction ' + cor.id + ': deleted ' + labelC + ' entry ' + plog(sidC) + ' (packed ' + packedC + ')'); }
@@ -10430,6 +10635,11 @@ async function main() {
   const etsOk = wEndlessTrioSeason.filter(x => x.status === 'fulfilled' && x.value).length;
   const eqOk = wEndlessQuad.filter(x => x.status === 'fulfilled' && x.value).length;
   const eqsOk = wEndlessQuadSeason.filter(x => x.status === 'fulfilled' && x.value).length;
+  // Q319: an endless best write that failed waits for the next run (the backlog's ew: the higher of it and his row then), one that
+  //   lands at or above a waiting one ends that wait -- every best pool below the same way
+  ebAfterPool(ENDLESS_LB, changedEndless, wEndless); ebAfterPool(seasonBoardName(ENDLESS_LB, seasonId), changedEndlessSeason, wEndlessSeason);
+  ebAfterPool(ENDLESS_LB_TRIO, changedEndlessTrio, wEndlessTrio); ebAfterPool(seasonBoardName(ENDLESS_LB_TRIO, seasonId), changedEndlessTrioSeason, wEndlessTrioSeason);
+  ebAfterPool(ENDLESS_LB_QUAD, changedEndlessQuad, wEndlessQuad); ebAfterPool(seasonBoardName(ENDLESS_LB_QUAD, seasonId), changedEndlessQuadSeason, wEndlessQuadSeason);
   // O218 solo casual ladder writes (client knife 3.7a): pools only fill when the solo casual boards resolved (same gate rule as trio / quad)
   const wEndlessSolo = await mapPool(Object.keys(changedEndlessSolo), CONCURRENCY, async (sid) => {
     const w = changedEndlessSolo[sid];
@@ -10449,6 +10659,7 @@ async function main() {
   });
   const esoOk = wEndlessSolo.filter(x => x.status === 'fulfilled' && x.value).length;
   const esosOk = wEndlessSoloSeason.filter(x => x.status === 'fulfilled' && x.value).length;
+  ebAfterPool(ENDLESS_LB_SOLO, changedEndlessSolo, wEndlessSolo); ebAfterPool(seasonBoardName(ENDLESS_LB_SOLO, seasonId), changedEndlessSoloSeason, wEndlessSoloSeason);   // Q319
   // O216 classic solo lifetime ladder writes (client knife 3.9b N2): details = [exact bank, 0] (the packed tiebreak is /1e5-saturated; the hub reads the bank from details)
   const wEndlessClassicSolo = await mapPool(Object.keys(changedEndlessClassicSolo), CONCURRENCY, async (sid) => {
     const w = changedEndlessClassicSolo[sid];
@@ -10459,6 +10670,7 @@ async function main() {
     return okFlag;
   });
   const eclOk = wEndlessClassicSolo.filter(x => x.status === 'fulfilled' && x.value).length;
+  ebAfterPool(ENDLESS_LB_CLASSIC_SOLO, changedEndlessClassicSolo, wEndlessClassicSolo);   // Q319
   if (Object.keys(changedEndlessClassicSolo).length) console.log('  classic solo ladder writes: ' + eclOk + '/' + Object.keys(changedEndlessClassicSolo).length);
   // N3 team classic lifetime ladder writes (duo / trio / quad): details = [team bank, 0] (same shape as the solo classic row)
   let eclTeamN = 0, eclTeamOk = 0;
@@ -10476,6 +10688,7 @@ async function main() {
       return okFlag;
     });
     eclTeamOk += wF.filter(x => x.status === 'fulfilled' && x.value).length;
+    ebAfterPool(F.name, F.changed, wF);   // Q319
   }
   if (eclTeamN) console.log('  classic team ladder writes: ' + eclTeamOk + '/' + eclTeamN);
   // O93 solo competitive ladder writes (details = exact bank; packed tiebreak is /1000-saturated)
@@ -10497,13 +10710,15 @@ async function main() {
   });
   const cmOk = wComp.filter(x => x.status === 'fulfilled' && x.value).length;
   const cmsOk = wCompSeason.filter(x => x.status === 'fulfilled' && x.value).length;
+  ebAfterPool(ENDLESS_COMP_LB, changedComp, wComp); ebAfterPool(seasonBoardName(ENDLESS_COMP_LB, seasonId), changedCompSeason, wCompSeason);   // Q319
   if (Object.keys(changedComp).length || Object.keys(changedCompSeason).length) console.log('solo comp writes: ' + cmOk + '/' + Object.keys(changedComp).length + ' lifetime, ' + cmsOk + '/' + Object.keys(changedCompSeason).length + ' season');
   // team competitive ladder writes (duo / trio, lifetime + season) -- same row shape as the solo ladder (details = exact team bank)
   for (const fam of Object.values(compFam)) {
     for (const [pool, bid, label] of [[fam.changed, fam.id, fam.low + ' comp'], [fam.seasonChanged, fam.seasonId, fam.low + ' comp season']]) {
+      const lbName = pool === fam.changed ? fam.name : seasonBoardName(fam.name, seasonId);   // Q319: the board a waiting write names
       const sids = Object.keys(pool || {});
       if (!sids.length) continue;
-      if (!bid) { ghWarn('write ' + label + ': board unresolved, ' + sids.length + ' row(s) dropped'); continue; }
+      if (!bid) { ghWarn('write ' + label + ': board unresolved, ' + sids.length + ' row(s) wait for the next run (Q319)'); ebAfterPool(lbName, pool, null); continue; }
       const wr = await mapPool(sids, CONCURRENCY, async (sid) => {
         const w = pool[sid];
         const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: bid, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, ladderDetails(w));
@@ -10513,6 +10728,7 @@ async function main() {
         return okFlag;
       });
       console.log(label + ' writes: ' + wr.filter(x => x.status === 'fulfilled' && x.value).length + '/' + sids.length);
+      ebAfterPool(lbName, pool, wr);   // Q319
     }
   }
   // O180 (client knife 5.1c-1) this week's boards (cup): created at the week's first write, the id kept in the chain memory
@@ -10523,7 +10739,7 @@ async function main() {
     let bid = pc === 1 ? compWeekId : fam.weekId;
     const name = cupWeekBoardName(base, cupWeekNow);
     if (!bid) { bid = await findOrCreateBoard(name, true); if (bid) console.log('weekly board created: ' + name + ' id=' + bid); }
-    if (!bid) { ghWarn('write weekly ' + name + ': board unresolved, ' + sids.length + ' row(s) dropped'); continue; }
+    if (!bid) { ghWarn('write weekly ' + name + ': board unresolved, ' + sids.length + ' row(s) wait for the next run (Q319)'); ebAfterPool(name, pool, null); continue; }
     if (pc === 1) compWeekId = bid; else fam.weekId = bid;
     soloState.cup = soloState.cup || {}; soloState.cup.wb = soloState.cup.wb || {};
     (soloState.cup.wb[cupWeekNow] = soloState.cup.wb[cupWeekNow] || {})[pc] = bid;
@@ -10536,7 +10752,9 @@ async function main() {
       return okFlag;
     });
     console.log(name + ' writes: ' + wr.filter(x => x.status === 'fulfilled' && x.value).length + '/' + sids.length);
+    ebAfterPool(name, pool, wr);   // Q319
   }
+  if (backlogDirty) savePendingWrites(lpBacklog, nowMs, true);   // Q319: the endless bests that wait, on disk ahead of the processed save below
   // this week's entrants per family for the cup carrier (solo players / teams = roster sets), from the read rows + this run's writes
   const cupCounts = !cupWeekOk ? null : [1, 2, 3, 4].map((pc) => {
     if (cupWeekPartial.has(pc === 1 ? 0 : pc)) return null;
