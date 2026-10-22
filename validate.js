@@ -2287,6 +2287,15 @@ function pruneSignals(s, now) {
   for (const k of Object.keys(s.players)) if (now - (s.players[k].at || 0) > SIG_PLAYER_WINDOW_MS) delete s.players[k];
   for (const k of Object.keys(s.flagged)) if (now - (s.flagged[k] || 0) > SIG_PAIR_WINDOW_MS) delete s.flagged[k];
   for (const k of Object.keys(s.flagOff || {})) if (!s.flagged[k]) delete s.flagOff[k];   // Q166: an arm goes with its flag (pruneFlagged)
+  // Q61 gamble-frame accusation strikes age out of their own window (at most GTAC.LIST_CAP per account); a per-key verdict
+  //   goes with its key's flag (a strike always flags the key; Q166 drops the flag once the key is off the shards), a hold
+  //   stamp with its key (applyGambleAccusations) -- the 45 days are a backstop
+  for (const k of Object.keys(s.gtac || {})) {
+    const live = (s.gtac[k] || []).filter(e => e && now - (Number(e.t) || 0) <= GTAC.WINDOW_MS).slice(-GTAC.LIST_CAP);
+    if (live.length) s.gtac[k] = live; else delete s.gtac[k];
+  }
+  for (const k of Object.keys(s.gtav || {})) if (!s.flagged[k] || now - ((s.gtav[k] && s.gtav[k].t) || 0) > SIG_PAIR_WINDOW_MS) delete s.gtav[k];
+  for (const k of Object.keys(s.gtah || {})) if (now - (Number(s.gtah[k]) || 0) > SIG_PAIR_WINDOW_MS) delete s.gtah[k];
   for (const k of Object.keys(s.rep || {})) if (now - (s.rep[k].at || 0) > SIG_PAIR_WINDOW_MS) delete s.rep[k];
   for (const k of Object.keys(s.rseen || {})) if (now - (s.rseen[k] || 0) > SIG_PAIR_WINDOW_MS) delete s.rseen[k];
   // Q57 host charges age out of their own window (they only feed the trust tier)
@@ -2800,6 +2809,7 @@ function writeRunSummary() {
       '| win streak events landing before matches already counted (a late settle; its own tier counts what came before it) / stale (older than the fold, ignored) / absences frozen (the first in a week) / absences that broke a streak (O181) | ' + s('streakLate', 0) + ' / ' + s('streakStale', 0) + ' / ' + s('streakAbsFreeze', 0) + ' / ' + s('streakAbsBreak', 0) + ' |',
       '| ranked 1V1s only the winner wrote (Q184): counted on the silent seat / waiting for a second opponent / paid (points written) / not counted, no signals of his own / over the weekly cap | ' + s('lone1v1', '0 / 0 / 0 / 0 / 0') + ' (' + s('lone1v1Paid', 0) + ') |',
       '| team-gamble host charges / at trust threshold | ' + s('t2lh', '0/0') + ' |',
+      '| gamble-frame refusals naming the host (Q61): strikes, only he flagged / of them judged, record only / held for a seat with no record / named, not a strike, every writer flagged as before | ' + s('gtac', '0 / 0 / 0 / 0') + ' |',
       '| reports seen / counted | ' + s('repSeen', 0) + ' / ' + s('repCounted', 0) + ' |',
       '| trust writes / deletes | ' + s('trustW', 0) + ' / ' + s('trustD', 0) + ' |',
       '| endless rating rows written / deleted / tier cuts (O103) | ' + s('ratingW', 0) + ' / ' + s('ratingD', 0) + ' / ' + s('tiercut', '-') + ' |',
@@ -6068,6 +6078,198 @@ function ptBoardPlan(names, cfg) {
   return { create, forbidden };
 }
 
+// ===== gamble-frame refusals that name the host (cloud audit Q61, the Q43 review's residual 4) =====
+// After Q41 a joiner checks every gamble-station frame (slot / roulette / cups) its host forwards: a frame the joiner can
+// prove wrong (a round that is not this one, a round already settled, a field out of its fixed domain, a net the seed or
+// the landing does not give) is taken back out of that seat's score when the joiner writes its record. The match's
+// records then disagree and it never settles -- and the inconsistent path below flagged EVERY writer once, the joiners
+// who refused the forged frame as much as the host who forged it. A modded host cost his honest table a flag each, for
+// free, every match.
+// Q61 client: such a joiner appends a self-describing block at the very end of its record, after the 5.4a char block:
+// [GT_MAGIC | GT_VER << 8 | GT_LEN << 16, seat bitmask], naming the seat that forwarded a refused frame (the host at that
+// moment). Only the refusals above, which an honest host cannot cause, name anybody; the two loose stake checks (a stake
+// out of range for the seat's score as the joiner sees it) still take the amount back but name nobody (the joiner's copy
+// of another seat's score can be off). The block sits past every field this job reads on these codes, so before this
+// pass it was simply ignored. It is a block, not a bare int, by the settle-tail rule (since 5.4a: anything appended to the
+// settle tail carries magic + length; Q43's T2BY_TAG int, read at a fixed offset, stays the one exception); the reader
+// walks the tail from the roster (gambleTagOf) and skips a version it does not know (= names nobody = the old path).
+// Here (matchmade quick / ranked FFA and team brawl, bases 1-4; friends' rooms, bot matches, endless and the mode-2
+// codes keep the old path -- mode 2 has the Q43 / Q51 / Q56 passes on its refusals, see the client README), a key in the
+// inconsistent list is a STRIKE on the named seat when:
+//   - one record per account (the first read, as Q43): exactly one record names nobody -- the named seat's own -- and
+//     at least GTAC.MIN_ACC records name him; every one of them names him, sits on its own roster seat ABOVE his (a
+//     host is the lowest seat still in the match: seat 0, or the lowest one left after the hosts before him went), and
+//     they all carry one score vector, not his; the records pass sanity with his scores read as theirs;
+//   - the writers who name him come from at least GTAC.MIN_UNITS queue units (a premade pair or trio of an FFA code is
+//     one unit, a team of a team code is one) -- one party cannot frame its host alone;
+//   - every other seat of the roster wrote a record (they all name him) -- a seat with no record holds the key, nobody
+//     flagged, until a complete read past the absence grace still lacks it (absenceHold; the seat left).
+// A strike flags only the named seat (instead of every writer) and records it (signals.gtac[host] = [{ m, t, a }]); the
+// key stays unsettled as before (the start-orphan verdict ends it). Record-only signals beside it: players[host].gs
+// (strikes on him), players[host].gx (judged strikes), players[writer].ga (strikes his record named the host in) -- a
+// crew that frames hosts leaves its trace there. The verdict is fixed on first sight
+// (signals.gtav[m]): GTAC.K strikes inside GTAC.WINDOW_MS whose naming writers are pairwise disjoint (this one among
+// them) make it 'judge' -- RECORD ONLY (players[host].gx): no leave, no rating, LP or XP change, and the match still
+// does not settle. Two crews that fill every other seat of one host's matches could frame an honest host, and the
+// project rule for anti-cheat against honest players (architecture decision 10) puts not punishing an honest player
+// first; the forging host gains nothing anyway (his match never settles), and a judged count is there for a person to
+// read. Never worse for anybody than before: the named seat is flagged once per key either way, the writers who named
+// him are no longer.
+const GT_MAGIC = 0xDB, GT_VER = 1, GT_LEN = 1;   // client Q61 result-reporter.js GTBY_MAGIC / GTBY_VER / GTBY_LEN (same values)
+const GTAC = {
+  MIN_ACC: Math.max(2, Number(process.env.GTAC_MIN_ACC || 2) | 0),
+  MIN_UNITS: Math.max(2, Number(process.env.GTAC_MIN_UNITS || 2) | 0),
+  K: Math.max(2, Number(process.env.GTAC_K || 2) | 0),
+  WINDOW_MS: Number(process.env.GTAC_WINDOW_MS || 30 * 86400000),
+  LIST_CAP: 16,   // strikes kept per named account (the verdict reads at most the newest 16)
+  BASES: [1, 2, 3, 4],
+};
+// seats a record names (its own seat never), 0 = none: walk the tail from the roster -- Q43's T2BY_TAG int when it is
+//   there (fixed offset), then block by block: the char block by its seat count (its byte 2 is pc, not a length), any
+//   other block by its length; the first GT_MAGIC block of GT_VER answers. A word with length 0 is not a block: stop.
+function gambleTagOf(r) {
+  const d = r.d, pc = d[8] | 0;
+  if (pc < 2 || pc > 6) return 0;
+  let i = 11 + 3 * pc;
+  if (d.length > i && ((d[i] | 0) & ~0x3F) === T2BY_TAG) i++;
+  while (i < d.length) {
+    const h = d[i] | 0, mg = h & 0xff, ver = (h >>> 8) & 0xff, len = (h >>> 16) & 0xff;
+    if (mg === CHAR_MAGIC && len === pc) { i += 1 + Math.ceil(pc / 4); continue; }
+    if (!len) return 0;
+    if (mg === GT_MAGIC && ver === GT_VER) return (i + GT_LEN < d.length) ? ((d[i + 1] | 0) & 0x3F & ~(1 << (d[5] | 0)) & ((1 << pc) - 1)) : 0;
+    i += 1 + len;
+  }
+  return 0;
+}
+function gambleMtOk(mt) { return GTAC.BASES.indexOf(baseMt(mt)) >= 0; }
+// the queue unit of a seat: a team of a team code, a premade pair / trio of an FFA code, else the seat alone
+function gambleUnitOf(mt, seat) {
+  const s = seat | 0;
+  if (isTeamMt(mt)) return 't' + teamOfSeat(s, teamSizeOfMt(mt));
+  const trioAt = premadeTrioAtOf(mt);
+  if (trioAt > 0 && s >= trioAt - 1 && s <= trioAt + 1) return 'trio';
+  if ((premadeMaskOf(mt) >> (s >> 1)) & 1) return 'pair' + (s >> 1);
+  return 'seat' + s;
+}
+// one record per account, the first read (a second record of one account is not a second voice)
+function oneRecordPerAccount(g) {
+  const seen = new Set(), out = [];
+  for (const r of g || []) { const s = String(r.steamID); if (seen.has(s)) continue; seen.add(s); out.push(r); }
+  return out;
+}
+// g = one inconsistent group. null = no record of it names anybody (not this pass's); { why } = not a strike (the
+//   old path); { h, host, acc, absent } = the strike shape (absent: roster seats with no record, for the hold)
+function gambleAccusation(g, vecOf) {
+  const recs = oneRecordPerAccount(g);
+  if (!recs.length || !gambleMtOk(recs[0].d[2] | 0)) return null;
+  const acc = recs.filter(r => gambleTagOf(r) !== 0);
+  if (!acc.length) return null;
+  const rest = recs.filter(r => gambleTagOf(r) === 0);
+  if (rest.length !== 1) return { why: rest.length ? rest.length + ' records name nobody' : 'every record names somebody' };
+  const host = rest[0], h = host.d[5] | 0, mt = host.d[2] | 0, pc = host.d[8] | 0;
+  if (acc.length < GTAC.MIN_ACC) return { why: 'one writer names him' };
+  if (!acc.every(r => (gambleTagOf(r) >> h) & 1)) return { why: 'the writers name different seats' };
+  const roster = rosterConsensus(recs);
+  if (roster[h] == null || String(roster[h]) !== String(host.steamID)) return { why: 'the named seat is not his on the roster' };
+  const seats = new Set([h]);
+  for (const r of acc) {
+    const s = r.d[5] | 0;
+    if (s <= h) return { why: 'a writer at seat ' + s + ' (not above the named seat) names him' };
+    if (seats.has(s) || roster[s] == null || String(roster[s]) !== String(r.steamID)) return { why: 'a writer off his roster seat' };
+    seats.add(s);
+  }
+  const v0 = vecOf(acc[0]), vh = vecOf(host);
+  if (String(v0).indexOf('BAD') === 0 || String(vh).indexOf('BAD') === 0) return { why: 'a malformed record' };
+  if (!acc.every(r => vecOf(r) === v0)) return { why: 'the writers who name him disagree among themselves' };
+  if (v0 === vh) return { why: 'the named seat writes their scores' };
+  const hostAs = Object.assign({}, host, { d: host.d.slice(0, 10).concat(acc[0].d.slice(10, 10 + pc), host.d.slice(10 + pc)) });
+  const sf = sanityFlags(acc.concat([hostAs]));
+  if (sf.length) return { why: 'sanity ' + sf.join(',') };
+  const units = new Set(acc.map(r => gambleUnitOf(mt, r.d[5] | 0)));
+  if (units.size < GTAC.MIN_UNITS) return { why: 'the writers who name him queued as ' + units.size + ' unit' };
+  const absent = Object.keys(roster).map(Number).filter(s => !seats.has(s)).sort((a, b) => a - b);
+  return { h, host, acc, absent };
+}
+// prior = the named account's stored strikes ({ m, t, a: [writer pids] }); cur = this key's. -> 'free' | 'judge':
+//   GTAC.K strikes in the window, this one among them, whose writers are pairwise disjoint (two strikes by one crew = one)
+function gtacVerdict(prior, cur, now) {
+  const live = (prior || []).filter(e => e && e.m !== cur.m && now - (Number(e.t) || 0) <= GTAC.WINDOW_MS).slice(-GTAC.LIST_CAP);
+  const setOf = e => new Set((Array.isArray(e.a) ? e.a : []).map(String));
+  const c = setOf(cur);
+  const apart = (a, b) => { for (const x of a) if (b.has(x)) return false; return true; };
+  const cand = live.map(setOf).filter(s => s.size && apart(s, c));
+  let best = 1;
+  const pick = (i, chosen) => {
+    if (chosen.length + 1 > best) best = chosen.length + 1;
+    for (let j = i; j < cand.length && best < GTAC.K; j++) {
+      if (!chosen.every(x => apart(x, cand[j]))) continue;
+      chosen.push(cand[j]); pick(j + 1, chosen); chosen.pop();
+    }
+  };
+  pick(0, []);
+  return best >= GTAC.K ? 'judge' : 'free';
+}
+// One run's pass over the inconsistent list, ahead of its flag loop: a strike flags only the named seat; a held key flags
+//   nobody this run; both leave the list (so the flag loop passes them by). Mutates gr.inconsistentGroups in place.
+//   opts = { complete, graceMs }. Returns { dirty, strikes, judged, held, other, touched: [real ids] }.
+function applyGambleAccusations(gr, signals, processed, now, vecOf, opts) {
+  const o = opts || {};
+  const res = { dirty: false, strikes: 0, judged: 0, held: 0, other: 0, touched: [] };
+  signals.gtac = signals.gtac || {}; signals.gtav = signals.gtav || {}; signals.gtah = signals.gtah || {};
+  const ig = gr.inconsistentGroups || [];
+  const heldNow = new Set();
+  for (let i = ig.length - 1; i >= 0; i--) {
+    const { m, g } = ig[i];
+    if (processed.has(m)) continue;   // a settled key is history (Q114 below: nobody flagged)
+    const ga = gambleAccusation(g, vecOf);
+    if (!ga) continue;
+    if (signals.gtav[m]) { ig.splice(i, 1); continue; }   // struck on an earlier run: the verdict stands, nobody else flagged
+    if (ga.why) {
+      res.other++;
+      console.log('  gamble accusation ' + m + ': not counted (' + ga.why + ') -- every writer flagged as before');
+      continue;
+    }
+    if (ga.absent.length) {
+      const pend = { absentAt: Number(signals.gtah[m]) || 0 };
+      const ah = absenceHold(ga.absent, pend, now, !!o.complete, o.graceMs);
+      if (signals.gtah[m] !== pend.absentAt) { signals.gtah[m] = pend.absentAt; res.dirty = true; }
+      if (ah.hold) {
+        res.held++; heldNow.add(m);
+        ig.splice(i, 1);
+        console.log('  gamble accusation ' + m + ': seat(s) ' + ga.absent.join(',') + ' wrote no record -- '
+          + (ah.hold === 'read' ? 'not every record shard was read this run' : 'grace ' + Math.ceil(ah.waitMs / 1000) + 's left') + ', strike deferred (nobody flagged yet)');
+        continue;
+      }
+    }
+    const hid = String(ga.host.steamID), hp = pid(hid);
+    const cur = { m, t: now, a: ga.acc.map(r => pid(String(r.steamID))).sort() };
+    const list = signals.gtac[hp] || (signals.gtac[hp] = []);
+    const v = gtacVerdict(list, cur, now);
+    // a key seen again after its verdict left with its flag (Q166: the key had gone off the shards) is not a new strike
+    const fresh = !list.some(e => e && e.m === m);
+    if (fresh) { list.push(cur); if (list.length > GTAC.LIST_CAP) list.splice(0, list.length - GTAC.LIST_CAP); }
+    signals.gtav[m] = { p: hp, t: now, v };
+    delete signals.gtah[m];
+    const sp = sigPlayer(signals, hp, now);
+    if (fresh) {
+      sp.gs = (sp.gs | 0) + 1;
+      if (v === 'judge') sp.gx = (sp.gx | 0) + 1;
+      for (const r of ga.acc) { const ap = sigPlayer(signals, pid(String(r.steamID)), now); ap.ga = (ap.ga | 0) + 1; }   // record only: who names hosts
+    }
+    if (v === 'judge') res.judged++;
+    if (recordFlag(signals, [ga.host], m, now)) res.touched.push(hid);
+    res.strikes++; res.dirty = true;
+    ig.splice(i, 1);
+    console.log('  gamble accusation ' + m + ': ' + ga.acc.length + ' writers (seat ' + ga.acc.map(r => r.d[5] | 0).sort((a, b) => a - b).join(',')
+      + ') name seat ' + ga.h + ' = ' + plog(hid) + (ga.absent.length ? ' (seat ' + ga.absent.join(',') + ' wrote no record)' : '')
+      + ' -> strike, verdict ' + v + (v === 'judge' ? ' (record only)' : '') + '; only he is flagged');
+  }
+  // a hold lives only while its key is on the shards in that shape: on a complete read, the stamps of keys not held this
+  //   run go (a key written for one run and dropped must not leave its stamp behind for 45 days -- Q166's file growth)
+  if (o.complete) for (const k of Object.keys(signals.gtah)) if (!heldNow.has(k)) { delete signals.gtah[k]; res.dirty = true; }
+  return res;
+}
+
 // ===== consensus grouping (audit 2026-09-06 D-F11 / B-F10 / E-G3: extracted from main() so the "N ends agree" rule is testable) =====
 //   - one voice per ACCOUNT: consensus counts distinct writers, not records. The same account writing the same key twice (cold
 //     reconnect double-write; a results record written on a suspended segment's key) used to pass as "2 consistent" = a single
@@ -6786,6 +6988,13 @@ async function main() {
     const n = streakApplyEarly(xs, streakEarly, nowMs);
     if (n) { saveXp(xs); console.log('streak: ' + n + ' early event(s) written to the XP state (no settle this run)'); }
   };
+  // Q61: inconsistent keys whose writers name the host that forwarded a gamble frame they refused -- a strike flags only
+  //   him, a key waiting for a seat with no record flags nobody yet; both leave the list before the flag loop below
+  const gtacRes = applyGambleAccusations(gr, signals, processed, nowMs, vecOf, { complete: shardsComplete, graceMs: ABSENT_GRACE_MS });
+  if (gtacRes.dirty) sigDirty = true;
+  for (const sid of gtacRes.touched) trustTouched.add(String(sid));
+  if (gtacRes.strikes || gtacRes.held || gtacRes.other) console.log('gamble accusations: ' + gtacRes.strikes + ' strikes (' + gtacRes.judged + ' judged, record only), ' + gtacRes.held + ' deferred, ' + gtacRes.other + ' not counted');
+  RUN.gtac = gtacRes.strikes + ' / ' + gtacRes.judged + ' / ' + gtacRes.held + ' / ' + gtacRes.other;
   // forgery-flag counters for the inconsistent groups seen this run
   // (they are never processed, so they re-surface every run -- recordFlag dedups by match key).
   for (const { m, g } of inconsistentGroups) {
@@ -9971,6 +10180,7 @@ Object.assign(module.exports, { recTable, splitKey, splitMark, applyTableSplit }
 Object.assign(module.exports, { LONE1V1, lone1v1Claim, lone1v1Verdicts, lone1v1Count });   // cloud audit Q184 a ranked 1V1 only its winner wrote
 Object.assign(module.exports, { repUpgrade, sortKeys });   // cloud audit Q209 report state with no key that stays with one reporter
 Object.assign(module.exports, { LONE1V1_LATE_CAP, keepLateOwn });   // cloud audit Q254 a lone 1V1 winner's own start read late with his result
+Object.assign(module.exports, { GT_MAGIC, GT_VER, GT_LEN, GTAC, gambleTagOf, gambleUnitOf, oneRecordPerAccount, gambleAccusation, gtacVerdict, applyGambleAccusations });   // cloud audit Q61 gamble-frame refusals naming the host
 Object.assign(module.exports, { startSig, lateStartSplit, START_CONFIRM_MS, START_CONFIRM_MIN_MS });   // cloud audit Q118 provisional start roster
 Object.assign(module.exports, { testimonyOf, recTestimony, noteTestimony, endlessRosterHold, endlessTestified });   // cloud audit Q113 endless testimony
 Object.assign(module.exports, { teamLossCounted });   // cloud audit Q136 the losing team must be somebody
