@@ -51,7 +51,7 @@ const leavesOf = (r, sid) => (((r.state.LEAVERS_FILE || {})[v.pid(sid)]) || {}).
 
 const A = H.SID(1), B = H.SID(2), C = H.SID(3), D = H.SID(4);
 const ALL = [A, B, C, D];
-const GT = 0x67740000;
+const GTH = 0xDB | (1 << 8) | (1 << 16);   // Q61 v3: the naming block's head (magic 0xDB, version 1, length 1), after the roster here (no char block)
 // one settle record (the test/gamble-accuse.js shape): scores = this writer's vector, rank from `ranked`; o.gt = tag
 function rec(mt, hash, seat, roster, scores, ranked, o) {
   o = o || {};
@@ -60,7 +60,7 @@ function rec(mt, hash, seat, roster, scores, ranked, o) {
   const rank = 1 + order.findIndex((x) => x[1] === seat);
   const d = [0xB1, 3, mt, hash | 0, 4321, seat, rank, (6 << 1) | (rank === 1 ? 1 : 0), pc, 900].concat(scores, [0]);
   for (const s of roster) { const p = H.sidPair(s); d.push(p[0], p[1]); }
-  if (o.gt) d.push(GT | o.gt);
+  if (o.gt) d.push(GTH, o.gt);
   return d;
 }
 // the host (seat 0) forwarded a forged gamble frame (+30000 on his own seat): every other seat takes it back and names
