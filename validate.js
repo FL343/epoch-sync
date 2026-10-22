@@ -2788,6 +2788,7 @@ function writeRunSummary() {
       '| start-orphan seats spared by their own exit note (Q64) | ' + s('exitNoteSpared', 0) + ' |',
       '| starts-state notes / endless, friends\' room and bot entries dropped, no record of the key left on the shards (Q144) | ' + s('noteGone', 0) + ' / ' + s('entryGone', 0) + ' |',
       '| processed keys remembered / dropped past the cap (Q144) | ' + s('processedN', 0) + ' / ' + s('processedPruned', 0) + ' |',
+      '| solo keys holding segments of more than one account / processed keys reopened for an account not processed under them (Q245) | ' + s('soloMultiOwner', 0) + ' / ' + s('soloReopen', 0) + ' |',
       '| signed solo segments remembered while their key verifies / written back after they left the processed list (Q144) | ' + s('soloDone', 0) + ' / ' + s('soloReplay', 0) + ' |',
       '| accounts whose remembered starts across the notes are at the room (Q144) | ' + s('seenCapped', 0) + ' |',
       '| 1V1s registered from the result writer\'s late start and the other seat\'s own start read before it (Q261) | ' + s('lateWriter', 0) + ' |',
@@ -5086,8 +5087,63 @@ function saveSolo(st, nowMs) { pruneSolo(st, nowMs); try { writeStateFile(SOLO_F
 //   key policy (pending, never settled). A key missing from the table (a lost push), held for another channel (a label
 //   slip a table fix undoes) or still inside its grace keeps its entries. Only verified segments are remembered, so only
 //   real play (or a holder of a live signing key, who can sign new segments anyway) grows it; SOLO_DONE_CAP is a fuse.
-const SOLO_DONE_CAP = Number(process.env.SOLO_DONE_CAP || 200000);   // about 10 MB; a segment is five levels of real play
-function soloDoneNote(st, m, keyName, nowMs) { (st.done || (st.done = {}))[m] = [String(keyName || ''), Math.floor(nowMs / 1000)]; }
+const SOLO_DONE_CAP = Number(process.env.SOLO_DONE_CAP || 200000);   // about 14 MB with the owner of each entry (Q245); a segment is five levels of real play
+// cloud audit Q245 (2026-10): the done memory remembers the OWNER (pid) of each processed segment. A key is d[3]_d[4]_d[2]:
+//   the hash of the match id the renderer hands the guard (32 bits), the run seed (the season seed, the same for every run
+//   of a season) and the type -- a modified client can make its own guard sign a real segment of its own under another
+//   player's key (the key is in every public start record; its own start splits the key, no seat gate). The lane settled
+//   the key's first record that verified and closed the key, so the victim's segment was never looked at (read after the
+//   outsider's, or landing a run later), and a check that flags flagged every writer of the key. Now the lane judges each
+//   owner's records on their own (soloOwnerGroups): the key's first processed owner is remembered at the key
+//   ([keyName, seconds, owner]), every later one at key|owner; a key remembered per owner comes back for an owner it never
+//   processed (soloReopenOwners, the fresh list in main). An entry in the old shape ([keyName, seconds], written before
+//   this change) and a processed key with no entry at all stay closed for every owner: what settled before is never looked
+//   at again. pruneSoloDone forgets each entry by its own key name, as before.
+function soloDoneOwner(e) { return (Array.isArray(e) && e[2] != null) ? String(e[2]) : null; }
+function soloDoneNote(st, m, keyName, nowMs, p) {
+  const d = st.done || (st.done = {}), ent = [String(keyName || ''), Math.floor(nowMs / 1000)];
+  if (p == null) { d[m] = ent; return; }   // the old whole-key shape (tests)
+  const e = d[m];
+  if (!e || soloDoneOwner(e) === String(p)) d[m] = ent.concat(String(p));
+  else d[m + '|' + p] = ent.concat(String(p));
+}
+// the entry that says the lane processed owner p's segment under key m (null = none)
+function soloDoneEntry(st, m, p) {
+  const d = st && st.done;
+  if (!d) return null;
+  const e = d[m];
+  if (e && (soloDoneOwner(e) == null || soloDoneOwner(e) === String(p))) return e;   // a whole-key entry covers every owner
+  return d[m + '|' + p] || null;
+}
+function soloDoneHas(st, m, p) { return !!soloDoneEntry(st, m, p); }
+// the writers (sids) of a solo key's records the lane never processed, when the key is one it remembers per owner
+function soloReopenOwners(st, m, g) {
+  const d = st && st.done;
+  if (!d) return [];
+  const e = d[m];
+  // no entry at the key = closed: it settled before this change, another lane closed it, or the first owner's entry was
+  //   forgotten (pruneSoloDone: its signing key verifies no more / the fuse) -- reopening only ever follows that first entry
+  if (!e || soloDoneOwner(e) == null) return [];
+  const owners = [...new Set((g || []).map((r) => String(r.steamID)))];
+  return owners.filter((s) => !soloDoneHas(st, m, pid(s)));
+}
+// when the lane first processed a solo key (ms; null = no entry): the pacing start of an owner the key reopened for -- its
+//   start entry went with the key (reconcileStarts drops the entry of a processed key); never earlier than the key's start
+function soloDoneT0(st, m, g) {
+  const d = st && st.done;
+  if (!d) return null;
+  let t = null;
+  const take = (e) => { if (Array.isArray(e) && Number.isFinite(e[1]) && (t == null || e[1] < t)) t = e[1]; };
+  take(d[m]);
+  for (const s of new Set((g || []).map((r) => String(r.steamID)))) take(d[m + '|' + pid(s)]);
+  return t == null ? null : t * 1000;
+}
+// one group per writer, in the order the records were read
+function soloOwnerGroups(g) {
+  const by = new Map();
+  for (const r of g || []) { const s = String(r.steamID); if (!by.has(s)) by.set(s, []); by.get(s).push(r); }
+  return [...by.values()];
+}
 function soloKeyGone(name, tables) {
   let seen = false;
   for (const t of tables || []) {
@@ -7496,7 +7552,16 @@ async function main() {
 
   RUN.consistent = consistentMatches.length;
   if (consistentMatches.length === 0) { console.log('no consistent matches'); await lpRetry(); persistStartsSide(); await maintainTrust(); { const st0 = loadSolo(); await maintainRating(st0, new Set()); if (await maintainCup(st0, null) && APPLY_MMR) saveSolo(st0, nowMs); } await processRedeems(null); await processCampaignGrants(); await processCampaignEndless(); await processChatMute(); await writePulse(); await processSupporters(null, []); await processClassicOwners(null, []); writeRunSummary(); return; }
-  const fresh = consistentMatches.filter(c => !processed.has(c.m));
+  // cloud audit Q245: the solo chain memory is read before the fresh list -- a processed solo key the done memory remembers
+  //   per owner comes back for a writer the lane never processed under it (soloReopenOwners); every other processed key
+  //   stays out as before
+  const soloState = loadSolo();
+  const fresh = consistentMatches.filter(c => !processed.has(c.m) || (c.solo && soloReopenOwners(soloState, c.m, c.g).length > 0));
+  for (const c of fresh) {
+    if (!processed.has(c.m)) continue;
+    RUN.soloReopen = (RUN.soloReopen | 0) + 1;
+    console.log('  solo ' + c.m + ': processed, back for ' + soloReopenOwners(soloState, c.m, c.g).map(plog).join(', ') + ' -- the lane never processed his records under it (another account\'s segment closed the key; Q245)');
+  }
   RUN.fresh = fresh.length;
   console.log(consistentMatches.length + ' consistent, ' + fresh.length + ' fresh (settled ' + (consistentMatches.length - fresh.length) + ')');
   if (fresh.length === 0) { console.log('no fresh matches, skip'); await lpRetry(); persistStartsSide(); await maintainTrust(); { const st0 = loadSolo(); await maintainRating(st0, new Set()); if (await maintainCup(st0, null) && APPLY_MMR) saveSolo(st0, nowMs); } await processRedeems(null); await processCampaignGrants(); await processCampaignEndless(); await processChatMute(); await writePulse(); await processSupporters(null, []); await processClassicOwners(null, []); writeRunSummary(); return; }
@@ -7928,7 +7993,7 @@ async function main() {
     return false;
   };
   // ===== O93 solo competitive segment settle (COMP block above) =====
-  const soloState = loadSolo();
+  //   (soloState is read before the fresh list -- cloud audit Q245)
   const ratingTouched = new Set();   // O103: sids whose competitive run history moved this run (settled segment / conviction) -> their rating row is redone in maintainRating
   // O180 (client knife 5.1c-1): this week's boards -- the id from the chain memory (kept when the week's first write created the
   //   board; the listing can lag behind a fresh board) or the listing; neither = no row this week yet (created at the first write).
@@ -7978,13 +8043,16 @@ async function main() {
   // Q144 rework: forget the processed segments whose key no table here verifies any more (pruneSoloDone)
   const soloDonePruned = pruneSoloDone(soloState, [soloPub, soloPubRec]);
   if (soloDonePruned.gone) console.log('endless-solo: ' + soloDonePruned.gone + ' processed segment(s) forgotten, their key verifies no more (retired past the grace / revoked; Q144)');
-  const soloSettle = async (c) => {
+  // cloud audit Q245: judged once per account under the key (soloSettle below hands each account its own records); c.g = his records
+  const soloSettleOwner = async (c) => {
     const m = c.m;
     // Q144 rework: a signed segment this lane processed before, its key since dropped from the processed list (pruneProcessed)
-    //   and the segment written back -- back in the list, nothing else (no signal, no flag: its owner wrote his own record)
-    if (soloState.done && soloState.done[m]) {
+    //   and the segment written back -- back in the list, nothing else (no signal, no flag: its owner wrote his own record).
+    //   Q245: the memory is per account -- a key reopened for another account (still in the processed list) only skips this one.
+    if (soloDoneHas(soloState, m, pid(String(c.g[0].steamID)))) {
+      if (processed.has(m)) return false;   // Q245: the key is back for another account; this one was processed under it
       processed.add(m); RUN.soloReplay = (RUN.soloReplay | 0) + 1;
-      console.log('  solo ' + m + ': ' + plog(String(c.g[0].steamID)) + ' processed before (key ' + soloState.done[m][0] + '), its key had left the processed list -- back in it, nothing settles (Q144)');
+      console.log('  solo ' + m + ': ' + plog(String(c.g[0].steamID)) + ' processed before (key ' + soloDoneEntry(soloState, m, pid(String(c.g[0].steamID)))[0] + '), its key had left the processed list -- back in it, nothing settles (Q144)');
       return false;
     }
     // audit 2026-09-06 B-F10: a group can hold several pc=1 records under one key (a foreign same-key record beside the real
@@ -8026,7 +8094,7 @@ async function main() {
     }
     const f = v.fields;
     const soloDone = () => {   // Q144 rework: a verified segment this lane processed (pruneSoloDone)
-      processed.add(m); soloDoneNote(soloState, m, f.keyName, nowMs);
+      processed.add(m); soloDoneNote(soloState, m, f.keyName, nowMs, p);
       if (soloClockBack(f)) {   // Q242: an honest clock change, not a forgery -- counted, the segment handled like any other
         RUN.soloNegDur = (RUN.soloNegDur | 0) + 1;
         console.log('  solo ' + m + ': ' + plog(sid) + ' the guard clock went back inside the segment (negative duration) -- counted (Q242)');
@@ -8102,6 +8170,9 @@ async function main() {
     if (!cpId || (classic ? !enClassicSoloId : casual ? (!cas.id || (seasonId >= 1 && !cas.seasonId)) : (!compId || (seasonId >= 1 && !compSeasonId)))) { console.log('  solo ' + m + ': cp/' + (classic ? 'classic-solo' : casual ? 'casual-solo' : 'comp') + '/seasonal board unresolved -- left pending'); return false; }
     // pacing: the segment's own start attestation (single guard attester) or its first sighting
     let pend = startsPending[m];
+    // Q245: a key reopened for this account -- its start row went when the other account's segment closed the key; pace from
+    //   the first segment processed under it (the start came no later), no missing-start signal (the start was seen)
+    if (!pend && processed.has(m)) { const t0 = soloDoneT0(soloState, m, c.g); if (t0 != null) pend = { t0, reopened: true }; }
     // (a recovered pool segment whose start row was overwritten by the pool rotation is not a missing-start signal)
     if (!pend) {
       pend = startsPending[m] = { t0: nowMs, mt: r.d[2] | 0, roster: {}, settled: [], synth: true };
@@ -8164,6 +8235,18 @@ async function main() {
     console.log('  solo settle ' + m + ': ' + plog(sid) + (classic ? ' classic' : (casual ? ' casual' : '')) + ' depth ' + f.startDepth + '->' + f.endDepth + ' bank ' + f.score + ' flags ' + f.flags + ((f.dispCode | 0) === attest.DISP_USER_QUIT ? ' (quit)' : '') + ' key=' + f.keyName + (v.sealed ? '' : ' [dev]') + (plan.overlap != null ? ' (overlap from ' + plan.overlap + ', proven ' + plan.proven + ')' : '') + (plan.truncated ? ' (recovered pool segment: truncated chain, head ' + plan.proven + ')' : '') + (plan.revive ? (classic ? ' (revived by a classic token resume)' : ' (revived by a casual token resume)') : ''));
     soloDone();
     return true;
+  };
+  // cloud audit Q245 (2026-10): the solo key (hash of the session id + run seed + mt) is not bound to one account. An account
+  //   outside the run (his own start naming himself: the key splits, no seat gate) got his own guard to sign a segment under a
+  //   victim's key; when his record came first the lane settled it and closed the key, and the victim's segment was never looked
+  //   at (or both were flagged by one bad record). Each account's records are now judged on their own, and the processed
+  //   memory is per account (soloDoneNote p): the key closes only for the account whose segment was processed under it.
+  const soloSettle = async (c) => {
+    const gs = soloOwnerGroups(c.g);
+    if (gs.length > 1) RUN.soloMultiOwner = (RUN.soloMultiOwner | 0) + 1;
+    let n = 0;
+    for (const g of gs) if (await soloSettleOwner(Object.assign({}, c, { g }))) n++;
+    return n > 0;
   };
   for (const c of fresh) {
     if (scPendingRestore) { scRestore(scPendingRestore); scPendingRestore = null; }
@@ -9893,6 +9976,7 @@ Object.assign(module.exports, { testimonyOf, recTestimony, noteTestimony, endles
 Object.assign(module.exports, { teamLossCounted });   // cloud audit Q136 the losing team must be somebody
 Object.assign(module.exports, { contestParties, contestTable, noteContestParties, noteParties, CONTEST_PARTY_CAP, CONTEST_PARTIES, LATE_SPLIT_WHO });   // cloud audit Q143 whose records contested a matchmade key
 Object.assign(module.exports, { completeTables, capContests, capLedger, CONTEST_CAP, CONTEST_CAP_MS, CONTEST_CAP_ACCOUNTS, CAP_NOTE });   // cloud audit Q208 an outside account may hold up only a few matches a day
+Object.assign(module.exports, { soloDoneOwner, soloDoneEntry, soloDoneHas, soloReopenOwners, soloDoneT0, soloOwnerGroups });   // cloud audit Q245: the solo lane's processed memory per account
 Object.assign(module.exports, { soloKeyGone, pruneSoloDone, soloDoneNote, SOLO_DONE_CAP, SEEN_PER_WRITER, screenLateStarts });   // cloud audit Q144 rework: processed solo segments remembered while their key verifies, a room per writer across the start-seen notes
 Object.assign(module.exports, { pruneFlagged, flagBaseKey, FLAG_PRUNE_WAIT_MS, blankSeen, BLANK_STARTS });   // cloud audit Q166 a signals flag goes once its key left the shards
 Object.assign(module.exports, { lateWriterRoster });   // cloud audit Q261 a 1V1 whose result writer's own start was first read with his result
