@@ -228,7 +228,14 @@ const CONFESS_MAGIC = 0xB5;
 // Exit-note record (Q64, cloud audit 2026-10): a matchmade client whose match ended for it WITHOUT a settle record -- the
 // migration after a host loss failed (no new host reachable / nobody joined the elected one), or the host left and this
 // client is not the sole survivor -- writes a self-claim "the match died on me" on its way to the menu. Same v3 layout
-// with zeroed results, disp slot = 2 host-left / 4 migrate-disband (lockstep with the client writer; NOTE_DISP below).
+// with zeroed results, disp slot = 2 host-left / 3 level-begin-timeout / 4 migrate-disband (lockstep with the client writer;
+// NOTE_DISP below). Q221 (cloud audit 2026-10-20) added 3: a joiner that waited 60 s for the host's next-level frame
+// (LEVEL_BEGIN, or the team-match round verdict) while the host's heartbeat stayed alive goes to the menu without a settle
+// record too. A modified host that keeps answering heartbeats and never sends the frame sent the whole honest table to the
+// menu with a quit each at maturity (the host himself escaped with a lone 0xB1). Honest uses of the path: only this
+// client's link is half-dead while the others play on -- they settle (consistent group), the note is never looked at and
+// this client is a leaver as before; in a 1V1 the other side can only write a lone record, so the note spares a client
+// whose link went bad (the client already classes code 3 innocent; a modified client could spare itself with a lone 0xB1).
 // It is read at ONE place: the start-orphan verdict (reconcileStarts) skips a roster member whose own note for the key
 // was seen, so an orphaned start no longer charges an exit-rate hit to the honest seats of a migration failure (before:
 // every seat that wrote a start got one -- e.g. in a matchmade 2V2 the host's teammate is always elected, so a host
@@ -240,7 +247,7 @@ const CONFESS_MAGIC = 0xB5;
 // cuts its network together to void a losing match still pays one exit-rate hit at the host (architecture decision 10:
 // the honest opponents are spared first; the seat-1 teammate cannot be told apart from an honest elected host).
 const NOTE_MAGIC = 0xBD;
-const NOTE_DISP = new Set([2, 4]);
+const NOTE_DISP = new Set([2, 3, 4]);
 // 'kicked' (7) = removed by the host for in-match inactivity; classed abandoner like user-quit.
 // A kicked player never writes a settle record (they leave mid-match), so the code never appears
 // in a shard in practice -- it exists for client-side exit-signal classing and table lockstep.
@@ -6075,7 +6082,7 @@ async function main() {
   const confState = loadConfessions();   // loaded before starts so the orphan verdict can skip confessed keys
   const consistentKeys = new Set(consistentMatches.map(c => c.m));
   const nowMs = Date.now();
-  // Q64: exit notes read this run ("pid|key", host-left / migrate-disband only) -> the start-orphan verdict spares their writers
+  // Q64: exit notes read this run ("pid|key", host-left / level-begin-timeout [Q221] / migrate-disband only) -> the start-orphan verdict spares their writers
   const noted = new Set(notes.filter((n) => NOTE_DISP.has(n.dispCode | 0)).map((n) => pid(String(n.steamID)) + '|' + n.m));
   const startsRes = reconcileStarts(starts, groups, consistentKeys, processed, startsPending, leavers, nowMs, STARTS_MATURITY_MS, confState, shardsComplete, registeredEarly, seenKeys, noted);   // Q144: + seenKeys; Q64: + noted
   if (startsRes.registered || startsRes.convicted || startsRes.cleaned || Object.keys(startsPending).length)

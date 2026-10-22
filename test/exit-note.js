@@ -5,8 +5,11 @@
 //   charged an exit-rate hit to EVERY roster seat that wrote its own start, the honest opponents included (in a matchmade
 //   2V2 the host's teammate is always the elected host, so a host team that drops together sent both opponents to the menu
 //   with a quit each). Now the client writes an exit note on that path; the verdict skips a roster member whose own note
-//   (disp 2 host-left / 4 migrate-disband) for the key was read while the key was pending. A key that settles never looks
-//   at notes.
+//   (disp 2 host-left / 3 level-begin-timeout [Q221] / 4 migrate-disband) for the key was read while the key was pending.
+//   A key that settles never looks at notes.
+// Q221 (cloud audit 2026-10-20): a joiner that waited 60 s for the next-level frame while the host's heartbeat stayed alive
+//   goes to the menu without a settle record as well (a modified host that answers heartbeats and never sends the frame sent
+//   the whole honest table to the menu, a quit each at maturity, while his own lone record spared him) -> disp 3 joins NOTE_DISP.
 // End-to-end over the REAL validate.js main() against an offline stateless board stub (the harness of
 //   test/late-start-roster.js), plus direct reconcileStarts units.
 //   [1] constants + reconcileStarts units: a noted seat is spared (logged, counted); p.noted is cumulative (the note can
@@ -16,7 +19,7 @@
 //       (migrate-disband): at maturity the host side has a hit each, the opponents none; summary row; control without notes
 //   [3] E2 three-player quick (mt 1): the host crashes, the other two cannot reach each other; notes host-left /
 //       migrate-disband: only the host is hit
-//   [4] E3 notes with another disp (user-quit 5, level-begin-timeout 3, kicked 7, eac-drop 9, finished 0) spare nobody
+//   [4] E3 notes with another disp (user-quit 5, eac-kick 8, kicked 7, eac-drop 9, finished 0, reconnect-failed 6) spare nobody
 //   [5] E4 the notes are read once, then overwritten before maturity: still spared
 //   [6] E5 a settled match (ranked mt 2, one seat dropped and wrote a note): the note changes nothing, the absent seat is a
 //       leaver exactly as without it (same exit-rate, same points posts)
@@ -26,6 +29,11 @@
 //   [10] mutants: no spare (the honest opponents are hit again); every disp accepted (E3 spared); the key ignored
 //        (E7 spared); notes read only in the current run (E4 hit again)
 //   [11] wiring pins
+//   [12] Q221: E10 three-player quick, the host withholds the next-level frame (heartbeat alive): both joiners write
+//        level-begin-timeout notes and are spared, the host's lone record keeps him exempt (no lone record: he is hit);
+//        an old client's table (no notes) is hit as before; E11 the same timeout on one half-dead joiner while the other two
+//        settle: he is a leaver exactly as without the note; E12 a ranked 1V1 whose joiner's link went bad: the host's lone
+//        record and the joiner's note -- nobody hit; mutant (disp 3 dropped from NOTE_DISP): the joiners are hit again
 // State isolation is structural (every *_FILE var scanned and redirected, cwd = temp dir), like test/seat-gate.js.
 const { spawnSync } = require('child_process');
 const fs = require('fs'), path = require('path'), os = require('os');
@@ -136,7 +144,9 @@ const E1P = ids([201, 202, 203, 204]), E1C = ids([205, 206, 207, 208]), E2P = id
 const E4P = ids([231, 232, 233, 234]), E5P = ids([241, 242, 243]), E5Q = ids([245, 246, 247]), E6P = ids([251, 252, 253, 254]), E6X = SID(255);
 const E7P = ids([261, 262, 263, 264]), E8P = ids([271, 272, 273, 274]), E9P = ids([281, 282, 283, 284]);
 const M1P = ids([291, 292, 293, 294]), M2P = ids([295, 296, 297, 298]), M3P = ids([301, 302, 303, 304]), M4P = ids([305, 306, 307, 308]);
-const ALL = [].concat(E1P, E1C, E2P, E3P, E4P, E5P, E5Q, E6P, [E6X], E7P, E8P, E9P, M1P, M2P, M3P, M4P);
+const QAP = ids([311, 312, 313]), QBP = ids([314, 315, 316]), QCP = ids([317, 318, 319]), QDP = ids([321, 322, 323]), QDQ = ids([324, 325, 326]);
+const QEP = ids([327, 328]), QMP = ids([331, 332, 333]);
+const ALL = [].concat(E1P, E1C, E2P, E3P, E4P, E5P, E5Q, E6P, [E6X], E7P, E8P, E9P, M1P, M2P, M3P, M4P, QAP, QBP, QCP, QDP, QDQ, QEP, QMP);
 function boardsWith(recs) {
   const boards = [];
   for (let i = 0; i < 50; i++) boards.push({ id: 1000 + i, name: 'shard_' + i, entries: [] });
@@ -180,8 +190,8 @@ const mkStart = (writer, roster, hash) => { const d = []; d[2] = 5; d[3] = (hash
 const KEY = '111_7_5', MAT = 2 * HOUR;
 {
   T('[1] NOTE_MAGIC 0xBD (0xB1..0xBC all taken on the client)', v.NOTE_MAGIC === 0xBD);
-  T('[1] NOTE_DISP = { host-left, migrate-disband } exactly', v.NOTE_DISP instanceof Set && v.NOTE_DISP.size === 2 && [...v.NOTE_DISP].map(v.dispName).sort().join(',') === 'host-left,migrate-disband',
-    JSON.stringify([...(v.NOTE_DISP || [])]));
+  T('[1] NOTE_DISP = { host-left, level-begin-timeout, migrate-disband } exactly (Q221 added level-begin-timeout)', v.NOTE_DISP instanceof Set && v.NOTE_DISP.size === 3
+    && [...v.NOTE_DISP].map(v.dispName).sort().join(',') === 'host-left,level-begin-timeout,migrate-disband', JSON.stringify([...(v.NOTE_DISP || [])]));
   const [A, B, C, D] = ids([101, 102, 103, 104]), X = SID(109);
   const R4 = { 0: A, 1: B, 2: C, 3: D };
   const pend0 = () => ({ [KEY]: { t0: 0, mt: 5, roster: { 0: v.pid(A), 1: v.pid(B), 2: v.pid(C), 3: v.pid(D) }, settled: [], started: [A, B, C, D].map(v.pid) } });
@@ -274,9 +284,9 @@ const e1 = (P, withNotes, disp) => {
 // ---- [4] E3 notes with a disp outside NOTE_DISP spare nobody ----
 {
   const P = E3P, h = 0x9603, S = [0, 1, 2, 3].map(s => start(5, h, P, s));
-  const N = [note(5, h, P, 0, 5), note(5, h, P, 1, 3), note(5, h, P, 2, 7), note(5, h, P, 3, 9)];
+  const N = [note(5, h, P, 0, 5), note(5, h, P, 1, 8), note(5, h, P, 2, 7), note(5, h, P, 3, 9)];
   const rs = timeline(absentSteps(S, N));
-  T('[4] E3: user-quit / level-begin-timeout / kicked / eac-drop notes: all four hit', allOk(rs, 4) && JSON.stringify(leaves(last(rs), P)) === '[1,1,1,1]' && sparedN(rs) === 0,
+  T('[4] E3: user-quit / eac-kick / kicked / eac-drop notes: all four hit', allOk(rs, 4) && JSON.stringify(leaves(last(rs), P)) === '[1,1,1,1]' && sparedN(rs) === 0,
     JSON.stringify(leaves(last(rs), P)));
   const S0 = [0, 1, 2, 3].map(s => start(5, h + 1, P, s));
   const rs0 = timeline(absentSteps(S0, [note(5, h + 1, P, 2, 0), note(5, h + 1, P, 3, 6)]));
@@ -296,10 +306,10 @@ const e4 = (P) => {
 }
 
 // ---- [6] E5 a settled match: the note is ignored, the dropped seat is a leaver exactly as without it ----
-const e5 = (P, withNote) => {
+const e5 = (P, withNote, disp) => {
   const h = 0x9605, SC3 = [9000, 6000, 3000], S = [0, 1, 2].map(s => start(2, h, P, s));
   const R = [settle(2, h, P, 0, 1, true, SC3), settle(2, h, P, 1, 2, false, SC3)];
-  const N = withNote ? [note(2, h, P, 2, 4)] : [];
+  const N = withNote ? [note(2, h, P, 2, disp == null ? 4 : disp)] : [];
   const F = S.concat(R, N);
   return { key: keyOf(S[0].d), steps: [[0, S], [12 * MIN, F], [6 * MIN, F], [6 * MIN, F], [v.LEAVE_CONFIRM_MS - 23 * MIN, F], [3 * HOUR, F]] };
 };
@@ -399,6 +409,54 @@ const e7 = (P) => {
     rs.indexOf("if (notedSet && notedSet.size) for (const seat of Object.keys(p.roster))") > 0
     && rs.indexOf("if (notedSet && notedSet.size) for (const seat of Object.keys(p.roster))") < rs.indexOf('if (consistentKeys.has(m)) continue;'));
   T('[11] the summary row', /'\| start-orphan seats spared by their own exit note \(Q64\) \| ' \+ s\('exitNoteSpared', 0\) \+ ' \|'/.test(SRC));
+}
+
+// ---- [12] Q221: the host keeps the heartbeat alive and never sends the next-level frame ----
+// E10 three-player quick (mt 1): host H (seat 0) withholds LEVEL_BEGIN; joiners J1 / J2 wait 60 s, go to the menu and write
+//   level-begin-timeout notes (3). H writes a lone result (the match "finished" for him alone) or nothing.
+const e10 = (P, notes, hostLone) => {
+  const h = 0x9621, S = [0, 1, 2].map(s => start(1, h, P, s));
+  const N = notes ? [note(1, h, P, 1, 3), note(1, h, P, 2, 3)] : [];
+  const L = hostLone ? [settle(1, h, P, 0, 1, true, [4200, 0, 0], 1)] : [];   // peers-gone: he "finished" with the table gone
+  return absentSteps(S, N.concat(L));
+};
+{
+  const rs = timeline(e10(QAP, true, true));
+  T('[12] E10: the joiners\' level-begin-timeout notes spare both, the host\'s lone record keeps him exempt -- nobody hit', allOk(rs, 4)
+    && JSON.stringify(leaves(last(rs), QAP)) === '[0,0,0]' && sparedN(rs) === 2 && /1 exempt \(wrote a settle record\)/.test(last(rs).out),
+    JSON.stringify(leaves(last(rs), QAP)) + ' ' + last(rs).out.split('\n').filter(l => /start-orphan/.test(l)).join(' | '));
+  const rb = timeline(e10(QBP, true, false));
+  T('[12] E10: a host that writes nothing at all is hit once, the joiners are spared', allOk(rb, 4) && JSON.stringify(leaves(last(rb), QBP)) === '[1,0,0]' && sparedN(rb) === 2,
+    JSON.stringify(leaves(last(rb), QBP)));
+  const rc = timeline(e10(QCP, false, true));
+  T('[12] E10 control (an old client, no notes): both honest joiners hit, the host exempt -- the bug as it was', allOk(rc, 4) && JSON.stringify(leaves(last(rc), QCP)) === '[0,1,1]' && sparedN(rc) === 0,
+    JSON.stringify(leaves(last(rc), QCP)));
+  T('[12] E10: nobody flagged, no points posted', QAP.concat(QBP).every(s => fOf(last(rs), s) === 0 && fOf(last(rb), s) === 0) && rs.concat(rb).every(r => pointPosts(r).length === 0));
+}
+// E11 one half-dead joiner: the host and the other joiner play on and settle; seat 2 timed out and wrote a level-begin-timeout note
+{
+  const a = e5(QDP, true, 3), b = e5(QDQ, false);
+  const ra = timeline(a.steps), rb = timeline(b.steps);
+  const norm = (rs, P) => rs.map(r => pointPosts(r).map(x => { let y = x; P.forEach((s, i) => { y = y.split(s).join('P' + i); }); return y; }).join(';')).join('|');
+  T('[12] E11: the match settles, the timed-out seat is a leaver with or without his note (same exit-rate, same points posts)', allOk(ra, 6) && allOk(rb, 6)
+    && processedOf(last(ra)).has(a.key) && leavesOf(last(ra), QDP[2]) === 1 && leavesOf(last(rb), QDQ[2]) === 1 && leavesOf(last(ra), QDP[0]) === 0 && leavesOf(last(ra), QDP[1]) === 0
+    && norm(ra, QDP) === norm(rb, QDQ) && ra.some(r => pointPosts(r).length > 0) && sparedN(ra) === 0, JSON.stringify([leaves(last(ra), QDP), leaves(last(rb), QDQ)]));
+}
+// E12 ranked 1V1 (mt 2): the joiner's link went bad (heartbeat answered, frames lost); the host plays on alone and writes a lone result
+{
+  const P = QEP, h = 0x9622, S = [0, 1].map(s => start(2, h, P, s));
+  const N = [note(2, h, P, 1, 3), settle(2, h, P, 0, 1, true, [5100, 900], 1)];
+  const rs = timeline(absentSteps(S, N));
+  T('[12] E12: ranked 1V1, the joiner\'s note and the host\'s lone record -- nobody hit, no points posted', allOk(rs, 4) && JSON.stringify(leaves(last(rs), P)) === '[0,0]'
+    && sparedN(rs) === 1 && rs.every(r => pointPosts(r).length === 0), JSON.stringify(leaves(last(rs), P)) + ' ' + last(rs).out.split('\n').filter(l => /start-orphan|lone/.test(l)).join(' | '));
+}
+{
+  const s5 = mutant('const NOTE_DISP = new Set([2, 3, 4]);', 'const NOTE_DISP = new Set([2, 4]);', '[12m]');
+  if (s5) try {
+    const m = timeline(e10(QMP, true, true), s5);
+    T('[12] mutant (level-begin-timeout dropped from NOTE_DISP, the code before Q221): both honest joiners hit again', allOk(m, 4) && JSON.stringify(leaves(last(m), QMP)) === '[0,1,1]',
+      JSON.stringify(leaves(last(m), QMP)));
+  } finally { try { fs.unlinkSync(s5); } catch (e) {} }
 }
 
 console.log('=== ' + (failN === 0 ? 'PASS' : 'FAIL') + ' -- ' + failN + ' fail (exit-note) ===');
