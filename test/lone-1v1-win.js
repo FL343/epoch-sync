@@ -443,7 +443,7 @@ console.log('=== a ranked 1V1 only its winner wrote: counted on the silent seat,
   const iCons = at(/\n  if \(startsRes\.consoledSids && startsRes\.consoledSids\.length && XP_LB\) \{/), iPay = at(/\n  else if \(l1Res\.pay\.length\) \{/);
   T('[5] main: the verdicts after reconcileStarts, then the early marks and the signals, then the consolation, then the points',
     iVer > at(/const startsRes = reconcileStarts\(/) && iMarks > iVer && iSig > iMarks && iCons > iSig && iPay > iCons, JSON.stringify([iVer, iMarks, iSig, iCons, iPay]));
-  T('[5] main: the paid winners join the consolation list', /for \(const p of l1Res\.pay\) if \(startsRes\.consoledSids\.indexOf\(p\.sid\) < 0\) startsRes\.consoledSids\.push\(p\.sid\);/.test(SRC));
+  T('[5] main: the paid winners join the consolation list (Q216: but one the void already consoled, x0)', /for \(const p of l1Res\.pay\) if \(!p\.x0 && startsRes\.consoledSids\.indexOf\(p\.sid\) < 0\) startsRes\.consoledSids\.push\(p\.sid\);/.test(SRC));
 }
 
 console.log('=== ' + (failN === 0 ? 'PASS' : 'FAIL') + ' -- ' + failN + ' fail (lone-1v1-win) ===');

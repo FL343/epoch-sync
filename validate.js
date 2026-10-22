@@ -1477,7 +1477,7 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
       //   only while the row stays up, the row could still be withdrawn once the note is gone and the match would count
       if (e.c && !pending[key] && !processed.has(key) && now - (e.t0 || 0) >= maturityMs) {
         processed.add(key);
-        voided.push({ m: key, pids: [] });
+        voided.push({ m: key, pids: [], note: e });   // Q216: the note, for lone1v1VoidClaims
         RUN.contestVoid = (RUN.contestVoid | 0) + 1;
         const who = noteParties(e);   // Q143
         console.log('  contest-void ' + key + ': contested since ' + new Date(e.t0 || 0).toISOString() + ', no start roster -- void, nobody rated (Q127)'
@@ -1548,7 +1548,7 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
     convicted += hit.length;
     if (spared.length) RUN.exitNoteSpared = (RUN.exitNoteSpared | 0) + spared.length;
     processed.add(m);   // idempotent: a super-late settlement of a convicted key is skipped as stale
-    voided.push({ m, pids: Object.keys(p.roster).map((seat) => p.roster[seat]) });
+    voided.push({ m, pids: Object.keys(p.roster).map((seat) => p.roster[seat]), note: pending['~' + m] || null });   // Q216: + the note
     delete pending[m];
     const cn = pending['~' + m], wasContested = !!(cn && cn.c), who = wasContested ? noteParties(cn) : '';   // Q143: a contested key voids here
     if (wasContested) RUN.contestHeldVoid = (RUN.contestHeldVoid | 0) + 1;
@@ -1611,6 +1611,85 @@ function lone1v1Claim(e, key, g, confState, confSeen) {
   if ((confState && confState[op + '|' + key]) || (confSeen && confSeen.has(op + '|' + key))) return null;   // he confessed: his own word, its own path
   return { m: key, w, o, seat };
 }
+// ---- a ranked 1V1 whose loser wrote only records the job cannot use (cloud audit Q216) ----
+// Q184 decides a ranked 1V1 only its winner wrote. A modded loser kept the match from that verdict and from every other one by
+// writing one record the job can never use: no start of his own and a result out of the sanity bounds (a duration past
+// DUR_CAP, V), or a result naming a table no honest record of the match names (his opponent twice, another account at the
+// winner's seat, U), or such a table in his start too (S6). The bad result keeps the winner's result from being alone (Q184 is
+// out), the winner's start stays the key's only usable vote (no roster, or a split one) and the key never settles: flagged
+// until it rots (V), or held by the Q75 contest and voided at maturity (Q127: U, S6), nobody rated -- the honest winner's win
+// was lost, the loser lost nothing (cloud audit Q216, from R1-X12-Q109 README section 10 and REVIEW-3 S6). lone1v1Spoiled is
+// lone1v1Claim with the loser's own records let in when each of them spoils itself:
+//   - every result of the key is the winner's -- lone1v1Claim's tests on them: a plain ranked 1V1, his seat and table, the
+//     same sanity-clean 'finished' record, his score above the other seat's -- or the other seat's account's (a third writer:
+//     no claim);
+//   - the other seat wrote at least one result (a start alone is a leave, the start-orphan verdict's), and every one of them
+//     carries the winner's score vector -- his own record says he lost (a record claiming his win is a dispute, not a silence:
+//     no claim) -- and fails on its own: another table than the winner's (startSig), another seat, or a sanity bound (a
+//     record the job could use goes the usual way: no claim);
+//   - the starts read before the result: the winner's are his own, from his seat, naming his table, at least one (or his own
+//     start read late with his result, Q254, as in lone1v1Claim); none of the other seat's names that table from that seat (two
+//     such starts register the roster and the start-orphan verdict judges it); on a voided key (strict) nobody else's either;
+//   - on a contested key the contest's parties (the note's w, Q143) are the two of them; on a voided start-orphan key the
+//     registered roster names nobody else (pids); the other seat did not confess.
+// The count and the payment are Q184's (lone1v1Count): nobody flagged beyond what his records already earn (the sanity flag of
+// V, as today), his points, rating and exits untouched, the winner paid only once two different accounts made such claims
+// against him, at most WEEK_CAP a week. The bad record is the loser's own row (the row owner is unforgeable), so the claim
+// rests on his own word -- the loss -- where Q184's rests on his silence; and what two colluding accounts can take this way
+// they can already take through Q184 without playing a match. An honest loser loses nothing by it (a count, as Q184); an
+// honest winner whose opponent's record was spoiled by somebody else (a modded host's seat table, Q109) is paid only when
+// that record admits the loss.
+function lone1v1Spoiled(e, key, g, confState, confSeen, strict, pids) {
+  if (!e || !Array.isArray(e.s) || !g || !g.length || (g[0].d[2] | 0) !== 2) return null;
+  const writers = [...new Set(g.map((r) => String(r.steamID)))];
+  if (writers.length !== 2) return null;
+  let out = null;
+  for (const w of writers) {
+    const mine = g.filter((r) => String(r.steamID) === w), r0 = mine[0];
+    if ((r0.d[8] | 0) !== 2) continue;   // (the match type is in the key; party bits keep their rules)
+    const seat = r0.d[5] | 0, ro = r0.roster || {};
+    if ((seat !== 0 && seat !== 1) || String(ro[seat]) !== w) continue;
+    const o = ro[1 - seat] != null ? String(ro[1 - seat]) : '';
+    if (!o || o === w || writers.indexOf(o) < 0) continue;   // the other writer is the account his table seats there
+    const sig = startSig(r0), vec = JSON.stringify(r0.d.slice(10, 12));
+    if (mine.some((r) => (r.d[5] | 0) !== seat || (r.dispCode | 0) !== 0 || startSig(r) !== sig || JSON.stringify(r.d.slice(10, 12)) !== vec || sanityFlags([r]).length)) continue;
+    if (!((r0.d[10 + seat] | 0) > (r0.d[11 - seat] | 0))) continue;   // his record says he won
+    const his = g.filter((r) => String(r.steamID) === o);
+    if (his.some((r) => JSON.stringify(r.d.slice(10, 12)) !== vec)) continue;   // the loser's record disputes the result
+    if (his.some((r) => startSig(r) === sig && (r.d[5] | 0) === 1 - seat && !sanityFlags([r]).length)) continue;   // a usable record
+    const wp = pid(w), op = pid(o), own = wp + '@' + seat + '#' + sig, hisOwn = op + '@' + (1 - seat) + '#' + sig;
+    let mineSeen = 0, bad = false;
+    for (const id of e.s) {
+      const h = String(id).split('@')[0];
+      if (h === wp) { if (id !== own) bad = true; else mineSeen++; }
+      else if (h === op) { if (id === hisOwn) bad = true; }
+      else if (strict) bad = true;
+    }
+    if (bad || (!mineSeen && !(Array.isArray(e.lo) && e.lo.indexOf(own) >= 0))) continue;
+    if (e.c && (!Array.isArray(e.w) || e.w.some((x) => { const h = String(x).slice(0, 16); return h !== wp && h !== op; }))) continue;
+    if (Array.isArray(pids) && pids.some((h) => h !== wp && h !== op)) continue;
+    if ((confState && confState[op + '|' + key]) || (confSeen && confSeen.has(op + '|' + key))) continue;
+    if (out) return null;
+    out = { m: key, w, o, seat, spoiled: 1 };
+  }
+  return out;
+}
+// Q216: the ranked 1V1 keys the starts verdict voided this run (reconcileStarts' voided, each with the note it voided from) ->
+//   lone1v1Spoiled's claims. The void stands either way: on an incomplete read (the other seat's usable record may sit on the
+//   unread shard; the contest void runs on any read) nothing is claimed, never later. x0: the winner is on this run's
+//   consolation list already (the start-orphan verdict) -- his payment's XP was that consolation.
+function lone1v1VoidClaims(voided, groups, consoledSids, confState, confSeen, readComplete) {
+  const out = [];
+  for (const vk of voided || []) {
+    if (!vk || !vk.note || (String(vk.m).split('_')[2] | 0) !== 2) continue;
+    const c = lone1v1Spoiled(vk.note, vk.m, groups[vk.m], confState, confSeen, true, vk.pids && vk.pids.length ? vk.pids : null);
+    if (!c) continue;
+    if (readComplete === false) { RUN.lone1v1VoidHeld = (RUN.lone1v1VoidHeld | 0) + 1; console.log('  lone-1v1 ' + vk.m + ': voided on an incomplete shard read -- not claimed (Q216)'); continue; }
+    if (consoledSids && consoledSids.indexOf(String(c.w)) >= 0) c.x0 = 1;
+    out.push(c);
+  }
+  return out;
+}
 function lone1v1Verdicts(pending, groups, processed, now, maturityMs, confState, confSeen, readComplete) {
   const out = [];
   let held = 0;
@@ -1618,7 +1697,7 @@ function lone1v1Verdicts(pending, groups, processed, now, maturityMs, confState,
     if (k.charAt(0) !== '~') continue;
     const key = k.slice(1), e = pending[k];
     if (pending[key] || processed.has(key) || !e || e.c || now - (e.t0 || 0) < maturityMs) continue;
-    const c = lone1v1Claim(e, key, groups[key], confState, confSeen);
+    const c = lone1v1Claim(e, key, groups[key], confState, confSeen) || lone1v1Spoiled(e, key, groups[key], confState, confSeen, false, null);   // Q216: or his bad records
     if (!c) continue;
     if (readComplete === false) { held += 1; continue; }   // his opponent's row may sit on the unread shard
     processed.add(key);
@@ -1635,18 +1714,20 @@ function lone1v1Count(claims, signals, now, sidOfPid) {
   const due = [];
   for (const c of claims) {
     const wp = pid(c.w), op = pid(c.o), so = signals.players[op];
-    if (!so) { res.nosig++; console.log('  lone-1v1 ' + c.m + ': ' + plog(c.w) + ' won, ' + plog(c.o) + ' wrote nothing -- no signals of his own, not counted, not paid (Q184)'); continue; }
+    const what = c.spoiled ? ' wrote only records the job cannot use (Q216)' : ' wrote nothing';
+    if (!so) { res.nosig++; console.log('  lone-1v1 ' + c.m + ': ' + plog(c.w) + ' won, ' + plog(c.o) + what + ' -- no signals of his own, not counted, not paid (Q184)'); continue; }
     so.l1 = (so.l1 | 0) + 1;
     const ol = Array.isArray(so.l1o) ? so.l1o : (so.l1o = []);
     if (ol.indexOf(wp) < 0 && ol.length < LONE1V1.OPP_CAP) ol.push(wp);
     res.counted++; res.dirty = true;
     const atGate = ol.length >= LONE1V1.GATE;
-    if (atGate) due.push({ sid: c.w, wp, op, m: c.m });   // m: the match key, for the payment's points receipt (O480)
+    if (atGate) due.push(Object.assign({ sid: c.w, wp, op, m: c.m }, c.x0 ? { x0: 1 } : {}));   // m: the match key, for the payment's points receipt (O480); x0: Q216
     else {
       const q = Array.isArray(so.l1q) ? so.l1q : (so.l1q = []);
-      if (q.length < LONE1V1.QUEUE_CAP) { q.push({ w: wp, t: now, m: c.m }); res.queued++; }
+      if (q.length < LONE1V1.QUEUE_CAP) { q.push(Object.assign({ w: wp, t: now, m: c.m }, c.x0 ? { x: 1 } : {})); res.queued++; }   // x: Q216, consoled at the void
     }
-    console.log('  lone-1v1 ' + c.m + ': ' + plog(c.w) + ' won, ' + plog(c.o) + ' wrote nothing -- counted on him (' + so.l1 + ' such match(es), '
+    if (c.spoiled) RUN.lone1v1Spoiled = (RUN.lone1v1Spoiled | 0) + 1;
+    console.log('  lone-1v1 ' + c.m + ': ' + plog(c.w) + ' won, ' + plog(c.o) + what + ' -- counted on him (' + so.l1 + ' such match(es), '
       + ol.length + ' different opponent(s)), nobody flagged; ' + (atGate ? 'winner paid' : 'payment waits for a second opponent\'s claim') + ' (Q184)');
   }
   // claims waiting on an entry that has reached the gate (this run's or an earlier one's): paid once their writer is named
@@ -1656,7 +1737,7 @@ function lone1v1Count(claims, signals, now, sidOfPid) {
     const live = so.l1q.filter((q) => q && now - (Number(q.t) || 0) <= LONE1V1.RETRO_MS);
     const atGate = Array.isArray(so.l1o) && so.l1o.length >= LONE1V1.GATE;
     const keep = [];
-    for (const q of live) { const sid = atGate ? sidOfPid(q.w) : null; if (sid) due.push({ sid: String(sid), wp: q.w, op, m: q.m }); else keep.push(q); }
+    for (const q of live) { const sid = atGate ? sidOfPid(q.w) : null; if (sid) due.push(Object.assign({ sid: String(sid), wp: q.w, op, m: q.m }, q.x ? { x0: 1 } : {})); else keep.push(q); }
     if (keep.length !== so.l1q.length) res.dirty = true;
     if (keep.length) so.l1q = keep; else delete so.l1q;
   }
@@ -2639,6 +2720,7 @@ function writeRunSummary() {
       '| signed solo segments remembered while their key verifies / written back after they left the processed list (Q144) | ' + s('soloDone', 0) + ' / ' + s('soloReplay', 0) + ' |',
       '| accounts whose remembered starts across the notes are at the room (Q144) | ' + s('seenCapped', 0) + ' |',
       '| 1V1s registered from the result writer\'s late start and the other seat\'s own start read before it (Q261) | ' + s('lateWriter', 0) + ' |',
+      '| ranked 1V1s whose loser wrote only records the job cannot use (Q216; counted and paid in the Q184 row below): claims / voided on an incomplete read, not claimed | ' + s('lone1v1Spoiled', 0) + ' / ' + s('lone1v1VoidHeld', 0) + ' |',
       '| absent-seat holds (incomplete read / grace) | ' + s('absentHeld', 0) + ' |',
       '| groups waiting for a seat that started but has no result yet, until the match must be over (Q121) | ' + s('leaveWait', 0) + ' |',
       '| confessions seen/penalized/refunded | ' + s('confess', '0/0/0') + ' |',
@@ -6421,11 +6503,12 @@ async function main() {
     for (const s of vs) noteReceipt(s, mhOfKey(vk.m), 0, RECEIPT_F.VOID, 0);
     if (vs.size) console.log('  receipt ' + vk.m + ': never settled -> VOID receipt for ' + vs.size + ' account(s)');
   }
-  const l1Res = lone1v1Count(lone1v1Verdicts(startsPending, groups, processed, nowMs, STARTS_MATURITY_MS, confState, confSeen, shardsComplete),
+  const l1Res = lone1v1Count(lone1v1Verdicts(startsPending, groups, processed, nowMs, STARTS_MATURITY_MS, confState, confSeen, shardsComplete)
+    .concat(lone1v1VoidClaims(startsRes.voided, groups, startsRes.consoledSids, confState, confSeen, shardsComplete)),   // Q216: + the voided keys'
     signals, nowMs, (h) => sidByPid.get(h) || null);
   if (l1Res.dirty) sigDirty = true;
   RUN.lone1v1 = l1Res.counted + ' / ' + l1Res.queued + ' / ' + l1Res.pay.length + ' / ' + l1Res.nosig + ' / ' + l1Res.capped;
-  for (const p of l1Res.pay) if (startsRes.consoledSids.indexOf(p.sid) < 0) startsRes.consoledSids.push(p.sid);
+  for (const p of l1Res.pay) if (!p.x0 && startsRes.consoledSids.indexOf(p.sid) < 0) startsRes.consoledSids.push(p.sid);   // Q216: x0 consoled at its void
   RUN.pending = Object.keys(startsPending).filter((m) => m.charAt(0) !== '~').length; RUN.convicted = startsRes.convicted;
   // R1-B2-03: the consolation XP and confession points writes below are relative ("board value now + delta") and
   // land long before this run's normal state save (early-return persistStartsSide / the main-path tail). Any exit
@@ -9719,6 +9802,7 @@ Object.assign(module.exports, { completeTables, capContests, capLedger, CONTEST_
 Object.assign(module.exports, { soloKeyGone, pruneSoloDone, soloDoneNote, SOLO_DONE_CAP, SEEN_PER_WRITER, screenLateStarts });   // cloud audit Q144 rework: processed solo segments remembered while their key verifies, a room per writer across the start-seen notes
 Object.assign(module.exports, { pruneFlagged, flagBaseKey, FLAG_PRUNE_WAIT_MS, blankSeen, BLANK_STARTS });   // cloud audit Q166 a signals flag goes once its key left the shards
 Object.assign(module.exports, { lateWriterRoster });   // cloud audit Q261 a 1V1 whose result writer's own start was first read with his result
+Object.assign(module.exports, { lone1v1Spoiled, lone1v1VoidClaims });   // cloud audit Q216 a ranked 1V1 whose loser wrote only records the job cannot use
 Object.assign(module.exports, { teamXpFloor, teamXpStarts, teamXpMark, teamRollbackPlan });   // cloud audit Q237 team competitive XP floors (test/team-comp-ghost-xp.js)
 Object.assign(module.exports, { RATING, RATING_FAMS, ENDLESS_RATING_LB_SOLO, ENDLESS_RATING_LB_DUO, ENDLESS_RATING_LB_TRIO, ENDLESS_RATING_LB_QUAD, ENDLESS_TIERCUT_LB, ratingFamOf, fnv32, ratingRunId, ratingHistKey,
   ratingHistUpsert, ratingHistRemove, ratingScoreOf, ratingPlan, ratingCutsOf, ratingTierOf, tiercutDay, tiercutEncode, tiercutDecode, tiercutDue, pruneRatingHist });
