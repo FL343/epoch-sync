@@ -1877,7 +1877,7 @@ const TEAM2 = { SCORE_MULT: Number(process.env.TEAM2_SCORE_MULT || 10) };
 // Invite-only private rooms earn SMALL XP (well below matchmade) so friend-only players still
 // progress. XP is the ONLY surface: no TrueSkill/LP/CP/career/leaver conviction/B6 pair signals.
 // Anti-farm = three layers (user-directed: TIME is the proof of work):
-//   1. structural: the ordinary >=2-consistent-writers settle gate (lone records never pay);
+//   1. structural: the ordinary >=2-consistent-writers settle gate (lone records never pay -- one exception, a friends' room whose other seat(s) started and never wrote a result: Q316, privateLoneVerdicts below);
 //   2. time-as-work: a claimed lv-level room cannot settle before lv*LEVEL_SECONDS*PACE_FRAC
 //      of REAL wall time on this job's own clock (endless pacing family; floor MIN_START_AGE);
 //   3. per-UTC-day XP cap (dayCapXp) -- even a wall-clock-honest farm is bounded per day.
@@ -1896,6 +1896,78 @@ const PRIVATE_XP = {
   LEVEL_SECONDS: 75, PACE_FRAC: 0.5,                   // same physical floor family as ENDLESS
 };
 function isPrivateMt(mt) { return baseMt(mt) === PRIVATE_XP.MT; }
+// ---- a friends' room only one of its players wrote a result for (cloud audit Q316) ----
+// A friends' room key settles only with two consistent writers (rule 1 above). When the other player is honest but his
+// result never lands -- he closed the game on the results page or it crashed there, and he did not come back to a menu
+// inside the client's resend window (result-reporter OB.TTL_MS, 2 hours) -- the key keeps one writer for good and the
+// player who stayed to the end got nothing, although his client showed him the room's XP. No modified client needed
+// (the job's side of it was reproduced in the Q224 review, N1).
+// So such a key settles for its one writer (privateLoneVerdicts, main: after the start pass) once all of this holds:
+//   - one account wrote its results, all from one seat, finished (disp 0), the same scores, none sanity-flagged;
+//   - the key's start roster is registered and final (not provisional, not split, no contest note, the key never split
+//     into tables) and his results name exactly that roster;
+//   - every other seat of it wrote its OWN start for the key (no account can write another account's start: a lone
+//     account cannot make up a partner) and none of them wrote any result for it (p.settled) or a confession; nor did he;
+//   - that has been so for PRIVATE_LONE.WAIT_MS on this job's clock (from the first run that saw it, p.pl) and this run
+//     read every record shard.
+// The group then goes through the normal private settle (pacing, one match at a time, the day cap) with one writer:
+// the base P of the levels his record reports, no transfer (one voice cannot say who won). Two honest finishers get
+// P + t and P - t, so the room still pays what it pays on average; two colluding accounts get 2P by both writing and P
+// by one writing, so this opens nothing to them. The silent seats are not touched (friends' rooms have no leaver
+// economy). WAIT_MS is an hour past the client's resend window, so the other player's late result (a resend lands at
+// most 2 hours after his results page) still makes a normal two-writer group before this fires (Q224 review N5).
+// Residuals (README of Q316): the level count is his word only (paced as ever; a gain only for a modified client whose
+// honest partner's result was lost); a result of the other player that lands after this settle reaches a processed key
+// (only past his client's window, i.e. a moved clock).
+const PRIVATE_LONE = { WAIT_MS: 3 * 3600000, CLIENT_TTL_MS: 2 * 3600000 };   // CLIENT_TTL_MS: the game's OB.TTL_MS (its lockstep test pins it)
+// p: the key's starts entry; g: groups[key]. Returns { m, w, seat } or null.
+function privateLoneClaim(p, key, g, pending, processed, confState, confSeen, vecOf) {
+  if (!p || !g || !g.length || processed.has(key) || processed.has(splitMark(key))) return null;
+  if (!isPrivateMt(g[0].d[2] | 0) || !isPrivateMt(p.mt)) return null;
+  const ro = seatGateRoster(p);
+  if (!ro || p.prov || p.lent) return null;
+  const cn = pending['~' + key];
+  if (cn && (cn.c || cn.lent)) return null;
+  const w = String(g[0].steamID), wp = pid(w), seat = g[0].d[5] | 0, v0 = vecOf(g[0]);
+  if (ro[seat] !== wp || String(v0).indexOf('BAD') === 0) return null;
+  const seats = Object.keys(ro);
+  for (const r of g) {
+    if (String(r.steamID) !== w || (r.d[5] | 0) !== seat || (r.dispCode | 0) !== 0) return null;
+    if (vecOf(r) !== v0 || sanityFlags([r]).length) return null;
+    const rr = r.roster || {};
+    if (Object.keys(rr).length !== seats.length || seats.some((s) => rr[s] == null || pid(String(rr[s])) !== ro[s])) return null;
+  }
+  const others = seats.filter((s) => (s | 0) !== seat).map((s) => ro[s]);
+  if (!others.length) return null;
+  const said = (h) => !!((confState && confState[h + '|' + key]) || (confSeen && confSeen.has(h + '|' + key)));
+  if (said(wp)) return null;
+  for (const h of others) if (h === wp || !hasOwnStart(p, h) || (p.settled || []).indexOf(h) >= 0 || said(h)) return null;
+  return { m: key, w, seat };
+}
+// Called once per run, after reconcileStarts (p.settled / p.started are cumulative and include this run's records).
+// Stamps p.pl the first run a claim holds, drops it when the claim stops holding, and returns the groups that are due
+// ({ m, g, void: false, pvLone: true }) for main to append to the consistent groups. Returns { due, waiting, held }.
+// The absence stamp the settle's absent-seat hold reads (p.absentAt) is set only on the due run, to p.pl, so its 5-minute
+// grace is already over and the due group is not held 5 more minutes. Not earlier: a room of three or more whose other
+// results land late, one after the other, inside the wait turns consistent first, and its grace for the last of them must
+// start when it does (as it does today), not when the first result was seen (Q316 review, R6: 104 / 74 / 44, not 104 / 44 / 0).
+function privateLoneVerdicts(pending, groups, processed, consistentKeys, now, confState, confSeen, readComplete, vecOf) {
+  const res = { due: [], waiting: 0, held: 0 };
+  for (const m of Object.keys(pending)) {
+    const p = pending[m];
+    if (m.charAt(0) === '~' || !p || typeof p !== 'object' || !isPrivateMt(p.mt) || consistentKeys.has(m)) continue;
+    const c = groups[m] ? privateLoneClaim(p, m, groups[m], pending, processed, confState, confSeen, vecOf) : null;
+    if (!c) { if (p.pl != null && readComplete !== false) delete p.pl; continue; }   // gone or changed: the wait starts over (a partial read keeps it)
+    if (!(Number(p.pl) > 0) || p.pl > now) p.pl = now;   // a stamp from the future (foreign state) restarts the wait
+    const left = PRIVATE_LONE.WAIT_MS - (now - p.pl);
+    if (left > 0) { res.waiting++; console.log('  private-lone ' + m + ': only ' + plog(c.w) + ' wrote a result, the other seat(s) started -- ' + Math.round(left / 60000) + ' min until it settles for him alone (Q316)'); continue; }
+    if (readComplete === false) { res.held++; console.log('  private-lone ' + m + ': due, held (incomplete shard read) (Q316)'); continue; }
+    if (!(Number(p.absentAt) > 0)) p.absentAt = p.pl;   // only now (see above): a group that turns consistent first keeps its own grace
+    res.due.push({ m, g: groups[m], void: false, pvLone: true });
+    console.log('  private-lone ' + m + ': only ' + plog(c.w) + ' wrote a result for ' + Math.round((now - p.pl) / 60000) + ' min, the other seat(s) started and wrote nothing -- settles for him alone, base XP (Q316)');
+  }
+  return res;
+}
 // ===== O156 bot-match XP (match type 11, 2026-09-14; client knives 3.7c / 3.7d) =====
 // Matches against host-driven bots (arcade card / private-room chips / the queue's "warm-up++"
 // form, solo or with a premade party). XP is the ONLY surface (same isolation as private: no
@@ -2959,6 +3031,7 @@ function writeRunSummary() {
       '| leaves convicted at a settle this run, kept for a late result / late results forgiven (points of the finish, exit retracted) / late results over the cap, the leave stands (Q228) | ' + s('lateCv', 0) + ' / ' + s('lateForgive', 0) + ' / ' + s('lateCapped', 0) + ' |',
       '| win streak events landing before matches already counted (a late settle; its own tier counts what came before it) / stale (older than the fold, ignored) / absences frozen (the first in a week) / absences that broke a streak (O181) | ' + s('streakLate', 0) + ' / ' + s('streakStale', 0) + ' / ' + s('streakAbsFreeze', 0) + ' / ' + s('streakAbsBreak', 0) + ' |',
       '| ranked 1V1s only the winner wrote (Q184): counted on the silent seat / waiting for a second opponent / paid (points written) / not counted, no signals of his own / over the weekly cap | ' + s('lone1v1', '0 / 0 / 0 / 0 / 0') + ' (' + s('lone1v1Paid', 0) + ') |',
+      '| friends\' rooms only one player wrote a result for, the other seat(s) started (Q316): due / waiting / held (incomplete read) (settled for him alone) | ' + s('pvLone', '0 / 0 / 0') + ' (' + s('pvLonePaid', 0) + ') |',
       '| team-gamble host charges / at trust threshold | ' + s('t2lh', '0/0') + ' |',
       '| gamble-frame refusals naming the host (Q61): strikes, only he flagged / of them judged, record only / held for a seat with no record / named, not a strike, left to the flag rules below | ' + s('gtac', '0 / 0 / 0 / 0') + ' |',
       '| reports seen / counted | ' + s('repSeen', 0) + ' / ' + s('repCounted', 0) + ' |',
@@ -7385,6 +7458,13 @@ async function main() {
   const startsRes = reconcileStarts(starts, groups, consistentKeys, processed, startsPending, leavers, nowMs, STARTS_MATURITY_MS, confState, shardsComplete, registeredEarly, seenKeys, noted, heldKeys);   // Q144: + seenKeys; Q64: + noted; Q294: + heldKeys
   if (startsRes.registered || startsRes.convicted || startsRes.cleaned || Object.keys(startsPending).length)
     console.log('starts: ' + Object.keys(startsPending).length + ' pending (+' + startsRes.registered + ' new), ' + startsRes.convicted + ' exit-rate hits, ' + startsRes.cleaned + ' cleaned' + (startsRes.held ? ', ' + startsRes.held + ' matured verdict(s) held (incomplete shard read)' : ''));
+  // Q316: a friends' room only one player wrote a result for (the others started, wrote nothing, for PRIVATE_LONE.WAIT_MS)
+  //   joins the consistent groups and settles for him alone in the private branch. After reconcileStarts (this run's
+  //   p.settled / p.started), ahead of saveEarlyMarks (p.pl goes to disk with the start side). Not a consistent key for
+  //   the confession pass (its absolution still needs two writers).
+  const plRes = privateLoneVerdicts(startsPending, groups, processed, consistentKeys, nowMs, confState, confSeen, shardsComplete, vecOf);
+  for (const c of plRes.due) consistentMatches.push(c);
+  RUN.pvLone = plRes.due.length + ' / ' + plRes.waiting + ' / ' + plRes.held;
   // Q184: a ranked 1V1 only its winner wrote (lone1v1Verdicts) -- counted on the silent seat, the winner paid at the gate.
   //   Counted and marked here, ahead of saveEarlyMarks; the payments are written after it (below the consolation).
   const sidByPid = new Map();
@@ -9819,7 +9899,9 @@ async function main() {
       countDay();
       if (xpId) creditXpPrivate(g, rankOf, lvP, xp, changedXp, xpState, today, spSet);
       if (xpId) creditCareerMatch(g, matchType, rankOf, xpState, careerTouched);   // 5.4a career: games + time, no W/L (user 09-05)
-      console.log('  private settle ' + c.m + ': ' + g.length + ' writers, lv ' + lvP + (c.void ? ' (void majority -- XP by class only, nothing else to void)' : ''));
+      console.log('  private settle ' + c.m + ': ' + g.length + ' writers, lv ' + lvP + (c.void ? ' (void majority -- XP by class only, nothing else to void)' : '')
+        + (c.pvLone ? ' (one writer, the other seat(s) never wrote a result: base XP for him alone, Q316)' : ''));
+      if (c.pvLone) RUN.pvLonePaid = (RUN.pvLonePaid | 0) + 1;
       processed.add(c.m); settledPrivate++;
       continue;
     }
@@ -10945,3 +11027,4 @@ Object.assign(module.exports, { lpWriteDetails, mhOfKey, groupSids, prunePending
 Object.assign(module.exports, { lpReadStale, lpLastLive, LP_LAST_HOLD_MS });   // O481 the backlog's last write against a lagging read (test/stale-lp-read.js)
 Object.assign(module.exports, { careerBlockOf, fillCareerDetails, careerEnsureWrites, decodeCharBlock, careerSeatCodes, careerModeOfMt, careerSecOf, careerCellAdd, creditCareerMatch, creditCareerEndless, CHAR_MAGIC, CAREER_MATRIX_MAGIC, CAREER_MODES, CAREER_WL_MASK, CAREER_COLS });   // 5.4a S0 / S2 career block + matrix (test/career-refill.js, test/career-matrix.js, mvp ledger-schema-lockstep)
 Object.assign(module.exports, { V54B3_STREAK, streakPlan, streakApply, streakAbsence, streakPardon, streakApplyEarly, minuteOf });   // O181 matchmade win streak (client knife 5.4b3; test/streak.js, test/streak-plan-fixtures.js, mvp ledger-schema-lockstep)
+Object.assign(module.exports, { PRIVATE_LONE, privateLoneClaim, privateLoneVerdicts });   // cloud audit Q316 a friends' room only one player wrote a result for (test/private-lone-stayer.js)
