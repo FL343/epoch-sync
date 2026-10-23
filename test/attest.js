@@ -333,8 +333,14 @@ const HOST = '76561198000000010', OTHER = '76561198000000011';
   const quick = [0xB1, 3, 1, 77, 9, 0, 1, 0, 2, 100, 5, 4, 0].concat(sp('76561198000000001'), sp('76561198000000002'));
   const recs = [{ d: solo(1, 5) }, { d: solo(2, 3) }, { d: solo(3, 5) }, { d: team(4, 12) }, { d: team(5, 11) }, { d: quick }, { d: solo(6, 5) }, { start: true, d: team(8, 12) }];
   const c = V.persistCensus(recs, new Set(['6_9_7']));
-  eq('census: unsettled solo by attestation layout, endless tails by length, every record by ledger version (settled / starts left out)', c, { att: { 3: 1, 5: 2 }, tail: { 11: 1, 12: 1 }, ledger: { 3: 6 } });
-  eq('census line', V.fmtCensus(c), 'att 3:1 5:2 / tail 11:1 12:1 / ledger 3:6');
+  eq('census: unsettled solo by attestation layout, endless tails by length, every record by ledger version (settled / starts left out)', c, { att: { 3: 1, 5: 2 }, tail: { 11: 1, 12: 1 }, ledger: { 3: 6 }, msig: {} });
+  eq('census line', V.fmtCensus(c), 'att 3:1 5:2 / tail 11:1 12:1 / ledger 3:6 / msig -');
+  // client knife 5.8a: result records carrying the guard match signature block, by block version ('bad' = broken / not last)
+  const blk = (ver) => [(0xE5 | (ver << 8) | (20 << 16)) | 0].concat(new Array(20).fill(7));
+  const bots = [0xB1, 3, 11, 31, 9, 0, 1, 13, 2, 100, 5, 4, 0].concat(sp('76561198000000001'), [0, 0]);
+  const c2 = V.persistCensus(recs.concat([{ d: bots.concat(blk(1)) }, { d: bots.concat(blk(1)) }, { d: bots.concat(blk(2)) }, { d: bots.concat(blk(1), [5]) }, { d: bots }]), new Set(['6_9_7']));
+  eq('census: signature blocks by block version (a block followed by a non-zero int = bad; no block = not counted)', c2.msig, { 1: 2, 2: 1, bad: 1 });
+  eq('census line with blocks', V.fmtCensus(c2), 'att 3:1 5:2 / tail 11:1 12:1 / ledger 3:11 / msig 1:2 2:1 bad:1');
 }
 
 // ---- C2) O199 (S6): tools/persist-census.js (read-only) ----

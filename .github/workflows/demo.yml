@@ -81,6 +81,9 @@ jobs:
           SEEDCAP_REJECT: '1'
           # O198 v1 shadow pool: the reject-window bit on trust_tier rows; '0' clears every bit next run (remote off switch)
           SHADOW_POOL: '1'
+          # client knife 5.8a: a lone bot record carrying a usable guard match signature block (attest.verifyMatchSig) is credited
+          # without the single-writer discount; '0' / unset = the 0.6 lane for every lone bot record, the blocks only counted
+          MSIG_BOTS: '1'
           # O198 v1 trust ledger (knife 5.5b-1): this job writes the channel's trust file; the sanctions twin's file is a
           # read-only consult (its event queue), like the seedcap file above
           TRUST_FILE: demo-trust.json

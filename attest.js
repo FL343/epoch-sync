@@ -27,6 +27,7 @@
 //      row that names matches the writer was never host of is simply not corroborated.
 // ============================================================
 const crypto = require('crypto');
+const MS = require('./match-sig.js');   // A2: the match signature block (0xE5) layout / message / structural trust
 
 // ---- shared: FNV-1a 32 (client REPORTER.hash32 / guard fnv1a32 lockstep) ----
 function hash32(s) {
@@ -241,6 +242,66 @@ function soloSettleGate(verdict, opts) {
 }
 
 // ============================================================
+// A2) match signature block (0xE5) on a match result record (client knife 5.8)
+// ============================================================
+// The block layout, the signed message and the structural trust test live in match-sig.js (the client's guard builds the same
+//   bytes; both repos replay its golden cases). This leg adds what only this job has: the Ed25519 check against the build-key
+//   table (same table, same per-channel policy as the solo records) and the binding of the block to the leaderboard row's owner.
+// verifyMatchSig(d, pubTable, opts{ h0 }) -> verdict
+//   { state, reason, keyName, sealed, at, levels, ownerSid, trust: { ok, why } }
+//   state 'none'     no block: the record is judged as before (never a reason to doubt it)
+//         'ok'       a registered key of this job verifies the block's signature
+//         'pending'  a block this job cannot judge yet: another block version ('msig-ver'), another ledger version, a key the
+//                    table does not list ('unknown-key') or a key the job's policy holds ('key-channel' / 'key-retired' /
+//                    'key-revoked') -- never a mark against anyone (architecture decision 9 / 10, same soft states as solo)
+//         'bad'      a block that is broken ('trailing' / 'short' / 'len') or whose signature no key verifies ('bad-sig')
+//   h0: the record's ORIGINAL matchHash when a table split rewrote d[3] (validate keeps it as r.h0); null = d[3].
+function verifyMatchSig(d, pubTable, opts) {
+  const f = MS.find(d);
+  if (f.state === 'none') return { state: 'none', reason: 'none' };
+  if ((d[1] | 0) !== LEDGER_VER) return { state: 'pending', reason: 'ledger-ver' };
+  if (f.state === 'unknown') return { state: 'pending', reason: 'msig-ver', ver: f.ver };
+  if (f.state === 'bad') return { state: 'bad', reason: f.why, at: f.at };
+  const blk = d.slice(f.at, f.at + MS.BLOCK_INTS);
+  const keyId = blk[1] | 0;
+  const keyName = keyId === 0 ? 'dev' : String(keyId >>> 0);
+  const pc = d[8] | 0, seat = d[5] | 0;
+  const lo = d[11 + pc + 2 * seat], hi = d[12 + pc + 2 * seat];
+  const out = { keyId, keyName, at: f.at, levels: MS.levelsOf(d, f.at), flags: MS.flagsOf(blk[2]), ownerSid: ((BigInt(hi >>> 0) << 32n) | BigInt(lo >>> 0)).toString(), trust: MS.trust(d, f.at) };
+  const ent = pubTable && pubTable[keyName];
+  const held = (ent && Array.isArray(ent.held)) ? ent.held : [];
+  if (!ent || !Array.isArray(ent.pubs) || !(ent.pubs.length || held.length)) return Object.assign(out, { state: 'pending', reason: 'unknown-key' });
+  const msg = MS.message(d, blk, opts && opts.h0 != null ? opts.h0 : null);
+  if (!msg) return Object.assign(out, { state: 'bad', reason: 'shape' });
+  const bytes = Buffer.from(msg), sig = Buffer.from(MS.sigBytes(blk));
+  for (const pub of ent.pubs) {
+    try { if (crypto.verify(null, bytes, pubKeyObj(pub), sig)) return Object.assign(out, { state: 'ok', reason: '', sealed: !!ent.sealed }); }
+    catch (e) { /* malformed pub entry: try the next */ }
+  }
+  for (const h of held) {
+    try { if (crypto.verify(null, bytes, pubKeyObj(h.pub), sig)) return Object.assign(out, { state: 'pending', reason: 'key-' + h.reason }); }
+    catch (e) { /* malformed pub entry: try the next */ }
+  }
+  return Object.assign(out, { state: 'bad', reason: 'bad-sig' });
+}
+// What a verdict lets a settle lane believe -> { use, kind, reason }
+//   use true only for a verified block, signed by a sealed key (or the dev key where opts.allowDevKey: the test shards), whose
+//   writer's roster account is the leaderboard row's owner (opts.owner; a signature proves "a guard signed this", not "this
+//   account's guard signed it" -- a copied public record must not count for the copier), and whose structural trust holds.
+//   kind (for counting): 'none' | 'pending' | 'bad' (broken, unverifiable, another owner, dev key on a production board) |
+//   'untrusted' (verified, but the block itself says not to lean on the table: relayed-event trouble, host change, bare level,
+//   source / role) | 'ok'.
+function matchSigGate(v, opts) {
+  if (!v || v.state === 'none') return { use: false, kind: 'none', reason: 'none' };
+  if (v.state === 'pending') return { use: false, kind: 'pending', reason: v.reason };
+  if (v.state !== 'ok') return { use: false, kind: 'bad', reason: v.reason };
+  if (!v.sealed && !(opts && opts.allowDevKey)) return { use: false, kind: 'bad', reason: 'dev-key-on-prod' };
+  if (opts && opts.owner != null && String(opts.owner) !== String(v.ownerSid)) return { use: false, kind: 'bad', reason: 'owner-mismatch' };
+  if (!v.trust || !v.trust.ok) return { use: false, kind: 'untrusted', reason: (v.trust && v.trust.why) || 'trust' };
+  return { use: true, kind: 'ok', reason: '' };
+}
+
+// ============================================================
 // B) unmatched confession reconcile
 // ============================================================
 const CONFESS_MAGIC = 0xB8, CONFESS_VER = 1, CONFESS_MAX_SEATS = 6, SEAT_BITS = 5, SEAT_CAP = 31;
@@ -379,6 +440,8 @@ module.exports = {
   SB_MAGIC, SB_VER, SB_CONSUMED, saveBoxHead,
   SEG_SUSPENDED, SEG_FINAL, SEG_RESUMED, SEG_COMP, SEG_CASUAL, SEG_CLASSIC, DISP_FINISHED, DISP_USER_QUIT,
   verifySoloRecord, soloSettleGate, soloTail, toBytes, loadPubTable,
+  // A2
+  verifyMatchSig, matchSigGate,
   KEY_CHANNELS, KEY_RETIRE_GRACE_MS, keyHoldReason, applyKeyPolicy,
   // B
   CONFESS_MAGIC, CONFESS_VER, CONFESS_MAX_SEATS,

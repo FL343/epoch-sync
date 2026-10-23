@@ -204,8 +204,9 @@ eq('abandoner -> nothing', credit([mk11(A, 0, { disp: 5 })], 6, {}, {}, 20000, t
     const b = branch[0];
     eq('branch exits with continue (skips TrueSkill/LP/CP/B6/leavers wholesale)', /processed\.add\(c\.m\); settledBots\+\+;\s*\r?\n\s*continue;/.test(b), true);
     eq('branch credits ONLY XP (no creditCp/recordMatchSignals/detectLeavers/rankOf inside)', !/creditCp|recordMatchSignals|detectLeavers|updateMatch|teamLpPlan|rankOf/.test(b), true);
-    eq('branch passes the lone flag into the credit (loneMult applied there)', /creditXpBot\(g, lvB, xp, changedXp, xpState, today, spSet, !!c\.botLone\)/.test(b), true);
-    eq('time-as-work: lv-scaled floor with MIN_START_AGE lower bound', /Math\.max\(SANITY\.MIN_START_AGE_MS, lvB \* BOT_XP\.LEVEL_SECONDS \* 1000 \* BOT_XP\.PACE_FRAC\)/.test(b), true);
+    eq('branch passes the lone flag into the credit (loneMult applied there)', /creditXpBot\(g, lvB, xp, changedXp, xpState, today, spSet, !!c\.botLone, sigB\.use && MSIG\.BOTS\)/.test(b), true);
+    eq('knife 5.8a: the signature is read only for a lone group, the levels capped by the guard count only when it is used', /const sigB = c\.botLone \? botSignedOf\(g, soloPub, sandboxOn\(\)\) :/.test(b) && /const lvB = \(sigB\.use && MSIG\.BOTS\) \? Math\.min\(botProgressOf\(g\), sigB\.lv\) : botProgressOf\(g\);/.test(b), true);
+    eq('time-as-work: lv-scaled floor (the record\'s own level count, signed or not) with MIN_START_AGE lower bound', /Math\.max\(SANITY\.MIN_START_AGE_MS, botProgressOf\(g\) \* BOT_XP\.LEVEL_SECONDS \* 1000 \* BOT_XP\.PACE_FRAC\)/.test(b), true);
     eq('synth first-sighting fallback (fabricator pays the same wall time)', /synth: true/.test(b), true);
   }
   eq('branch placed after the private branch and before matchmade XP credit (creditXp)',

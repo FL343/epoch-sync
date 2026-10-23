@@ -175,7 +175,7 @@ console.log('=== source pins: every credit site is followed by its career call; 
   const after = (a, b) => { const i = src.indexOf(a); return i >= 0 && src.indexOf(b, i) > i && src.indexOf(b, i) - i < 900; };
   assert('matchmade creditXp -> creditCareerMatch', after('if (xpId) creditXp(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers, today, progFrac, careerDet, spSet,', 'creditCareerMatch(g, matchType, rankOf, xpState, careerTouched)'));
   assert('private -> creditCareerMatch', after('if (xpId) creditXpPrivate(g, rankOf, lvP, xp, changedXp, xpState, today, spSet);', 'creditCareerMatch(g, matchType, rankOf, xpState, careerTouched)'));
-  assert('bots -> creditCareerMatch (no ranks)', after('if (xpId) creditXpBot(g, lvB, xp, changedXp, xpState, today, spSet, !!c.botLone);', 'creditCareerMatch(g, matchType, null, xpState, careerTouched)'));
+  assert('bots -> creditCareerMatch (no ranks)', after('if (xpId) creditXpBot(g, lvB, xp, changedXp, xpState, today, spSet, !!c.botLone, sigB.use && MSIG.BOTS);', 'creditCareerMatch(g, matchType, null, xpState, careerTouched)'));
   // O198 v1 (knife 5.5b-1 S3): the solo lane's reject-window branch pays the segment's XP on purpose WITHOUT a career credit
   //   (user ruling 0-3: the XP counts, the career W-L does not) -- that one credit is taken out of the count, pinned by its text
   const WIN_XP = "if (xpId) creditXpEndless(c.g, { startDepth: Math.max(f.startDepth | 0, plan.proven | 0), endDepth: f.endDepth }, xp, changedXp, spSet, classic ? CLASSIC.XP_MUL : 1);   // S3: same credit as a settle";

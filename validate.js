@@ -3,6 +3,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const ts = require('./trueskill.js');
 const attest = require('./attest.js');   // knife-7: solo attested-record verify + unmatched confession reconcile
+const MATCH_SIG = require('./match-sig.js');   // client knife 5.8a: the guard's match signature block layout (census)
 const perks = require('./perks.js');     // endless perk build replay (record tail build word + pick log; perk_forge / perk_chain)
 const campaign = require('./campaign.js');   // O159 knife-7d: Vegas campaign clear attestation -> exclusive cosmetic grants
 const campaignEndless = require('./campaign-endless.js');   // knife 3.9b N4: Vegas Gold Rush run attestation -> per-difficulty best-only ladders + offense ledger
@@ -2184,6 +2185,35 @@ function botXpGain(lv, n, rankEff, tierMult, loneMult, bm, cls) {
   const R = (cls === 'valid') ? BOT_XP.rankMax * f * (L / BOT_XP.progMax) : 0;
   return Math.max(0, Math.round((P + R) * tierMult * loneMult * bm));
 }
+// ===== client knife 5.8a: the guard's match signature block (0xE5) on a lone bot record =====
+// The client's guard runs the authority core of a bot match itself (one human, the bots' seats driven by the host renderer):
+//   at the record's upload it checks the renderer's score table / seat / seed / seat count against its own core, and its own
+//   account against the roster, and signs them (attest.verifyMatchSig; layout match-sig.js). A lone bot record that carries a
+//   usable block (verified, sealed key or the dev key on the test shards, the row owner on the signed seat, block trust ok)
+//   is credited without the single-writer discount (loneMult -> 1) and at the levels the guard's own wall clock saw played
+//   (min with the record's progress bits). Every other gate of the lane stays as it is: the time-as-work floor, one match at
+//   a time per account, sanity, the table split, the seedcap reject window. What the signature cannot vouch for: whether the
+//   bots really played (their inputs come from the host renderer) and the tier bits -- the time floor is still the rate bound.
+//   No block / a block this job cannot judge yet / a broken block = the 0.6 lane as before (a broken block is only counted,
+//   never flagged, in this phase: a key table pushed wrong must not mark honest players).
+//   MSIG_BOTS='1' turns the x1.0 credit on (the three reconcile jobs set it); unset = count only.
+const MSIG = { BOTS: process.env.MSIG_BOTS === '1' };
+// the block verdict of a lone bot group -> { use, lv, kinds } (use only when EVERY record of the group carries a usable block)
+function botSignedOf(g, pubTable, allowDevKey) {
+  let use = g.length > 0, lv = -1;
+  const kinds = [];
+  for (const r of g) {
+    const v = attest.verifyMatchSig(r.d, pubTable, { h0: r.h0 !== undefined ? r.h0 : null });
+    const k = attest.matchSigGate(v, { owner: String(r.steamID), allowDevKey });
+    kinds.push(k.kind + (k.reason ? ':' + k.reason : ''));
+    RUN.msig = RUN.msig || { block: 0, ok: 0, untrusted: 0, bad: 0, pending: 0, bots1: 0 };
+    if (k.kind !== 'none') RUN.msig.block++;
+    if (k.kind === 'ok' || k.kind === 'untrusted' || k.kind === 'bad' || k.kind === 'pending') RUN.msig[k.kind]++;
+    if (k.use) lv = lv < 0 ? (v.levels | 0) : Math.min(lv, v.levels | 0);
+    else use = false;
+  }
+  return { use, lv: use ? lv : -1, kinds };
+}
 // demo channel identity (both playtest/demo twins export DEMO_APPID; kept for channel telemetry)
 const DEMO_APPID = Number(process.env.DEMO_APPID || 0);
 // R1-A5-07 (cloud audit, 2026-10-08): the attest key table serves all three jobs, so each job loads it through its own key policy
@@ -2214,14 +2244,17 @@ const soloHoldsChain = (reason) => keyHeld(reason) || String(reason || '') === '
 //   UNSETTLED records (a settled one is never decoded again; an old row of a player who never comes back stays on the shards
 //   for good, so "not one row left" would never come). att = guard-signed solo segments by attestation layout ([21] low byte),
 //   tail = other endless records by tail length in ints, ledger = every record by header version ([1]). Pure.
+//   msig (client knife 5.8a) = result records carrying a guard match signature block, by block version ('bad' = a block that is
+//   cut short / has another length / is not last) -- the same evidence for the day a block decoder may go.
 function persistCensus(recs, processed) {
-  const out = { att: {}, tail: {}, ledger: {} };
+  const out = { att: {}, tail: {}, ledger: {}, msig: {} };
   const add = (o, k) => { o[k] = (o[k] | 0) + 1; };
   for (const r of (recs || [])) {
     const d = r && r.d;
     if (!d || r.start || (d[0] & 0xff) !== 0xB1 || d.length < 10) continue;
     if (processed && processed.has(d[3] + '_' + d[4] + '_' + d[2])) continue;
     add(out.ledger, d[1] | 0);
+    { const f = MATCH_SIG.find(d); if (f.state !== 'none') add(out.msig, f.state === 'bad' ? 'bad' : f.ver); }
     if (!isEndlessMt(d[2] | 0)) continue;
     const pc = d[8] | 0;
     if (pc === 1 && d.length >= 22) { add(out.att, d[21] & 0xff); continue; }
@@ -2230,7 +2263,7 @@ function persistCensus(recs, processed) {
   }
   return out;
 }
-const fmtCensus = (c) => ['att', 'tail', 'ledger'].map((k) => k + ' ' + (Object.keys(c[k]).sort((a, b) => a - b).map((v) => v + ':' + c[k][v]).join(' ') || '-')).join(' / ');
+const fmtCensus = (c) => ['att', 'tail', 'ledger', 'msig'].map((k) => k + ' ' + (Object.keys(c[k]).sort((a, b) => a - b).map((v) => v + ':' + c[k][v]).join(' ') || '-')).join(' / ');
 // ===== one-shot pool recovery (client knife 5.0i, 2026-10-06) =====
 // Sealed demo packages 2026093001..2026100601 started their guard through the client's auto-spawn path in the dev
 //   "test form", so every solo endless segment and its start attestation went to the client's three test pools instead
@@ -3253,6 +3286,7 @@ function writeRunSummary() {
       '| signed solo segments whose guard clock went back inside the segment, counted and handled as usual (Q242) | ' + s('soloNegDur', 0) + ' |',
       '| unsettled records by layout version (O199: attestation / endless tail ints / ledger header) | ' + s('persistPending', '-') + ' |',
       '| solo segments held for an attestation layout not read yet (att-ver; their runs wait with them) | ' + s('attVerHeld', 0) + ' |',
+      '| guard match signature blocks on lone bot records settling this run (knife 5.8a): with a block / usable / verified but not trusted / broken or not verifiable / pending (key, version) -- bot matches credited at x1.0' + (MSIG.BOTS ? '' : ' (MSIG_BOTS off: counted only)') + ' | ' + (RUN.msig ? [RUN.msig.block, RUN.msig.ok, RUN.msig.untrusted, RUN.msig.bad, RUN.msig.pending].join(' / ') + ' -- ' + RUN.msig.bots1 : '0 / 0 / 0 / 0 / 0 -- 0') + ' |',
       '| one-match-at-a-time deferrals (waited past the own floor: < 5 min / < 30 min / < 4 h / 4 h+) | ' + s('writerPaced', 0) + ' (' + (RUN.writerPacedWait || [0, 0, 0, 0]).join(' / ') + ') |',
       '| cron stall before this run (minutes, from cron_pulse; 0 = none) | ' + s('stall', 0) + ' |',
       '| ranked matches the ranked rating turns into / out of a mismatch, quick matches and the repeat-group decay set aside (Q160) | ' + s('heldMismatch', 0) + ' / ' + s('heldMismatchOff', 0) + ' |',
@@ -6124,13 +6158,14 @@ function botProgressOf(g) {
 }
 // XP-lite credit for one bot group (client mirror computeGameXpBot, lockstep-pinned; formula in
 // the BOT_XP header). Rank/tier/human split all read from the canonical record g[0] (the
-// consensus vector / group-key mt / consensus roster); lone = single writer (loneMult).
+// consensus vector / group-key mt / consensus roster); lone = single writer (loneMult) unless signed (knife 5.8a: the lone
+// record carries a usable guard signature block, botSignedOf -> no discount).
 // No money, no daily-first, no leaver factor, no career counters. Day cap only when dayCapXp > 0.
-function creditXpBot(g, lv, xp, changedXp, xpState, today, spSet, lone) {
+function creditXpBot(g, lv, xp, changedXp, xpState, today, spSet, lone, signed) {
   const recBySeat = {};
   for (const r of g) { const s = r.d[5] | 0; if (recBySeat[s] == null) recBySeat[s] = r; }
   const canon = g[0], n = canon.d[8] | 0, mt = canon.d[2] | 0;
-  const tierMult = botTierMult(mt), loneMult = lone ? BOT_XP.loneMult : 1;
+  const tierMult = botTierMult(mt), loneMult = (lone && !signed) ? BOT_XP.loneMult : 1;
   const ranks = botRanksOf(canon), humans = botSeatSplit(canon).humans.length;
   for (const seatKey of Object.keys(recBySeat).map(k => k | 0).sort((a, b) => a - b)) {
     const r = recBySeat[seatKey], sid = r.steamID, p = pid(sid);
@@ -6138,7 +6173,10 @@ function creditXpBot(g, lv, xp, changedXp, xpState, today, spSet, lone) {
     if (cls === 'abandoner') continue;
     const rankEff = botRankEffOf(canon, seatKey);
     const bm = xpBoostMult(xpLevelOf(xp[sid] | 0), !!(spSet && spSet.has(String(sid))));   // pre-credit board value (same rule as creditXp, + supporter pack)
-    const gain = botXpGain(lv, n, rankEff, tierMult, loneMult, bm, cls);
+    // knife 5.8a: a signed lone record never earns less than the same record would unsigned (the guard's level count is a cap
+    //   on the no-discount credit, not a new penalty: an honest end the guard did not count still gets the old x0.6 credit)
+    const gain = (lone && signed) ? Math.max(botXpGain(lv, n, rankEff, tierMult, 1, bm, cls), botXpGain(botProgressOf(g), n, rankEff, tierMult, BOT_XP.loneMult, bm, cls))
+      : botXpGain(lv, n, rankEff, tierMult, loneMult, bm, cls);
     let credited = gain;
     if (BOT_XP.dayCapXp > 0) {
       const st = xpState[p] = xpState[p] || { lastWinDay: 0, games: 0 };
@@ -6150,7 +6188,7 @@ function creditXpBot(g, lv, xp, changedXp, xpState, today, spSet, lone) {
     if (credited > 0) { xp[sid] = (xp[sid] | 0) + credited; changedXp[sid] = xp[sid]; }
     console.log('  xp-bots ' + plog(sid) + ' ' + cls + ' lv' + (lv | 0)
       + ' rank' + (ranks[seatKey] | 0) + '/' + n + (humans >= 2 ? ' eff' + (Math.round(rankEff * 100) / 100) : '')
-      + ' tier' + botTierOf(mt) + (lone ? ' lone' : '')
+      + ' tier' + botTierOf(mt) + (lone ? (signed ? ' lone signed' : ' lone') : '')
       + (bm !== 1 ? ' boost x' + bm : '') + ' +' + credited
       + (credited < gain ? ' (day-capped from ' + gain + ')' : '') + ' -> ' + (xp[sid] | 0));
   }
@@ -10273,17 +10311,22 @@ async function main() {
         for (const sid of writerSids) sigPlayer(signals, pid(sid), nowMs).ns += 1;
         sigDirty = true;
       }
-      const lvB = botProgressOf(g);
-      const reqMsB = Math.max(SANITY.MIN_START_AGE_MS, lvB * BOT_XP.LEVEL_SECONDS * 1000 * BOT_XP.PACE_FRAC);
+      // knife 5.8a: a lone record with a usable guard signature block -> no single-writer discount, levels capped by the
+      //   guard's own count (botSignedOf; counted on every channel, credited only with MSIG_BOTS)
+      const sigB = c.botLone ? botSignedOf(g, soloPub, sandboxOn()) : { use: false, lv: -1, kinds: [] };
+      const lvB = (sigB.use && MSIG.BOTS) ? Math.min(botProgressOf(g), sigB.lv) : botProgressOf(g);
+      // pacing keeps the record's own level count (a signed record can still be credited at its record levels, x0.6 floor)
+      const reqMsB = Math.max(SANITY.MIN_START_AGE_MS, botProgressOf(g) * BOT_XP.LEVEL_SECONDS * 1000 * BOT_XP.PACE_FRAC);
       if (nowMs - (pendB.t0 || 0) < reqMsB) {
         console.log('  bots-pacing ' + c.m + ': lv ' + lvB + ' needs ' + Math.round(reqMsB / 1000) + 's real time, seen ' + Math.round((nowMs - (pendB.t0 || 0)) / 1000) + 's -- deferred');
         continue;
       }
       if (writerPaced(c.m, writerSids, pendB.t0, reqMsB)) continue;   // one match at a time per account (a lone writer cannot run parallel bot matches, R1-A2-01)
       countDay();
-      if (xpId) creditXpBot(g, lvB, xp, changedXp, xpState, today, spSet, !!c.botLone);
+      if (xpId) creditXpBot(g, lvB, xp, changedXp, xpState, today, spSet, !!c.botLone, sigB.use && MSIG.BOTS);
+      if (sigB.use && MSIG.BOTS) RUN.msig.bots1++;
       if (xpId) creditCareerMatch(g, matchType, null, xpState, careerTouched);   // 5.4a career: games + time, no W/L (no ranks needed)
-      console.log('  bots settle ' + c.m + ': ' + g.length + ' writer' + (g.length > 1 ? 's' : '') + ', lv ' + lvB + ' tier ' + botTierOf(matchType) + (c.botLone ? ' (lone lane x' + BOT_XP.loneMult + ')' : '') + (c.void ? ' (void majority -- XP by class only, nothing else to void)' : ''));
+      console.log('  bots settle ' + c.m + ': ' + g.length + ' writer' + (g.length > 1 ? 's' : '') + ', lv ' + lvB + ' tier ' + botTierOf(matchType) + (c.botLone ? ((sigB.use && MSIG.BOTS) ? ' (signed x1.0)' : (' (lone lane x' + BOT_XP.loneMult + ')')) : '') + (sigB.kinds.some((k) => k !== 'none') ? ' [msig ' + sigB.kinds.join(',') + ']' : '') + (c.void ? ' (void majority -- XP by class only, nothing else to void)' : ''));
       processed.add(c.m); settledBots++;
       continue;
     }
@@ -11349,6 +11392,7 @@ module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CLASSIC_OWN
   pruneProcessed, PROCESSED_CAP, PROCESSED_KEEP, PROCESSED_PRUNE_WAIT_MS, PRUNE_NOTE,   // cloud audit Q144 what the job remembers about keys whose records are gone
   RECOVER_FILE, loadRecover, recoverPick, readRecoverRows };   // client knife 5.0i one-shot pool recovery
 Object.assign(module.exports, { KEY_CHANNEL, loadJobPubTable, soloKeyHeld, soloRunHasHeld });   // cloud audit R1-A5-07 per-channel key policy (test/playtest-key-policy.js)
+Object.assign(module.exports, { MSIG, botSignedOf });   // client knife 5.8a: the guard match signature on lone bot records (test/match-sig.js)
 Object.assign(module.exports, { flagPlayer, flagsInWindow, stampLegacyFlags, TRUST_F_WINDOW_MS, SIG_FLAG_KEYS_CAP });   // cloud audit Q98 forgery flags age out of the trust tier (test/trust-decay.js)
 Object.assign(module.exports, { noteOwnStarts, hasOwnStart, OWN_START_CAP });   // cloud audit Q69 own-record evidence for leaver verdicts
 Object.assign(module.exports, { leaverXpRecordOnlyUntil, LEAVER_XP_RECORD_ONLY, LEAVER_XP_RECORD_ONLY_MAX_MS });   // M194 / W57 demo Next Fest: leaves recorded, XP not discounted

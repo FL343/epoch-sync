@@ -148,6 +148,27 @@ for (const [file, tmpl, ptJob, dmJob] of [
   T(file + ': ' + dmJob + ' persists one demo file', pDm.length === 1 && /demo/.test(pDm[0]), pDm.join(','));
 }
 
+// ---- 2b) client knife 5.8a: the match signature switch on every reconcile job ----
+console.log('-- match signature switch (MSIG_BOTS) --');
+{
+  // the env block of the step that runs validate.js (validate.yml's job has a gate step with its own env before it)
+  const runEnv = (src) => {
+    const at = src.indexOf('\n      - name: run\n');
+    if (at < 0) return null;
+    const end = src.indexOf('\n      - name: ', at + 1);
+    const step = src.slice(at, end < 0 ? src.length : end);
+    const out = {};
+    for (const line of step.split('\n')) { const m = line.match(/^          ([A-Z_]+):\s*(.*)$/); if (m) out[m[1]] = m[2].trim(); }
+    return out;
+  };
+  for (const f of ['validate.yml', 'playtest.yml', 'demo.yml']) {
+    const e = runEnv(read(f));
+    T(f + ': MSIG_BOTS armed (quoted 1) on the reconcile run step', !!e && e.MSIG_BOTS === "'1'", e && e.MSIG_BOTS);
+  }
+  const vsrc = fs.readFileSync(path.join(__dirname, '..', 'validate.js'), 'utf8');
+  T('validate.js arms the x1.0 credit only on the exact string 1', /const MSIG = \{ BOTS: process\.env\.MSIG_BOTS === '1' \};/.test(vsrc));
+}
+
 // ---- 3) schedule minutes: 5-minute-class workflows on distinct offsets ----
 console.log('-- schedule offsets --');
 {
