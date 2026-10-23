@@ -148,10 +148,13 @@ console.log('-- [6] carrier --');
 {
   const byFam = { solo: v.ratingCutsOf([], R.PRIOR.solo), duo: { N: 7, cuts: [1, 2, 3, 4, 5, 6] }, trio: v.ratingCutsOf([], R.PRIOR.trio), quad: v.ratingCutsOf([], R.PRIOR.quad) };
   const det = v.tiercutEncode(1, byFam);
-  eq('[6] carrier details = 30 ints: magic, season, then N + six cuts per family (solo, duo, trio, quad)', [det.length, det[0], det[1], det.slice(2, 9), det.slice(9, 16)], [30, 0xEC, 1, [0, 6000, 4000, 2800, 2000, 1400, 800], [7, 1, 2, 3, 4, 5, 6]]);
+  eq('[6] carrier details = 30 ints: magic | version << 8 (O199), season, then N + six cuts per family (solo, duo, trio, quad)', [det.length, det[0], det[1], det.slice(2, 9), det.slice(9, 16)], [30, 0xEC | (1 << 8), 1, [0, 6000, 4000, 2800, 2000, 1400, 800], [7, 1, 2, 3, 4, 5, 6]]);
   const dec = v.tiercutDecode(20261201, det);
   eq('[6] decode round trip (day from the score)', [dec.day, dec.season, dec.byFam.duo, dec.byFam.quad.cuts], [20261201, 1, { N: 7, cuts: [1, 2, 3, 4, 5, 6] }, [9600, 6400, 4500, 3200, 2200, 1300]]);
   eq('[6] decode refuses a short / foreign row', [v.tiercutDecode(1, det.slice(0, 20)), v.tiercutDecode(1, [0x77].concat(det.slice(1))), v.tiercutDecode(1, null)], [null, null, null]);
+  // O199 (knife 5.5b-2, architecture decision 9): version 0 rows (written before the version byte) still decode; an unknown version does not
+  eq('[6] version 0 row (pre-version carrier) decodes to the same table', JSON.stringify(v.tiercutDecode(20261201, [0xEC].concat(det.slice(1)))), JSON.stringify(dec));
+  eq('[6] unknown version 2 -> null (no table)', v.tiercutDecode(20261201, [0xEC | (2 << 8)].concat(det.slice(1))), null);
   eq('[6] due: no row / another day / another season; not when both match', [v.tiercutDue(null, 1, 20261201), v.tiercutDue(dec, 1, 20261202), v.tiercutDue(dec, 2, 20261201), v.tiercutDue(dec, 1, 20261201)], [true, true, true, false]);
   eq('[6] day = UTC calendar day YYYYMMDD', [v.tiercutDay(Date.UTC(2026, 11, 1, 0, 0, 0)), v.tiercutDay(Date.UTC(2026, 11, 1, 23, 59, 59)), v.tiercutDay(Date.UTC(2026, 11, 2))], [20261201, 20261201, 20261202]);
   const st = { hist: { 'a|solo|0': {}, 'b|duo|1': {}, 'c|solo|2': {}, 'd|quad|3': {} } };

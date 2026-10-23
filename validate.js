@@ -5397,7 +5397,9 @@ const RATING = {
   N_PRIOR_ONLY: 20, N_FULL: 200,             // cron-only: blend bounds (<= 20 rated players pure prior, >= 200 pure live percentile)
   OLD_IDS: 20,                                // ids of runs pushed out of the window remembered per entry
   HIST_SEASONS: 2,                            // history kept for the current and the previous season
-  TC_MAGIC: 0xEC,                             // tier-cut carrier details[0]
+  TC_MAGIC: 0xEC,                             // tier-cut carrier details[0] low byte
+  TC_VER: 1,                                  // O199 (knife 5.5b-2): carrier version in details[0] bits 8-15 (architecture decision 9)
+  TC_VERS: [0, 1],                            // versions the readers accept (0 = rows written before the version byte); mvp endless-tier.js accepts the same set
 };
 const RATING_FAMS = [['solo', ENDLESS_RATING_LB_SOLO], ['duo', ENDLESS_RATING_LB_DUO], ['trio', ENDLESS_RATING_LB_TRIO], ['quad', ENDLESS_RATING_LB_QUAD]];
 function ratingFamOf(pc) { return (pc | 0) <= 1 ? 'solo' : compFamKeyOf(pc | 0).toLowerCase(); }
@@ -5478,12 +5480,13 @@ function ratingTierOf(score, cuts) {
 }
 function tiercutDay(nowMs) { const d = new Date(nowMs); return d.getUTCFullYear() * 10000 + (d.getUTCMonth() + 1) * 100 + d.getUTCDate(); }
 function tiercutEncode(seasonId, byFam) {
-  const out = [RATING.TC_MAGIC, seasonId | 0];
+  const out = [RATING.TC_MAGIC | (RATING.TC_VER << 8), seasonId | 0];
   for (const [fam] of RATING_FAMS) { const c = (byFam || {})[fam] || { N: 0, cuts: [0, 0, 0, 0, 0, 0] }; out.push(c.N | 0); for (let i = 0; i < 6; i++) out.push(c.cuts[i] | 0); }
   return out;
 }
 function tiercutDecode(score, det) {
   if (!Array.isArray(det) || det.length < 2 + 7 * RATING_FAMS.length || ((det[0] | 0) & 0xff) !== RATING.TC_MAGIC) return null;
+  if (!RATING.TC_VERS.includes(((det[0] | 0) >>> 8) & 0xff)) return null;   // unknown version = no table (clients fall back to "being rated")
   const byFam = {}; let at = 2;
   for (const [fam] of RATING_FAMS) { byFam[fam] = { N: det[at] | 0, cuts: det.slice(at + 1, at + 7).map((x) => x | 0) }; at += 7; }
   return { day: score | 0, season: det[1] | 0, byFam };
