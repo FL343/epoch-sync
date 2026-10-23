@@ -25,6 +25,9 @@
 //        no bit while SEEDCAP_REJECT is off
 //   [15] S4: O285 (1) a new world core (72 h / 200 honest audits) vetoes but convicts nobody (no window, no offense, no
 //        correction), records an observation (sev 0), mails once a day; past it the core convicts
+//   [16] Q325: a core that filed verdicts in this channel before a window named it (dev / test matches on the root CLI
+//        before launch) is observed again from the window's liveAt, and only the honest audits inside the window count toward
+//        the 200; no window = the first verdict, as before; mutations (earlier of the two / every audit counts) -> red
 const fs = require('fs'), path = require('path');
 process.env.STATE_SALT = 's';
 const TL = require(path.join(__dirname, '..', 'trust-ledger.js'));
@@ -436,6 +439,68 @@ console.log('=== trust ledger (O198 v1, knife 5.5b-1) ===');
   const SJ = read('seedcap.js');
   T('[15] main passes the observation judge of this run (snapshot before the verdicts)', /obsOf: observationOf\(st, cf\.live, SEEDCAP_CHANNEL, nowMin\(\)\)/.test(SJ));
   T('[15] the observed branch never touches the suspect ledger', /const blamed = obs \? \[\] : selfOver;/.test(SJ));
+}
+
+// ---- [16] Q325: the window that names a core starts its observation, even when the core filed verdicts here before it ----
+{
+  const SIDC = SID(6301), SIDD = SID(6302);
+  const W = 29499930;              // the launch window's liveAt (minute; mid-hour: the hour it cuts is left out of the count)
+  const tL = W + 60;               // launch day, 1 h after the window
+  const tEarly = W - 80 * 60;      // the same core's first verdict on the root CLI, 80 h before the window (dev / test matches)
+  const K = 'rootcoreroot';
+  const hW = Math.floor(W / 60);   // the hour the window's start cuts
+  const legacy = { buildNum: null, core: null, liveAt: '2026-07-11T00:00:00.000Z', gateAt: null };
+  const live = { v: 1, channels: { ea: [legacy, { buildNum: 2026111701, core: K, liveAt: new Date(W * 60000).toISOString(), gateAt: null }] } };
+  const noWin = { v: 1, channels: { ea: [legacy] } };
+  const early = (n, h) => ({ t0: tEarly, n, o: 0, h: h || { [Math.floor(tEarly / 60)]: [n, 0] } });
+  const state = (c) => ({ audited: {}, chain: {}, suspects: {}, veto: {}, corrections: [], cores: { [K]: c } });
+  const mk = (m) => ({ m, mt: 1, pc: 2, scores: [6000, 3000], p: { entry: 'quick' }, tail: null, roster: { 0: SIDC, 1: SIDD }, self: [0, 1], runSeed: 9, w: 0 });
+  T('[16] a window and an earlier first verdict: first seen = the window', sc.coreFirstSeen(state(early(10)), live, 'ea', K) === W);
+  T('[16] a window earlier than the first verdict: the window (as before)', sc.coreFirstSeen(state({ t0: W + 30, n: 0, o: 0, h: {} }), live, 'ea', K) === W);
+  T('[16] no window names it: the first verdict (as before)', sc.coreFirstSeen(state(early(10)), noWin, 'ea', K) === tEarly);
+  // launch day: observed again -> vetoed, nobody convicted
+  const st = state(early(10));
+  const obsOf = sc.observationOf(st, live, 'ea', tL);
+  T('[16] launch day, the core used 80 h before on dev / test matches: in observation again', obsOf(K) === true);
+  const out = sc.applyAudit(st, [mk('q1')], { m0: { cap: 5000 } }, new Set(), tL, { primary: K, obsOf });
+  T('[16] ... a self-written seat over the cap: vetoed, nobody convicted, no offense row', !!st.veto.q1 && !st.suspects[v.pid(SIDC)] && Object.keys(sc.offensePlanOf(st, out.flags)).length === 0, JSON.stringify(st.suspects));
+  // before the window was registered (root CLI only): the same core is past its 72 h and convicts, as before
+  const st0 = state(early(10));
+  sc.applyAudit(st0, [mk('q0')], { m0: { cap: 5000 } }, new Set(), tL, { primary: K, obsOf: sc.observationOf(st0, noWin, 'ea', tL) });
+  T('[16] no window (first verdict 80 h ago): convicts as before', !!(st0.suspects[v.pid(SIDC)] && st0.suspects[v.pid(SIDC)].n === 1));
+  // 72 h after the window: convicts
+  const st2 = state(early(10));
+  const after = W + sc.SC_OBS_H * 60 + 1;
+  sc.applyAudit(st2, [mk('q2')], { m0: { cap: 5000 } }, new Set(), after, { primary: K, obsOf: sc.observationOf(st2, live, 'ea', after) });
+  T('[16] ' + sc.SC_OBS_H + ' h after the window: convicts as usual', !!(st2.suspects[v.pid(SIDC)] && st2.suspects[v.pid(SIDC)].n === 1));
+  // the count: honest audits before the window do not end it; the window's own ones do
+  const N = sc.SC_OBS_N;
+  const before = early(N + 100);
+  T('[16] ' + (N + 100) + ' honest audits before the window: none count, still observed', sc.honestSince(before, W) === 0 && sc.observationOf(state(before), live, 'ea', tL)(K) === true);
+  const cut = early(N + 100, { [Math.floor(tEarly / 60)]: [100, 0], [hW]: [N, 0] });
+  T('[16] the hour the window cuts is left out of the count (the safe side)', sc.honestSince(cut, W) === 0 && sc.observationOf(state(cut), live, 'ea', tL)(K) === true);
+  const inside = early(N + 100 + 7, { [Math.floor(tEarly / 60)]: [100, 0], [hW + 1]: [N + 5, 5], [hW + 2]: [2, 0] });
+  inside.o = 5;
+  T('[16] ' + N + ' honest audits inside the window end it early (over-cap ones do not count)', sc.honestSince(inside, W) === N + 2 && sc.observationOf(state(inside), live, 'ea', tL + 120)(K) === false);
+  T('[16] window before the first verdict: every honest audit counts (n - o, as before)', sc.honestSince({ t0: W + 30, n: N, o: 0, h: {} }, W) === N && sc.observationOf(state({ t0: W + 30, n: N, o: 0, h: {} }), live, 'ea', tL)(K) === false);
+  T('[16] no window: every honest audit counts (as before)', sc.honestSince(early(N), tEarly) === N);
+  // mutation self-check: the old rules would leave launch day without the observation
+  const src = read('seedcap.js');
+  const mutate = (from, to) => { const m = src.replace(from, to); T('[16] mutation applies', m !== src); return m; };
+  const mutA = mutate('  if (t != null) return t;\n  const c = st.cores && st.cores[k];\n  return (c && c.t0 > 0) ? (c.t0 | 0) : null;',
+    '  const c = st.cores && st.cores[k];\n  if (c && c.t0 > 0 && (t == null || (c.t0 | 0) < t)) t = c.t0 | 0;\n  return t;');
+  const mutB = mutate('  if (t0 == null || !(c.t0 > 0) || (c.t0 | 0) >= t0) return all;', '  return all;');
+  for (const [tag, m, probe] of [
+    ['the earlier of the window and the first verdict', mutA, (ms) => ms.observationOf(state(early(10)), live, 'ea', tL)(K) === false],
+    ['every honest audit counts, before the window too', mutB, (ms) => ms.observationOf(state(early(N + 100)), live, 'ea', tL)(K) === false],
+  ]) {
+    const mf = path.join(ROOT, '.mutant-q325-' + process.pid + '.js');
+    try {
+      fs.writeFileSync(mf, m);
+      delete require.cache[mf];
+      T('[16] mutant (' + tag + '): launch day out of observation -> the cases above would go red', probe(require(mf)));
+    } finally { try { fs.unlinkSync(mf); } catch (e) {} delete require.cache[mf]; }
+  }
 }
 
 console.log(failN ? '=== FAIL (' + failN + ') ===' : '=== trust-ledger: ALL PASS ===');

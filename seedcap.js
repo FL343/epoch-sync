@@ -128,7 +128,7 @@ const REPLAY_MAX = Math.max(1, Number(process.env.SC_REPLAY_MAX || 100));
 const CONVICTION_KEEP = 8;   // su.cv / su.fpm: the latest convictions [m, t] and the reversed match keys
 // O285 (1) observation window (knife 5.5b-1 S4, user 2026-10-23): a world core is new for SC_OBS_H hours after it first went
 //   live in this channel (the earliest live.json window naming it, else the first run that filed a verdict under it), or until
-//   SC_OBS_N honest audits ran on it, whichever comes first. Inside it an over-cap group is still VETOED (it settles for
+//   SC_OBS_N honest audits ran on it from then on, whichever comes first. Inside it an over-cap group is still VETOED (it settles for
 //   nobody: no one gains), but nobody is convicted -- no suspect count, no reject window, no shadow-pool bit, no offense row,
 //   no endless correction (a new core's cap bug would otherwise land on honest players); the ledger gets an observation
 //   record (sev 0) and the mail goes out at once (once per core per day). Past it the core enforces with no ops action.
@@ -514,7 +514,9 @@ function coreAlerts(st, tNow) {
   return out;
 }
 // O285 (1): first minute a core was live in this channel -- the earliest live.json window naming it, else the first verdict
-//   filed under it (st.cores[k].t0); null = never seen
+//   filed under it (st.cores[k].t0); null = never seen. Q325: a window wins even when the core filed verdicts here before it
+//   (dev / test matches on the root CLI before the package naming it was registered): the package's players get their own
+//   observation window from the day it goes live. The verdict time is only for a core no window names.
 function coreFirstSeen(st, live, channel, k) {
   let t = null;
   for (const w of ((live && live.channels && live.channels[channel]) || [])) {
@@ -522,14 +524,25 @@ function coreFirstSeen(st, live, channel, k) {
     const ms = Date.parse(w.liveAt);
     if (Number.isFinite(ms)) { const m = Math.floor(ms / 60000); if (t == null || m < t) t = m; }
   }
+  if (t != null) return t;
   const c = st.cores && st.cores[k];
-  if (c && c.t0 > 0 && (t == null || (c.t0 | 0) < t)) t = c.t0 | 0;
-  return t;
+  return (c && c.t0 > 0) ? (c.t0 | 0) : null;
+}
+// honest audits of a core counted toward SC_OBS_N from minute t0 (its coreFirstSeen) on. Q325: when the core filed verdicts
+//   before its window opened, only the hour buckets wholly inside the window count (kept CORE_HOURS_KEEP > SC_OBS_H); an hour
+//   cut by the window's start is left out -- a smaller count only keeps the observation longer (architecture decision 10)
+function honestSince(c, t0) {
+  if (!c) return 0;
+  const all = Math.max(0, (c.n | 0) - (c.o | 0));
+  if (t0 == null || !(c.t0 > 0) || (c.t0 | 0) >= t0) return all;
+  let s = 0;
+  for (const hk of Object.keys(c.h || {})) if ((hk | 0) * 60 >= t0) { const b = c.h[hk] || []; s += Math.max(0, (b[0] | 0) - (b[1] | 0)); }
+  return Math.min(all, s);
 }
 // the observation judge of one run (pure): snapshot of each core's honest audits BEFORE this run's verdicts are filed
 function observationOf(st, live, channel, tNow) {
   const ok0 = {};
-  for (const k of Object.keys(st.cores || {})) ok0[k] = Math.max(0, (st.cores[k].n | 0) - (st.cores[k].o | 0));
+  for (const k of Object.keys(st.cores || {})) ok0[k] = honestSince(st.cores[k], coreFirstSeen(st, live, channel, k));
   return (k) => {
     const t0 = coreFirstSeen(st, live, channel, k);
     const age = t0 == null ? 0 : (tNow | 0) - t0;
@@ -1047,7 +1060,7 @@ async function main() {
     ' suspects=' + Object.keys(st.suspects).length + ' corrections=' + st.corrections.length);
 }
 
-module.exports = { coreFirstSeen, observationOf, observedAlerts, SC_OBS_H, SC_OBS_N, pendingOfGroup, coreOfVerdict, coreStat, coreRate24, coreAlerts, standingT1, convictedFor, replayCandidates, applyReplay, headHashOf, coreHashOf,
+module.exports = { coreFirstSeen, honestSince, observationOf, observedAlerts, SC_OBS_H, SC_OBS_N, pendingOfGroup, coreOfVerdict, coreStat, coreRate24, coreAlerts, standingT1, convictedFor, replayCandidates, applyReplay, headHashOf, coreHashOf,
   REPLAY_DAYS, REPLAY_MAX, CONVICTION_KEEP, SC_RATE_PERMIL, SC_RATE_MIN_OVER, CORE_HOURS_KEEP,
   selectCores, resolveCores, mergeCaps, corePathOf, OVERLAP_GRACE_MS, OVERLAP_MAX_MS, cliSupportsRerolls, cliSupportsClassic, cliSupportsBuilds, cliSupportsFee, cliSupportsRv, capParamsOf, cliLineOf, cliSupportsBuild, chainKey, chainStartBank, tailOf, coreForBuildNum, selfSeatsOf, pickAuditable, takeSkips, applyAudit, pruneState, readGroups, coresForNow, auditPending, runCli, loadState, saveState, SC_STATE_FILE, AUDITED_KEEP, VETO_KEEP_MIN, CHAIN_LEGACY_KEEP_MIN, CHAIN_KEEP_MIN, offensePlanOf, writeOffense, mailDecision, sendAlertMail, alertMailText, rejectWindowsOf, OFFENSE_LB, OFFENSE_MAGIC, SC_MAIL_MIN_OVER, SC_MAIL_SUS_MIN };
 if (require.main === module) {
