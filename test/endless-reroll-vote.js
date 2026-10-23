@@ -9,9 +9,10 @@
 //   [1] unit: endlessRerollCanon (agree / the most votes / a tie keeps the first record's / the first out of reach /
 //       none reachable / classic / one writer two bitmaps / abstention)
 //   [2] casual trio, C's out-of-reach bitmap on the first shard: all three settle, nobody flagged; casual duo, the first
-//       record's out of reach: both settle; neither reachable: rejected as before (both flagged)
+//       record's out of reach: both settle; neither reachable: rejected as before (processed, nothing written), and since
+//       Q314 nobody flagged (the bitmap every honest writer carries is the host's)
 //   [3] the run summary counts the group
-//   [4] wiring pin + mutation self-check: the vote removed -> [2] flags all three again
+//   [4] wiring pin + mutation self-check: the vote removed -> [2] is rejected again (processed, nothing written)
 // State isolation is structural (every *_FILE var scanned and redirected, cwd = temp dir), like test/absence-grace.js.
 const { spawnSync } = require('child_process');
 const fs = require('fs'), path = require('path'), os = require('os');
@@ -187,7 +188,8 @@ const r11 = (() => {
     flagSet(r2, DUO) + ' ' + r2.out.slice(-400));
   const h3 = 0x312C, m3 = h3 + '_5_7';
   const r3 = run([row(h3, DUO, { sid: A, seat: 0, tail: RR(4) }), row(h3, DUO, { sid: B, seat: 1, tail: RR(8) })], attested(h3, DUO));
-  T('[2] duo, neither reachable: rejected as before (both flagged, processed)', processedOf(r3).has(m3) && flagSet(r3, DUO) === '1/1' && /reroll bitmap sanity REJECT/.test(r3.out) && /none reachable, the first record's read as before \(Q306\)/.test(r3.out),
+  T('[2] duo, neither reachable: rejected as before (processed, nothing written), nobody flagged (Q314)', processedOf(r3).has(m3) && flagSet(r3, DUO) === '0/0' && DUO.every((s) => writes(r3, BOARD.duo, s).length === 0)
+    && /reroll bitmap sanity REJECT[^\n]*nobody flagged \(Q314\)/.test(r3.out) && /none reachable, the first record's read as before \(Q306\)/.test(r3.out),
     flagSet(r3, DUO) + ' ' + r3.out.slice(-400));
   return { r, r2, h, rows };
 })();
@@ -212,7 +214,7 @@ console.log('-- [4] mutation self-check --');
       fs.writeFileSync(script, SRC.replace(from, 'const rc = null;'));
       const m = r11.h + '_5_7';
       const r = runCron(world(r11.rows), attested(r11.h, TRIO), null, script);
-      T('[4] the vote removed -> [2] flags all three again (and marks the run processed, as before)', processedOf(r).has(m) && flagSet(r, TRIO) === '1/1/1' && /reroll bitmap sanity REJECT/.test(r.out) && TRIO.every((s) => writes(r, BOARD.trio, s).length === 0),
+      T('[4] the vote removed -> [2] is rejected again (processed, nothing written; nobody flagged since Q314)', processedOf(r).has(m) && flagSet(r, TRIO) === '0/0/0' && /reroll bitmap sanity REJECT/.test(r.out) && TRIO.every((s) => writes(r, BOARD.trio, s).length === 0),
         flagSet(r, TRIO) + ' processed=' + processedOf(r).has(m));
     } finally { try { fs.unlinkSync(script); } catch (e) {} }
   }

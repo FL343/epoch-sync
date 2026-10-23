@@ -101,7 +101,10 @@ console.log('-- wiring pins (validate.js lane) --');
   assert('classic branch sits inside the endless (type 7) block before the SEG_COMP lane', lane.length > 0 && src.indexOf('if (isClassicSeg) {') < src.indexOf('if ((t.flags | 0) & attest.SEG_COMP) {'));
   assert('outer casual/cp board gate is bypassed for classic segments', /if \(!isClassicSeg && \(!cpId \|\| !bId \|\| \(seasonId >= 1 && !bSeasonId\)\)\)/.test(src));
   assert('family picked by seat count (classicLadderOf: 4 quad / 3 trio / else duo)', /const classicLadderOf = \(pc\) => pc >= 4 \? classicFam\.QUAD : pc >= 3 \? classicFam\.TRIO : classicFam\.DUO;/.test(src) && /classicLadderOf\(pc7\)/.test(lane));
-  assert('incomplete roster = sanity flag, not settled', /rosterSids\.length !== pc7/.test(lane) && /recordFlag\(signals, g, c\.m, nowMs\)/.test(lane));
+  { // Q314: the seat table is a copy of the host's frame on every record, so a short one is held and nobody is flagged
+    const rb = lane.match(/if \(rosterSids\.length !== pc7\) \{[^}]*\}/);
+    assert('incomplete roster = held (not settled), nobody flagged, counted (Q314)', !!rb && /RUN\.endlessRosterShort = \(RUN\.endlessRosterShort \| 0\) \+ 1;/.test(rb[0]) && /nobody flagged \(Q314\)'\);/.test(rb[0]) && /continue;/.test(rb[0]) && !/recordFlag|flagPlayer|processed\.add/.test(rb[0]));
+  }
   assert('chain keyed by teamRunKey(roster, season 0, runSeed) through the solo chain planner', /teamRunKey\(rosterSids, 0, g\[0\]\.d\[4\] \| 0\)/.test(lane) && /soloChainPlan\(soloState, key, f, c\.m, nowMs\)/.test(lane));
   assert('perk / reroll tail pinned to 0 in the plan input (sanity classic-perk already refused any other value)', /build: 0, picksLo: 0, picksHi: 0, seasonId: t\.seasonId \| 0, rerollLo: 0, rerollHi: 0/.test(lane));
   assert('pacing on the 40s team level', /endlessRequiredMs\(f, plan\.proven, CLASSIC\.LEVEL_S_TEAM\)/.test(lane));

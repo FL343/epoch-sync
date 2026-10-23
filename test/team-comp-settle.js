@@ -170,7 +170,10 @@ console.log('-- wiring pins (validate.js lane) --');
   assert('the lane branches on SEG_COMP inside the endless (type 7) settle block, before the casual chain/pacing', lane.length > 0 && src.indexOf('if ((t.flags | 0) & attest.SEG_COMP) {') < src.indexOf('let chainMax = 0;'));
   assert('family picked by seat count (compFamKeyOf: 4 quad / 3 trio / else duo)', /compFam\[compFamKeyOf\(pc7\)\]/.test(lane) && /function compFamKeyOf\(pc\) \{ return pc >= 4 \? 'QUAD' : pc >= 3 \? 'TRIO' : 'DUO'; \}/.test(src));
   assert('boards are the gate (cp + family lifetime + seasonal when a season is live)', /if \(!cpId \|\| !fam\.id \|\| \(seasonId >= 1 && !fam\.seasonId\)\)/.test(lane));
-  assert('incomplete roster = sanity flag, not settled', /rosterSids\.length !== pc7/.test(lane) && /recordFlag\(signals, g, c\.m, nowMs\)/.test(lane));
+  { // Q314: the seat table is a copy of the host's frame on every record, so a short one is held and nobody is flagged
+    const rb = lane.match(/if \(rosterSids\.length !== pc7\) \{[^}]*\}/);
+    assert('incomplete roster = held (not settled), nobody flagged, counted (Q314)', !!rb && /RUN\.endlessRosterShort = \(RUN\.endlessRosterShort \| 0\) \+ 1;/.test(rb[0]) && /nobody flagged \(Q314\)'\);/.test(rb[0]) && /continue;/.test(rb[0]) && !/recordFlag|flagPlayer|processed\.add/.test(rb[0]));
+  }
   assert('chain keyed by teamRunKey(roster, season, runSeed=d[4]) through the solo chain planner', /teamRunKey\(rosterSids, t\.seasonId, g\[0\]\.d\[4\] \| 0\)/.test(lane) && /soloChainPlan\(soloState, key, f, c\.m, nowMs\)/.test(lane));
   assert('chain reject marks the segment processed; a wait leaves it fresh', /plan\.ok === false\) \{[\s\S]*?processed\.add\(c\.m\);[\s\S]*?continue;/.test(lane) && /plan\.ok === null\) \{[^}]*continue; \}/.test(lane));
   assert('pacing on the proven chain depth (start attestation or first sighting)', /endlessRequiredMs\(f, plan\.proven\)/.test(lane) && /startsPending\[c\.m\]/.test(lane));

@@ -385,7 +385,10 @@ console.log('-- [7] wiring pins --');
   const iRej = lane.indexOf('if (plan.ok === false) {');
   T('[7] the lane reads the run before planning and reworks only a reject (teamRollbackPlan right after the planner)', lane.indexOf('const runT0 = soloState.runs[key], headT0 = runT0 ? (runT0.max | 0) : 0;') >= 0
     && iPlan > 0 && iPlan < iRb && iRb < iRej, [iPlan, iRb, iRej].join(','));
-  T('[7] a catch-up flags nobody when its perk chain does not line up (today\'s chain-back flags nobody either)', /if \(!catchUp\) \{ recordFlag\(signals, g, c\.m, nowMs\); sigDirty = true; RUN\.perkRej = \(RUN\.perkRej \| 0\) \+ 1; \}/.test(lane));
+  { // Q314: a perk reject flags nobody at all now (the build / pick log is a copy of the host's frames on every record); a catch-up still is not counted
+    const pb = lane.match(/if \(!pvT\.ok\) \{[^\n]*\n[\s\S]*?\n {10}continue;\n {8}\}/);
+    T('[7] a catch-up flags nobody when its perk chain does not line up (today\'s chain-back flags nobody either; since Q314 no perk reject in the lane flags anyone)', !!pb && /if \(!catchUp\) RUN\.perkRej = \(RUN\.perkRej \| 0\) \+ 1;/.test(pb[0]) && /processed\.add\(c\.m\);/.test(pb[0]) && !/recordFlag|flagPlayer/.test(pb[0]));
+  }
   const iFrom = lane.indexOf('const xpFrom = teamXpStarts(runT0, g, f, plan.proven);'), iAdv = lane.indexOf('soloAdvance(soloState, key, f, c.m, plan, nowMs);');
   T('[7] XP starts are read before the head moves; a catch-up never advances the chain', iFrom > 0 && iFrom < iAdv && /if \(!catchUp\) \{[^\n]*\n[\s\S]*?soloAdvance\(soloState, key, f, c\.m, plan, nowMs\);\n {8}\}/.test(lane));
   T('[7] ladder / milestones of a catch-up go to the writers behind only', /for \(const sid of writerSids\) \{\n {10}if \(catchUp && !catchUp\.has\(sid\)\) continue;/.test(lane));

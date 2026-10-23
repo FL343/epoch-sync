@@ -3442,6 +3442,7 @@ function writeRunSummary() {
       '| endless seats empty on the agreed roster that carried continues, left off the price ladder (Q201) | ' + s('endlessEmptySeatCont', 0) + ' |',
       '| seedcap veto / reject-window discards | ' + s('seedcapVeto', 0) + ' / ' + s('seedcapReject', 0) + ' |',
       '| perk replay rejects | ' + s('perkRej', 0) + ' |',
+      '| endless co-op checks on values every writer copies from the host, nobody flagged (Q314): seat table short of the seat count (held) / reroll bitmap out of reach (rejected) | ' + s('endlessRosterShort', 0) + ' / ' + s('endlessRrRej', 0) + ' |',
       '| token resumes: replays caught / burnt-run segments / untagged settled / untagged refused | ' + s('resumeReplay', 0) + ' / ' + s('runBurnt', 0) + ' / ' + s('resumeUntagged', 0) + ' / ' + s('resumeUntaggedRej', 0) + ' |',
       '| solo same-key forks (another signed record under a settled segment key) | ' + s('soloKeyFork', 0) + ' |',
       '| signed solo segments whose guard clock went back inside the segment, counted and handled as usual (Q242) | ' + s('soloNegDur', 0) + ' |',
@@ -10043,9 +10044,22 @@ async function main() {
       if (isClassicSeg) {
         const famK = classicLadderOf(pc7);
         if (!famK.id) { console.log('  endless-classic ' + c.m + ': ' + famK.low + ' classic board unresolved -- left pending'); continue; }
-        if (rosterSids.length !== pc7) {
-          recordFlag(signals, g, c.m, nowMs); sigDirty = true; RUN.sanity = (RUN.sanity | 0) + 1;
-          ghWarn('match=' + c.m + ': team classic segment roster incomplete (' + rosterSids.length + '/' + pc7 + ') -- not settled');
+        // Q314 (cloud audit 2026-10, found doing Q305 / Q306): past sanity, five checks of an endless co-op group read only values
+        //   every writer copies from the host's frames -- the seat table (start frame / cold-rejoin receipt: a seat with no account
+        //   is written '0' and left off the roster) here and in the team competitive lane, the perk build + pick log (pick frames
+        //   adopted on a mismatch, the results table, a resume's start frame) in the team competitive and casual lanes, and the casual
+        //   reroll bitmap (level-begin frames, the results table; after Q306's vote every honest record carries the host's). The
+        //   records already agree on them (endlessRosterHold: one roster, every writer at his own seat; the build / pick log ride the
+        //   consistency vector), so a value no honest host sends came from the host or from writers who are all in on it, and the
+        //   job cannot tell which: a friends' room has no seal and no record names the host (Q305). The checks still hold (roster) or
+        //   reject (perk / bitmap: processed, as before), and they flag nobody: the flag fell on the honest joiners who carried the
+        //   host's value (a trust-tier count and the run lost), never on the host alone, while writers who are all in on it earn
+        //   nothing from the held / rejected run either way. Architecture decision 10 (spare the honest player), as Q305 / Q109
+        //   rework 2 / Q211 for the seat table. A writer's own field still flags him (Q306), and so does any sanity reason Q305 does
+        //   not list.
+        if (rosterSids.length !== pc7) {   // Q314: the seat table every writer copies from the host -- held, nobody flagged
+          RUN.endlessRosterShort = (RUN.endlessRosterShort | 0) + 1;
+          ghWarn('match=' + c.m + ': team classic segment roster incomplete (' + rosterSids.length + '/' + pc7 + ') -- not settled, nobody flagged (Q314)');
           continue;
         }
         const key = teamRunKey(rosterSids, 0, g[0].d[4] | 0);   // lifetime: season 0 in the key (the row / segments carry the season snapshot but a classic run may span seasons)
@@ -10100,9 +10114,9 @@ async function main() {
       if ((t.flags | 0) & attest.SEG_COMP) {
         const fam = compFam[compFamKeyOf(pc7)];
         if (!cpId || !fam.id || (seasonId >= 1 && !fam.seasonId)) { console.log('  endless-comp ' + c.m + ': cp/' + fam.low + '/seasonal board unresolved -- left pending'); continue; }
-        if (rosterSids.length !== pc7) {
-          recordFlag(signals, g, c.m, nowMs); sigDirty = true; RUN.sanity = (RUN.sanity | 0) + 1;
-          ghWarn('match=' + c.m + ': team comp segment roster incomplete (' + rosterSids.length + '/' + pc7 + ') -- not settled');
+        if (rosterSids.length !== pc7) {   // Q314: the seat table every writer copies from the host -- held, nobody flagged
+          RUN.endlessRosterShort = (RUN.endlessRosterShort | 0) + 1;
+          ghWarn('match=' + c.m + ': team comp segment roster incomplete (' + rosterSids.length + '/' + pc7 + ') -- not settled, nobody flagged (Q314)');
           continue;
         }
         const key = teamRunKey(rosterSids, t.seasonId, g[0].d[4] | 0);
@@ -10130,9 +10144,9 @@ async function main() {
           continue;
         }
         const pvT = perks.verifyPerkPicks(f, soloState.runs[key], pc7, PERK_CH);   // shared team build: the co-op draw pool, same replay + chain rules
-        if (!pvT.ok) {
-          if (!catchUp) { recordFlag(signals, g, c.m, nowMs); sigDirty = true; RUN.perkRej = (RUN.perkRej | 0) + 1; }   // Q237: a catch-up was a plain chain-back reject before (never flagged)
-          ghWarn('match=' + c.m + ': team comp segment perk REJECT (' + pvT.reason + ': ' + pvT.why + ') build ' + (f.build >>> 0) + ' depth ' + f.startDepth + '->' + f.endDepth + ' ' + rosterSids.map(plog).join('+') + (catchUp ? ' (catch-up, nobody flagged)' : ''));
+        if (!pvT.ok) {   // Q314: the build / pick log every writer copies from the host -- rejected as before, nobody flagged (a catch-up flagged nobody either, Q237)
+          if (!catchUp) RUN.perkRej = (RUN.perkRej | 0) + 1;
+          ghWarn('match=' + c.m + ': team comp segment perk REJECT (' + pvT.reason + ': ' + pvT.why + ') build ' + (f.build >>> 0) + ' depth ' + f.startDepth + '->' + f.endDepth + ' ' + rosterSids.map(plog).join('+') + (catchUp ? ' (catch-up, nobody flagged)' : ' -- nobody flagged (Q314)'));
           processed.add(c.m);
           continue;
         }
@@ -10201,16 +10215,16 @@ async function main() {
       // casual co-op: a shared perk build (co-op draw pool) must still replay from its pick log -- no run chain here, so
       //   only perk_forge applies (a forged build word inflates every writer's score alike; consensus alone cannot see it)
       const rcC = rerollChain({ rerollLo: t.rerollLo >>> 0, rerollHi: t.rerollHi >>> 0, endDepth: t.endDepth | 0 }, null);
-      if (rcC) {
-        recordFlag(signals, g, c.m, nowMs); sigDirty = true; RUN.sanity = (RUN.sanity | 0) + 1;
-        ghWarn('match=' + c.m + ': endless reroll bitmap sanity REJECT (' + rcC + ') depth ' + t.startDepth + '->' + t.endDepth);
+      if (rcC) {   // Q314: the bitmap every honest writer copies from the host -- rejected as before, nobody flagged
+        RUN.endlessRrRej = (RUN.endlessRrRej | 0) + 1;
+        ghWarn('match=' + c.m + ': endless reroll bitmap sanity REJECT (' + rcC + ') depth ' + t.startDepth + '->' + t.endDepth + ' -- nobody flagged (Q314)');
         processed.add(c.m);
         continue;
       }
       const pvC = perks.verifyPerkPicks({ build: t.build >>> 0, picksLo: t.picksLo | 0, picksHi: t.picksHi | 0, seasonId: t.seasonId | 0, endDepth: t.endDepth | 0, runSeed: g[0].d[4] | 0 }, null, pc7, PERK_CH);
-      if (!pvC.ok) {
-        recordFlag(signals, g, c.m, nowMs); sigDirty = true; RUN.perkRej = (RUN.perkRej | 0) + 1;
-        ghWarn('match=' + c.m + ': endless perk REJECT (' + pvC.reason + ': ' + pvC.why + ') build ' + (t.build >>> 0) + ' depth ' + t.startDepth + '->' + t.endDepth);
+      if (!pvC.ok) {   // Q314: the build / pick log every writer copies from the host -- rejected as before, nobody flagged
+        RUN.perkRej = (RUN.perkRej | 0) + 1;
+        ghWarn('match=' + c.m + ': endless perk REJECT (' + pvC.reason + ': ' + pvC.why + ') build ' + (t.build >>> 0) + ' depth ' + t.startDepth + '->' + t.endDepth + ' -- nobody flagged (Q314)');
         processed.add(c.m);
         continue;
       }
