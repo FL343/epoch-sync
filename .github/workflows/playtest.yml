@@ -82,6 +82,10 @@ jobs:
           SC_STATE_FILE: pt-seedcap.json
           SEEDCAP_ENFORCE: '1'
           SEEDCAP_REJECT: '1'
+          # O198 v1 trust ledger (knife 5.5b-1): this job writes the channel's trust file; the sanctions twin's file is a
+          # read-only consult (its event queue), like the seedcap file above
+          TRUST_FILE: pt-trust.json
+          SN_STATE_FILE: pt-sanctions.json
           # rating-side state is never produced in PT mode; pointed off the main files anyway
           # (belt over suspenders) and deliberately NOT persisted below.
           SKILL_FILE: pt-skill.json
@@ -100,7 +104,7 @@ jobs:
           RUN_OUTCOME: ${{ steps.run.outcome }}
         run: |
           state_files=""
-          for f in pt-processed.json pt-leavers.json pt-xp.json pt-starts.json pt-signals.json pt-confessions.json pt-unmatched.json pt-supporters.json pt-endless-solo.json pt-chat-mute.json pt-pending-writes.json; do
+          for f in pt-processed.json pt-leavers.json pt-xp.json pt-starts.json pt-signals.json pt-confessions.json pt-unmatched.json pt-supporters.json pt-endless-solo.json pt-chat-mute.json pt-pending-writes.json pt-trust.json; do
             [ -f "$f" ] && state_files="$state_files $f"
           done
           if [ -n "$state_files" ] && [ -n "$(git status --porcelain -- $state_files)" ]; then

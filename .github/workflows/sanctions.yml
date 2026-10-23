@@ -63,6 +63,8 @@ jobs:
           # rare-event mail note (same Resend channel as the feedback digest); unset = off
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           SN_MAIL_TO: ${{ secrets.FB_DIGEST_TO }}
+          # O198 v1 (knife 5.5b-1): the reconcile's trust ledger of this channel, read-only -- its cursor prunes the event queue
+          TRUST_FILE: trust.json
         run: node sanctions.js
       - name: persist
         run: |
@@ -111,6 +113,8 @@ jobs:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           SN_MAIL_TO: ${{ secrets.FB_DIGEST_TO }}
           SN_STATE_FILE: pt-sanctions.json
+          # O198 v1 (knife 5.5b-1): the reconcile's trust ledger of this channel, read-only -- its cursor prunes the event queue
+          TRUST_FILE: pt-trust.json
           FB_DIGEST_TAG: '[playtest] '
         run: node sanctions.js
       - name: persist
@@ -159,6 +163,8 @@ jobs:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           SN_MAIL_TO: ${{ secrets.FB_DIGEST_TO }}
           SN_STATE_FILE: demo-sanctions.json
+          # O198 v1 (knife 5.5b-1): the reconcile's trust ledger of this channel, read-only -- its cursor prunes the event queue
+          TRUST_FILE: demo-trust.json
           FB_DIGEST_TAG: '[demo] '
         run: node sanctions.js
       - name: persist

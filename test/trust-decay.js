@@ -127,12 +127,13 @@ console.log('=== trust decay (Q98: forgery flags count 90 days) ===');
 
 { // [6]
   const SRC = fs.readFileSync(path.join(__dirname, '..', 'validate.js'), 'utf8');
-  const fp = /\nfunction flagPlayer\(s, h, m, now\) \{[\s\S]*?\n\}\n/.exec(SRC);
+  const fp = /\nfunction flagPlayer\(s, h, m, now(?:, src)?\) \{[\s\S]*?\n\}\n/.exec(SRC);   // (O198 v1: src = the trust ledger source tag)
   T('[6] flagPlayer found', !!fp);
   const rest = fp ? SRC.replace(fp[0], '\n') : SRC;
   const writes = rest.split('\n').map((l, i) => [i + 1, l]).filter(([, l]) => /\.f\s*(\+\+|--|[-+*|]?=(?!=))/.test(l.replace(/\/\/.*$/, '')));
   T('[6] no other write of a player\'s f (every flag goes through flagPlayer)', writes.length === 0, writes.map(([n, l]) => n + ': ' + l.trim()).join(' | '));
-  T('[6] trustPlan judges flagsInWindow, not the lifetime f', /trustTierOf\(flagsInWindow\(\(s\.players \|\| \{\}\)\[p\], now\), verifiedUniqueReporters\(s, sid, idx\),\s*hostDissentCount\(\(s\.t2lh \|\| \{\}\)\[p\], now/.test(SRC));
+  T('[6] trustPlan judges flagsInWindow, not the lifetime f', /f: flagsInWindow\(\(s\.players \|\| \{\}\)\[p\], now\), vur: verifiedUniqueReporters\(s, sid, idx\), hd: hostDissentCount\(\(s\.t2lh \|\| \{\}\)\[p\], now[^\n]*\n[^\n]*\n\s*const tier = trustTierOf\(comps\.f, comps\.vur, comps\.hd\);/.test(SRC));
+  //   (O198 v1 restack, knife 5.5b-1: the three inputs are named once in `comps` -- the trust ledger sees them -- then judged)
   //   (Q57 restack: the tier line takes a third argument, the team-gamble host charges; the first two stay pinned as they were;
   //   Q190 restack: the reporters count takes the SteamID and the run's index, as test/report-keys.js [8] pins it)
   // Q98 rework 2: B022's Q166 prunes the flagged map right after `let sigDirty = false;` (its own pin, test/flag-prune.js

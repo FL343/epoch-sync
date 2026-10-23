@@ -79,6 +79,10 @@ jobs:
           SC_STATE_FILE: demo-seedcap.json
           SEEDCAP_ENFORCE: '1'
           SEEDCAP_REJECT: '1'
+          # O198 v1 trust ledger (knife 5.5b-1): this job writes the channel's trust file; the sanctions twin's file is a
+          # read-only consult (its event queue), like the seedcap file above
+          TRUST_FILE: demo-trust.json
+          SN_STATE_FILE: demo-sanctions.json
           # rating-side state is never produced in PT mode; pointed off the main files anyway
           # (belt over suspenders) and deliberately NOT persisted below.
           SKILL_FILE: demo-skill.json
@@ -103,7 +107,7 @@ jobs:
           RUN_OUTCOME: ${{ steps.run.outcome }}
         run: |
           state_files=""
-          for f in demo-processed.json demo-leavers.json demo-xp.json demo-starts.json demo-signals.json demo-confessions.json demo-unmatched.json demo-supporters.json demo-endless-solo.json demo-chat-mute.json demo-pending-writes.json; do
+          for f in demo-processed.json demo-leavers.json demo-xp.json demo-starts.json demo-signals.json demo-confessions.json demo-unmatched.json demo-supporters.json demo-endless-solo.json demo-chat-mute.json demo-pending-writes.json demo-trust.json; do
             [ -f "$f" ] && state_files="$state_files $f"
           done
           if [ -n "$state_files" ] && [ -n "$(git status --porcelain -- $state_files)" ]; then

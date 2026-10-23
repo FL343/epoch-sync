@@ -104,6 +104,10 @@ jobs:
           # switch: flip to '1' after the audit soak looks clean (SEEDCAP_REJECT likewise).
           SC_STATE_FILE: seedcap.json
           SEEDCAP_ENFORCE: '0'
+          # O198 v1 trust ledger (knife 5.5b-1): this job writes trust.json; the sanctions twin's file is a read-only
+          # consult (its event queue), like seedcap.json above
+          TRUST_FILE: trust.json
+          SN_STATE_FILE: sanctions.json
           # all boards are provisioned: a board missing from the listing is a config
           # regression -- fail loudly (e-mail) instead of silently skipping authority
           STRICT_BOARDS: '1'
@@ -123,7 +127,7 @@ jobs:
           RUN_OUTCOME: ${{ steps.run.outcome }}
         run: |
           state_files=""
-          for f in processed.json skill.json leavers.json xp.json starts.json signals.json groups.json confessions.json unmatched.json supporters.json classic.json endless-solo.json campaign-endless.json chat-mute.json pending-writes.json; do
+          for f in processed.json skill.json leavers.json xp.json starts.json signals.json groups.json confessions.json unmatched.json supporters.json classic.json endless-solo.json campaign-endless.json chat-mute.json pending-writes.json trust.json; do
             [ -f "$f" ] && state_files="$state_files $f"
           done
           if [ -n "$state_files" ] && [ -n "$(git status --porcelain -- $state_files)" ]; then

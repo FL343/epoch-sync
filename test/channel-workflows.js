@@ -82,7 +82,9 @@ console.log('-- reconcile twins --');
     //   SC_STATE_FILE: a read-only consult here (seedcap.yml's twin jobs persist it). SKILL_FILE / GROUPS_FILE: PT_MODE
     //   skips the rating update and group decay, so both stay empty -- verified, not trusted: test/channel-state-files.js
     //   runs the real reconcile under each twin's env and goes red the day a file a twin does not persist carries data.
-    const NOT_PERSISTED = new Set(['SC_STATE_FILE', 'SKILL_FILE', 'GROUPS_FILE']);
+    //   SN_STATE_FILE (O198 v1, knife 5.5b-1): the sanctions twin's file, a read-only consult of its event queue (sanctions.yml
+    //   persists it), like SC_STATE_FILE.
+    const NOT_PERSISTED = new Set(['SC_STATE_FILE', 'SN_STATE_FILE', 'SKILL_FILE', 'GROUPS_FILE']);
     // every state file validate.js writes (writeStateFile(<var>, ...)) is named by both twins: an unnamed one falls back
     //   to the main channel's file in the checkout (read as this channel's state, written over, never persisted) --
     //   unless its lane is hard-off under PT_MODE (pinned: the lane returns before it touches the file)

@@ -36,6 +36,7 @@ const mhOfKey = (m) => parseInt(String(m), 10) | 0;   // a match key starts with
 //   streak-plan.js, one copy for this job and for the client (see its header); the gate V54B3_STREAK is next to XP_CFG
 const streakPlan = require('./streak-plan.js');
 const startProof = require('./start-proof.js');   // O462: a matchmade start's seat commitment (one copy with the client, its vendor copy byte-locked there)
+const trustLedger = require('./trust-ledger.js');   // O198 v1 (knife 5.5b-1): the per-account violation event ledger (trust.json + trust_ledger mirror board)
 // ---- O480 points-row backlog (PENDING_WRITES_FILE; test/receipt-ring.js, test/pending-writes.js, test/stale-lp-read.js) ----
 // pid -> { rc, w, l }, de-identified like every state file (pid keys; a matchHash is the key the start rosters in starts.json carry
 //   already; the score and details in w / l are the ones his public points row shows):
@@ -2699,12 +2700,19 @@ function saveSignals(s, now) { try { pruneSignals(s, now); writeStateFile(SIGNAL
 function sigPlayer(s, h, now) { const p = s.players[h] || (s.players[h] = { g: 0, w: 0, v: 0, f: 0, ns: 0, disp: [0, 0, 0, 0, 0, 0, 0], s1: 0, s2: 0, smax: 0, at: 0 }); p.at = now; return p; }
 // flag once per match key (flagged groups are not processed, so they re-surface every run
 // until their shard entries are overwritten -- the dedup map keeps counters honest).
-function recordFlag(s, g, m, now) {
+// src (O198 v1 trust ledger): the source tag the flag carries into trust.json -- 'fl' (consensus / sanity / veto, the
+//   default) or 'at' (a guard-signature failure on the solo lane); the tier still reads every flag through f as before
+function recordFlag(s, g, m, now, src) {
   if (s.flagged[m]) return false;
   s.flagged[m] = now;
-  for (const sid of new Set(g.map(r => String(r.steamID)))) flagPlayer(s, pid(sid), m, now);
+  for (const sid of new Set(g.map(r => String(r.steamID)))) { if (flagPlayer(s, pid(sid), m, now, src)) TRUST_RUN_SID.set(pid(sid), sid); }
   return true;
 }
+// O198 v1: this run's new flags, taken into the trust ledger at the trust upkeep (maintainTrust) -- one per (account, key)
+//   like f itself (flagPlayer returns true only for a first flag). TRUST_RUN_SID: pid -> sid of the accounts flagged this
+//   run (the mirror board row needs the sid; the ledger file never holds one).
+const TRUST_RUN_EV = [];
+const TRUST_RUN_SID = new Map();
 // Q166 (cloud audit 2026-10): a flag stays only while its key can come back on its own. A key whose records are on the
 //   shards re-surfaces every run, so its entry must stay (dropped, every player of it would be counted again: trust tier).
 //   A shard row is overwritten, never restored, so a key none of whose records is on the shards comes back only when a
@@ -2769,7 +2777,7 @@ function stampUntimedFlags(p, now) {
   capFlagKeys(p);
   return true;
 }
-function flagPlayer(s, h, m, now) {
+function flagPlayer(s, h, m, now, src) {
   const old = s.players[h];
   if (old && hasKey(old.fm, m)) return false;   // this match flagged him already: no second flag, no `at` refresh
   const p = sigPlayer(s, h, now);
@@ -2778,6 +2786,7 @@ function flagPlayer(s, h, m, now) {
   p.f = (p.f | 0) + 1;
   p.fm[m] = now; p.fx = p.f;
   capFlagKeys(p);
+  TRUST_RUN_EV.push({ p: h, m: String(m), t: Math.floor((Number(now) || 0) / 60000), src: src === 'at' ? 'at' : 'fl' });   // O198 v1 ledger
   return true;
 }
 // once per run, right after loading the signals file: date the unstamped flags -> true = the state changed
@@ -3015,14 +3024,17 @@ function trustTierOf(f, vur, hd) {
 // existing = {sid: tier on board}; touched = iterable of real sids seen this run with
 // trust-relevant signals. Union both so decayed players get re-evaluated (and deleted
 // at 0) without any identity leaving the board itself.
-function trustPlan(s, existing, touched, now) {
+// opt (O198 v1, knife 5.5b-1; optional): onComp(sid, {f, vur, hd}) sees every judged account's inputs (the trust ledger
+//   records an rp / hd rise from them)
+function trustPlan(s, existing, touched, now, opt) {
   const writes = [], deletes = [];
   const all = new Set([...Object.keys(existing || {}), ...touched]);
   const idx = s.rkv ? trustIndex(s) : null;
   for (const sid of all) {
     const p = pid(sid);
-    const tier = trustTierOf(flagsInWindow((s.players || {})[p], now), verifiedUniqueReporters(s, sid, idx),
-      hostDissentCount((s.t2lh || {})[p], now == null ? Date.now() : now));
+    const comps = { f: flagsInWindow((s.players || {})[p], now), vur: verifiedUniqueReporters(s, sid, idx), hd: hostDissentCount((s.t2lh || {})[p], now == null ? Date.now() : now) };
+    if (opt && opt.onComp) opt.onComp(sid, comps);
+    const tier = trustTierOf(comps.f, comps.vur, comps.hd);
     const cur = (existing || {})[sid];
     if (tier > 0 && tier !== (cur | 0)) writes.push({ sid, tier });
     else if (tier === 0 && cur != null) deletes.push(sid);
@@ -3182,6 +3194,7 @@ function writeRunSummary() {
       '| gamble-frame refusals naming the host (Q61): strikes, only he flagged / of them judged, record only / held for a seat with no record / named, not a strike, left to the flag rules below | ' + s('gtac', '0 / 0 / 0 / 0') + ' |',
       '| reports seen / counted | ' + s('repSeen', 0) + ' / ' + s('repCounted', 0) + ' |',
       '| trust writes / deletes | ' + s('trustW', 0) + ' / ' + s('trustD', 0) + ' |',
+      '| trust ledger events taken (seedcap / sanctions / flags) / mirror rows written | ' + s('trustLedger', '0/0/0') + ' / ' + s('trustMirror', 0) + ' |',
       '| endless rating rows written / deleted / tier cuts (O103) | ' + s('ratingW', 0) + ' / ' + s('ratingD', 0) + ' / ' + s('tiercut', '-') + ' |',
       '| Gold Rush Cup (O180): settled / honor rows written / deleted / carrier | ' + s('cup', '-') + ' / ' + s('cupHonorW', 0) + ' / ' + s('cupHonorD', 0) + ' / ' + s('cupCarrier', '-') + ' |',
       '| team-gamble lone / team dissent unsettled / settled | ' + s('t2ld', '0/0') + ' |',
@@ -3417,6 +3430,16 @@ function seedcapRejectActive(su, nowMin) {
   return u != null && (nowMin | 0) < u;
 }
 function loadSeedcap() { try { return JSON.parse(fs.readFileSync(SC_STATE_FILE, 'utf8')) || null; } catch (e) { return null; } }
+// ---- O198 v1 trust ledger (knife 5.5b-1): trust.json, this job its only writer (trust-ledger.js header) ----
+// The producers queue their events in their own state files (seedcap.json / sanctions.json `events`, read-only here); the
+//   trust upkeep takes them past the cursor it keeps in trust.json (`taken`), which the producers read back to prune.
+//   SN_STATE_FILE: the sanctions twin's file of THIS channel (a read-only consult, like SC_STATE_FILE).
+const TRUST_FILE = process.env.TRUST_FILE || 'trust.json';
+const SN_STATE_FILE = process.env.SN_STATE_FILE || 'sanctions.json';
+const TRUST_LEDGER_LB = process.env.TRUST_LEDGER_LB || 'trust_ledger';   // mirror board: trusted writes, friends-only reads
+function loadTrustLedger() { let o = null; try { o = JSON.parse(fs.readFileSync(TRUST_FILE, 'utf8')); } catch (e) {} return trustLedger.loadLedger(o); }
+function saveTrustLedger(L) { try { writeStateFile(TRUST_FILE, JSON.stringify(L, null, 0)); } catch (e) { ghWarn('write ' + TRUST_FILE + ' failed: ' + (e && e.message)); } }
+function loadSanctionsState() { try { return JSON.parse(fs.readFileSync(SN_STATE_FILE, 'utf8')) || null; } catch (e) { return null; } }
 // abandon confessions (see reconcileConfessions): "pid|matchKey" -> {t0, mt, ded, ex, refunded, done}
 // An entry is also the ONLY memory that its 0xB5 record was already applied, and that record stays
 // readable until the writer's own shard rotation overwrites it -- for a player who stops playing,
@@ -7964,7 +7987,56 @@ async function main() {
   // trust board upkeep: recompute tiers for touched players + everyone currently ON the
   // board (decay/deletion). Runs on every exit path (reports/flags arrive with or without
   // settles). Board absent -> logged skip (code can ship before the board exists).
+  // O198 v1 trust ledger (knife 5.5b-1): every exit path, inside the trust upkeep -- the producer queues (seedcap /
+  //   sanctions events) arrive with or without settles. Begin = load trust.json + take the queues + this run's new flags;
+  //   end = size fuse + the mirror board rows that are behind + save. The board half below feeds it the rp / hd rises.
+  const trustLedgerBegin = () => {
+    const led = { L: loadTrustLedger(), dirty: false, took: { seedcap: 0, sanctions: 0, flags: 0 }, boardSid: new Map() };
+    for (const [name, st] of [['seedcap', loadSeedcap()], ['sanctions', loadSanctionsState()]]) {
+      if (!st || !Array.isArray(st.events)) continue;
+      const q = trustLedger.takeQueue(led.L, name, st.events);
+      if (q.changed) led.dirty = true;
+      led.took[name] = q.took;
+      if (q.lost) ghWarn('trust ledger: ' + q.lost + ' ' + name + ' event(s) dropped by the producer queue fuse before this job took them');
+    }
+    for (const e of TRUST_RUN_EV.splice(0)) {
+      if (trustLedger.recordEvent(led.L, e.p, { t: e.t, src: e.src, sev: e.src === 'at' ? 2 : 1, m: e.m })) { led.dirty = true; led.took.flags++; }
+    }
+    return led;
+  };
+  const trustLedgerEnd = async (led) => {
+    const L = led.L;
+    const pruned = trustLedger.pruneLedger(L);
+    if (pruned) { led.dirty = true; ghWarn('trust ledger: ' + pruned + ' low-confidence account(s) evicted by the size fuse (' + trustLedger.ACCT_CAP + ')'); }
+    let mOk = 0;
+    const due = trustLedger.mirrorDue(L);
+    if (due.length && APPLY_MMR) {
+      const sidOf = (p) => TRUST_RUN_SID.get(p) || sidByPid.get(p) || led.boardSid.get(p) || null;
+      const named = due.map((p) => [p, sidOf(p)]).filter((x) => x[1]);
+      if (named.length) {
+        const listed = ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).find(x => String(x.name || x.Name) === TRUST_LEDGER_LB);
+        const bid = listed ? (listed.id || listed.ID) : await findOrCreateBoard(TRUST_LEDGER_LB, true, true);
+        if (!bid) ghWarn('trust ledger: mirror board unavailable -- rows stay behind (the file keeps the counts)');
+        else for (const [p, sid] of named) {
+          const a = L.acct[p];
+          const r = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: bid, steamid: sid,
+            score: trustLedger.mirrorScore(a), scoremethod: 'ForceUpdate', format: 'json' }, trustLedger.mirrorDetails(a));
+          if (r.ok) { delete a.mw; led.dirty = true; mOk++; }
+          else ghWarn('trust ledger mirror write failed ' + plog(sid) + ': HTTP ' + r.status + ' (retried next run)');
+        }
+      }
+    }
+    RUN.trustLedger = led.took.seedcap + '/' + led.took.sanctions + '/' + led.took.flags; RUN.trustMirror = mOk;
+    if (led.took.seedcap || led.took.sanctions || led.took.flags || mOk) console.log('trust ledger: took ' + RUN.trustLedger + ' (seedcap / sanctions / flags), mirror rows ' + mOk + '/' + due.length);
+    if (led.dirty && APPLY_MMR) saveTrustLedger(L);
+  };
+  // the ledger is record-only: a failure in it warns and never costs the trust board (or the run) anything
   const maintainTrust = async () => {
+    let led = null;
+    try { led = trustLedgerBegin(); } catch (e) { ghWarn('trust ledger: load / take failed (' + (e && e.message) + ') -- skipped this run'); }
+    try { await maintainTrustBoard(led); } finally { if (led) { try { await trustLedgerEnd(led); } catch (e) { ghWarn('trust ledger: save / mirror failed (' + (e && e.message) + ')'); } } }
+  };
+  const maintainTrustBoard = async (led) => {
     const tLb = ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).find(x => String(x.name || x.Name) === TRUST_LB);
     if (!tLb) { strictBoard('trust board absent'); console.log('trust board absent (pre-create ' + TRUST_LB + ', trusted-writes) -- skip'); return; }
     try {
@@ -7972,8 +8044,11 @@ async function main() {
       // a stale 0 would skip the read and silently starve decay-deletes for the run).
       const existing = {};
       const tb = await readBoardAll(tLb.id || tLb.ID, 'trust board');
-      for (const e of tb.ents) existing[String(e.steamID)] = e.score | 0;
-      const plan = trustPlan(signals, existing, trustTouched, nowMs);
+      for (const e of tb.ents) { existing[String(e.steamID)] = e.score | 0; if (led) led.boardSid.set(pid(String(e.steamID)), String(e.steamID)); }
+      const tLedT = Math.floor(nowMs / 60000);
+      const plan = trustPlan(signals, existing, trustTouched, nowMs, {
+        onComp: (sid, comps) => { if (led && trustLedger.noteLevels(led.L, pid(sid), tLedT, comps, TRUST_T)) { led.dirty = true; TRUST_RUN_SID.set(pid(sid), sid); } },
+      });
       RUN.trustW = plan.writes.length; RUN.trustD = plan.deletes.length;
       if (!plan.writes.length && !plan.deletes.length) return;
       console.log('trust: ' + plan.writes.length + ' tier writes [' + plan.writes.map(w => plog(w.sid) + '=' + w.tier).join(' ') + '], ' +
@@ -9209,7 +9284,7 @@ async function main() {
       //   while its records are on the shards, Q166), looked at again quietly each run while it stays there, and a record
       //   that verifies settles the key as before. A co-op key is held meanwhile (its records wait in this lane), as an
       //   outside start already holds it (Q113).
-      if (recordFlag(signals, c.g, m, nowMs)) {
+      if (recordFlag(signals, c.g, m, nowMs, 'at')) {   // O198 v1: a signature failure carries its own ledger source (still one f)
         sigDirty = true; trustTouched.add(sid);
         RUN.soloRej = (RUN.soloRej | 0) + 1;
         ghWarn('match=' + m + ': solo segment ' + plog(sid) + ' REJECTED (' + gate.reason + ') -- not settled, the key stays open');

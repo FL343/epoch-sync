@@ -66,6 +66,7 @@ const { spawnSync } = require('child_process');
 const v = require('./validate.js');
 const attest = require('./attest.js');
 const perks = require('./perks.js');   // pick-log replay (segment-start build; same replay as the reconcile's perk_forge check)
+const trustLedger = require('./trust-ledger.js');   // O198 v1 (knife 5.5b-1): conviction events queued for the reconcile's trust ledger
 
 const KEY = process.env.STEAM_PUBLISHER_KEY;
 const APPID = process.env.APPID;
@@ -73,6 +74,10 @@ const PREFIX = process.env.LB_PREFIX;   // no default: the shard prefix is deplo
 const SC_STATE_FILE = process.env.SC_STATE_FILE || 'seedcap.json';
 const PROCESSED_FILE = process.env.PROCESSED_FILE || 'processed.json';   // read-only (reconcile owns it)
 const SIGNALS_FILE = process.env.SIGNALS_FILE || 'signals.json';         // read-only (reconcile owns it; carries applied-correction ids)
+// O198 v1 trust ledger (knife 5.5b-1): every conviction is also queued in this file's `events` (ids from `evSeq`); the reconcile
+//   takes them into ITS trust.json and keeps the last id it took there (`taken.seedcap`) -- read back here to prune the queue
+//   (the O124 seedcapApplied handshake: each side writes only its own file)
+const TRUST_FILE = process.env.TRUST_FILE || 'trust.json';               // read-only (reconcile owns it)
 const SEEDCAP_CLI = process.env.SEEDCAP_CLI || './seedcap_cli.exe';
 // Versioned world cores (2026-09-18): the artifact repo may carry one compiled core per world under
 // cores/<id>/seedcap_cli.exe plus live.json = per-channel package windows [{buildNum, core, liveAt, gateAt}].
@@ -452,9 +457,11 @@ function applyAudit(st, pending, cliMap, processed, t) {
         const sid = x.roster[seat];
         const p2 = v.pid(sid);
         const su = st.suspects[p2] = st.suspects[p2] || { n: 0, t0: t, ms: [] };
+        const nb = su.n | 0;
         su.n++; su.t1 = t;
         nOf[seat] = su.n;
         if (su.ms.indexOf(x.m) < 0) { su.ms.push(x.m); if (su.ms.length > SUSPECT_MATCH_KEEP) su.ms.shift(); }
+        trustLedger.queuePush(st, { t, src: 'sc', p: p2, sev: 3, m: x.m, ctx: { cap: capEff | 0, s: x.scores[seat] | 0, mt: x.mt | 0, pc: x.pc | 0, nb } });   // O198 v1
       }
       if (processed.has(x.m) && x.p.entry === 'endless' && !st.corrections.some(c => c.m === x.m)) {
         st.corrections.push({ id: 'sc-' + x.m, m: x.m, seats: overSeats, t });
@@ -786,6 +793,11 @@ async function main() {
     console.log('seedcap: anomaly mail sent (' + md.reasons.join(' + ') + ')');
   }
   pruneState(st, applied, nowMin());
+  { // O198 v1: drop the queued events the reconcile already took (its cursor in trust.json; unreadable = keep them all)
+    const tl = loadJsonObj(TRUST_FILE);
+    const qp = trustLedger.queuePrune(st, tl && tl.taken && tl.taken.seedcap);
+    if (qp.fused) v.ghWarn('seedcap: ' + qp.fused + ' trust event(s) dropped by the queue fuse (the reconcile has not taken them)');
+  }
   saveState(st);
   console.log('seedcap: done groups=' + Object.keys(groups).length + ' audited-now=' + audited.pending.length + ' skipped=' + picked.skipped.length + ' deferred=' + audited.deferred +
     ' ok=' + stats.okN + ' over=' + stats.over + ' err=' + stats.errN + ' veto=' + Object.keys(st.veto).length +

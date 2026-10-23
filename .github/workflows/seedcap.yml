@@ -68,6 +68,8 @@ jobs:
           SC_STATE_FILE: seedcap.json
           PROCESSED_FILE: processed.json
           SIGNALS_FILE: signals.json
+          # O198 v1 (knife 5.5b-1): the reconcile's trust ledger of this channel, read-only -- its cursor prunes the event queue
+          TRUST_FILE: trust.json
           # offense-board mirror + mass-anomaly alert mail (Resend, feedback.yml channel)
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           FB_DIGEST_TO: ${{ secrets.FB_DIGEST_TO }}
@@ -125,6 +127,8 @@ jobs:
           SC_STATE_FILE: pt-seedcap.json
           PROCESSED_FILE: pt-processed.json
           SIGNALS_FILE: pt-signals.json
+          # O198 v1 (knife 5.5b-1): the reconcile's trust ledger of this channel, read-only -- its cursor prunes the event queue
+          TRUST_FILE: pt-trust.json
           # offense-board mirror + mass-anomaly alert mail (Resend, feedback.yml channel)
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           FB_DIGEST_TO: ${{ secrets.FB_DIGEST_TO }}
@@ -186,6 +190,8 @@ jobs:
           SC_STATE_FILE: demo-seedcap.json
           PROCESSED_FILE: demo-processed.json
           SIGNALS_FILE: demo-signals.json
+          # O198 v1 (knife 5.5b-1): the reconcile's trust ledger of this channel, read-only -- its cursor prunes the event queue
+          TRUST_FILE: demo-trust.json
           # offense-board mirror + mass-anomaly alert mail (Resend, feedback.yml channel)
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           FB_DIGEST_TO: ${{ secrets.FB_DIGEST_TO }}

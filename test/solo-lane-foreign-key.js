@@ -207,7 +207,7 @@ console.log('=== W41: a failed solo check does not close the key (outside rows u
 {
   const pin = (label, s) => T('[0] ' + label, SRC.split(s).length === 2, 'not found exactly once: ' + s.slice(0, 120));
   pin('a hard reject flags + warns once and leaves the key open',
-    "      if (recordFlag(signals, c.g, m, nowMs)) {\n        sigDirty = true; trustTouched.add(sid);\n        RUN.soloRej = (RUN.soloRej | 0) + 1;\n"
+    "      if (recordFlag(signals, c.g, m, nowMs, 'at')) {   // O198 v1: a signature failure carries its own ledger source (still one f)\n        sigDirty = true; trustTouched.add(sid);\n        RUN.soloRej = (RUN.soloRej | 0) + 1;\n"
     + "        ghWarn('match=' + m + ': solo segment ' + plog(sid) + ' REJECTED (' + gate.reason + ') -- not settled, the key stays open');\n"
     + "      } else console.log('  solo ' + m + ': ' + plog(sid) + ' rejected again (' + gate.reason + '), flagged before -- not settled, the key stays open');\n      return false;\n");
   T('[0] the solo lane closes no key before the signature verified', !/processed\.add\(m\);\s+\/\/ a bad signature \/ foreign owner never heals/.test(SRC));

@@ -52,8 +52,13 @@
 const fs = require('fs');
 const crypto = require('crypto');
 const v = require('./validate.js');
+const trustLedger = require('./trust-ledger.js');   // O198 v1 (knife 5.5b-1): sanction events queued for the reconcile's trust ledger
 
 const SN_STATE_FILE = process.env.SN_STATE_FILE || 'sanctions.json';
+// O198 v1 trust ledger (knife 5.5b-1): every enacted ban / matchmaking restriction / unban is also queued in this file's `events`
+//   (pid only -- the state file still names nobody); the reconcile takes them into its trust.json and keeps the last id it took
+//   there (`taken.sanctions`), read back here to prune the queue. The shadow boards stay the storage of everything else.
+const TRUST_FILE = process.env.TRUST_FILE || 'trust.json';   // read-only (the reconcile owns it)
 const BAN_LB = process.env.BAN_LB || 'ban_board';            // lockstep: client eac-gate BOARD_BAN
 const BAN_SHADOW_SUFFIX = '_banned';
 // Display boards to exile. Extra names (season ladders etc.) come in via env --
@@ -401,6 +406,7 @@ async function main() {
   let cursor = String(st.lastLogId || '');
   const cursor0 = cursor;
   const boards0 = JSON.stringify(st.boards || {});   // persist when the id cache grows (sweep-only runs)
+  const events0 = JSON.stringify(st.events || null);   // O198 v1: persist when the trust event queue moves
   let boards = null;
   // Documented resume protocol: ask with the cursor, consume the batch IN THE ORDER
   // RETURNED, then set the cursor to the LAST element's logId. logId is opaque -- it
@@ -429,11 +435,14 @@ async function main() {
       }
       if (!boards) boards = await resolveBoards(st);
       if (!boards.ban) throw new Error('ban gate board unavailable -- refusing to advance the cursor');
+      const nowM = Math.floor(Date.now() / 60000);
       if (verb === 'ban') {
+        trustLedger.queuePush(st, { t: nowM, src: 'sa', p: pid(sid), sev: actionCodeOf(ev.action) === ACT_MM ? 2 : 3, ctx: { a: actionCodeOf(ev.action) | 0, x: expiryMinOf(ev.expiresAt) > 0 ? 1 : 0 } });   // O198 v1
         const r = await enactBan(boards, sid, expiryMinOf(ev.expiresAt), ev);
         mail.push((actionCodeOf(ev.action) === ACT_MM ? 'MM-RESTRICT ' : 'BAN ') + sid + ' action=' + ev.action + (ev.automated ? ' (automated)' : '') +
           ' exp=' + (expiryMinOf(ev.expiresAt) || 'permanent') + ' exiled=' + r.moved + ' platform=' + r.bans + ' ref=' + ev.refId);
       } else {
+        trustLedger.queuePush(st, { t: nowM, src: 'sa', p: pid(sid), sev: 0, ctx: { u: 1 } });   // O198 v1: history only (no count)
         const r = await enactUnban(boards, sid);
         mail.push('UNBAN ' + sid + ' restored=' + r.restored + ' platform=' + r.unbans + ' ref=' + ev.refId);
       }
@@ -448,7 +457,11 @@ async function main() {
     if (!boards) boards = await resolveBoards(st);
     if (boards.ban) lapsed = await sweepExpired(boards, mail);
   } catch (e) { v.ghWarn('expiry sweep failed (retries next tick): ' + (e && e.message)); }
-  if (cursor !== cursor0 || JSON.stringify(st.boards || {}) !== boards0 || !fs.existsSync(SN_STATE_FILE)) {
+  // O198 v1: the queued events the reconcile already took go (its cursor in trust.json; unreadable = keep them all)
+  let tl = null; try { tl = JSON.parse(fs.readFileSync(TRUST_FILE, 'utf8')); } catch (e) {}
+  const qp = trustLedger.queuePrune(st, tl && tl.taken && tl.taken.sanctions);
+  if (qp.fused) v.ghWarn('sanctions: ' + qp.fused + ' trust event(s) dropped by the queue fuse (the reconcile has not taken them)');
+  if (cursor !== cursor0 || JSON.stringify(st.boards || {}) !== boards0 || !fs.existsSync(SN_STATE_FILE) || qp.taken || qp.fused || JSON.stringify(st.events || null) !== events0) {
     st.lastLogId = cursor;
     saveState(st);
   }
