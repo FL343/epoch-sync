@@ -2676,6 +2676,32 @@ function pairDisputeCount(signals, pair, m, now) {
   }
   return res;
 }
+// Q305 (cloud audit 2026-10, found doing Q301): an endless co-op group is never split (above), so a reason that fails it flags
+//   every writer. These reasons read only what each writer copies from the host's frames: the seat count and the seat table
+//   (start frame / cold-rejoin receipt: pc and the three roster reasons), the depth pair and a segment's span (verdict frames,
+//   the results table, a resume's start depth), the season (start frame), the other seats' continue nibbles (verdict / results
+//   frames), the score vector (results table; its cap follows the host's end depth) and a classic segment's perk build / pick
+//   log / reroll bitmap (results table). A friends' room has no seal: one out-of-range value from a modded host lands in every
+//   honest joiner's record, and the flag fell on them. Who sent it cannot be read off the records (no host field; seat 0 is
+//   only the first host, a migration moves the host), so the flag could not go to the host alone. A group whose every reason
+//   is one of these, with no reason of a writer's own on any record (a negative duration, a seat outside the seat count, one
+//   account writing twice -- sanityFlags stops at the first record reason, so every record is read again here), is held
+//   unsettled and unprocessed as before and flags nobody, like a roster reason off endless (Q109 rework 2 / Q211): the held
+//   match already takes what it could earn (no XP / CP / board for anyone, the host included) and endless convicts no leaver
+//   from a start alone. Any other reason (type, a missing tail, tokens, segment flags, a disposition) keeps the whole-group flag.
+const SANITY_ENDLESS_HOST_SLUGS = ['pc', 'depth', 'span', 'season', 'cont', 'score', 'classic-perk', 'self-seat', 'sid-range', 'dup-sid'];
+function endlessHostOnly(g, flags) {
+  if (!flags.length || baseMt(g[0].d[2] | 0) !== ENDLESS.MT) return false;
+  if (flags.some((f) => SANITY_ENDLESS_HOST_SLUGS.indexOf(f) < 0)) return false;
+  const pc = g[0].d[8] | 0, seen = new Set();
+  for (const r of g) {
+    const s = String(r.steamID);
+    if (seen.has(s)) return false;
+    seen.add(s);
+    if (recordSanityFlags(r, ENDLESS.MT, pc).some((f) => SANITY_ENDLESS_HOST_SLUGS.indexOf(f) < 0)) return false;
+  }
+  return true;
+}
 // pacing gate: true = this settle group must wait (its start attestation is younger than the
 // physical minimum). No pending entry -> no constraint here; the settle loop never passes one any
 // more (since 2026-10-07 a group with no attestation ever sighted gets a synthetic entry stamped
@@ -3265,6 +3291,7 @@ function writeRunSummary() {
       '| sanity on one record only: dropped, rest settles / too few writers left (Q109) | ' + s('sanityDrop', 0) + ' / ' + s('sanityDropHeld', 0) + ' |',
       '| sanity whose every reason is the host\'s seat or table, nobody flagged, not settled (Q292) | ' + s('sanityHost', 0) + ' |',
       '| sanity whose every shared reason is the host\'s match header, only a writer breaking his own fields flagged, not settled (Q294) | ' + s('sanityHeader', 0) + ' |',
+      '| endless sanity on fields copied from the host only: held, nobody flagged (Q305) | ' + s('sanityEndHost', 0) + ' |',
       '| starts pending / exit-rate hits | ' + s('pending', 0) + ' / ' + s('convicted', 0) + ' |',
       '| start-orphan seats spared by their own exit note (Q64) | ' + s('exitNoteSpared', 0) + ' |',
       '| keys the host\'s match header held voided at maturity / seats spared there (Q294) | ' + s('headerVoid', 0) + ' / ' + s('headerSpared', 0) + ' |',
@@ -9670,6 +9697,11 @@ async function main() {
         continue;
       }
       if (!sp.drop.length) {
+        if (endlessHostOnly(g, sane)) {   // Q305: endless (never split) held only on fields every writer copies from the host -- nobody flagged
+          RUN.sanityEndHost = (RUN.sanityEndHost | 0) + 1;
+          ghWarn('match=' + c.m + ': sanity-held [' + sane.join(',') + '] on fields every endless writer copies from the host -- not settled, nobody flagged (Q305): ' + g.map(r => plog(r.steamID) + '@' + r.shard).join(' '));
+          continue;
+        }
         recordFlag(signals, g, c.m, nowMs); sigDirty = true;
         for (const r of g) trustTouched.add(String(r.steamID));   // trust-tier candidates
         RUN.sanity = (RUN.sanity | 0) + 1;
@@ -11421,6 +11453,7 @@ module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CLASSIC_OWN
 Object.assign(module.exports, { KEY_CHANNEL, loadJobPubTable, soloKeyHeld, soloRunHasHeld });   // cloud audit R1-A5-07 per-channel key policy (test/playtest-key-policy.js)
 Object.assign(module.exports, { MSIG, botSignedOf });   // client knife 5.8a: the guard match signature on lone bot records (test/match-sig.js)
 Object.assign(module.exports, { flagPlayer, flagsInWindow, stampLegacyFlags, TRUST_F_WINDOW_MS, SIG_FLAG_KEYS_CAP });   // cloud audit Q98 forgery flags age out of the trust tier (test/trust-decay.js)
+Object.assign(module.exports, { endlessHostOnly, SANITY_ENDLESS_HOST_SLUGS });   // cloud audit Q305 endless sanity on host-copied fields flags nobody (test/endless-host-fields.js)
 Object.assign(module.exports, { noteOwnStarts, hasOwnStart, OWN_START_CAP });   // cloud audit Q69 own-record evidence for leaver verdicts
 Object.assign(module.exports, { leaverXpRecordOnlyUntil, LEAVER_XP_RECORD_ONLY, LEAVER_XP_RECORD_ONLY_MAX_MS });   // M194 / W57 demo Next Fest: leaves recorded, XP not discounted
 Object.assign(module.exports, { NL_OPP_CAP, NL_REPEAT });   // cloud audit Q161 named-only losing seats counted on the account

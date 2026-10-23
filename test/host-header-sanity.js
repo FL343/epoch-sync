@@ -339,7 +339,7 @@ for (const [name, mt, ws, honest, opt] of HEADER_CASES) {
 // ---- [6] wiring pins ----
 {
   T('[6] the Q294 branch sits after the Q292 one and before the whole-group flag', (() => {
-    const a = SRC.indexOf('if (!sp.drop.length && sane.every((f) => SANITY_HOST_SLUGS.indexOf(f) >= 0)) {'), b = SRC.indexOf('      const hh = sanityHeaderHeld(g, sane, sp);\n'), c = SRC.indexOf('      if (!sp.drop.length) {\n        recordFlag(signals, g, c.m, nowMs);');
+    const a = SRC.indexOf('if (!sp.drop.length && sane.every((f) => SANITY_HOST_SLUGS.indexOf(f) >= 0)) {'), b = SRC.indexOf('      const hh = sanityHeaderHeld(g, sane, sp);\n'), c = SRC.search(/      if \(!sp\.drop\.length\) \{\n(?:        if \(endlessHostOnly\(g, sane\)\) \{(?:[^\n]*\n){4}        \}\n)?        recordFlag\(signals, g, c\.m, nowMs\);/);   // (Q305: its endless block may open the branch)
     return a > 0 && b > a && c > b;
   })());
   const br = (/      const hh = sanityHeaderHeld\(g, sane, sp\);\n[\s\S]*?\n        continue;\n      \}\n/.exec(SRC) || [''])[0];
