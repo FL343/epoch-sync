@@ -10,6 +10,8 @@
 //      this a confession rather than an accusation tool:
 //        - the signal subject is ALWAYS the writer (never the joiner seats in the payload)
 //        - it is a signal (weight review/weak), never a settlement verdict
+//   C) O199 (knife 5.5b-1 S6): an att-ver segment holds its run's later segments (never a chain-gap reject), an unknown ledger
+//      version is pending (no flag), the census of unsettled records by layout version
 //   node test/attest.js
 process.env.STATE_SALT = process.env.STATE_SALT || 'test-salt';
 const path = require('path');
@@ -151,7 +153,10 @@ console.log('== A) verifySoloRecord ==');
   const badMagic = rec.slice(); badMagic[0] = 0xB2;
   eq('wrong magic -> magic', A.verifySoloRecord(badMagic, TABLE).reason, 'magic');
   const badVer = rec.slice(); badVer[1] = 2;
-  eq('wrong ledger ver -> ver', A.verifySoloRecord(badVer, TABLE).reason, 'ver');
+  // O199 (knife 5.5b-1 S6): an unknown ledger version is a layout this job cannot read yet -> pending (soft), never a reject
+  const vv = A.verifySoloRecord(badVer, TABLE);
+  eq('wrong ledger ver -> ledger-ver, pending (O199: same soft state as att-ver)', [vv.ok, vv.reason, vv.pending, vv.ver], [false, 'ledger-ver', true, 2]);
+  eq('... and the settle gate keeps it pending (the lane neither flags nor closes the key)', A.soloSettleGate(vv, { owner: '1' }).pending, true);
   const badMt = rec.slice(); badMt[2] = 1;
   eq('non-endless mt -> mt', A.verifySoloRecord(badMt, TABLE).reason, 'mt');
   const badPc = rec.slice(); badPc[8] = 2;
@@ -289,6 +294,57 @@ const HOST = '76561198000000010', OTHER = '76561198000000011';
   const pruneState = { 'x|1': { t0: 0 }, 'y|2': { t0: 100 * 86400000 } };
   A.pruneUnmatchedState(pruneState, 100 * 86400000, 30 * 86400000);
   eq('prune drops aged entries, keeps fresh', Object.keys(pruneState), ['y|2']);
+}
+
+// ---- C) O199 (knife 5.5b-1 S6): a layout the job cannot read yet holds its run, never loses it ----
+{
+  const V = require(path.join(__dirname, '..', 'validate.js'));
+  const DAY = 86400000, NOW0 = 1760000000000, W = V.COMP.CHAIN_WAIT_MS;
+  const key = V.soloRunKey('p1', 1, 4242);
+  const f2 = { startDepth: 5, endDepth: 10, flags: 0, seasonId: 1, runSeed: 4242 };   // the run's second segment, current layout
+  assert('the solo lane holds a run for an att-ver segment like for a held key (soloHoldsChain)', V.soloHoldsChain('att-ver') && V.soloHoldsChain('key-retired') && !V.soloHoldsChain('unknown-key') && !V.soloHoldsChain('bad-sig'));
+  // baseline (before): the att-ver first segment only waited by itself -> its successor rejected after CHAIN_WAIT_MS
+  {
+    const st = { runs: {}, wait: {}, ms: {}, held: {} };
+    V.soloChainPlan(st, key, f2, 'm2', NOW0);
+    assert('baseline: without the hold the successor rejects (chain-gap) once CHAIN_WAIT_MS passed', V.soloChainPlan(st, key, f2, 'm2', NOW0 + W + 1).ok === false);
+  }
+  // now: the future-layout (attVer 6) first segment is held each run it is seen; the current-layout second segment waits, never rejects
+  {
+    const st = { runs: {}, wait: {}, ms: {}, held: {} };
+    let worst = null;
+    for (let d = 0; d <= 30; d++) {
+      const t = NOW0 + d * DAY;
+      V.soloKeyHeld(st, key, 'm1', '6', 'att-ver', t);
+      const a = V.soloChainPlan(st, key, f2, 'm2', t);
+      if (a.ok === false) { worst = d + ': ' + JSON.stringify(a); break; }
+    }
+    assert('attVer 6 first segment held + current-layout second segment: held 30 days, never rejected', worst === null);
+    // the reader ships: the first segment settles (leaves held), the second chains at once
+    V.soloAdvance(st, key, { startDepth: 0, endDepth: 5, flags: 0 }, 'm1', { ok: true, proven: 0 }, NOW0 + 31 * DAY);
+    assert('reader pushed -> the first settles, the second chains (ok:true)', !st.held.m1 && V.soloChainPlan(st, key, f2, 'm2', NOW0 + 31 * DAY).ok === true);
+  }
+  const VJ = require('fs').readFileSync(path.join(__dirname, '..', 'validate.js'), 'utf8');
+  assert('wiring: the lane registers the hold for every soloHoldsChain reason with fields', /if \(gate\.pending && soloHoldsChain\(gate\.reason\) && v && v\.fields\) \{/.test(VJ));
+  // the census of unsettled records by layout version
+  const sp = (s) => { const b = BigInt(s); return [Number(b & 0xFFFFFFFFn) | 0, Number((b >> 32n) & 0xFFFFFFFFn) | 0]; };
+  const solo = (h, att) => { const d = [0xB1, 3, 7, h, 9, 0, 0, 0, 1, 100, 500, 0].concat(sp('76561198000000001')); while (d.length < 21) d.push(0); d.push(att); return d; };
+  const team = (h, tail) => { const d = [0xB1, 3, 7, h, 9, 0, 0, 0, 2, 100, 500, 400, 0].concat(sp('76561198000000001'), sp('76561198000000002')); for (let i = 0; i < tail; i++) d.push(0); return d; };
+  const quick = [0xB1, 3, 1, 77, 9, 0, 1, 0, 2, 100, 5, 4, 0].concat(sp('76561198000000001'), sp('76561198000000002'));
+  const recs = [{ d: solo(1, 5) }, { d: solo(2, 3) }, { d: solo(3, 5) }, { d: team(4, 12) }, { d: team(5, 11) }, { d: quick }, { d: solo(6, 5) }, { start: true, d: team(8, 12) }];
+  const c = V.persistCensus(recs, new Set(['6_9_7']));
+  eq('census: unsettled solo by attestation layout, endless tails by length, every record by ledger version (settled / starts left out)', c, { att: { 3: 1, 5: 2 }, tail: { 11: 1, 12: 1 }, ledger: { 3: 6 } });
+  eq('census line', V.fmtCensus(c), 'att 3:1 5:2 / tail 11:1 12:1 / ledger 3:6');
+}
+
+// ---- C2) O199 (S6): tools/persist-census.js (read-only) ----
+{
+  const PC = require(path.join(__dirname, '..', 'tools', 'persist-census.js'));
+  const row = (ver) => [0xBA | (ver << 8), 1, 2, 3];
+  eq('save box census: rows by layout version per board (other magics ignored)', PC.saveBoxCensus({ endless_save_box_casual: [row(6), row(7), row(7), [0xB1, 3]], endless_save_box_solo: [] }),
+    { endless_save_box_casual: { 6: 1, 7: 2 }, endless_save_box_solo: {} });
+  const src = require('fs').readFileSync(path.join(__dirname, '..', 'tools', 'persist-census.js'), 'utf8');
+  assert('the census tool writes nothing (no POST, no state file write)', !/postForm|SetLeaderboardScore|DeleteLeaderboardScore|writeFileSync|writeStateFile/.test(src));
 }
 
 console.log(failN ? ('\nFAIL ' + failN) : '\nall green');

@@ -2204,6 +2204,33 @@ function loadJobPubTable(nowMs, exempt) {
   });
 }
 const keyHeld = (reason) => /^key-/.test(String(reason || ''));
+// O199 (knife 5.5b-1 S6): a solo segment the job cannot settle YET holds its run's later segments (soloKeyHeld) -- a held key, or
+//   an attestation layout this job does not read yet (att-ver: the client shipped first, the cron reader lagged). Before, an
+//   att-ver segment only waited by itself: the run's later segments (a layout the job reads) waited out CHAIN_WAIT_MS and were
+//   rejected as chain gaps -- the whole run lost on an update day if the reader was not pushed first.
+const soloHoldsChain = (reason) => keyHeld(reason) || String(reason || '') === 'att-ver';
+// O199 (knife 5.5b-1 S6): layout versions among the result records not settled yet -- the evidence the "no online record of
+//   that version" rule reads before an old decoder may go (architecture decision 9): the version census that matters is the
+//   UNSETTLED records (a settled one is never decoded again; an old row of a player who never comes back stays on the shards
+//   for good, so "not one row left" would never come). att = guard-signed solo segments by attestation layout ([21] low byte),
+//   tail = other endless records by tail length in ints, ledger = every record by header version ([1]). Pure.
+function persistCensus(recs, processed) {
+  const out = { att: {}, tail: {}, ledger: {} };
+  const add = (o, k) => { o[k] = (o[k] | 0) + 1; };
+  for (const r of (recs || [])) {
+    const d = r && r.d;
+    if (!d || r.start || (d[0] & 0xff) !== 0xB1 || d.length < 10) continue;
+    if (processed && processed.has(d[3] + '_' + d[4] + '_' + d[2])) continue;
+    add(out.ledger, d[1] | 0);
+    if (!isEndlessMt(d[2] | 0)) continue;
+    const pc = d[8] | 0;
+    if (pc === 1 && d.length >= 22) { add(out.att, d[21] & 0xff); continue; }
+    const tl = d.length - (10 + pc + 1 + 2 * pc);
+    if (pc >= 1 && tl >= 0) add(out.tail, tl);
+  }
+  return out;
+}
+const fmtCensus = (c) => ['att', 'tail', 'ledger'].map((k) => k + ' ' + (Object.keys(c[k]).sort((a, b) => a - b).map((v) => v + ':' + c[k][v]).join(' ') || '-')).join(' / ');
 // ===== one-shot pool recovery (client knife 5.0i, 2026-10-06) =====
 // Sealed demo packages 2026093001..2026100601 started their guard through the client's auto-spawn path in the dev
 //   "test form", so every solo endless segment and its start attestation went to the client's three test pools instead
@@ -3224,6 +3251,8 @@ function writeRunSummary() {
       '| token resumes: replays caught / burnt-run segments / untagged settled / untagged refused | ' + s('resumeReplay', 0) + ' / ' + s('runBurnt', 0) + ' / ' + s('resumeUntagged', 0) + ' / ' + s('resumeUntaggedRej', 0) + ' |',
       '| solo same-key forks (another signed record under a settled segment key) | ' + s('soloKeyFork', 0) + ' |',
       '| signed solo segments whose guard clock went back inside the segment, counted and handled as usual (Q242) | ' + s('soloNegDur', 0) + ' |',
+      '| unsettled records by layout version (O199: attestation / endless tail ints / ledger header) | ' + s('persistPending', '-') + ' |',
+      '| solo segments held for an attestation layout not read yet (att-ver; their runs wait with them) | ' + s('attVerHeld', 0) + ' |',
       '| one-match-at-a-time deferrals (waited past the own floor: < 5 min / < 30 min / < 4 h / 4 h+) | ' + s('writerPaced', 0) + ' (' + (RUN.writerPacedWait || [0, 0, 0, 0]).join(' / ') + ') |',
       '| cron stall before this run (minutes, from cron_pulse; 0 = none) | ' + s('stall', 0) + ' |',
       '| ranked matches the ranked rating turns into / out of a mismatch, quick matches and the repeat-group decay set aside (Q160) | ' + s('heldMismatch', 0) + ' / ' + s('heldMismatchOff', 0) + ' |',
@@ -7534,6 +7563,7 @@ async function main() {
   //   -- before grouping, so an outside account's record votes nowhere below (consistency, dissent, absent seats, own records)
   const processed = loadProcessed();
   let processedN0 = processed.size;   // grow-only set: a size change = keys added on this run (persistStartsSide)
+  { const pc0 = persistCensus(recs, processed); RUN.persistPending = fmtCensus(pc0); console.log('persist census (unsettled records by layout version, O199): ' + RUN.persistPending); }
   // Q220: the keys seen this run also hold the split key of every friends' room / bot match record on a table of its
   //   writer's own (applyTableSplit), so a split key is not pruned below or let go (reconcileStarts) while records of its
   //   table are on the shards
@@ -9345,14 +9375,20 @@ async function main() {
       if (cg.settle) break;
     }
     if (!gate.settle) {
-      if (gate.pending && keyHeld(gate.reason) && v && v.fields) {
+      if (gate.pending && soloHoldsChain(gate.reason) && v && v.fields) {
         // R1-A5-07: soft hold (never flagged / processed) + one warning per new held segment: either a forgery with another channel's
         //   or a retired key, or a build of that key is still live (Steam rollback, a second branch, a missed channel-live registration)
-        RUN.keyHeld = (RUN.keyHeld | 0) + 1;
+        // O199 (S6): or an attestation layout this job does not read yet (att-ver) -- same hold, its own counter and warning
+        const attVerHold = gate.reason === 'att-ver';
+        if (attVerHold) RUN.attVerHeld = (RUN.attVerHeld | 0) + 1; else RUN.keyHeld = (RUN.keyHeld | 0) + 1;
         if (soloKeyHeld(soloState, soloRunKey(p, v.fields.seasonId, v.fields.runSeed), m, v.fields.keyName, gate.reason, nowMs)) {
-          RUN.keyHeldNew = (RUN.keyHeldNew | 0) + 1;
-          ghWarn('match=' + m + ': solo segment ' + plog(sid) + ' signed by key ' + v.fields.keyName + ' is held (' + gate.reason + ') -- a forgery, or that build is still ' +
-            'live (Steam rollback / second branch / missed channel-live registration: fix the key table, e.g. keepUntil). It waits; the run\'s later segments wait with it.');
+          if (attVerHold) ghWarn('match=' + m + ': solo segment ' + plog(sid) + ' carries attestation layout v' + v.fields.attVer + ', which this job does not read yet -- ' +
+            'it waits, and the run\'s later segments wait with it (push the reader first: architecture decision 9)');
+          else {
+            RUN.keyHeldNew = (RUN.keyHeldNew | 0) + 1;
+            ghWarn('match=' + m + ': solo segment ' + plog(sid) + ' signed by key ' + v.fields.keyName + ' is held (' + gate.reason + ') -- a forgery, or that build is still ' +
+              'live (Steam rollback / second branch / missed channel-live registration: fix the key table, e.g. keepUntil). It waits; the run\'s later segments wait with it.');
+          }
         }
       }
       if (gate.pending) { console.log('  solo ' + m + ': ' + plog(sid) + ' pending (' + gate.reason + ')'); return false; }
@@ -11303,7 +11339,7 @@ module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CLASSIC_OWN
   ENDLESS_LB_OVERALL, ENDLESS_LB_CLASSIC_OVERALL, V51B_PT,   // O276 casual / classic composites + the knife 5.1b rollout gate
   TEAM_MAGIC, TEAM_VER, teamBlock, ladderDetails,   // O207 team block on team-ladder rows
   CAMPAIGN_ENDLESS_BOX_PREFIX, CAMPAIGN_ENDLESS_LB_PREFIX, CAMPAIGN_ENDLESS_SUFFIX, CAMPAIGN_ENDLESS_OFFENSE_LB, CAMPAIGN_ENDLESS_FILE, CE_MAIL_MIN, CE_SETTLED_TTL_MS, loadCe, saveCe,   // client knife 3.9b N4 (Gold Rush lane)
-  absentRosterSeats, absenceHold, shardPlan, transientStatus, ABSENT_GRACE_MS, ABSENT_GRACE_MIN_MS, LEDGER_SHARDS,   // R1-B2-04 / R1-X14 absent-seat hold
+  absentRosterSeats, absenceHold, shardPlan, persistCensus, fmtCensus, soloHoldsChain, transientStatus, ABSENT_GRACE_MS, ABSENT_GRACE_MIN_MS, LEDGER_SHARDS,   // R1-B2-04 / R1-X14 absent-seat hold
   T2LH, hostDissentCount, team2HostOwnsSeat0,   // cloud audit Q57 team-gamble host charges
   PERKS_CFG: perks.PERKS_CFG, verifyPerkPicks: perks.verifyPerkPicks,
   pruneConfessions, CONFESS_PRUNE_MS,   // confession entries outlive the window while their record is still on a shard

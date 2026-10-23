@@ -139,7 +139,10 @@ function applyKeyPolicy(keys, policy) {
 function verifySoloRecord(d, pubTable) {
   if (!Array.isArray(d) || d.length < BASE_LEN_V3 + SIG_INTS) return { ok: false, reason: 'short' };   // shortest accepted layout
   if ((d[0] & 0xff) !== LEDGER_MAGIC) return { ok: false, reason: 'magic' };
-  if (d[1] !== LEDGER_VER) return { ok: false, reason: 'ver' };
+  // O199 (knife 5.5b-1 S6): a ledger version this job does not know = a record layout it cannot read yet (a client shipped
+  //   first) -- the same soft state as an unknown attestation layout: PENDING, never a reject / flag (architecture decision 9:
+  //   a LEDGER_VER bump goes through the same two-version acceptance as every persistent face; decision 10: no honest flag)
+  if (d[1] !== LEDGER_VER) return { ok: false, reason: 'ledger-ver', pending: true, ver: d[1] | 0 };
   if (d[2] !== MT_ENDLESS) return { ok: false, reason: 'mt' };
   if (d[8] !== 1) return { ok: false, reason: 'pc' };
   const keyId = d[20] | 0;

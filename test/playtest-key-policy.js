@@ -185,7 +185,8 @@ console.log('== D) wiring ==');
   const sc = s.match(/attest\.loadPubTable\([^;]*;/g) || [];
   assert('seedcap.js: every key table read passes the job policy (channel: SEEDCAP_CHANNEL)', sc.length >= 1 && sc.every(x => /channel: SEEDCAP_CHANNEL/.test(x)), sc.join(' | '));
   assert('held solo segments are counted (RUN.keyHeld / keyHeldNew) and shown in the step summary', /RUN\.keyHeld = \(RUN\.keyHeld \| 0\) \+ 1/.test(v) && /s\('keyHeld', 0\)/.test(v) && /s\('keyHeldNew', 0\)/.test(v));
-  assert('a NEW held solo segment raises a warning (soloKeyHeld first sighting -> ghWarn)', /if \(soloKeyHeld\(soloState, [^)]*\)[^)]*\)\) \{\s*RUN\.keyHeldNew[^;]*;\s*ghWarn\(/.test(v));
+  // (O199, knife 5.5b-1 S6: the first sighting warns for either hold -- an att-ver one in its own branch, a held key in the else)
+  assert('a NEW held solo segment raises a warning (soloKeyHeld first sighting -> ghWarn)', /if \(soloKeyHeld\(soloState, [^)]*\)[^)]*\)\) \{\s*if \(attVerHold\) ghWarn\([\s\S]{0,400}else \{\s*RUN\.keyHeldNew[^;]*;\s*ghWarn\(/.test(v));
   assert('waitOr consults soloRunHasHeld before its reject clock', /const waitOr = \(reason\) => \{\s*if \(soloRunHasHeld\(st, key, m, nowMs\)\)/.test(v));
 }
 
