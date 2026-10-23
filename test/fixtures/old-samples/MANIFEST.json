@@ -1,0 +1,45 @@
+{
+ "_doc": "O199 old-version samples (architecture decision 9: an old version the job still accepts is pinned by a sample its shipped writer produced). files = sha256 of every sample in this directory (test/old-version-samples.js checks them); covers = which sample pins which accepted old version. The samples are derived from the client repo fixtures (mvp/test/fixtures/persist-old) and checked against them there; never edit them here.",
+ "files": {
+  "attest-solo-v3.json": "8cc790d466021dec4c425d5d526182e3d8be1c40bd029a26343a68ed2a223846",
+  "attest-solo-v5-oldwriter.json": "38d0f3f821f66ecea792ec56324bf5cbe2c7ffc7e7aee4653e8312548f09da16",
+  "endless-tail-v11.json": "2acf43aea331f8cc81024f5a30d63856e52bc149707e9ced9cfb920433565baa",
+  "endless-tail-v4.json": "ec8c296b179a3dff99435abd428baea90107e7863964402e81d53f5d7df2557f",
+  "endless-tail-v6.json": "458e03461e9514ee9cc38b428053386d30f072e85784c35d1ef46021e4161ba3",
+  "save-box-v2-rows.json": "2c5dc349619ef4aa177c3ec11a33bfadc034d4553a3dd351d6843d39d4d6dd45"
+ },
+ "covers": [
+  {
+   "face": "save_box",
+   "v": 2,
+   "file": "save-box-v2-rows.json"
+  },
+  {
+   "face": "attest_solo",
+   "v": 3,
+   "file": "attest-solo-v3.json"
+  },
+  {
+   "face": "endless_tail",
+   "v": 4,
+   "file": "endless-tail-v4.json"
+  },
+  {
+   "face": "endless_tail",
+   "v": 6,
+   "file": "endless-tail-v6.json"
+  },
+  {
+   "face": "endless_tail",
+   "v": 11,
+   "file": "endless-tail-v11.json"
+  }
+ ],
+ "extras": [
+  {
+   "face": "attest_solo",
+   "v": 5,
+   "file": "attest-solo-v5-oldwriter.json"
+  }
+ ]
+}
