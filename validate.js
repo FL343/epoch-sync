@@ -2611,11 +2611,20 @@ function pacingDefer(pendingEntry, now, minMs) { return !!(pendingEntry && (now 
 // and settling it moves every writer's mark to readyAt. Honest matches never overlap, so an honest group waits only
 // when the job first sees several of one player's starts at once (an outage): they drain one floor apart. A
 // fabricated batch settles at most one group per writer per floor -- no faster than really playing it. Deferral
-// only, never a flag. Lanes: matchmade, private, bot (endless lanes keep their depth-scaled per-run gate for now).
+// only, never a flag. Lanes: matchmade, private, bot, and (O348 (1), knife 5.5b-1 S5) the three endless group lanes (co-op,
+// team competitive, team classic) and the solo lane, each after its own depth-scaled gate.
 // now (optional): a legitimate mark is never later than the run that claimed it, so a stored mark past `now` (clock
 //   skew, a foreign or hand-edited state file) is read as `now` instead of blocking that writer until it passes.
+// O348 (5) (knife 5.5b-1 S5): after a cron stall (signals.stall = { from: the last run's end, at: the recovery run, from the
+//   cron_pulse row; see main), the starts first sighted by the recovery run were written somewhere in the stall, so their
+//   queue starts at the stall's start instead of the sighting: a writer clears up to floor(stall / floor) + 1 of them in one
+//   run -- as many as he could really have played in that time -- instead of one per floor afterwards (only slower, never
+//   lost, but hours late after a long stall). The match's own floor (from its sighting) is untouched.
+const STALL_SEEN_BEFORE_MS = 60000, STALL_SEEN_AFTER_MS = 8 * 60000;   // a recovery run's own sightings (the run lasts < 8 min)
 function writerReadyAt(signals, writerSids, t0, reqMs, now) {
   let start = Number(t0) || 0;
+  const sl = signals && signals.stall;
+  if (sl && sl.from > 0 && sl.at > 0 && start >= sl.at - STALL_SEEN_BEFORE_MS && start <= sl.at + STALL_SEEN_AFTER_MS && sl.from < start) start = Number(sl.from);
   for (const sid of writerSids) {
     const p = signals.players[pid(sid)];
     let mark = p ? Number(p.bz) : 0;
@@ -3215,7 +3224,8 @@ function writeRunSummary() {
       '| token resumes: replays caught / burnt-run segments / untagged settled / untagged refused | ' + s('resumeReplay', 0) + ' / ' + s('runBurnt', 0) + ' / ' + s('resumeUntagged', 0) + ' / ' + s('resumeUntaggedRej', 0) + ' |',
       '| solo same-key forks (another signed record under a settled segment key) | ' + s('soloKeyFork', 0) + ' |',
       '| signed solo segments whose guard clock went back inside the segment, counted and handled as usual (Q242) | ' + s('soloNegDur', 0) + ' |',
-      '| one-match-at-a-time deferrals | ' + s('writerPaced', 0) + ' |',
+      '| one-match-at-a-time deferrals (waited past the own floor: < 5 min / < 30 min / < 4 h / 4 h+) | ' + s('writerPaced', 0) + ' (' + (RUN.writerPacedWait || [0, 0, 0, 0]).join(' / ') + ') |',
+      '| cron stall before this run (minutes, from cron_pulse; 0 = none) | ' + s('stall', 0) + ' |',
       '| ranked matches the ranked rating turns into / out of a mismatch, quick matches and the repeat-group decay set aside (Q160) | ' + s('heldMismatch', 0) + ' / ' + s('heldMismatchOff', 0) + ' |',
       '| absent seats named by others only, not convicted (Q69) | ' + s('unattested', 0) + ' |',
       '| matchmade FFA seats seen agreeing whose record is gone at the settle: settled at their agreed place / left out, their own confession for the match standing (Q185) | ' + s('agreedBack', 0) + ' / ' + s('agreedConf', 0) + ' |',
@@ -7391,6 +7401,18 @@ async function main() {
   //   "to be confirmed"), a RULES_VER other than its own = the rules moved since its build (the same). Carrier account: the
   //   tier-cut rule -- TIERCUT_CARRIER_SID, else the account already on the row, else the one carrying this app's version_gate
   //   row; with none nothing is written and no board is created.
+  // O348 (5): the minute the last run reached its end (this channel's cron_pulse row, see writePulse), or null
+  const readPulseMinute = async () => {
+    try {
+      const name = CRON_PULSE_LB || (sandboxOn() ? 'cron_pulse_test' : 'cron_pulse');
+      const f = ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).find((x) => String(x.name || x.Name) === name);
+      if (!f) return null;
+      const br = await readBoardAll(f.id || f.ID, 'cron pulse board');
+      let best = null;
+      for (const e of br.ents) if ((e.score | 0) > 0 && (best == null || (e.score | 0) > best)) best = e.score | 0;
+      return best;
+    } catch (e) { return null; }
+  };
   const writePulse = async () => {
     if (!APPLY_MMR) return;
     const name = CRON_PULSE_LB || (sandboxOn() ? 'cron_pulse_test' : 'cron_pulse');
@@ -7571,6 +7593,19 @@ async function main() {
   if (prunedF.dropped) console.log('signals: ' + prunedF.dropped + ' flag(s) of keys off the shards on two complete reads dropped, ' + Object.keys(signals.flagged).length + ' kept (Q166)');
   if (stampLegacyFlags(signals, Date.now())) sigDirty = true;   // Q98: flags written without a date start aging now
   { const up = repUpgrade(signals); if (up) { sigDirty = true; console.log('reports: report state moved onto pair-keyed edges and daily slot tokens (Q209): ' + up.edges + ' edge(s), ' + up.slots + ' daily slot(s)'); } }
+  // O348 (5) (knife 5.5b-1 S5): a cron stall before this run (the cron_pulse row = the last run that reached its end) marks the
+  //   run's own start sightings (signals.stall, see writerReadyAt). No new state file: one small field in signals, kept 6 h.
+  //   Pulse unreadable / absent = no mark (as before).
+  {
+    const stallMs = Math.max(6 * 60000, Number(process.env.CRON_STALL_MS || 12 * 60000));
+    const pm = await readPulseMinute();
+    const tNow = Date.now();
+    if (pm != null && tNow - pm * 60000 > stallMs) {
+      signals.stall = { from: pm * 60000, at: tNow };
+      sigDirty = true; RUN.stall = Math.round((tNow - pm * 60000) / 60000);
+      console.log('cron stall: the last run ended ' + RUN.stall + ' min ago -- starts first sighted this run queue from the stall\'s start (O348 (5))');
+    } else if (signals.stall && tNow - (Number(signals.stall.at) || 0) > 6 * 3600000) { delete signals.stall; sigDirty = true; }
+  }
   // trust-tier candidates seen this run (real sids; signals stay HMAC-keyed -- the only
   // place real ids persist is the trust board itself, which is the public artifact anyway)
   const trustTouched = new Set();
@@ -9183,6 +9218,10 @@ async function main() {
     const readyAt = writerReadyAt(signals, wSids, t0, reqMs, nowMs);
     if (readyAt > nowMs) {
       RUN.writerPaced = (RUN.writerPaced | 0) + 1;
+      // O348 (2) (S5): how long past its OWN floor a deferred group has waited only for its writers' earlier matches
+      //   (< 5 min / < 30 min / < 4 h / 4 h+) -- a real-player match waiting long behind a forger's batch shows up here
+      const waited = nowMs - ((Number(t0) || 0) + (Number(reqMs) || 0));
+      if (waited > 0) { const b = RUN.writerPacedWait = RUN.writerPacedWait || [0, 0, 0, 0]; b[waited < 300000 ? 0 : waited < 1800000 ? 1 : waited < 14400000 ? 2 : 3]++; }
       console.log('  writer-pacing ' + m + ': a writer is still inside an earlier match -- eligible in ' + Math.round((readyAt - nowMs) / 1000) + 's, deferred');
       return true;
     }
@@ -9421,6 +9460,9 @@ async function main() {
       console.log('  solo-pacing ' + m + ': depth ' + f.startDepth + '->' + f.endDepth + ' (proven ' + plan.proven + ') needs ' + Math.round(reqMs / 1000) + 's real time, seen ' + Math.round((nowMs - (pend.t0 || 0)) / 1000) + 's -- deferred');
       return false;
     }
+    // O348 (1): one match at a time per account (several single-player runs at once need several real guards -- real play,
+    //   but the depth XP would arrive in parallel; paced, it only arrives one floor apart)
+    if (writerPaced(m, [sid], pend.t0, reqMs)) return false;
     if (scInWin) {
       RUN.seedcapReject = (RUN.seedcapReject | 0) + 1;
       soloAdvance(soloState, key, f, m, plan, nowMs);
@@ -9755,6 +9797,7 @@ async function main() {
           console.log('  endless-classic-pacing ' + c.m + ': depth ' + f.startDepth + '->' + f.endDepth + ' (proven ' + plan.proven + ') needs ' + Math.round(reqK / 1000) + 's real time, seen ' + Math.round((nowMs - (pendK.t0 || 0)) / 1000) + 's -- deferred');
           continue;
         }
+        if (writerPaced(c.m, writerSids, pendK.t0, reqK)) continue;   // O348 (1): one match at a time per account
         const dayK = sigDay(signals, nowMs);
         for (const sid of writerSids) dayK.n[pid(sid)] = (dayK.n[pid(sid)] || 0) + 1;
         recordEndlessSignals(signals, ownRosterSids, nowMs); sigDirty = true;   // Q78: own-record seats only
@@ -9829,6 +9872,9 @@ async function main() {
           console.log('  endless-comp-pacing ' + c.m + ': depth ' + f.startDepth + '->' + f.endDepth + ' (proven ' + plan.proven + ') needs ' + Math.round(reqT / 1000) + 's real time, seen ' + Math.round((nowMs - (pendT.t0 || 0)) / 1000) + 's -- deferred');
           continue;
         }
+        // O348 (1): one match at a time per account -- every writer, a catch-up segment too (one account is in one match at a
+        //   time, whoever is behind on the chain)
+        if (writerPaced(c.m, writerSids, pendT.t0, reqT)) continue;
         const xpFrom = teamXpStarts(runT0, g, f, plan.proven);   // Q237: read before the head moves
         if (PT_MODE) ptSeedCp(cp, changedCp, [...new Set(ownRosterSids.concat(writerSids))]);
         if (!catchUp) {   // Q237: a catch-up re-counts no run (signals) and leaves the chain as the reject would have
@@ -9924,6 +9970,7 @@ async function main() {
         console.log('  endless-pacing ' + c.m + ': depth ' + t.startDepth + '->' + t.endDepth + ' (chain ' + chainMax + ') needs ' + Math.round(reqMs / 1000) + 's real time, seen ' + Math.round((nowMs - (pend7.t0 || 0)) / 1000) + 's -- deferred');
         continue;
       }
+      if (writerPaced(c.m, writerSids, pend7.t0, reqMs)) continue;   // O348 (1): one match at a time per account
       const day7 = sigDay(signals, nowMs);
       for (const sid of writerSids) day7.n[pid(sid)] = (day7.n[pid(sid)] || 0) + 1;
       recordEndlessSignals(signals, ownRosterSids, nowMs);   // Q78: own-record seats only (Q113: no fallback to every writer -- the writers always

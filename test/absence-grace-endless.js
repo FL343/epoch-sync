@@ -19,6 +19,7 @@
 //   [9] a writer seen agreeing earlier whose record is gone (shard rotation) is not waited for
 //   [10] wiring pins
 //   [11] mutation self-checks (each lane's gate removed -> its late-record scenario goes red)
+//   [12] O348 (1) (knife 5.5b-1 S5): two co-op runs of one pair at once -- one settles, the other a floor later
 // State isolation is structural (every *_FILE var scanned and redirected, cwd = temp dir), like test/absence-grace.js.
 const { spawnSync } = require('child_process');
 const fs = require('fs'), path = require('path'), os = require('os');
@@ -286,6 +287,22 @@ console.log('-- [11] mutation self-checks --');
       T('[11] ' + label + ' -> the late seat loses its credit again', check(script));
     } finally { try { fs.unlinkSync(script); } catch (e) {} }
   }
+}
+
+// ---- [12] O348 (1) (knife 5.5b-1 S5): one match at a time per account on the endless lanes too ----
+console.log('-- [12] two co-op runs of one pair at once: one settles, the other waits a floor --');
+{
+  // the same two accounts, two different co-op runs whose starts were both sighted 4 minutes ago: each clears its own
+  //   depth-scaled floor (6 levels = 225 s), but one account is in one match at a time -- the second waits for the first
+  const h1 = 0x4791, h2 = 0x4792, m1 = h1 + '_5_7', m2 = h2 + '_5_7';
+  const rows = rowsOf(h1, DUO, CASUAL).concat(rowsOf(h2, DUO, CASUAL).map((r) => Object.assign({}, r, { shard: r.shard + 10 })));
+  const st = {}; st[m1] = { t0: Date.now() - 4 * MIN, mt: 7, roster: {}, settled: [] }; st[m2] = { t0: Date.now() - 4 * MIN, mt: 7, roster: {}, settled: [] };
+  const r1 = runCron(world(rows), { STARTS_FILE: st });
+  const p1 = [m1, m2].filter((m) => processedOf(r1).has(m)).length;
+  T('[12] run 1: one of the two runs settles, the other is deferred (writer pacing)', r1.code === 0 && p1 === 1 && /writer-pacing [^\n]*deferred/.test(r1.out), 'settled=' + p1 + ' ' + (r1.out.match(/ {2}writer-pacing [^\n]*/) || [''])[0]);
+  const r2 = runCron(world(rows), advance(r1.state, 4 * MIN));
+  T('[12] a floor later: the second settles too (only slower, never lost)', r2.code === 0 && processedOf(r2).has(m1) && processedOf(r2).has(m2), [...processedOf(r2)].join(','));
+  T('[12] each account got XP once per run settled (2 writes over the two runs)', [A, B].every((sid) => writes(r1, BOARD.progress, sid).length + writes(r2, BOARD.progress, sid).length === 2));
 }
 
 console.log(failN ? ('FAIL x' + failN + ' (absence-grace-endless)') : 'ALL OK (absence-grace-endless)');

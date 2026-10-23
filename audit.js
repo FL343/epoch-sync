@@ -20,6 +20,7 @@ const fs = require('fs');
 const { readBoardAll, pid, decodeDetails, getJson, BASE, TRUST_LB, REPORT_LB, START_MAGIC, REPORT_MAGIC, CP_LB, ENDLESS_LB, REDEEM_LB, GRANT_LB,
   ENDLESS_LB_SOLO, ENDLESS_LB_TRIO, ENDLESS_LB_QUAD, ENDLESS_LB_OVERALL, ENDLESS_COMP_LB, ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, ENDLESS_COMP_LB_QUAD, ENDLESS_COMP_LB_OVERALL,
   ENDLESS_LB_CLASSIC_SOLO, ENDLESS_LB_CLASSIC_DUO, ENDLESS_LB_CLASSIC_TRIO, ENDLESS_LB_CLASSIC_QUAD, ENDLESS_LB_CLASSIC_OVERALL, ENDLESS_CUP_HONOR_LB } = require('./validate.js');
+const v = require('./validate.js');   // O348 (3): shardPlan / LEDGER_SHARDS / sandboxOn
 // O276 (client knife 5.1b, 2026-10-18): every cron-written endless ladder is a trusted board like endless_board (the closure once held only
 //   endless_board and its season twins). Their names are this repo's public defaults (the jobs never override them), and every writer of
 //   one of them enters the state the closure reads (recordEndlessSignals for every own-record seat, xp for every endless settle).
@@ -97,7 +98,12 @@ async function main() {
   const want = [[RANKED_LB, 'rating'], [LP_LB, 'points'], [TRUST_LB, 'trust'], [REPORT_LB, 'report'], [CP_LB, 'cp'], [ENDLESS_LB, 'endless'], [REDEEM_LB, 'redeem'], [GRANT_LB, 'grant']];
   if (XP_LB) want.push([XP_LB, 'xp']);
   for (const [name, label] of want) if (!byName[name]) violations.push(label + ' board missing from listing');
-  const shardBoards = all.filter(b => { const n = String(b.name || b.Name); return n.indexOf(PREFIX) === 0 && n.indexOf('test') < 0; });
+  const shardListed = all.filter(b => { const n = String(b.name || b.Name); return n.indexOf(PREFIX) === 0 && n.indexOf('test') < 0; });
+  // O348 (3) (knife 5.5b-1 S5): the reconcile's shard set (PREFIX+0..N-1, shardPlan) -- extra prefix boards are reported, not read
+  const shardSel = v.shardPlan(shardListed.map((b) => String(b.name || b.Name)), PREFIX, v.LEDGER_SHARDS, v.sandboxOn());
+  const shardReadSet = new Set(shardSel.read);
+  const shardBoards = shardListed.filter((b) => shardReadSet.has(String(b.name || b.Name)));
+  if (shardSel.extra.length) violations.push(shardSel.extra.length + ' extra board(s) with the shard prefix (not read): ' + shardSel.extra.slice(0, 5).join(', '));
   if (shardBoards.length < MIN_SHARDS) violations.push('shard boards ' + shardBoards.length + ' < expected ' + MIN_SHARDS);
   console.log('inventory: ' + shardBoards.length + ' shards + ' + want.filter(w => byName[w[0]]).length + '/' + want.length + ' core boards');
 

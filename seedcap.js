@@ -809,11 +809,18 @@ async function readGroups() {
   const lr = await v.getJson(v.BASE + '/ISteamLeaderboards/GetLeaderboardsForGame/v2/?key=' + KEY + '&appid=' + APPID + '&format=json');
   if (!lr.ok) return { fail: 'GetLeaderboardsForGame HTTP ' + lr.status };
   const boards = ((lr.json && lr.json.response && lr.json.response.leaderboards) || []);
-  const shardIds = [];
+  const listed = [];
   for (const b of boards) {
     const n = String(b.name || b.Name);
-    if (n.indexOf(PREFIX) === 0 && n.indexOf('test') < 0) shardIds.push({ id: b.id || b.Id, name: n });
+    if (n.indexOf(PREFIX) === 0 && n.indexOf('test') < 0) listed.push({ id: b.id || b.Id, name: n });
   }
+  // O348 (3) (knife 5.5b-1 S5): the reconcile's shard set -- PREFIX+0..N-1 only (shardPlan); a board the listing shows under
+  //   the prefix beyond them is not read (warned): a client able to create same-prefix boards cannot make every run read more
+  const sel = v.shardPlan(listed.map((x) => x.name), PREFIX, v.LEDGER_SHARDS, v.sandboxOn());
+  const readSet = new Set(sel.read);
+  const shardIds = listed.filter((x) => readSet.has(x.name));
+  if (sel.extra.length) v.ghWarn('seedcap: ' + sel.extra.length + ' extra board(s) with the shard prefix not read (' + sel.extra.slice(0, 5).join(', ') + (sel.extra.length > 5 ? ', ...' : '') + ')');
+  if (sel.mismatch) v.ghWarn('seedcap: no board named prefix+0..' + (v.LEDGER_SHARDS - 1) + ' -- reading all ' + listed.length + ' prefix boards');
   // always read EVERY shard -- listing entry counts lag and lie (2026-08-21 lesson)
   const groups = {};
   let records = 0;

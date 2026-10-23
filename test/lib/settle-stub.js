@@ -104,6 +104,7 @@ function advance(state, ms) {
   const sg = files.SIGNALS_FILE;
   if (sg && sg.players) for (const k of Object.keys(sg.players)) if (sg.players[k].bz) sg.players[k].bz -= ms;
   if (sg && sg.flagged) for (const k of Object.keys(sg.flagged)) sg.flagged[k] -= ms;
+  if (sg && sg.stall) { sg.stall.from -= ms; sg.stall.at -= ms; }   // O348 (5) (knife 5.5b-1): the cron-stall marker
   const gr = files.GROUPS_FILE;
   if (gr) for (const k of Object.keys(gr)) if (gr[k] && gr[k].at) gr[k].at -= ms;
   const cf = files.CONFESSIONS_FILE;

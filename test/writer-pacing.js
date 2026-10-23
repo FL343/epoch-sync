@@ -15,6 +15,9 @@
 //        convicted as a leaver once the rest of the group settles (he was seen agreeing earlier); since Q185 he settles at
 //        the place he agreed to (his 3rd-place loss), never the leaver penalty
 //   [11] the per-day settle signal counts a drained bot match once, not on every run it waited
+//   [12] O348 (5) (knife 5.5b-1 S5): after a cron stall (the cron_pulse row 30 min old) six matches of one pair first sighted by
+//        the recovery run settle together on the next run (they queue from the stall's start: up to stall / floor + 1), where
+//        they used to drain one floor apart; mutation (no stall start) -> one; [9] pins every endless lane + the solo lane
 // State isolation is structural (every *_FILE var scanned and redirected, cwd = temp dir), like test/strict-gate.js.
 const { spawnSync } = require('child_process');
 const fs = require('fs'), path = require('path'), os = require('os');
@@ -59,7 +62,7 @@ const STUB = [
 const hexLE = (arr) => arr.map(n => { const b = ((n | 0) >>> 0).toString(16).padStart(8, '0'); return b.slice(6, 8) + b.slice(4, 6) + b.slice(2, 4) + b.slice(0, 2); }).join('');
 
 // boards: [{ id, name, entries: [{ steamID, score, details: int[] }] }]; files: { STARTS_FILE: obj, ... } carried state
-function runCron(boards, files, env) {
+function runCron(boards, files, env, script) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'writer-pacing-'));
   try {
     const stub = path.join(dir, 'stub.js'); fs.writeFileSync(stub, STUB);
@@ -77,7 +80,7 @@ function runCron(boards, files, env) {
       //   red here would stop settlement on that day
       SEASON_NOW: '2026-10-01T00:00:00Z',
     }, stateEnv, env || {});
-    const r = spawnSync(process.execPath, ['-r', stub, VALIDATE], { env: e, encoding: 'utf8', cwd: dir, timeout: 120000 });
+    const r = spawnSync(process.execPath, ['-r', stub, script || VALIDATE], { env: e, encoding: 'utf8', cwd: dir, timeout: 120000 });
     const posts = fs.readFileSync(logPath, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l));
     const state = {};
     for (const k of FILE_VARS) { try { state[k] = JSON.parse(fs.readFileSync(stateEnv[k], 'utf8')); } catch (err) {} }
@@ -92,6 +95,7 @@ function advance(state, ms) {
   for (const k of Object.keys(st)) if (st[k] && st[k].t0) st[k].t0 -= ms;
   const sg = files.SIGNALS_FILE;
   if (sg && sg.players) for (const k of Object.keys(sg.players)) if (sg.players[k].bz) sg.players[k].bz -= ms;
+  if (sg && sg.stall) { sg.stall.from -= ms; sg.stall.at -= ms; }   // O348 (5): the stall marker is an instant too
   return files;
 }
 const posts = (r, boardId) => r.posts.filter(p => /SetLeaderboardScore/.test(p.url) && new RegExp('leaderboardid=' + boardId + '(&|$)').test(p.body));
@@ -288,6 +292,38 @@ const FLOOR = v.SANITY.MIN_START_AGE_MS;
   T('[11] ' + N + ' drained bot matches -> per-day count ' + N + ' (once per settle)', processedOf(r).size === N && n === N, 'settled=' + processedOf(r).size + ' day.n=' + n);
 }
 
+// ---- [12] O348 (5): a cron stall's backlog clears at once ----
+{
+  const N = 6;
+  const recs = [];
+  for (let i = 0; i < N; i++) { const h = 0x7100 + i; recs.push({ sid: A, d: mm(1, h, 0) }, { sid: B, d: mm(1, h, 1) }); }
+  const pulseAgo = (min) => ({ id: 77, name: 'cron_pulse', entries: [{ steamID: C, score: Math.floor(Date.now() / 60000) - min }] });
+  const drain = (script) => {
+    const r1 = runCron(boardsWith(recs).concat([pulseAgo(30)]), null, null, script);   // the recovery run: every start first sighted now
+    const r2 = runCron(boardsWith(recs).concat([pulseAgo(0)]), advance(r1.state, FLOOR + 1000), null, script);
+    return { r1, r2 };
+  };
+  const { r1, r2 } = drain();
+  T('[12] the recovery run marks the stall (30 min) and settles nothing yet (each match\'s own floor)', processedOf(r1).size === 0 && /cron stall: the last run ended 3\d min ago/.test(r1.out)
+    && ((r1.state.SIGNALS_FILE || {}).stall || {}).from > 0, r1.out.split('\n').filter((l) => /stall/.test(l)).join(' | '));
+  T('[12] the next run settles the backlog together (' + N + ' of ' + N + ', bound = stall / floor + 1)', processedOf(r2).size >= 5, 'settled=' + processedOf(r2).size + ' ' + r2.out.split('\n').filter((l) => /writer-pacing/.test(l)).slice(0, 3).join(' | '));
+  // mutation self-check: without the stall start the same backlog drains one floor apart
+  const mut = SRC.replace(' && sl.from < start) start = Number(sl.from);', ' && sl.from < start) start = start;');
+  T('[12] mutation applies', mut !== SRC);
+  const mf = path.join(__dirname, '..', '.mutant-writer-pacing-' + process.pid + '.js');
+  try {
+    fs.writeFileSync(mf, mut);
+    const m2 = drain(mf).r2;
+    T('[12] mutant (queue from the sighting): one match only -> the case above is sensitive', processedOf(m2).size === 1, 'settled=' + processedOf(m2).size);
+  } finally { try { fs.unlinkSync(mf); } catch (e) {} }
+  // a normal cadence (pulse 5 min old) marks nothing
+  const r0 = runCron(boardsWith(recs).concat([pulseAgo(5)]));
+  T('[12] a normal 5-minute gap is no stall', !((r0.state.SIGNALS_FILE || {}).stall) && !/cron stall/.test(r0.out));
+  // the helper: a sighting outside the recovery run keeps its own queue start
+  const sig = { players: {}, stall: { from: 1000000, at: 5000000 } };
+  T('[12] writerReadyAt: a sighting of the recovery run queues from the stall start; another keeps its own', v.writerReadyAt(sig, [A], 5000000, 300000, 6000000) === 1300000 && v.writerReadyAt(sig, [A], 5000000 + 9 * 60000, 300000, 6000000) === 5000000 + 9 * 60000 + 300000);
+}
+
 // ---- [9] wiring pins ----
 {
   const gate = SRC.indexOf('let pend = startsPending[c.m];');
@@ -305,6 +341,13 @@ const FLOOR = v.SANITY.MIN_START_AGE_MS;
     /writerPaced\(c\.m, writerSids, pendP\.t0, reqMsP\)\) continue;[^\n]*\n\s*countDay\(\);/.test(SRC) &&
     /writerPaced\(c\.m, writerSids, pendB\.t0, reqMsB\)\) continue;[^\n]*\n\s*countDay\(\);/.test(SRC));
   T('[9] the closure clamps stored marks to this run', /writerReadyAt\(signals, wSids, t0, reqMs, nowMs\)/.test(SRC));
+  // O348 (1) (knife 5.5b-1 S5): the endless lanes, each right after its own depth-scaled gate
+  T('[9] team classic lane applies it after its own floor', /-- deferred'\);\s*continue;\s*\}\s*if \(writerPaced\(c\.m, writerSids, pendK\.t0, reqK\)\) continue;/.test(SRC));
+  T('[9] team comp lane applies it after its own floor (every writer, a catch-up too)', /-- deferred'\);\s*continue;\s*\}\s*(\/\/[^\n]*\n\s*)*if \(writerPaced\(c\.m, writerSids, pendT\.t0, reqT\)\) continue;/.test(SRC));
+  T('[9] co-op lane applies it after its own floor', /-- deferred'\);\s*continue;\s*\}\s*if \(writerPaced\(c\.m, writerSids, pend7\.t0, reqMs\)\) continue;/.test(SRC));
+  T('[9] solo lane applies it after its own floor, before the reject-window branch', /-- deferred'\);\s*return false;\s*\}\s*(\/\/[^\n]*\n\s*)*if \(writerPaced\(m, \[sid\], pend\.t0, reqMs\)\) return false;\s*if \(scInWin\) \{/.test(SRC));
+  T('[9] seven lanes call it (matchmade, private, bot, classic, comp, co-op, solo)', (SRC.match(/writerPaced\((c\.)?m, /g) || []).length === 7, String((SRC.match(/writerPaced\((c\.)?m, /g) || []).length));
+  T('[9] the summary carries the wait buckets and the stall', /waited past the own floor/.test(SRC) && /cron stall before this run/.test(SRC));
 }
 
 console.log(failN ? ('FAIL x' + failN) : 'ALL OK (writer-pacing)');
