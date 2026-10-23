@@ -14,6 +14,12 @@
 //   [7] wiring pins: the three reconcile workflows name + persist their trust file, the seedcap / sanctions jobs read it,
 //       the trust upkeep runs the ledger on every exit path, the solo signature failure carries 'at'
 //   [8] tools/trust-report.js (pure part)
+//   [9] S2: the reject window reads n - fp (t1e = the latest conviction still standing); mutation (n) -> red
+//   [10] S2: each verdict filed under its world core (head hash / exact core), the conviction context, per-core 24 h rate
+//        alert (once a day), mail text, offense fp tail
+//   [11] S2: replay on a new core -- candidates (14 days, other core, not replayed, records still there), reversal (fp,
+//        window gone, n stays, veto stands, fp event -> ledger), negatives (still over / CLI error), main wiring
+//   [12] S2 end to end over main(): an account whose only conviction was reversed settles again under SEEDCAP_REJECT
 const fs = require('fs'), path = require('path');
 process.env.STATE_SALT = 's';
 const TL = require(path.join(__dirname, '..', 'trust-ledger.js'));
@@ -206,6 +212,133 @@ console.log('=== trust ledger (O198 v1, knife 5.5b-1) ===');
   const r = rep.report(L, { suspects: { a: { n: 1, t0: 29000000, t1: 29000000 } } }, 29000060);
   T('[8] per core: c1 one conviction reversed, c2 one observation', r.byCore.c1 && r.byCore.c1.convictions === 1 && r.byCore.c1.reversed === 1 && r.byCore.c2.observed === 1, JSON.stringify(r.byCore));
   T('[8] open window counted with its length', r.windows.open === 1 && r.windows.avgWindowH === 24 && r.windows.avgLeftH === 23, JSON.stringify(r.windows));
+}
+
+// ---- [9] S2: the reject window reads the effective count n - fp ----
+{
+  const su = (o) => Object.assign({ n: 2, t0: 1000, t1: 5000, ms: ['a', 'b'], cv: [['a', 1000], ['b', 5000]] }, o);
+  T('[9] no fp: window by n (2 -> 3 days from t1)', v.seedcapRejectUntilMin(su({})) === 5000 + 3 * 1440 && v.seedcapNEff(su({})) === 2);
+  T('[9] one reversed (the latest): nEff 1, the window from the conviction still standing (t1e) for 24 h', v.seedcapNEff(su({ fp: 1, fpm: ['b'], t1e: 1000 })) === 1 && v.seedcapRejectUntilMin(su({ fp: 1, fpm: ['b'], t1e: 1000 })) === 1000 + 1440);
+  T('[9] every conviction reversed: no window at all', v.seedcapNEff(su({ fp: 2 })) === 0 && !v.seedcapRejectActive(su({ fp: 2 }), 5001));
+  T('[9] a legacy entry (no fp, no t1e) reads exactly as before', v.seedcapRejectUntilMin({ n: 1, t0: 100 }) === 100 + 1440 && v.seedcapRejectUntilMin({ n: 3, t0: 1, t1: 200 }) === 200 + 7 * 1440);
+  T('[9] standingT1: the newest conviction not reversed; none kept -> t0', sc.standingT1(su({ fpm: ['b'] })) === 1000 && sc.standingT1(su({ fpm: ['a', 'b'] })) === 1000 && sc.standingT1({ n: 1, t0: 77, cv: [['x', 900]], fpm: ['x'] }) === 77);
+  // mutation self-check: the window counting n instead of n - fp keeps a fully reversed account in the window
+  const src = read('validate.js');
+  const mut = src.replace('const nEff = seedcapNEff(su);', 'const nEff = su.n | 0;');
+  T('[9] mutation applies', mut !== src);
+  const mf = path.join(ROOT, '.mutant-trust-ledger-' + process.pid + '.js');
+  try {
+    fs.writeFileSync(mf, mut);
+    const vm = require(mf);
+    T('[9] mutant (n, not n - fp): the reversed account stays in a window -> the case above would go red', vm.seedcapRejectActive(su({ fp: 2 }), 5001) === true);
+  } finally { try { fs.unlinkSync(mf); } catch (e) {} }
+}
+
+// ---- [10] S2: every verdict filed under its world core; the conviction carries its context; per-core rate alert ----
+{
+  const SIDA = SID(5701), SIDB = SID(5702);
+  const st = { audited: {}, chain: {}, suspects: {}, veto: {}, corrections: [] };
+  const t = 600000;
+  const mk = (m, scores, self) => ({ m, mt: 1, pc: 2, scores, p: { entry: 'quick' }, tail: null, roster: { 0: SIDA, 1: SIDB }, self, runSeed: 7, w: 2 });
+  const pend = [mk('c1', [100, 6000], [0, 1]), mk('c2', [100, 200], [0, 1]), mk('c3', [100, 200], [0, 1]), mk('c4', [100, 200], [0, 1])];
+  const map = { m0: { cap: 5000 }, m1: { cap: 5000 }, m2: { cap: 5000 }, m3: { cap: 5000, via: 'exact:eeeeeeeeeeee' } };
+  sc.applyAudit(st, pend, map, new Set(), t, { primary: 'aaaaaaaaaaaa' });
+  T('[10] audited carries the answering core (primary / exact)', st.audited.c1.k === 'aaaaaaaaaaaa' && st.audited.c4.k === 'eeeeeeeeeeee', JSON.stringify(st.audited));
+  const ev = (st.events || [])[0] || {};
+  const c = ev.ctx || {};
+  T('[10] conviction context: core / cap / score / over / ratio / writers / same-core run share / prior count', c.k === 'aaaaaaaaaaaa' && c.cap === 5000 && c.s === 6000 && c.over === 1000 && c.ratio === 200 && c.w === 2 && c.r === 333 && c.nb === 0 && c.ov === 0, JSON.stringify(c));
+  T('[10] the suspect keeps the conviction time (cv) and t1e', st.suspects[v.pid(SIDB)].cv[0][0] === 'c1' && st.suspects[v.pid(SIDB)].t1e === t);
+  T('[10] per-core stats: primary 3 audits / 1 over, exact 1 / 0', st.cores.aaaaaaaaaaaa.n === 3 && st.cores.aaaaaaaaaaaa.o === 1 && st.cores.eeeeeeeeeeee.n === 1 && st.cores.eeeeeeeeeeee.o === 0);
+  eq('[10] 24 h rate of the primary', sc.coreRate24(st, 'aaaaaaaaaaaa', t + 10), [3, 1]);
+  T('[10] one over-cap is below the alert floor (needs >= ' + sc.SC_RATE_MIN_OVER + ' over and >= ' + sc.SC_RATE_PERMIL / 10 + '%)', sc.coreAlerts(st, t + 10).length === 0);
+  // a wave on one core: 3 more over of 40 audits within the day
+  const wave = [];
+  for (let i = 0; i < 40; i++) wave.push(mk('w' + i, [100, i < 3 ? 9000 : 10], [0]));
+  const wmap = {}; wave.forEach((x, i) => { wmap['m' + i] = { cap: 5000 }; });
+  sc.applyAudit(st, wave, wmap, new Set(), t + 60, { primary: 'aaaaaaaaaaaa' });
+  const al = sc.coreAlerts(st, t + 70);
+  T('[10] 4 over of 43 on one core in 24 h (9.3%) -> one alert for that core', al.length === 1 && al[0].k === 'aaaaaaaaaaaa' && al[0].o === 4 && al[0].a === 43, JSON.stringify(al));
+  st.cores.aaaaaaaaaaaa.md = Math.floor((t + 70) / 1440);
+  T('[10] mailed today -> no second alert today', sc.coreAlerts(st, t + 80).length === 0);
+  T('[10] the 24 h window rolls off', sc.coreRate24(st, 'aaaaaaaaaaaa', t + 25 * 60)[0] === 0);
+  const md = sc.mailDecision(0, 0, 0, ['core x over-cap 4/43 in 24h']);
+  T('[10] an extra reason alone sends the mail', md.send && md.reasons[0] === 'core x over-cap 4/43 in 24h');
+  const txt = sc.alertMailText(md.reasons, [], { veto: 0, suspects: 0 }, [], { cores: al, reversed: [{ m: 'r1', k0: 'old', k1: 'new', cap0: 10, cap1: 20, score: 15, pid: 'abcdef0123456789' }] });
+  T('[10] mail text: the core rate line and the reversal line', /CORE aaaaaaaaaaaa: 4 of 43 audits over the cap in 24 h/.test(txt) && /REVERSED m=r1 core old -> new cap 10 -> 20 score 15 pid abcdef01/.test(txt), txt.slice(0, 400));
+  T('[10] offense details carry fp (7th int)', sc.offensePlanOf({ suspects: { [v.pid(SIDB)]: { n: 3, fp: 1 } } }, [{ t: 1, runSeed: 2, mt: 1, cap: 5, offenders: [{ sid: SIDB, score: 9 }] }])[SIDB].details[6] === 1);
+  T('[10] head hash parse', sc.headHashOf('SEEDCAP 08f46e52a393') === '08f46e52a393' && sc.headHashOf('') === null && sc.coreHashOf(null, () => ({ head: 'SEEDCAP abcdefabcdef', map: {} })) === 'abcdefabcdef');
+}
+
+// ---- [11] S2: automatic reversal on a new world core ----
+{
+  const SIDA = SID(5801), SIDB = SID(5802);
+  const mk = (m, scores) => ({ m, mt: 1, pc: 2, scores, p: { entry: 'quick' }, tail: null, roster: { 0: SIDA, 1: SIDB }, self: [1], runSeed: 9, w: 2 });
+  const fresh = () => {
+    const st = { audited: {}, chain: {}, suspects: {}, veto: {}, corrections: [] };
+    sc.applyAudit(st, [mk('r1', [10, 6000])], { m0: { cap: 5000 } }, new Set(), 100000, { primary: 'oldcoreoldco' });
+    return st;
+  };
+  const st = fresh();
+  const pB = v.pid(SIDB);
+  T('[11] baseline: convicted, window open', st.suspects[pB].n === 1 && v.seedcapRejectActive(st.suspects[pB], 100001));
+  const groups = { r1: [{ d: [0xB1], w: SIDB }] };
+  eq('[11] candidates on a new core: r1', sc.replayCandidates(st, groups, 'newcorenewco', 100100).ms, ['r1']);
+  eq('[11] no candidate on the same core', sc.replayCandidates(st, groups, 'oldcoreoldco', 100100).ms, []);
+  eq('[11] no candidate past ' + sc.REPLAY_DAYS + ' days', sc.replayCandidates(st, groups, 'newcorenewco', 100000 + sc.REPLAY_DAYS * 1440 + 1).ms, []);
+  eq('[11] records gone from the shards: listed gone, not replayed', sc.replayCandidates(st, {}, 'newcorenewco', 100100), { ms: [], gone: ['r1'] });
+  const ev0 = (st.events || []).length;
+  const out = sc.applyReplay(st, [mk('r1', [10, 6000])], { m0: { cap: 7000 } }, 'newcorenewco', 100100);
+  T('[11] the new cap covers the score -> reversed: fp 1, nEff 0, window gone, n stays 1', out.reversed.length === 1 && st.suspects[pB].fp === 1 && st.suspects[pB].n === 1 && v.seedcapNEff(st.suspects[pB]) === 0 && !v.seedcapRejectActive(st.suspects[pB], 100101), JSON.stringify(st.suspects[pB]));
+  const fpEv = (st.events || [])[ev0] || {};
+  T('[11] an fp event queued for the ledger (pid only)', fpEv.fp === 1 && fpEv.p === pB && fpEv.m === 'r1' && fpEv.ctx.k0 === 'oldcoreoldco' && fpEv.ctx.k1 === 'newcorenewco' && JSON.stringify(st.events).indexOf(SIDB) < 0, JSON.stringify(fpEv));
+  T('[11] marked replayed on the new core (no second replay)', st.audited.r1.rk === 'newcorenewco' && sc.replayCandidates(st, groups, 'newcorenewco', 100200).ms.length === 0);
+  T('[11] the veto is not lifted', !!(st.veto && st.veto.r1));
+  T('[11] a second replay of the same conviction cannot count twice', sc.applyReplay(st, [mk('r1', [10, 6000])], { m0: { cap: 9000 } }, 'thirdcorethi', 100300).reversed.length === 0 && st.suspects[pB].fp === 1);
+  // the ledger reads the fp event
+  const L = TL.loadLedger({});
+  TL.takeQueue(L, 'seedcap', st.events);
+  T('[11] ledger: the conviction marked replay, fp 1, n.sc stays 1', L.acct[pB].n.sc === 1 && L.acct[pB].fp === 1 && L.acct[pB].ev.some((e) => e.m === 'r1' && e.fp === 'replay'), JSON.stringify(L.acct[pB]));
+  // negative: the new cap still below the score
+  const st2 = fresh();
+  const o2 = sc.applyReplay(st2, [mk('r1', [10, 6000])], { m0: { cap: 5500 } }, 'newcorenewco', 100100);
+  T('[11] new core still caps below the score: nothing reversed, the window stays', o2.reversed.length === 0 && o2.still === 1 && v.seedcapRejectActive(st2.suspects[pB], 100101) && st2.audited.r1.rk === 'newcorenewco');
+  // an error answer: marked (the same core answers the same), nothing reversed
+  const st3 = fresh();
+  const o3 = sc.applyReplay(st3, [mk('r1', [10, 6000])], { m0: { err: 'x' } }, 'newcorenewco', 100100);
+  T('[11] a CLI error on replay reverses nothing', o3.reversed.length === 0 && v.seedcapRejectActive(st3.suspects[pB], 100101));
+  // wiring: main replays after the audit, with the run's cores, and mails the reversals
+  const SJ = read('seedcap.js');
+  T('[11] main: replay candidates on the primary core, re-audited through auditPending, applied by applyReplay', /replayCandidates\(st, groups, primaryHash, nowMin\(\)\)/.test(SJ) && /const ra = auditPending\(items, \{ cores, live: cf\.live, channel: SEEDCAP_CHANNEL, distDir: SEEDCAP_DIST_DIR \}\);/.test(SJ) && /rp = applyReplay\(st, ra\.pending, ra\.map, primaryHash, nowMin\(\)\);/.test(SJ));
+  T('[11] main: the primary core is named by its head hash', /const primaryHash = coreHashOf\(cores\[0\]\.exe\) \|\| cores\[0\]\.label;/.test(SJ));
+}
+
+// ---- [12] S2 end to end: a fully reversed account settles again (SEEDCAP_REJECT on) ----
+{
+  const { rec: srec, keyOf } = require('./lib/settle-stub.js');
+  const A = SID(5901), B = SID(5902), C = SID(5903), ros = [A, B, C];
+  const h = 0x5901, scs = [3000, 6000, 9000];
+  const recs = ros.map((sid, i) => ({ sid, d: srec(0xB1, 2, h, i, 3 - i, i === 2, ros, scs) }));
+  const boards = () => {
+    const b = [];
+    for (let i = 0; i < 50; i++) b.push({ id: 1000 + i, name: 'shard_' + i, entries: [] });
+    for (const r of recs) b[0].entries.push({ steamID: r.sid, score: 1, details: r.d });
+    b.push({ id: 5, name: 'progress', entries: ros.map((s) => ({ steamID: s, score: 1000 })) }, { id: 6, name: 'rating', entries: [] },
+      { id: 7, name: 'points', entries: ros.map((s) => ({ steamID: s, score: 2500 })) }, { id: 8, name: 'cp_bank', entries: [] });
+    return b;
+  };
+  const pointsOf = (r, sid) => { const w = r.posts.filter((p) => /SetLeaderboardScore/.test(p.url) && /leaderboardid=7(&|$)/.test(p.body) && new RegExp('steamid=' + sid + '(&|$)').test(p.body)); return w.length ? Number(/score=(-?[0-9]+)/.exec(w[w.length - 1].body)[1]) : null; };
+  const nowM = Math.floor(Date.now() / 60000);
+  const two = (su) => {
+    const files = { SC_STATE_FILE: { suspects: { [v.pid(C)]: su } } };
+    const r1 = runCron(boards(), files, { SEEDCAP_REJECT: '1' }, null, 'trust-ledger-12');
+    return runCron(boards(), Object.assign(advance(r1.state, v.SANITY.MIN_START_AGE_MS + 1000), files), { SEEDCAP_REJECT: '1' }, null, 'trust-ledger-12');
+  };
+  const open = two({ n: 1, t0: nowM, t1: nowM, ms: ['x'] });
+  const rev = two({ n: 1, t0: nowM, t1: nowM, ms: ['x'], fp: 1, fpm: ['x'] });
+  const m = keyOf(recs[0].d);
+  T('[12] runs ok + the match settles both times', open.code === 0 && rev.code === 0 && (open.state.PROCESSED_FILE || []).indexOf(m) >= 0 && (rev.state.PROCESSED_FILE || []).indexOf(m) >= 0, open.out.slice(-600) + rev.out.slice(-600));
+  T('[12] window open (n 1): C (the winner) gets no points', pointsOf(open, C) == null && pointsOf(open, A) != null && /inside reject window/.test(open.out));
+  T('[12] the same conviction reversed (fp 1): C settles like everyone else', pointsOf(rev, C) != null && pointsOf(rev, C) > 2500 && !/inside reject window/.test(rev.out), JSON.stringify([A, B, C].map((s) => pointsOf(rev, s))));
 }
 
 console.log(failN ? '=== FAIL (' + failN + ') ===' : '=== trust-ledger: ALL PASS ===');

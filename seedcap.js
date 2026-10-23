@@ -112,6 +112,20 @@ const OFFENSE_LB = process.env.SC_OFFENSE_LB || 'seedcap_offense';
 const OFFENSE_MAGIC = 0xC7;   // details: [magic, tMin, runSeed, mt, cap, claimedScore]
 const SC_MAIL_MIN_OVER = Math.max(1, Number(process.env.SC_MAIL_MIN_OVER || 3));
 const SC_MAIL_SUS_MIN = Math.max(1, Number(process.env.SC_MAIL_SUS_MIN || 5));
+// O198 v1 (knife 5.5b-1 S2): per world core over-cap rate. A wave on ONE core in a day looks like our cap bug (the core
+//   missed a scoring source), not a cheat wave: mail when its last 24 h reach SC_RATE_PERMIL / 1000 over-cap with at least
+//   SC_RATE_MIN_OVER over-cap groups (once per core per day). Hourly buckets, a week kept (st.cores[k].h).
+const SC_RATE_PERMIL = Math.max(1, Number(process.env.SC_RATE_PERMIL || 50));
+const SC_RATE_MIN_OVER = Math.max(1, Number(process.env.SC_RATE_MIN_OVER || 3));
+const CORE_HOURS_KEEP = 7 * 24;
+// O198 v1 (S2): automatic reversal. When the primary world core changes (a new package's core goes live), every conviction
+//   of the last REPLAY_DAYS made on another core is re-audited on the new one (with the usual overlap max); a self-written
+//   seat the new cap no longer exceeds was a cap bug -> the conviction is marked false (su.fp / su.fpm; the reconcile's window
+//   reads n - fp), the trust ledger gets an fp event, the mail says so. The veto is not lifted (that match settled for the
+//   others long ago); n stays (the permanent count). Once per (match, core): audited[m].rk.
+const REPLAY_DAYS = 14;
+const REPLAY_MAX = Math.max(1, Number(process.env.SC_REPLAY_MAX || 100));
+const CONVICTION_KEEP = 8;   // su.cv / su.fpm: the latest convictions [m, t] and the reversed match keys
 
 const nowMin = () => Math.floor(Date.now() / 60000);
 
@@ -332,6 +346,10 @@ function runCli(lines, exe) {
   return { map, head };
 }
 
+// O198 v1 (S2): a core's identity = the source hash its CLI prints in the head line ("SEEDCAP <hash12>"); null when it does not run
+function headHashOf(head) { const m = /^SEEDCAP\s+([0-9a-f]{6,64})/i.exec(String(head || '')); return m ? m[1].toLowerCase() : null; }
+function coreHashOf(exe, run) { const r = (run || ((lines) => runCli(lines, exe)))(['V p0']); return (r && !r.fail) ? headHashOf(r.head) : null; }
+
 // endless continuation carry-in bound: best audited chain cap among the roster,
 // else the pre-seedcap static bound at that depth (generous fail-open for chains
 // that predate the audit -- exact from the first fully-audited session onward)
@@ -379,16 +397,15 @@ function selfSeatsOf(g, roster) {
 
 // ---- pick auditable groups (consistent score vector; audited-once) ----
 // groups: m -> [{d, roster, w}] (w = writing account); pure (reads st.audited/st.chain, mutates nothing)
-function pickAuditable(st, groups) {
-  const pending = [];
-  for (const m of Object.keys(groups)) {
-    if (st.audited[m]) continue;
-    const g = groups[m];
+// one group -> its pending audit item, or null (not auditable). Shared by pickAuditable and the O198 replay (knife 5.5b-1 S2,
+//   which re-audits an already-convicted group on a new world core: it ignores st.audited).
+function pendingOfGroup(st, m, g) {
+  {
     const d0 = g[0].d;
     const mt = d0[2] | 0, pc = d0[8] | 0, base = v.baseMt(mt);
-    if (base < 1 || base > 10 || pc < 1 || pc > 8 || d0.length < 10 + pc) continue;   // 10 = O140 private (audited via capParamsOf); 11 = O156 bot matches excluded (record pc = humans only != world seat count -> no derivable cap; XP-only track, zero stakes)
+    if (base < 1 || base > 10 || pc < 1 || pc > 8 || d0.length < 10 + pc) return null;   // 10 = O140 private (audited via capParamsOf); 11 = O156 bot matches excluded (record pc = humans only != world seat count -> no derivable cap; XP-only track, zero stakes)
     const vecOf = (d) => d.slice(10, 10 + pc).join(',');
-    if (!g.every(r => vecOf(r.d) === vecOf(d0))) continue;   // forgery-suspect groups are the reconcile's own flag lane
+    if (!g.every(r => vecOf(r.d) === vecOf(d0))) return null;   // forgery-suspect groups are the reconcile's own flag lane
     const scores = d0.slice(10, 10 + pc).map(x => x | 0);
     let tail = null;
     if (v.isEndlessMt(mt)) {
@@ -398,19 +415,29 @@ function pickAuditable(st, groups) {
         const t = tailOf(r.d);
         if (t && (!tail || (t.endDepth | 0) > (tail.endDepth | 0))) tail = t;
       }
-      if (!tail || (tail.endDepth | 0) < (tail.startDepth | 0)) continue;
+      if (!tail || (tail.endDepth | 0) < (tail.startDepth | 0)) return null;
       // out-of-domain depth (structural forgery: the reconcile flags it 'depth' and never settles it) is never replayed
       //   or capped here -- one unsigned record claiming a depth near 2^31 used to run the goal curve for ~15 s per run
       //   (R1-B2-02). Remembered once as audited-with-error like a forged pick log (takeSkips).
-      if ((tail.startDepth | 0) < 0 || (tail.endDepth | 0) > v.ENDLESS.DEPTH_CAP) { pending.push({ m, mt, pc, scores, p: null, tail, roster: {}, self: [], runSeed: d0[4] | 0, skip: 'depth' }); continue; }
+      if ((tail.startDepth | 0) < 0 || (tail.endDepth | 0) > v.ENDLESS.DEPTH_CAP) return { m, mt, pc, scores, p: null, tail, roster: {}, self: [], runSeed: d0[4] | 0, skip: 'depth' };
     }
     const p = capParamsOf(mt, pc, tail);
     const roster = v.rosterConsensus(g);
     const rosterPids = Object.keys(roster).map(s2 => v.pid(roster[s2]));
     const runSeed = d0[4] | 0;
-    if (p.replayErr) { pending.push({ m, mt, pc, scores, p, tail, roster, self: [], runSeed, skip: 'perk-replay:' + p.replayErr }); continue; }   // forged pick log: not capped (reconcile perk_forge lane)
+    if (p.replayErr) return { m, mt, pc, scores, p, tail, roster, self: [], runSeed, skip: 'perk-replay:' + p.replayErr };   // forged pick log: not capped (reconcile perk_forge lane)
     if (p.entry === 'endless') p.startBank = chainStartBank(st, rosterPids, pc, p.startDepth, runSeed);
-    pending.push({ m, mt, pc, scores, p, tail, roster, self: selfSeatsOf(g, roster), runSeed, keyId: (p.entry === 'endless' && p.keyId > 0) ? (p.keyId | 0) : 0 });
+    // w (O198 v1 context): distinct accounts that wrote a record of the group
+    return { m, mt, pc, scores, p, tail, roster, self: selfSeatsOf(g, roster), runSeed, keyId: (p.entry === 'endless' && p.keyId > 0) ? (p.keyId | 0) : 0,
+      w: new Set(g.map(r => String((r && (r.w || r.steamID)) || ''))).size };
+  }
+}
+function pickAuditable(st, groups) {
+  const pending = [];
+  for (const m of Object.keys(groups)) {
+    if (st.audited[m]) continue;
+    const x = pendingOfGroup(st, m, groups[m]);
+    if (x) pending.push(x);
   }
   return pending;
 }
@@ -427,9 +454,61 @@ function takeSkips(st, pending, t) {
 }
 
 // ---- apply CLI verdicts onto state (pure state-machine half; testable offline) ----
-function applyAudit(st, pending, cliMap, processed, t) {
+// ---- O198 v1 (S2): per-core stats (hourly buckets) ----
+// the world core that answered a verdict: the exact core of a guard-signed record, else this run's primary (its CLI head hash)
+function coreOfVerdict(r, primary) { return (r && typeof r.via === 'string' && r.via.indexOf('exact:') === 0) ? r.via.slice(6) : (primary || 'root'); }
+function coreStat(st, k, t, over) {
+  if (!st.cores) st.cores = {};
+  const c = st.cores[k] = st.cores[k] || { t0: t | 0, n: 0, o: 0, h: {} };
+  if (!c.h) c.h = {};
+  c.n++; if (over) c.o++;
+  const hk = Math.floor((t | 0) / 60);
+  const b = c.h[hk] = c.h[hk] || [0, 0];
+  b[0]++; if (over) b[1]++;
+  c.ts = t | 0;
+  return c;
+}
+// last 24 h of one core: [audited, over]
+function coreRate24(st, k, tNow) {
+  const c = st.cores && st.cores[k];
+  const out = [0, 0];
+  if (!c || !c.h) return out;
+  const h0 = Math.floor((tNow | 0) / 60) - 23;
+  for (const hk of Object.keys(c.h)) if ((hk | 0) >= h0) { out[0] += c.h[hk][0] | 0; out[1] += c.h[hk][1] | 0; }
+  return out;
+}
+// the cores whose 24 h over-cap rate looks like a cap bug and were not mailed today (pure; marking is the caller's)
+function coreAlerts(st, tNow) {
+  const out = [], day = Math.floor((tNow | 0) / 1440);
+  for (const k of Object.keys(st.cores || {})) {
+    const [a, o] = coreRate24(st, k, tNow);
+    if (o >= SC_RATE_MIN_OVER && o * 1000 >= SC_RATE_PERMIL * a && (st.cores[k].md | 0) !== day) out.push({ k, a, o, permil: Math.round(o * 1000 / Math.max(1, a)) });
+  }
+  return out;
+}
+// the latest conviction still standing (not reversed) -> su.t1e; none standing in the kept list -> t0 (the earliest: a shorter
+//   window is the safe side, architecture decision 10)
+function standingT1(su) {
+  const fpm = su.fpm || [];
+  let best = null;
+  for (const c of (su.cv || [])) if (fpm.indexOf(c[0]) < 0 && (best == null || (c[1] | 0) > best)) best = c[1] | 0;
+  return best != null ? best : (su.t0 | 0);
+}
+function convictedFor(su, m) { return !!su && (((su.cv || []).some(c => c[0] === m)) || ((su.ms || []).indexOf(m) >= 0)) && (su.fpm || []).indexOf(m) < 0; }
+// opt (O198 v1, optional): { primary: the primary core's head hash }. Without it every verdict counts under 'root'.
+function applyAudit(st, pending, cliMap, processed, t, opt) {
   let over = 0, okN = 0, errN = 0;
   const flags = [];   // runtime-only offense detail (sids never enter the public state file)
+  const primary = (opt && opt.primary) || 'root';
+  // this run's per-core counts first (the conviction context carries the run's same-core over-cap share)
+  const runCore = {};
+  pending.forEach((x, i) => {
+    const r = cliMap['m' + i];
+    if (!r || r.err != null || r.cap == null) return;
+    const k = coreOfVerdict(r, primary), capEff = Math.round(r.cap * (x.p.capMult || 1));
+    const rc = runCore[k] = runCore[k] || [0, 0];
+    rc[0]++; if (x.scores.some(sc => sc > capEff)) rc[1]++;
+  });
   pending.forEach((x, i) => {
     const r = cliMap['m' + i];
     if (!r) { errN++; st.audited[x.m] = { e: 'no-out', t }; return; }
@@ -443,7 +522,10 @@ function applyAudit(st, pending, cliMap, processed, t) {
     const capEff = Math.round(r.cap * (x.p.capMult || 1));   // O140: private takes the gamble headroom post-CLI
     const overSeats = [];
     x.scores.forEach((sc, seat) => { if (sc > capEff) overSeats.push(seat); });
-    st.audited[x.m] = { c: capEff, s: Math.max.apply(null, x.scores), o: overSeats.length ? 1 : 0, t };
+    const k = coreOfVerdict(r, primary), ov = r.via === 'overlap';   // O198 v1: which world answered (k) + overlap max
+    st.audited[x.m] = { c: capEff, s: Math.max.apply(null, x.scores), o: overSeats.length ? 1 : 0, t, k };
+    if (ov) st.audited[x.m].ov = 1;
+    coreStat(st, k, t, overSeats.length > 0);
     if (overSeats.length) {
       over++;
       // the veto (no settlement) and the correction (reverse a settled gain) stay on every over-cap seat; a
@@ -458,17 +540,24 @@ function applyAudit(st, pending, cliMap, processed, t) {
         const p2 = v.pid(sid);
         const su = st.suspects[p2] = st.suspects[p2] || { n: 0, t0: t, ms: [] };
         const nb = su.n | 0;
-        su.n++; su.t1 = t;
+        su.n++; su.t1 = t; su.t1e = t;
         nOf[seat] = su.n;
         if (su.ms.indexOf(x.m) < 0) { su.ms.push(x.m); if (su.ms.length > SUSPECT_MATCH_KEEP) su.ms.shift(); }
-        trustLedger.queuePush(st, { t, src: 'sc', p: p2, sev: 3, m: x.m, ctx: { cap: capEff | 0, s: x.scores[seat] | 0, mt: x.mt | 0, pc: x.pc | 0, nb } });   // O198 v1
+        if (!Array.isArray(su.cv)) su.cv = [];
+        su.cv.push([x.m, t]); if (su.cv.length > CONVICTION_KEEP) su.cv.shift();
+        // O198 v1 (S2): the conviction's context, for reading a false positive back out of the ledger
+        const sc0 = x.scores[seat] | 0, rc = runCore[k] || [1, 1];
+        const ctx = { b: x.keyId | 0, k, ov: ov ? 1 : 0, cap: capEff | 0, s: sc0, over: sc0 - (capEff | 0), ratio: Math.round(1000 * (sc0 - capEff) / Math.max(1, capEff)),
+          w: x.w | 0, pc: x.pc | 0, mt: x.mt | 0, r: Math.round(1000 * rc[1] / Math.max(1, rc[0])), nb };
+        if (x.tail) { ctx.d0 = x.tail.startDepth | 0; ctx.d1 = x.tail.endDepth | 0; }
+        trustLedger.queuePush(st, { t, src: 'sc', p: p2, sev: 3, m: x.m, ctx });   // O198 v1
       }
       if (processed.has(x.m) && x.p.entry === 'endless' && !st.corrections.some(c => c.m === x.m)) {
         st.corrections.push({ id: 'sc-' + x.m, m: x.m, seats: overSeats, t });
       }
       flags.push({
         m: x.m, t, runSeed: x.runSeed | 0, mt: x.mt | 0, cap: capEff | 0,
-        offenders: blamed.map(s2 => ({ seat: s2, sid: String(x.roster[s2]), score: x.scores[s2] | 0, n: nOf[s2] | 0 })),
+        offenders: blamed.map(s2 => ({ seat: s2, sid: String(x.roster[s2]), score: x.scores[s2] | 0, n: nOf[s2] | 0, ne: v.seedcapNEff(st.suspects[v.pid(x.roster[s2])]) })),
         unattributed: unblamed.map(s2 => ({ seat: s2, score: x.scores[s2] | 0 })),
       });
       // pids only in logs -- never sids (public run logs)
@@ -495,6 +584,53 @@ function applyAudit(st, pending, cliMap, processed, t) {
   return { over, okN, errN, flags };
 }
 
+// ---- O198 v1 (S2): automatic reversal on a new world core ----
+// which convictions to re-audit now: over-cap (o 1) audits of the last REPLAY_DAYS made on another core than `primary`, not yet
+//   replayed on it. A group no longer on the shards cannot be replayed (marked, never looked at again on this core).
+function replayCandidates(st, groups, primary, tNow) {
+  const ms = [], gone = [];
+  for (const m of Object.keys(st.audited || {})) {
+    const a = st.audited[m];
+    if (!a || a.o !== 1 || a.e != null) continue;
+    if ((tNow | 0) - (a.t | 0) > REPLAY_DAYS * 1440) continue;
+    if (a.k === primary || a.rk === primary) continue;
+    if (!groups[m]) { gone.push(m); continue; }
+    ms.push(m);
+  }
+  ms.sort((a, b) => (st.audited[b].t | 0) - (st.audited[a].t | 0));   // the newest first (their windows are the open ones)
+  return { ms: ms.slice(0, REPLAY_MAX), gone };
+}
+// apply the new core's verdicts (pure): items = pending items of the candidate groups (pendingOfGroup), cliMap = their answers.
+//   A convicted self-written seat whose score the new cap covers -> reversed: su.fp++, su.fpm, su.t1e, an fp event queued.
+//   Every candidate is marked replayed on `primary` (an error included: the same core would answer the same).
+function applyReplay(st, items, cliMap, primary, t) {
+  const out = { replayed: 0, reversed: [], still: 0 };
+  items.forEach((x, i) => {
+    const a = st.audited[x.m];
+    if (a) a.rk = primary;
+    const r = cliMap['m' + i];
+    if (!r || r.err != null || r.cap == null) return;
+    out.replayed++;
+    const capEff = Math.round(r.cap * ((x.p && x.p.capMult) || 1));
+    for (const seat of (x.self || [])) {
+      const sid = x.roster[seat];
+      if (!sid) continue;
+      const p2 = v.pid(sid), su = st.suspects[p2];
+      if (!convictedFor(su, x.m)) continue;
+      if ((x.scores[seat] | 0) > capEff) { out.still++; continue; }
+      su.fp = (su.fp | 0) + 1;
+      if (!Array.isArray(su.fpm)) su.fpm = [];
+      su.fpm.push(x.m); if (su.fpm.length > CONVICTION_KEEP) su.fpm.shift();
+      su.t1e = standingT1(su);
+      trustLedger.queuePush(st, { t, src: 'sc', p: p2, m: x.m, fp: 1, ctx: { k0: (a && a.k) || '?', k1: primary, cap1: capEff } });
+      out.reversed.push({ pid: p2, m: x.m, k0: (a && a.k) || '?', k1: primary, cap0: a ? a.c : null, cap1: capEff, score: x.scores[seat] | 0 });
+      console.log('::warning::seedcap REPLAY m=' + x.m + ' core ' + ((a && a.k) || '?') + ' -> ' + primary + ': cap ' + (a ? a.c : '?') + ' -> ' + capEff +
+        ', seat ' + seat + ' score ' + (x.scores[seat] | 0) + ' now under the cap -- conviction of ' + p2.slice(0, 8) + ' reversed (n stays ' + su.n + ', effective ' + v.seedcapNEff(su) + '; the veto stands)');
+    }
+  });
+  return out;
+}
+
 // ---- offense-board mirror + anomaly mail (pure planners; IO stays at the call site) ----
 function offensePlanOf(st, flags) {
   const plan = {};
@@ -503,7 +639,7 @@ function offensePlanOf(st, flags) {
     const su = st.suspects[v.pid(o.sid)];
     plan[o.sid] = {
       score: su ? su.n | 0 : 1,   // absolute cumulative count = idempotent + self-healing
-      details: [OFFENSE_MAGIC, f.t | 0, f.runSeed | 0, f.mt | 0, f.cap | 0, o.score | 0],
+      details: [OFFENSE_MAGIC, f.t | 0, f.runSeed | 0, f.mt | 0, f.cap | 0, o.score | 0, su ? su.fp | 0 : 0],   // + fp (O198 v1 S2: convictions reversed so far)
     };
   }
   return plan;
@@ -523,8 +659,10 @@ async function writeOffense(st, flags) {
     else v.ghWarn('seedcap: offense write failed HTTP ' + res.status + ' (suspects state still keeps the count)');
   }
 }
-function mailDecision(newOver, suspectsTotal, lastMailedSus) {
+// extra (O198 v1 S2, optional): reasons computed elsewhere (a core's 24 h over-cap rate, reversals) -- each one sends
+function mailDecision(newOver, suspectsTotal, lastMailedSus, extra) {
   const reasons = [];
+  for (const e of (extra || [])) if (e) reasons.push(String(e));
   if ((newOver | 0) >= SC_MAIL_MIN_OVER) reasons.push('over-cap x' + (newOver | 0) + ' in one run');
   let mailedSus = lastMailedSus | 0;
   if ((suspectsTotal | 0) >= SC_MAIL_SUS_MIN && (suspectsTotal | 0) > mailedSus) {
@@ -541,18 +679,22 @@ function rejectWindowsOf(st, nowM) {
     const su = st.suspects[p];
     if (!v.seedcapRejectActive(su, nowM)) continue;
     const until = v.seedcapRejectUntilMin(su);
-    out.push({ pid: p, n: su.n | 0, until, leftMin: until - (nowM | 0) });
+    out.push({ pid: p, n: v.seedcapNEff(su), until, leftMin: until - (nowM | 0) });   // n = the effective count (O198 v1: n - fp)
   }
   out.sort((a, b) => a.until - b.until || (a.pid < b.pid ? -1 : 1));
   return out;
 }
 const fmtMin = (m) => new Date((m | 0) * 60000).toISOString().replace(/\.\d+Z$/, 'Z');
-function alertMailText(reasons, flags, totals, windows) {
+function alertMailText(reasons, flags, totals, windows, more) {
   const lines = ['seedcap anomaly alert: ' + reasons.join(' + '), ''];
+  // O198 v1 (S2): the per-core rate lines and the reversals of this run
+  for (const c of ((more && more.cores) || [])) lines.push('CORE ' + c.k + ': ' + c.o + ' of ' + c.a + ' audits over the cap in 24 h (' + (c.permil / 10) + '%) -- more like a cap bug of this core than cheating; check its scoring sources');
+  for (const x of ((more && more.reversed) || [])) lines.push('REVERSED m=' + x.m + ' core ' + x.k0 + ' -> ' + x.k1 + ' cap ' + x.cap0 + ' -> ' + x.cap1 + ' score ' + x.score + ' pid ' + x.pid.slice(0, 8) + ' (the window now reads n - fp)');
+  if (more && ((more.cores || []).length || (more.reversed || []).length)) lines.push('');
   for (const f of flags || []) {
     lines.push('OVER m=' + f.m + ' mt=' + f.mt + ' seed=' + f.runSeed + ' cap=' + f.cap + '  ' +
       (f.offenders || []).map(o => 'seat' + o.seat + '=' + o.score + ' sid=' + (o.sid || '?') +
-        (o.n ? (' n=' + o.n + ' window=' + Math.round(v.seedcapRejectWindowMin(o.n) / 60) + 'h') : '')).concat(
+        (o.n ? (' n=' + o.n + ' window=' + Math.round(v.seedcapRejectWindowMin(o.ne != null ? o.ne : o.n) / 60) + 'h') : '')).concat(
         (f.unattributed || []).map(u => 'seat' + u.seat + '=' + u.score + ' (not self-written: vetoed, nobody convicted)')).join(' | '));
   }
   lines.push('', 'totals: veto=' + (totals.veto | 0) + ' suspects=' + (totals.suspects | 0));
@@ -566,10 +708,10 @@ function alertMailText(reasons, flags, totals, windows) {
     'self-heals once a flag is cleared; a window clears on its own or early via the review tool.');
   return lines.join('\n');
 }
-async function sendAlertMail(reasons, flags, totals, windows) {
+async function sendAlertMail(reasons, flags, totals, windows, more) {
   const to = process.env.SC_MAIL_TO || process.env.FB_DIGEST_TO, apiKey = process.env.RESEND_API_KEY;
   if (!to || !apiKey) return false;   // unconfigured -> decision stays pending (mailedSus not advanced)
-  const text = alertMailText(reasons, flags, totals, windows);
+  const text = alertMailText(reasons, flags, totals, windows, more);
   try {
     const res = await fetch('https://api.resend.com/emails', {
       method: 'POST',
@@ -595,6 +737,11 @@ function pruneState(st, applied, tNow) {
   }
   for (const m of Object.keys(st.veto)) if (tNow - (st.veto[m].t | 0) > VETO_KEEP_MIN) delete st.veto[m];
   st.corrections = st.corrections.filter(c => !applied.has(c.id));
+  // O198 v1 (S2): per-core hourly buckets keep a week
+  if (st.cores) {
+    const h0 = Math.floor((tNow | 0) / 60) - CORE_HOURS_KEEP;
+    for (const k of Object.keys(st.cores)) { const c = st.cores[k]; for (const hk of Object.keys(c.h || {})) if ((hk | 0) < h0) delete c.h[hk]; }
+  }
   // knife 3.5c2a-A chain hygiene: per-run entries expire (t stamped at write); legacy pid:pc entries (no t) stay readable for
   //   CHAIN_LEGACY_KEEP_MIN after the first run that saw them, then go in one sweep
   if (st.chain) {
@@ -774,6 +921,7 @@ async function main() {
   console.log('seedcap: cores channel=' + (SEEDCAP_CHANNEL || '-') + ' primary=' + cores[0].label +
     (cores.length > 1 ? ' overlap=' + cores.slice(1).map(c => c.label).join(',') : '') + ' (' + sel.why + ')');
 
+  const primaryHash = coreHashOf(cores[0].exe) || cores[0].label;   // O198 v1 (S2): the world core every verdict of this run is filed under
   const picked = takeSkips(st, pickAuditable(st, groups), nowMin());
   let stats = { over: 0, okN: 0, errN: 0, flags: [] };
   let audited = { pending: [], map: {}, deferred: 0, exact: 0, head: '' };
@@ -782,14 +930,33 @@ async function main() {
     if (audited.fail) { console.log('::error::seedcap: ' + audited.fail); process.exit(1); }
     if (audited.pending.length) {
       console.log('seedcap: ' + audited.head + ' auditing ' + audited.pending.length + ' groups' + (audited.exact ? ' (' + audited.exact + ' solo records on the core of the package that signed them)' : ''));
-      stats = applyAudit(st, audited.pending, audited.map, processed, nowMin());
+      stats = applyAudit(st, audited.pending, audited.map, processed, nowMin(), { primary: primaryHash });
     }
   }
   if (stats.flags && stats.flags.length) await writeOffense(st, stats.flags);
-  const md = mailDecision(stats.over, Object.keys(st.suspects).length, st.mailSus | 0);
+  // O198 v1 (S2): reversal -- convictions of the last REPLAY_DAYS made on another core, re-audited on this run's primary
+  let rp = { replayed: 0, reversed: [], still: 0 };
+  {
+    const rc = replayCandidates(st, groups, primaryHash, nowMin());
+    for (const m of rc.gone) if (st.audited[m]) st.audited[m].rk = primaryHash;   // records gone: nothing to replay on this core
+    if (rc.ms.length) {
+      const items = rc.ms.map(m => pendingOfGroup(st, m, groups[m])).filter(x => x && !x.skip);
+      for (const m of rc.ms) if (!items.some(x => x.m === m) && st.audited[m]) st.audited[m].rk = primaryHash;   // not auditable any more
+      if (items.length) {
+        const ra = auditPending(items, { cores, live: cf.live, channel: SEEDCAP_CHANNEL, distDir: SEEDCAP_DIST_DIR });
+        if (ra.fail) v.ghWarn('seedcap: replay CLI run failed ' + ra.fail + ' -- convictions stay as they are, retried next run');
+        else rp = applyReplay(st, ra.pending, ra.map, primaryHash, nowMin());   // capability-deferred items stay unmarked (next run)
+      }
+      console.log('seedcap: replay on core ' + primaryHash + ': ' + rc.ms.length + ' candidate(s), ' + rp.replayed + ' re-audited, ' + rp.reversed.length + ' reversed, ' + rp.still + ' still over');
+    }
+  }
+  const ca = coreAlerts(st, nowMin());
+  const extra = ca.map(c => 'core ' + c.k + ' over-cap ' + c.o + '/' + c.a + ' in 24h').concat(rp.reversed.length ? ['replay reversed ' + rp.reversed.length + ' conviction(s)'] : []);
+  const md = mailDecision(stats.over, Object.keys(st.suspects).length, st.mailSus | 0, extra);
   if (md.send && await sendAlertMail(md.reasons, stats.flags,
-      { veto: Object.keys(st.veto).length, suspects: Object.keys(st.suspects).length }, rejectWindowsOf(st, nowMin()))) {
+      { veto: Object.keys(st.veto).length, suspects: Object.keys(st.suspects).length }, rejectWindowsOf(st, nowMin()), { cores: ca, reversed: rp.reversed })) {
     st.mailSus = md.mailedSus;   // advance only on a delivered mail (failed send retries next run)
+    for (const c of ca) st.cores[c.k].md = Math.floor(nowMin() / 1440);   // a core's rate alert: once a day
     console.log('seedcap: anomaly mail sent (' + md.reasons.join(' + ') + ')');
   }
   pruneState(st, applied, nowMin());
@@ -804,7 +971,9 @@ async function main() {
     ' suspects=' + Object.keys(st.suspects).length + ' corrections=' + st.corrections.length);
 }
 
-module.exports = { selectCores, resolveCores, mergeCaps, corePathOf, OVERLAP_GRACE_MS, OVERLAP_MAX_MS, cliSupportsRerolls, cliSupportsClassic, cliSupportsBuilds, cliSupportsFee, cliSupportsRv, capParamsOf, cliLineOf, cliSupportsBuild, chainKey, chainStartBank, tailOf, coreForBuildNum, selfSeatsOf, pickAuditable, takeSkips, applyAudit, pruneState, readGroups, coresForNow, auditPending, runCli, loadState, saveState, SC_STATE_FILE, AUDITED_KEEP, VETO_KEEP_MIN, CHAIN_LEGACY_KEEP_MIN, CHAIN_KEEP_MIN, offensePlanOf, writeOffense, mailDecision, sendAlertMail, alertMailText, rejectWindowsOf, OFFENSE_LB, OFFENSE_MAGIC, SC_MAIL_MIN_OVER, SC_MAIL_SUS_MIN };
+module.exports = { pendingOfGroup, coreOfVerdict, coreStat, coreRate24, coreAlerts, standingT1, convictedFor, replayCandidates, applyReplay, headHashOf, coreHashOf,
+  REPLAY_DAYS, REPLAY_MAX, CONVICTION_KEEP, SC_RATE_PERMIL, SC_RATE_MIN_OVER, CORE_HOURS_KEEP,
+  selectCores, resolveCores, mergeCaps, corePathOf, OVERLAP_GRACE_MS, OVERLAP_MAX_MS, cliSupportsRerolls, cliSupportsClassic, cliSupportsBuilds, cliSupportsFee, cliSupportsRv, capParamsOf, cliLineOf, cliSupportsBuild, chainKey, chainStartBank, tailOf, coreForBuildNum, selfSeatsOf, pickAuditable, takeSkips, applyAudit, pruneState, readGroups, coresForNow, auditPending, runCli, loadState, saveState, SC_STATE_FILE, AUDITED_KEEP, VETO_KEEP_MIN, CHAIN_LEGACY_KEEP_MIN, CHAIN_KEEP_MIN, offensePlanOf, writeOffense, mailDecision, sendAlertMail, alertMailText, rejectWindowsOf, OFFENSE_LB, OFFENSE_MAGIC, SC_MAIL_MIN_OVER, SC_MAIL_SUS_MIN };
 if (require.main === module) {
   main().catch(e => { console.log('::error::seedcap run failed: ' + (e && e.stack || e)); process.exit(1); });
 }

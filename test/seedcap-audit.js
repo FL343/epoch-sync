@@ -265,8 +265,8 @@ const SIDA = '76561198000000001', SIDB = '76561198000000002', SIDX = '7656119800
     plan[SIDB] && plan[SIDB].score === 7 && Object.keys(plan).length === 1);
   ok('[8] alert thresholds pinned (3 over/run mass floor, 5 suspect floor; env-overridable)',
     sc.SC_MAIL_MIN_OVER === 3 && sc.SC_MAIL_SUS_MIN === 5);
-  ok('[8] plan details = [magic,t,seed,mt,cap,claimed] of the LATEST offense',
-    plan[SIDB].details.join(',') === [sc.OFFENSE_MAGIC, 2000, 12, 7, 6000, 8888].join(','));
+  ok('[8] plan details = [magic,t,seed,mt,cap,claimed,fp] of the LATEST offense (fp: O198 v1 S2 reversals so far)',
+    plan[SIDB].details.join(',') === [sc.OFFENSE_MAGIC, 2000, 12, 7, 6000, 8888, 0].join(','));
   ok('[8] offense magic stays clear of the known details namespace', sc.OFFENSE_MAGIC === 0xC7);
   ok('[8] board name default + PRESERVE-class intent', sc.OFFENSE_LB === 'seedcap_offense');
   ok('[8] below both thresholds -> silent', sc.mailDecision(sc.SC_MAIL_MIN_OVER - 1, sc.SC_MAIL_SUS_MIN - 1, 0).send === false);
@@ -457,7 +457,7 @@ const SIDA = '76561198000000001', SIDB = '76561198000000002', SIDX = '7656119800
   ok('[14] coreForBuildNum: registered package -> its core; unknown / pre-core package -> null', sc.coreForBuildNum(live, 'demo', 2026093001) === 'bbbbbbbbbbbb' && sc.coreForBuildNum(live, 'demo', 2026090703) === 'aaaaaaaaaaaa' && sc.coreForBuildNum(live, 'demo', 2026070100) === null && sc.coreForBuildNum(live, 'demo', 1) === null && sc.coreForBuildNum(live, 'nope', 2026093001) === null && sc.coreForBuildNum(null, 'demo', 2026093001) === null);
   const src = require('fs').readFileSync(path.join(__dirname, '..', 'seedcap.js'), 'utf8');
   ok('[14] auditPending routes solo records to the core of the package that signed them (keyId -> live window -> disk), exact verdict replaces window/overlap', /const c = coreForBuildNum\(live, channel, x\.keyId\);/.test(src) && /res\.map\[k\] = Object\.assign\(\{\}, r3\.map\[k\], \{ via: 'exact:' \+ ex\.label \}\)/.test(src) && /if \(!\(x\.keyId > 0\) \|\| !live \|\| !channel\) return;/.test(src));
-  ok('[14] main(): readGroups -> takeSkips(pickAuditable) -> auditPending -> applyAudit (shared with tools/seedcap-reaudit.js)', /const picked = takeSkips\(st, pickAuditable\(st, groups\), nowMin\(\)\);/.test(src) && /audited = auditPending\(picked\.pending, \{ cores, live: cf\.live, channel: SEEDCAP_CHANNEL, distDir: SEEDCAP_DIST_DIR \}\);/.test(src) && /stats = applyAudit\(st, audited\.pending, audited\.map, processed, nowMin\(\)\);/.test(src));
+  ok('[14] main(): readGroups -> takeSkips(pickAuditable) -> auditPending -> applyAudit (shared with tools/seedcap-reaudit.js)', /const picked = takeSkips\(st, pickAuditable\(st, groups\), nowMin\(\)\);/.test(src) && /audited = auditPending\(picked\.pending, \{ cores, live: cf\.live, channel: SEEDCAP_CHANNEL, distDir: SEEDCAP_DIST_DIR \}\);/.test(src) && /stats = applyAudit\(st, audited\.pending, audited\.map, processed, nowMin\(\), \{ primary: primaryHash \}\);/.test(src));
   ok('[14] reaudit tool exists, is read-only (no saveState / writeOffense / sendAlertMail) and shares the audit routine', (() => { let t = ''; try { t = require('fs').readFileSync(path.join(__dirname, '..', 'tools', 'seedcap-reaudit.js'), 'utf8'); } catch (e) { return false; } return /sc\.readGroups\(\)/.test(t) && /sc\.auditPending\(/.test(t) && /sc\.applyAudit\(/.test(t) && !/saveState\(/.test(t) && !/writeOffense\(/.test(t) && !/sendAlertMail\(/.test(t); })());
 }
 // ---- [15] debt-pact cash replay + fee= / rv= tokens (client knife 5.10b) ----
