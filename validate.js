@@ -362,6 +362,26 @@ function absentRosterSeats(g) {
   for (const seatKey of Object.keys(g[0].roster || {})) if ((seatKey | 0) !== present) out.push({ seat: seatKey | 0, steamID: g[0].roster[seatKey] });
   return out;
 }
+// Q302 (cloud audit, found doing Q275): the leavers of a team match settled on one kept record (a Q109 settle that stands on
+//   a dropped record written from its writer's start-roster seat as the second writer). detectLeavers needs two records to
+//   vote, so it named nobody: the seats that left were neither convicted nor named, the losing team kept a seat nobody
+//   accounted for, and Q149 settled the match without a rating move -- an honest 2V2 winner whose opponent's teammate left
+//   and whose opponent's own record was dropped (a bad roster seat or field) got no points for the win; the players who
+//   left kept theirs. A seat counts here when the kept record and the registered start roster (the start attesters, the
+//   Q80 seat gate) name the same account on it -- two sources, as two records' majority is -- and it has no record in the
+//   group; the leavers0 filter then does the rest as for any settle: the dropped writer is not a leaver (Q109), a seat seen
+//   agreeing is not (pend.agreed), and only an account that wrote his own start, result or confession for the key is
+//   convicted (Q69: the rest are named-only shields). The absent-seat hold and the leave-confirm hold (absentRosterSeats)
+//   already waited on these seats. No registered roster: nobody (no such settle reaches here: the witness needs one).
+function loneWitnessLeavers(g, gro) {
+  if (!g || g.length !== 1 || !gro) return [];
+  const present = g[0].d[5] | 0, out = [];
+  for (const seatKey of Object.keys(g[0].roster || {})) {
+    const seat = seatKey | 0, sid = String(g[0].roster[seatKey]);
+    if (seat !== present && gro[seat] === pid(sid)) out.push({ seat, steamID: sid });
+  }
+  return out;
+}
 // ---- absent-seat hold (R1-B2-04 / R1-X14, cloud audit 2026-10) ----
 // A missing record is only evidence that its player left once (a) this run read EVERY record shard and (b) the gap has
 // been visible for the grace period on this job's own clock. Before this, a consistent group missing one seat settled on
@@ -10379,7 +10399,14 @@ async function main() {
     //   on this match (pend.agreed): that record was lost to shard rotation while the group waited, the player finished
     const agreedAbs = [];     // Q167: the same seats with their accounts (a losing one stands in for the winners' update below)
     const agreedSeats = [];   // Q149: those seats (finished, accounted for by the agreement seen earlier)
-    const leavers0 = detectLeavers(g).filter((x) => {
+    // Q302: a team match settled on one kept record and a dropped witness (Q109) counts its absent seats as a two-record
+    //   group would (loneWitnessLeavers); FFA / bot lanes as before (one record there names nobody; FFA players' own numbers
+    //   do not depend on it, a team match's do: Q149)
+    const loneTeam = !!dropSeat && g.length < 2 && isTeamMt(matchType);
+    const absent0 = loneTeam ? loneWitnessLeavers(g, seatGateRoster(pend)) : detectLeavers(g);
+    if (loneTeam) console.log('  lone-witness ' + c.m + ': one record kept beside a dropped witness, absent seat(s) ' + (absent0.map((x) => x.seat).join(',') || 'none')
+      + ' read from that record and the start roster (Q302)');
+    const leavers0 = absent0.filter((x) => {
       if (dropped(x.steamID)) { console.log('  leaver ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' wrote a record that sanity dropped -- played, not a leaver (Q109)'); return false; }
       if (!(pend.agreed && pend.agreed.indexOf(pid(String(x.steamID))) >= 0)) return ownOrNamed(x);
       agreedSeats.push(x.seat);

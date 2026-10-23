@@ -257,7 +257,7 @@ console.log('=== a losing seat named by the others only leaves a team match unra
 T('[0] the Q149 check walks every seat of the losing team, by the team size of the match type, and flips the side uncounted', SRC.split(GATE).length === 2 && SRC.split(LOOP).length === 2
   && SRC.split(FLIP).length === 2);
 T('[0] accounted for: a writer, a leaver / excused dissenter (leavers0), an agreement seen earlier (agreedSeats)', SRC.split(ACC).length === 2 && SRC.split(AGREED).length === 2
-  && SRC.indexOf(AGREED) < SRC.indexOf(ACC) && /const agreedSeats = \[\];[^\n]*\n    const leavers0 = detectLeavers\(g\)\.filter/.test(SRC));
+  && SRC.indexOf(AGREED) < SRC.indexOf(ACC) && /const agreedSeats = \[\];[^\n]*\n(?:[^\n]*\n){0,8}    const leavers0 = absent0\.filter/.test(SRC));
 T('[0] the two log forms (named by the others only / no account on the roster)', SRC.indexOf("(x.blank ? ' (no account on the roster)' : ' (named by the others only)')") > 0
   && SRC.indexOf('-- no record, leave or agreement of his own for this match, settled without a rating move (Q149)') > 0);
 T('[0] the Q149 summary row', /team matches with a losing seat nobody accounts for \(named by the others only or left blank\), settled without a rating move \(Q149\) \| ' \+ s\('namedLoser', 0\)/.test(SRC));

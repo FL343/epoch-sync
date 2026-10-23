@@ -191,7 +191,7 @@ for (const withStarts of [true, false]) {
 
 // ---- [5] wiring pins ----
 {
-  const at = SRC.indexOf('const leavers0 = detectLeavers(g).filter((x) => {');
+  const at = SRC.indexOf('const leavers0 = absent0.filter((x) => {');   // Q302: absent0 = detectLeavers(g), or the one-record team settle's
   T('[5] the leaver filter routes every absent seat through the own-record check', at > 0 && SRC.indexOf('return ownOrNamed(x);', at) > at && SRC.indexOf('return ownOrNamed(x);', at) < SRC.indexOf('});', at));
   T('[5] named-only seats still shield their teammates', /matchPlan\(planIn, matchType, \{ scores, leaverSeats: leavers0\.concat\(namedOnly\)\.map\(x => x\.seat\), winTeam: t2Win(, absent: absentIn(, finished: finishedIn)?)? \}\)/.test(SRC));   // Q167 added absentIn, Q183 finishedIn; O480 the call goes through matchPlan
   T('[5] the orphan path remembers own starts every run', /noteOwnStarts\(p, sg\[m\](, now)?\);/.test(SRC) && /if \(!hasOwnStart\(p, h\)\) continue;/.test(SRC));

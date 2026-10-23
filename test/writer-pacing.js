@@ -335,7 +335,7 @@ const FLOOR = v.SANITY.MIN_START_AGE_MS;
   T('[9] the old unconstrained "no attestation" pass is gone', !/if \(!pend\) for \(const sid of writerSids\)/.test(SRC));
   T('[9] exports', typeof v.writerReadyAt === 'function' && typeof v.writerClaim === 'function' && typeof v.freshOrderPaced === 'function');
   T('[9] run summary reports the deferrals', /one-match-at-a-time deferrals/.test(SRC));
-  T('[9] the gate remembers agreeing writers; the leaver filter consults them', /const agreed = pend\.agreed \|\| \(pend\.agreed = \[\]\);/.test(SRC) && /detectLeavers\(g\)\.filter\(/.test(SRC) && /pend\.agreed\.indexOf\(pid\(String\(x\.steamID\)\)\)/.test(SRC));
+  T('[9] the gate remembers agreeing writers; the leaver filter consults them', /const agreed = pend\.agreed \|\| \(pend\.agreed = \[\]\);/.test(SRC) && /const leavers0 = absent0\.filter\(/.test(SRC) && /pend\.agreed\.indexOf\(pid\(String\(x\.steamID\)\)\)/.test(SRC));
   T('[9] per-day count once per settle: matchmade at the gate, private / bot only after their floor and the one-match rule',
     /if \(!isPrivateMt\(matchType\) && !isBotMt\(matchType\)\) countDay\(\);/.test(SRC) &&
     /writerPaced\(c\.m, writerSids, pendP\.t0, reqMsP\)\) continue;[^\n]*\n\s*countDay\(\);/.test(SRC) &&
