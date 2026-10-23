@@ -84,6 +84,9 @@ jobs:
           # client knife 5.8a: a lone bot record carrying a usable guard match signature block (attest.verifyMatchSig) is credited
           # without the single-writer discount; '0' / unset = the 0.6 lane for every lone bot record, the blocks only counted
           MSIG_BOTS: '1'
+          # client knife 5.8b: disputed two-voice 1V1 keys with one usable signed side -- record = counted and logged only (what the
+          #   signature would settle); enforce = settled by it (turned on remotely once the data hold, the companion plan section 2.6)
+          MSIG_PAIR: record
           # O198 v1 trust ledger (knife 5.5b-1): this job writes the channel's trust file; the sanctions twin's file is a
           # read-only consult (its event queue), like the seedcap file above
           TRUST_FILE: demo-trust.json

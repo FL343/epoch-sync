@@ -407,8 +407,27 @@ function selfSeatsOf(g, roster) {
 // groups: m -> [{d, roster, w}] (w = writing account); pure (reads st.audited/st.chain, mutates nothing)
 // one group -> its pending audit item, or null (not auditable). Shared by pickAuditable and the O198 replay (knife 5.5b-1 S2,
 //   which re-audits an already-convicted group on a new world core: it ignores st.audited).
+// client knife 5.8b: a disputed 1V1 the reconcile settles by its one usable signed side (validate.js signedPairOf, MSIG_PAIR=enforce)
+//   is audited on that side's records -- otherwise the settle would run without a per-seed cap. Off in every other mode (the key
+//   never settles then). The key table is read once per run through this job's channel policy (as the recovery pool's).
+let msigPubMemo = null;
+function msigPub() {
+  if (!msigPubMemo) msigPubMemo = attest.loadPubTable(path.join(__dirname, 'attest-keys.json'), { channel: SEEDCAP_CHANNEL || null, nowMs: Date.now() }) || {};
+  return msigPubMemo;
+}
+function signedSideOf(g) {
+  if (v.MSIG.PAIR !== 'enforce') return null;
+  const sp = v.signedPairOf(g.map((r) => Object.assign({}, r, { steamID: r.w })), msigPub(), v.sandboxOn());
+  return sp.state === 'one' ? sp.recsA : null;
+}
 function pendingOfGroup(st, m, g) {
   {
+    const mt0 = g[0].d[2] | 0, pc0 = g[0].d[8] | 0;
+    if (pc0 >= 1 && g[0].d.length >= 10 + pc0 && !g.every(r => r.d.slice(10, 10 + pc0).join(',') === g[0].d.slice(10, 10 + pc0).join(','))) {
+      const side = (v.baseMt(mt0) === 1 || v.baseMt(mt0) === 2) ? signedSideOf(g) : null;
+      if (!side) return null;   // forgery-suspect groups are the reconcile's own flag lane
+      g = side;
+    }
     const d0 = g[0].d;
     const mt = d0[2] | 0, pc = d0[8] | 0, base = v.baseMt(mt);
     if (base < 1 || base > 10 || pc < 1 || pc > 8 || d0.length < 10 + pc) return null;   // 10 = O140 private (audited via capParamsOf); 11 = O156 bot matches excluded (record pc = humans only != world seat count -> no derivable cap; XP-only track, zero stakes)

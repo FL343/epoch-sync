@@ -164,9 +164,16 @@ console.log('-- match signature switch (MSIG_BOTS) --');
   for (const f of ['validate.yml', 'playtest.yml', 'demo.yml']) {
     const e = runEnv(read(f));
     T(f + ': MSIG_BOTS armed (quoted 1) on the reconcile run step', !!e && e.MSIG_BOTS === "'1'", e && e.MSIG_BOTS);
+    // client knife 5.8b: the two-voice lane ships in record mode (counted, nothing settled by it); enforce is a later remote switch
+    T(f + ': MSIG_PAIR record on the reconcile run step', !!e && e.MSIG_PAIR === 'record', e && e.MSIG_PAIR);
   }
+  // seedcap's enforce branch reads the same switch: record on every audit job (inert until enforce)
+  const scSrc = read('seedcap.yml');
+  const scRuns = (scSrc.match(/run: node seedcap\.js/g) || []).length, scPair = (scSrc.match(/^ {10}MSIG_PAIR: record\b/gm) || []).length;
+  T('seedcap.yml: MSIG_PAIR record on every audit job (' + scPair + ' / ' + scRuns + ')', scRuns > 0 && scPair === scRuns);
   const vsrc = fs.readFileSync(path.join(__dirname, '..', 'validate.js'), 'utf8');
-  T('validate.js arms the x1.0 credit only on the exact string 1', /const MSIG = \{ BOTS: process\.env\.MSIG_BOTS === '1' \};/.test(vsrc));
+  T('validate.js arms the x1.0 credit only on the exact string 1, the pair lane only on record / enforce',
+    /const MSIG = \{ BOTS: process\.env\.MSIG_BOTS === '1', PAIR: \(process\.env\.MSIG_PAIR === 'record' \|\| process\.env\.MSIG_PAIR === 'enforce'\) \? process\.env\.MSIG_PAIR : '' \};/.test(vsrc));
 }
 
 // ---- 3) schedule minutes: 5-minute-class workflows on distinct offsets ----

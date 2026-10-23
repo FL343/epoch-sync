@@ -2217,7 +2217,9 @@ function botXpGain(lv, n, rankEff, tierMult, loneMult, bm, cls) {
 //   No block / a block this job cannot judge yet / a broken block = the 0.6 lane as before (a broken block is only counted,
 //   never flagged, in this phase: a key table pushed wrong must not mark honest players).
 //   MSIG_BOTS='1' turns the x1.0 credit on (the three reconcile jobs set it); unset = count only.
-const MSIG = { BOTS: process.env.MSIG_BOTS === '1' };
+//   MSIG_PAIR (client knife 5.8b, the two-voice lane below): 'record' = count and log what the signatures would settle, change
+//   nothing; 'enforce' = settle a disputed 1V1 by its one usable signed side; unset = the lane is off (not even counted).
+const MSIG = { BOTS: process.env.MSIG_BOTS === '1', PAIR: (process.env.MSIG_PAIR === 'record' || process.env.MSIG_PAIR === 'enforce') ? process.env.MSIG_PAIR : '' };
 // the block verdict of a lone bot group -> { use, lv, kinds } (use only when EVERY record of the group carries a usable block)
 function botSignedOf(g, pubTable, allowDevKey) {
   let use = g.length > 0, lv = -1;
@@ -2233,6 +2235,153 @@ function botSignedOf(g, pubTable, allowDevKey) {
     else use = false;
   }
   return { use, lv: use ? lv : -1, kinds };
+}
+// ===== client knife 5.8b: the guard match signature on multiplayer records -- the two-voice 1V1 lane =====
+// Every human of a multiplayer match now asks his own guard for the block: the host's guard signs the table of the authority
+//   core it ran, frozen when the host's game said the match ended (role own); a joiner's guard re-signs the same frozen table
+//   the host's guard sent it over the guard-to-guard channel, naming the host's account as the table's source (role relay).
+//   Two honest players of a 1V1 so carry one table under two signatures. A modded loser who writes a record giving himself the
+//   win gets no block (his guard refuses a table its core / the host's snapshot does not hold), so a disagreeing two-voice key
+//   has at most one usable signed side, and this lane reads it:
+//   - only a quick / ranked FFA key (base 1 / 2) of two seats, no party / trio bits, two voices on two-seat tables
+//     (pairDispute1v1 pair, nobody's own duration broken), no gamble refusal tag (Q61 owns those keys), not held by the roster
+//     contest (Q75 / Q200); every record judged by verifyMatchSig + matchSigGate (owner = the row; the dev key on test shards);
+//   - a 'pending' block (a key this job does not list yet, a held key, a block version it does not read) -> nothing this run;
+//   - both accounts usable and still disagreeing (two guards signed two tables: an honest desync or a leaked key) -> today's path
+//     (the key voids at the start verdict, Q308 consoles both); counted on both (ds, record only);
+//   - exactly one account usable (A, his records agreeing), the other (O) with no block or a broken one, and A's table passing the
+//     settle's sanity with O seated -> 'record': counted and logged (what it would settle), the key goes on as today; 'enforce':
+//     the key leaves the disputed list as a consistent group of A's records plus O's record rebuilt on A's signed table (O seated
+//     where the table seats him, his testimony replaced by A's: disposition, progress bits, duration), so O is settled as the
+//     honest loser of that table would be (rating, points, XP, CP, career, streak); a broken block flags O ('at'), no block
+//     only counts (an honest player whose guard was down is never marked: architecture decision 10);
+//   - anything else (no usable side, an untrusted block, a third voice) -> today's path. Keys of three seats or more and friends'
+//     rooms are only counted (coverage) -- settling them by signature is a later, reconcile-only change.
+//   Q184 (the loser writes nothing) does not come here: one voice, its gate of two distinct opponents stays.
+const MSIG_PAIR_BASES = [1, 2];
+function msigKindOf(r, pubTable, allowDevKey) {
+  const v = attest.verifyMatchSig(r.d, pubTable, { h0: r.h0 !== undefined ? r.h0 : null });
+  return attest.matchSigGate(v, { owner: String(r.steamID), allowDevKey });
+}
+// -> { state: 'skip' | 'pending' | 'dual' | 'one' | 'other', a, o, oWhy ('none' | 'bad'), recsA, recsO, kinds { sid: ['kind:reason'] } }
+function signedPairOf(g, pubTable, allowDevKey) {
+  const out = { state: 'skip', kinds: {} };
+  if (!Array.isArray(g) || g.length < 2) return out;
+  for (const r of g) {
+    const mt = r.d[2] | 0;
+    if (MSIG_PAIR_BASES.indexOf(baseMt(mt)) < 0 || premadeMaskOf(mt) || premadeTrioAtOf(mt) || (r.d[8] | 0) !== 2) return out;
+    if (gambleTagOf(r)) return out;
+  }
+  const pd = pairDispute1v1(g);
+  if (!pd || !pd.pair || pd.own.length) return out;
+  const by = new Map();
+  for (const r of g) { const s = String(r.steamID); if (!by.has(s)) by.set(s, []); by.get(s).push(r); }
+  if (by.size !== 2 || !pd.pair.every((s) => by.has(String(s)))) return out;
+  const acc = [];
+  let pending = false;
+  for (const [sid, recs] of by) {
+    const ks = recs.map((r) => msigKindOf(r, pubTable, allowDevKey));
+    out.kinds[sid] = ks.map((k) => k.kind + (k.reason ? ':' + k.reason : ''));
+    if (ks.some((k) => k.kind === 'pending')) pending = true;
+    const vec0 = recs[0].d.slice(10, 12).join(',');
+    const kind = (ks.every((k) => k.use) && recs.every((r) => r.d.slice(10, 12).join(',') === vec0)) ? 'ok'
+      : ks.some((k) => k.use || k.kind === 'untrusted') ? 'other' : ks.some((k) => k.kind === 'bad') ? 'bad' : 'none';
+    acc.push({ sid, recs, kind });
+  }
+  if (pending) { out.state = 'pending'; return out; }
+  const ok = acc.filter((x) => x.kind === 'ok');
+  if (ok.length === 2) return Object.assign(out, { state: 'dual', a: ok[0].sid, o: ok[1].sid });
+  if (ok.length === 1) {
+    const o = acc.find((x) => x !== ok[0]);
+    if (o.kind === 'none' || o.kind === 'bad') return Object.assign(out, { state: 'one', a: ok[0].sid, o: o.sid, oWhy: o.kind, recsA: ok[0].recs, recsO: o.recs });
+  }
+  out.state = 'other';
+  return out;
+}
+// O's record rebuilt on A's signed table (A's first record minus its block; O seated where its table seats him; rank / win of
+//   that table) -> a record object, or null when A's table does not seat O at a seat of his own
+function signedPairSynth(sp) {
+  const a0 = sp.recsA[0];
+  const ro = a0.roster || decodeRoster(a0.d);
+  let oSeat = -1;
+  for (const k of Object.keys(ro)) if (String(ro[k]) === String(sp.o)) oSeat = k | 0;
+  if (oSeat < 0 || oSeat > 1 || oSeat === (a0.d[5] | 0)) return null;
+  const f = MATCH_SIG.find(a0.d);
+  const d = f.state === 'ok' ? a0.d.slice(0, f.at) : a0.d.slice();
+  const mine = d[10 + oSeat] | 0, theirs = d[10 + (1 - oSeat)] | 0;
+  d[5] = oSeat;
+  d[6] = mine >= theirs ? 1 : 2;
+  d[7] = ((d[7] | 0) & ~1) | (mine > theirs ? 1 : 0);
+  return Object.assign({}, a0, { d, steamID: String(sp.o), shard: (sp.recsO[0] && sp.recsO[0].shard) || a0.shard, signedSynth: true });
+}
+// a dispute of two usable signed tables, once per key on both accounts (record only): ds += 1, dsk = the keys counted
+function dualSignedCount(signals, pair, m, now) {
+  let n = 0;
+  for (const sid of pair) {
+    const h = pid(String(sid)), old = signals.players[h];
+    if (old && hasKey(old.dsk, m)) continue;
+    const p = sigPlayer(signals, h, now);
+    if (!p.dsk || typeof p.dsk !== 'object') p.dsk = {};
+    p.ds = (p.ds | 0) + 1; p.dsk[m] = now;
+    const ks = Object.keys(p.dsk);
+    if (ks.length > PAIR_DISPUTE.KEYS_CAP) {
+      ks.sort((a, b) => (Number(p.dsk[a]) || 0) - (Number(p.dsk[b]) || 0));
+      for (let k = 0; k < ks.length - PAIR_DISPUTE.KEYS_CAP; k++) delete p.dsk[ks[k]];
+    }
+    n++;
+  }
+  return n;
+}
+// the lane over the disputed keys (after the team-2 accusations, before consistentKeys: a key moved here must not be voided by
+//   the start verdict). ctx = { mode, pubTable, allowDevKey, processed, contested, signals, now } -> counters + dirty / touched
+function applySignedPair(gr, ctx) {
+  const res = { pending: 0, dual: 0, one: 0, oneBad: 0, would: 0, moved: 0, insane: 0, other: 0, dirty: false, touched: [] };
+  if (!ctx || !ctx.mode) return res;
+  for (let i = gr.inconsistentGroups.length - 1; i >= 0; i--) {
+    const { m, g } = gr.inconsistentGroups[i];
+    if (ctx.processed.has(m) || (ctx.contested && ctx.contested.has(m))) continue;
+    const sp = signedPairOf(g, ctx.pubTable, ctx.allowDevKey);
+    if (sp.state === 'skip') continue;
+    if (sp.state === 'pending') { res.pending++; console.log('  msig-pair ' + m + ': a signature block this job cannot judge yet [' + Object.values(sp.kinds).map((k) => k.join('+')).join(' | ') + '] -- not this run'); continue; }
+    if (sp.state === 'dual') {
+      res.dual++;
+      if (dualSignedCount(ctx.signals, [sp.a, sp.o], m, ctx.now)) res.dirty = true;
+      console.log('  msig-pair ' + m + ': both writers carry a usable signed table and still disagree -- today\'s path, counted on both (record only)');
+      continue;
+    }
+    if (sp.state !== 'one') { res.other++; continue; }
+    res.one++;
+    if (sp.oWhy === 'bad') res.oneBad++;
+    const synth = signedPairSynth(sp);
+    const g2 = synth ? sp.recsA.concat([synth]) : null;
+    const bad = g2 ? sanityFlags(g2) : ['seat'];
+    if (bad.length) { res.insane++; console.log('  msig-pair ' + m + ': ' + plog(sp.a) + '\'s signed table does not pass the settle with the other seat filled [' + bad.join(',') + '] -- today\'s path'); continue; }
+    const what = plog(sp.a) + '\'s signed table [' + synth.d.slice(10, 12).join(',') + '], ' + plog(sp.o) + ' (' + (sp.oWhy === 'bad' ? 'broken block ' + sp.kinds[sp.o].join('+') : 'no block') + ') at seat ' + synth.d[5];
+    if (ctx.mode !== 'enforce') { res.would++; console.log('  msig-pair ' + m + ': would settle by ' + what + ' -- record only (MSIG_PAIR=record)'); continue; }
+    gr.inconsistentGroups.splice(i, 1);
+    gr.consistentMatches.push({ m, g: g2, void: voidByConsensus(g2.map((r) => r.dispCode)).isVoid, signedPair: { a: sp.a, o: sp.o, why: sp.oWhy } });
+    res.moved++;
+    if (sp.oWhy === 'bad' && recordFlag(ctx.signals, sp.recsO, m, ctx.now, 'at')) { res.dirty = true; res.touched.push(String(sp.o)); }
+    console.log('  msig-pair ' + m + ': settling by ' + what + (sp.oWhy === 'bad' ? ', broken block flagged' : ''));
+  }
+  return res;
+}
+// coverage of the agreeing multiplayer keys (counted on every mode but off): how many carry a usable signed table on every
+//   writer / some / none -- the 1V1 keys of this lane apart from the rest (keys of three seats or more, friends' rooms, bot
+//   matches of two humans or more). The data for turning 'enforce' on (the companion plan KNIFE_58 section 2.6 (1)) and for a later three-seat lane.
+function msigCoverage(gr, pubTable, allowDevKey) {
+  const out = { pair: [0, 0, 0], multi: [0, 0, 0] };
+  for (const c of gr.consistentMatches) {
+    if (c.solo || c.botLone || c.signedPair) continue;
+    const d0 = c.g[0].d, pc = d0[8] | 0, mt = d0[2] | 0;
+    if (pc < 2 || isEndlessMt(mt) || new Set(c.g.map((r) => String(r.steamID))).size < 2) continue;
+    const ks = c.g.map((r) => msigKindOf(r, pubTable, allowDevKey));
+    const n = ks.filter((k) => k.use).length;
+    const slot = n === ks.length ? 0 : (n ? 1 : 2);
+    const pair = pc === 2 && MSIG_PAIR_BASES.indexOf(baseMt(mt)) >= 0 && !premadeMaskOf(mt) && !premadeTrioAtOf(mt);
+    (pair ? out.pair : out.multi)[slot]++;
+  }
+  return out;
 }
 // demo channel identity (both playtest/demo twins export DEMO_APPID; kept for channel telemetry)
 const DEMO_APPID = Number(process.env.DEMO_APPID || 0);
@@ -3480,6 +3629,8 @@ function writeRunSummary() {
       '| unsettled records by layout version (O199: attestation / endless tail ints / ledger header) | ' + s('persistPending', '-') + ' |',
       '| solo segments held for an attestation layout not read yet (att-ver; their runs wait with them) | ' + s('attVerHeld', 0) + ' |',
       '| guard match signature blocks on lone bot records settling this run (knife 5.8a): with a block / usable / verified but not trusted / broken or not verifiable / pending (key, version) -- bot matches credited at x1.0' + (MSIG.BOTS ? '' : ' (MSIG_BOTS off: counted only)') + ' | ' + (RUN.msig ? [RUN.msig.block, RUN.msig.ok, RUN.msig.untrusted, RUN.msig.bad, RUN.msig.pending].join(' / ') + ' -- ' + RUN.msig.bots1 : '0 / 0 / 0 / 0 / 0 -- 0') + ' |',
+      '| guard match signature on multiplayer records (knife 5.8b, MSIG_PAIR ' + (MSIG.PAIR || 'off') + '): disputed 1V1 keys with one usable signed side / of them settled by it this run (enforce) / with a broken block on the other side / both sides signed, still disagreeing / pending -- agreeing 1V1 keys signed on both / one / no side -- agreeing keys of 3+ seats, rooms, bot matches signed on all / some / no writer | '
+        + (RUN.msigPair ? [RUN.msigPair.one, RUN.msigPair.moved, RUN.msigPair.oneBad, RUN.msigPair.dual, RUN.msigPair.pending].join(' / ') : '0 / 0 / 0 / 0 / 0') + ' -- ' + (RUN.msigCov ? RUN.msigCov.pair.join(' / ') + ' -- ' + RUN.msigCov.multi.join(' / ') : '0 / 0 / 0 -- 0 / 0 / 0') + ' |',
       '| one-match-at-a-time deferrals (waited past the own floor: < 5 min / < 30 min / < 4 h / 4 h+) | ' + s('writerPaced', 0) + ' (' + (RUN.writerPacedWait || [0, 0, 0, 0]).join(' / ') + ') |',
       '| cron stall before this run (minutes, from cron_pulse; 0 = none) | ' + s('stall', 0) + ' |',
       '| ranked matches the ranked rating turns into / out of a mismatch, quick matches and the repeat-group decay set aside (Q160) | ' + s('heldMismatch', 0) + ' / ' + s('heldMismatchOff', 0) + ' |',
@@ -7936,6 +8087,17 @@ async function main() {
   if (t2acRes.strikes || t2acRes.judged || t2acRes.lone || t2acRes.nocost || t2acRes.nostart || t2acRes.held) console.log('team2 accusations: ' + t2acRes.strikes + ' strikes (' + t2acRes.judged + ' judged as leaver), ' + t2acRes.lone + ' lone, ' + t2acRes.nocost + ' not counted (record only), ' + t2acRes.nostart + ' named by others only (Q69), ' + t2acRes.held + ' deferred');
   RUN.t2ac = t2acRes.strikes + '/' + t2acRes.judged + ((t2acRes.lone || t2acRes.nocost) ? ' (record only: ' + t2acRes.nocost + ' not counted, ' + t2acRes.lone + ' lone)' : '') + (t2acRes.held ? ' (' + t2acRes.held + ' deferred)' : '');
   RUN.unattested = (RUN.unattested | 0) + t2acRes.nostart;   // Q69: the run summary's named-only row counts these too
+  // client knife 5.8b: disputed two-voice 1V1 keys with exactly one usable signed side (MSIG_PAIR); before consistentKeys, so a key
+  //   'enforce' settles never reaches the start verdict's void. Agreeing keys: signature coverage only (both modes)
+  if (MSIG.PAIR) {
+    const msigPub = loadJobPubTable(Date.now()) || {};
+    const spRes = applySignedPair(gr, { mode: MSIG.PAIR, pubTable: msigPub, allowDevKey: sandboxOn(), processed, contested: rcRes.contested, signals, now: Date.now() });
+    if (spRes.dirty) sigDirty = true;
+    for (const sid of spRes.touched) trustTouched.add(sid);
+    RUN.msigPair = spRes;
+    RUN.msigCov = msigCoverage(gr, msigPub, sandboxOn());
+    if (spRes.one || spRes.dual || spRes.pending) console.log('msig pair (' + MSIG.PAIR + '): ' + spRes.one + ' disputed 1V1 with one signed side (' + spRes.would + ' would settle, ' + spRes.moved + ' settling, ' + spRes.insane + ' not sane, ' + spRes.oneBad + ' with a broken block), ' + spRes.dual + ' both signed, ' + spRes.pending + ' pending');
+  }
   const confState = loadConfessions();   // loaded before starts so the orphan verdict can skip confessed keys
   const consistentKeys = new Set(consistentMatches.map(c => c.m));
   // Q294: a key the host's match header holds (sanityHeaderHeld, the settle gate below) never settles -- the start-orphan
@@ -9824,6 +9986,7 @@ async function main() {
   for (const c of fresh) {
     if (scPendingRestore) { scRestore(scPendingRestore); scPendingRestore = null; }
     if (c.solo) { if (await soloSettle(c)) settledSolo++; continue; }
+    if (c.signedPair) console.log('  msig-pair settle ' + c.m + ': the signed table of ' + plog(c.signedPair.a) + ', ' + plog(c.signedPair.o) + ' (' + c.signedPair.why + ') settled at it (MSIG_PAIR=enforce)');
     let g = c.g;
     const matchType = g[0].d[2] | 0;   // 2=ranked; visible LP only moves for ranked (quick = MMR only)
     // Q306: in an endless co-op group, a reason on one record's own fields drops that record (endlessRecordSplit) and flags
@@ -11656,7 +11819,7 @@ module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CLASSIC_OWN
   pruneProcessed, PROCESSED_CAP, PROCESSED_KEEP, PROCESSED_PRUNE_WAIT_MS, PRUNE_NOTE,   // cloud audit Q144 what the job remembers about keys whose records are gone
   RECOVER_FILE, loadRecover, recoverPick, readRecoverRows };   // client knife 5.0i one-shot pool recovery
 Object.assign(module.exports, { KEY_CHANNEL, loadJobPubTable, soloKeyHeld, soloRunHasHeld });   // cloud audit R1-A5-07 per-channel key policy (test/playtest-key-policy.js)
-Object.assign(module.exports, { MSIG, botSignedOf });   // client knife 5.8a: the guard match signature on lone bot records (test/match-sig.js)
+Object.assign(module.exports, { MSIG, botSignedOf, signedPairOf, signedPairSynth, applySignedPair, msigCoverage, dualSignedCount });   // client knife 5.8a / 5.8b: the guard match signature (test/match-sig.js, test/signed-pair-1v1.js)
 Object.assign(module.exports, { flagPlayer, flagsInWindow, stampLegacyFlags, TRUST_F_WINDOW_MS, SIG_FLAG_KEYS_CAP });   // cloud audit Q98 forgery flags age out of the trust tier (test/trust-decay.js)
 Object.assign(module.exports, { endlessHostOnly, SANITY_ENDLESS_HOST_SLUGS });   // cloud audit Q305 endless sanity on host-copied fields flags nobody (test/endless-host-fields.js)
 Object.assign(module.exports, { endlessRecordSplit, endlessRerollCanon, SANITY_ENDLESS_OWN_SLUGS, SANITY_ENDLESS_REC_SLUGS, SANITY_ENDLESS_GROUP_HOST });   // cloud audit Q306 endless: one record's own fields drop that record (test/endless-own-fields.js)
