@@ -176,9 +176,13 @@ console.log('=== source pins: every credit site is followed by its career call; 
   assert('matchmade creditXp -> creditCareerMatch', after('if (xpId) creditXp(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers, today, progFrac, careerDet, spSet,', 'creditCareerMatch(g, matchType, rankOf, xpState, careerTouched)'));
   assert('private -> creditCareerMatch', after('if (xpId) creditXpPrivate(g, rankOf, lvP, xp, changedXp, xpState, today, spSet);', 'creditCareerMatch(g, matchType, rankOf, xpState, careerTouched)'));
   assert('bots -> creditCareerMatch (no ranks)', after('if (xpId) creditXpBot(g, lvB, xp, changedXp, xpState, today, spSet, !!c.botLone);', 'creditCareerMatch(g, matchType, null, xpState, careerTouched)'));
-  const nEndlessXp = src.split('if (xpId) creditXpEndless(').length - 1;
+  // O198 v1 (knife 5.5b-1 S3): the solo lane's reject-window branch pays the segment's XP on purpose WITHOUT a career credit
+  //   (user ruling 0-3: the XP counts, the career W-L does not) -- that one credit is taken out of the count, pinned by its text
+  const WIN_XP = "if (xpId) creditXpEndless(c.g, { startDepth: Math.max(f.startDepth | 0, plan.proven | 0), endDepth: f.endDepth }, xp, changedXp, spSet, classic ? CLASSIC.XP_MUL : 1);   // S3: same credit as a settle";
+  assert('the reject-window XP credit is there once (S3), inside the scInWin branch', src.split(WIN_XP).length === 2 && src.indexOf(WIN_XP) > src.indexOf('if (scInWin) {'));
+  const nEndlessXp = src.split('if (xpId) creditXpEndless(').length - 1 - (src.split(WIN_XP).length - 1);
   const nEndlessCareer = src.split('creditCareerEndless(').length - 2;   // minus the definition
-  eq('every endless XP credit has a career credit', [nEndlessXp, nEndlessCareer], [4, 4]);
+  eq('every endless XP credit has a career credit (the reject-window one aside)', [nEndlessXp, nEndlessCareer], [4, 4]);
   const iEns = src.indexOf('careerEnsureWrites(careerTouched, changedXp, xp)'), iFill = src.indexOf('careerRefilled = fillCareerDetails(changedXp, careerDet, xpState)'), iW = src.indexOf('const wXp = await mapPool(Object.keys(changedXp)');
   assert('same-score rewrites, then refill, then the xp write', iEns > 0 && iFill > iEns && iW > iFill);
   // mutation self-check: drop the private career call -> the pin goes red

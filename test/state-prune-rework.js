@@ -443,14 +443,21 @@ console.log('=== Q144 rework: signed solo segments written back, the remembered-
     const fl = flood('sc'), pad = padProcessed(35, 50);
     const CAP = { PROCESSED_CAP: '60', PROCESSED_KEEP: '40', PROCESSED_PRUNE_WAIT_MS: String(HOUR), COMP_RUN_TTL_MS: String(HOUR), SEEDCAP_REJECT: '1' };
     const sc = (t1) => (f) => Object.assign(f, { SC_STATE_FILE: { suspects: { [v.pid(Q)]: { n: 1, t1 } } } });
+    // O198 v1 (knife 5.5b-1 S3): the window is judged after the solo pacing gate (no segment skips the real-time floor), so
+    //   the first sighting only waits; the segment is discarded (XP kept) on the next run, still inside the window
     const steps = [
       [0, [r0], CAP, sc(nowMin)],
+      [5 * MIN, [r0], CAP, sc(nowMin)],
       [5 * MIN, fl(), CAP, pad], [5 * MIN, fl(), CAP, pad], [HOUR, fl(), CAP, pad], [HOUR, fl(), CAP, pad],
       [3 * HOUR, [r0], CAP, sc(nowMin - 3 * 1440)], [HOUR, [r0], CAP, sc(nowMin - 3 * 1440)],
     ];
-    const rs = timelineMut(steps);
-    if (!brk(rs, steps.length, '[3b] seedcap window')) {
-      T('[3b] seedcap window: inside it the segment is discarded', /inside seedcap reject window -- own settlement discarded/.test(rs[0].out) && !/solo settle /.test(rs[0].out), '');
+    const rs0 = timelineMut(steps);
+    const rs = rs0.slice(1);   // rs[0] = the run that judges it inside the window (the indexes below as before)
+    if (!brk(rs0, steps.length, '[3b] seedcap window')) {
+      T('[3b] seedcap window: the first sighting waits for the pacing floor (judged after it, S3)', /solo-pacing /.test(rs0[0].out) && !/inside seedcap reject window/.test(rs0[0].out), '');
+      T('[3b] seedcap window: inside it the segment is discarded (XP kept)', /inside seedcap reject window -- own settlement discarded except XP/.test(rs[0].out) && !/solo settle /.test(rs[0].out), '');
+      const xpPosts = rs[0].posts.filter((p) => /SetLeaderboardScore/.test(p.url) && /leaderboardid=5(&|$)/.test(p.body) && new RegExp('steamid=' + Q + '(&|$)').test(p.body));
+      T('[3b] seedcap window (S3): the XP of the segment is still written', xpPosts.length === 1, String(xpPosts.length));
       T('[3b] seedcap window: the overflow pushed its key out of the processed list', (rs[4].state.PROCESSED_FILE || []).indexOf(keyOf(w0)) < 0 && ((rs[4].state.SOLO_FILE || {}).done || {})[keyOf(w0)], '');
       const again = [].concat(...rs.slice(5).map((r) => r.out.split('\n').filter((l) => /solo settle /.test(l))));
       T('[3b] seedcap window: written back after the window, it does not settle', again.length === 0 && /processed before \(key/.test(rs[5].out), again.join(' | '));

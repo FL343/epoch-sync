@@ -429,6 +429,21 @@ badCase('[3c] C writes the key twice', 0x10905, () => {}, (h) => [{ sid: C, d: r
   T('[11] settles; A and B get points, C (the winner, in a reject window) gets none', processedOf(r2).has(keyOf(rec(2, h, 0, ROS3, sc))) && scoreWrittenFor(r2, POINTS, A) != null
     && scoreWrittenFor(r2, POINTS, B) != null && scoreWrittenFor(r2, POINTS, C) == null && /seedcap suspect .* inside reject window/.test(r2.out),
     JSON.stringify([A, B, C].map(s => scoreWrittenFor(r2, POINTS, s))) + r2.out.slice(-600));
+  // [11b] O198 v1 (knife 5.5b-1 S3, user ruling 0-3): the same window with C's record clean -- the XP still counts: C's XP row
+  //   is written, his points / CP rows are not, and his ranked points come back to him as a VOID receipt (queued until his
+  //   next points write)
+  const hb = 0x1090F;
+  const recsB = [{ sid: A, d: rec(2, hb, 0, ROS3, sc) }, { sid: B, d: rec(2, hb, 1, ROS3, sc) }, { sid: C, d: rec(2, hb, 2, ROS3, sc) }];
+  const b1 = runCron(boardsWith(recsB), { SC_STATE_FILE: sus }, env);
+  const b2 = runCron(boardsWith(recsB), Object.assign(advance(b1.state, FLOOR + 1000), { SC_STATE_FILE: sus }), env);
+  T('[11b] S3: settles; C (clean record, in the window) gets no points and no CP row', processedOf(b2).has(keyOf(rec(2, hb, 0, ROS3, sc))) && scoreWrittenFor(b2, POINTS, C) == null
+    && scoreWrittenFor(b2, 8, C) == null && scoreWrittenFor(b2, POINTS, A) != null, JSON.stringify([A, B, C].map(s => scoreWrittenFor(b2, POINTS, s))) + b2.out.slice(-600));
+  T('[11b] S3: ... but his XP row is written (like A and B)', scoreWrittenFor(b2, XP, C) != null && scoreWrittenFor(b2, XP, A) != null, 'xp C=' + scoreWrittenFor(b2, XP, C));
+  const pwC = ((b2.state.PENDING_WRITES_FILE || {})[v.pid(C)] || {}).rc || [];
+  T('[11b] S3: C\'s VOID receipt of this match waits for his next points write', pwC.some(x => Array.isArray(x) && (x[0] | 0) === (hb | 0) && ((x[2] | 0) & 32)), JSON.stringify(b2.state.PENDING_WRITES_FILE));
+  const xsC = ((b2.state.XP_FILE || {})[v.pid(C)]) || {};
+  const xsA = ((b2.state.XP_FILE || {})[v.pid(A)]) || {};
+  T('[11b] S3: his XP counters moved (games +1), his career W-L did not (A, outside the window, has a career game)', (xsC.games | 0) === 1 && !(xsC.cw | 0) && !(xsC.cg | 0) && (xsA.cg | 0) === 1, JSON.stringify({ C: xsC, A: xsA }));
 }
 
 // ---- [12] (Q109 review 2) a dropped writer still queues one match at a time ----

@@ -322,9 +322,24 @@ const SIDA = '76561198000000001', SIDB = '76561198000000002', SIDX = '7656119800
   let dm;
   while ((dm = declRe.exec(vjs9))) if (pools.indexOf(dm[1]) < 0) pools.push(dm[1]);
   const notSnapped = pools.filter(p => snap.indexOf(p + ': ' + p + '[sid]') < 0 && snap.indexOf(p + '[sid]') < 0);
-  const notRestored = pools.filter(p => rest.indexOf('scPut(' + p + ', sn.sid') < 0);
-  ok('[9] snapshot/restore cover every per-sid pool declared in the settle scope (' + pools.length + ')', pools.length >= 12 && notSnapped.length === 0 && notRestored.length === 0, 'snap-missing=' + notSnapped.join(',') + ' restore-missing=' + notRestored.join(','));
+  // O198 v1 (knife 5.5b-1 S3, user ruling 0-3): the XP is kept inside the window -- exactly the xp map and its write pool are
+  //   exempt from the restore (a WHITELIST, pinned here); every other per-sid pool must still be put back
+  const XP_EXEMPT = ['xp', 'changedXp'];
+  const restoreGaps = (src) => {
+    const r = src.slice(src.indexOf('const scRestore = '), src.indexOf('let scPendingRestore = null;'));
+    return pools.filter(p => XP_EXEMPT.indexOf(p) < 0 && r.indexOf('scPut(' + p + ', sn.sid') < 0);
+  };
+  const notRestored = restoreGaps(vjs9);
+  ok('[9] snapshot/restore cover every per-sid pool declared in the settle scope (' + pools.length + '), the XP pair exempt', pools.length >= 12 && notSnapped.length === 0 && notRestored.length === 0, 'snap-missing=' + notSnapped.join(',') + ' restore-missing=' + notRestored.join(','));
+  ok('[9] the XP pair is really exempt (not restored) and exactly that pair', XP_EXEMPT.every(p => rest.indexOf('scPut(' + p + ', sn.sid') < 0) && XP_EXEMPT.every(p => pools.indexOf(p) >= 0));
+  // mutation self-check: drop the restore of one non-exempt pool (the points) -> the coverage check reports it
+  const mut9 = vjs9.replace('scPut(lp, sn.sid, sn.lp); ', '');
+  ok('[9] mutation (points no longer restored) is caught by the coverage check', mut9 !== vjs9 && restoreGaps(mut9).indexOf('lp') >= 0);
   ok('[9] snapshot/restore cover the pid-keyed state too (skill + xpState, deep-cloned)', /scCloneOf\(skill\[p\]\)/.test(snap) && /scCloneOf\(xpState\[p\]\)/.test(snap) && /scPut\(skill, p, sn\.skill\)/.test(rest) && /scPut\(xpState, p, sn\.xpState\)/.test(rest));
+  ok('[9] S3: of xpState only the XP counters (games, lastWinDay) are copied back after the restore', /const SC_XP_KEPT = \['games', 'lastWinDay'\];/.test(vjs9) && /scPut\(xpState, p, sn\.xpState\);\s*if \(xsNow\) \{ const xs = xpState\[p\] = xpState\[p\] \|\| \{ lastWinDay: 0, games: 0 \}; for \(const k of SC_XP_KEPT\) if \(xsNow\[k\] !== undefined\) xs\[k\] = xsNow\[k\]; \}/.test(rest));
+  ok('[9] S3: a ranked writer in the window gets a VOID receipt', /if \(pend\.voidMh != null\) noteReceipt\(sn\.sid, pend\.voidMh, 0, RECEIPT_F\.VOID, 0\);/.test(rest) && /voidMh: \(lpId && appliesLp\(matchType\)\) \? \(g\[0\]\.d\[3\] \| 0\) : null/.test(vjs9));
+  const soloBlk = vjs9.slice(vjs9.indexOf('const scInWin = '), vjs9.indexOf('// ---- settle ----', vjs9.indexOf('const scInWin = ')));
+  ok('[9] S3: the solo lane judges the window after its pacing gate and pays XP only', /const reqMs = endlessRequiredMs[\s\S]*solo-pacing[\s\S]*if \(scInWin\) \{[\s\S]*soloAdvance\(soloState, key, f, m, plan, nowMs\);[\s\S]*creditXpEndless\(c\.g,[\s\S]*soloDone\(\);\s*return false;/.test(soloBlk) && !/creditCareerEndless|soloMilestones|cupWeekPut|ratingHistUpsert/.test(soloBlk.slice(soloBlk.indexOf('if (scInWin)'))));
   ok('[9] pending restore flushed at loop top AND after the loop', (vjs9.match(/if \(scPendingRestore\) \{ scRestore\(scPendingRestore\); scPendingRestore = null; \}/g) || []).length === 2);
   ok('[9] run summary reports the discards', /seedcap veto \/ reject-window discards/.test(vjs9));
 }

@@ -9110,11 +9110,21 @@ async function main() {
       careerDet: careerDet[sid], reveal: reveal[sid], receipts: scCloneOf(receipts[sid]) };   // O480: this run's points receipts
   };
   const scPut = (map, key, val) => { if (val === undefined) delete map[key]; else map[key] = val; };
+  // O198 v1 (knife 5.5b-1 S3, user 2026-10-23 ruling 0-3): inside the reject window the XP still counts -- the XP itself
+  //   (xp / changedXp: not restored) and the XP's own counters in xpState (games = the leaver-rate denominator, lastWinDay =
+  //   the daily first win: copied back after the restore, else the next match pays the first-win bonus a second time or
+  //   reads a wrong rate). Everything else stays as it was before the match: rating / points / CP / every endless best / the
+  //   weekly boards / the career W-L and the streak (xpState's other fields, careerDet) / the receipts. "Counts on no board,
+  //   the experience is earned normally." A ranked writer gets a VOID receipt (pend.voidMh): his client takes back the
+  //   optimistic points with the stock "not verified" toast. SC_XP_KEPT names the kept xpState fields (test/seedcap-audit [9]).
+  const SC_XP_KEPT = ['games', 'lastWinDay'];
   const scRestore = (pend) => {
     for (const sn of pend.snaps) {
       const p = pid(sn.sid);
+      const xsNow = xpState[p];
       scPut(skill, p, sn.skill); scPut(xpState, p, sn.xpState);
-      scPut(lp, sn.sid, sn.lp); scPut(xp, sn.sid, sn.xp); scPut(cp, sn.sid, sn.cp);
+      if (xsNow) { const xs = xpState[p] = xpState[p] || { lastWinDay: 0, games: 0 }; for (const k of SC_XP_KEPT) if (xsNow[k] !== undefined) xs[k] = xsNow[k]; }
+      scPut(lp, sn.sid, sn.lp); scPut(cp, sn.sid, sn.cp);   // (xp: kept, S3)
       scPut(endlessBest, sn.sid, sn.endlessBest); scPut(endlessSeasonBest, sn.sid, sn.endlessSeasonBest);
       scPut(endlessTrioBest, sn.sid, sn.endlessTrioBest); scPut(endlessTrioSeasonBest, sn.sid, sn.endlessTrioSeasonBest);
       scPut(endlessQuadBest, sn.sid, sn.endlessQuadBest); scPut(endlessQuadSeasonBest, sn.sid, sn.endlessQuadSeasonBest);
@@ -9123,7 +9133,7 @@ async function main() {
       scPut(classicFam.DUO.best, sn.sid, sn.classicDuoBest); scPut(changedEndlessClassicDuo, sn.sid, sn.changedEndlessClassicDuo);   // N3
       scPut(classicFam.TRIO.best, sn.sid, sn.classicTrioBest); scPut(changedEndlessClassicTrio, sn.sid, sn.changedEndlessClassicTrio);
       scPut(classicFam.QUAD.best, sn.sid, sn.classicQuadBest); scPut(changedEndlessClassicQuad, sn.sid, sn.changedEndlessClassicQuad);
-      scPut(changed, sn.sid, sn.changed); scPut(changedLp, sn.sid, sn.changedLp); scPut(changedXp, sn.sid, sn.changedXp); scPut(changedCp, sn.sid, sn.changedCp);
+      scPut(changed, sn.sid, sn.changed); scPut(changedLp, sn.sid, sn.changedLp); scPut(changedCp, sn.sid, sn.changedCp);   // (changedXp: kept, S3)
       scPut(changedEndless, sn.sid, sn.changedEndless); scPut(changedEndlessSeason, sn.sid, sn.changedEndlessSeason);
       scPut(changedEndlessTrio, sn.sid, sn.changedEndlessTrio); scPut(changedEndlessTrioSeason, sn.sid, sn.changedEndlessTrioSeason);
       scPut(changedEndlessQuad, sn.sid, sn.changedEndlessQuad); scPut(changedEndlessQuadSeason, sn.sid, sn.changedEndlessQuadSeason);
@@ -9137,7 +9147,8 @@ async function main() {
       scPut(compFam.TRIO.weekBest, sn.sid, sn.compTrioWeekBest); scPut(compFam.TRIO.weekTeam, sn.sid, sn.compTrioWeekTeam); scPut(changedCompTrioWeek, sn.sid, sn.changedCompTrioWeek);
       scPut(compFam.QUAD.weekBest, sn.sid, sn.compQuadWeekBest); scPut(compFam.QUAD.weekTeam, sn.sid, sn.compQuadWeekTeam); scPut(changedCompQuadWeek, sn.sid, sn.changedCompQuadWeek);
       scPut(careerDet, sn.sid, sn.careerDet); scPut(reveal, sn.sid, sn.reveal); scPut(receipts, sn.sid, sn.receipts);
-      console.log('  seedcap reject ' + pend.m + ': ' + plog(sn.sid) + ' settlement discarded (state restored)');
+      if (pend.voidMh != null) noteReceipt(sn.sid, pend.voidMh, 0, RECEIPT_F.VOID, 0);   // S3: the ranked writer's client rolls its optimistic points back
+      console.log('  seedcap reject ' + pend.m + ': ' + plog(sn.sid) + ' settlement discarded except XP (state restored)');
     }
   };
   let scPendingRestore = null;
@@ -9360,17 +9371,13 @@ async function main() {
       soloDone();
       return false;
     }
-    if (SEEDCAP_REJECT && seedcap && seedcap.suspects && seedcapRejectActive(seedcap.suspects[p], Math.floor(nowMs / 60000))) {
-      // audit 2026-09-06 B-F9 (user 2026-09-07): inside the reject window the OUTPUTS are discarded (ladder / CP / XP / milestones)
-      //   but the chain keeps walking (run.max / save points), exactly like the team lane restores only the flagged account's
-      //   outputs. The old early return never advanced the chain, so every segment after the window chain-gapped 7 days later
-      //   and the whole run died -- the opposite of O187's "the window passes and the account recovers".
-      RUN.seedcapReject = (RUN.seedcapReject | 0) + 1;
-      soloAdvance(soloState, key, f, m, plan, nowMs);
-      ghWarn('match=' + m + ': solo segment ' + plog(sid) + ' inside seedcap reject window -- own settlement discarded (chain advanced to ' + f.endDepth + ', no ladder/CP/XP)');
-      soloDone();
-      return false;
-    }
+    // audit 2026-09-06 B-F9 (user 2026-09-07): inside the reject window the OUTPUTS are discarded (ladder / CP / milestones /
+    //   career) but the chain keeps walking (run.max / save points), exactly like the team lane restores only the flagged
+    //   account's outputs. The old early return never advanced the chain, so every segment after the window chain-gapped 7 days
+    //   later and the whole run died -- the opposite of O187's "the window passes and the account recovers".
+    // O198 v1 (knife 5.5b-1 S3): judged AFTER the pacing gate below (no segment skips the real-time floor) and the XP is paid
+    //   (user ruling 0-3: the experience counts, no board does).
+    const scInWin = !!(SEEDCAP_REJECT && seedcap && seedcap.suspects && seedcapRejectActive(seedcap.suspects[p], Math.floor(nowMs / 60000)));
     const cas = casual ? casualLadderOf(1) : null;   // O218: the casual solo ladder pair (endless_board_solo + season twin)
     if (!cpId || (classic ? !enClassicSoloId : casual ? (!cas.id || (seasonId >= 1 && !cas.seasonId)) : (!compId || (seasonId >= 1 && !compSeasonId)))) { console.log('  solo ' + m + ': cp/' + (classic ? 'classic-solo' : casual ? 'casual-solo' : 'comp') + '/seasonal board unresolved -- left pending'); return false; }
     // pacing: the segment's own start attestation (single guard attester) or its first sighting
@@ -9387,6 +9394,14 @@ async function main() {
     const reqMs = endlessRequiredMs({ startDepth: f.startDepth, endDepth: f.endDepth }, plan.proven, classic ? CLASSIC.LEVEL_S_SOLO : 0);   // O216: classic 60s levels
     if (nowMs - (pend.t0 || 0) < reqMs) {
       console.log('  solo-pacing ' + m + ': depth ' + f.startDepth + '->' + f.endDepth + ' (proven ' + plan.proven + ') needs ' + Math.round(reqMs / 1000) + 's real time, seen ' + Math.round((nowMs - (pend.t0 || 0)) / 1000) + 's -- deferred');
+      return false;
+    }
+    if (scInWin) {
+      RUN.seedcapReject = (RUN.seedcapReject | 0) + 1;
+      soloAdvance(soloState, key, f, m, plan, nowMs);
+      if (xpId) creditXpEndless(c.g, { startDepth: Math.max(f.startDepth | 0, plan.proven | 0), endDepth: f.endDepth }, xp, changedXp, spSet, classic ? CLASSIC.XP_MUL : 1);   // S3: same credit as a settle
+      ghWarn('match=' + m + ': solo segment ' + plog(sid) + ' inside seedcap reject window -- own settlement discarded except XP (chain advanced to ' + f.endDepth + ', no ladder/CP/career)');
+      soloDone();
       return false;
     }
     // ---- settle ----
@@ -9569,17 +9584,18 @@ async function main() {
     // and their penalties must stand. Nothing is deferred: the match is processed. The snapshot
     // also puts back this match's continue / resume debits (the solo branch returns before them):
     // a suspect may be an auditor false positive, so the match counts as not played rather than
-    // costs-without-gains (architecture decision 10).
+    // costs-without-gains (architecture decision 10). O198 v1 (knife 5.5b-1 S3): the XP and its two counters stay (scRestore),
+    // a ranked writer gets a VOID receipt.
     if (SEEDCAP_REJECT && seedcap && seedcap.suspects) {
       const nowMin = Math.floor(nowMs / 60000);
       const dropSids = writerSids.concat(dropSeat ? [...dropSeat.keys()] : []).filter(sid => seedcapRejectActive(seedcap.suspects[pid(sid)], nowMin));   // Q109: a sanity-dropped writer is still ranked
       if (dropSids.length) {
-        scPendingRestore = { m: c.m, sids: dropSids, snaps: dropSids.map(scSnapshotOf) };
+        scPendingRestore = { m: c.m, sids: dropSids, snaps: dropSids.map(scSnapshotOf), voidMh: (lpId && appliesLp(matchType)) ? (g[0].d[3] | 0) : null };
         RUN.seedcapReject = (RUN.seedcapReject | 0) + dropSids.length;
         for (const sid of dropSids) {
           const su = seedcap.suspects[pid(sid)];
           const left = seedcapRejectUntilMin(su) - nowMin;
-          ghWarn('match=' + c.m + ': seedcap suspect ' + plog(sid) + ' inside reject window (n=' + (su.n | 0) + ', ' + Math.ceil(left / 60) + 'h left) -- own settlement discarded, other seats settle');
+          ghWarn('match=' + c.m + ': seedcap suspect ' + plog(sid) + ' inside reject window (n=' + (su.n | 0) + (su.fp ? ', fp ' + (su.fp | 0) : '') + ', ' + Math.ceil(left / 60) + 'h left) -- own settlement discarded except XP, other seats settle');
         }
       }
     }
