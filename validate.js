@@ -2702,6 +2702,81 @@ function endlessHostOnly(g, flags) {
   }
   return true;
 }
+// Q306 (cloud audit 2026-10, found doing Q305): past Q305's reasons (fields every writer copies from the host), an endless
+//   co-op group's sanity reasons sit on ONE record's own fields -- its duration, its seat, its roster, its disposition on a
+//   checkpoint / save cut, or one account writing the key twice -- and one such record still left the run unsettled with
+//   every writer flagged (endless is never split above): a
+//   modified joiner breaking his own record took the honest teammates' segment and put a forgery flag on each. These are
+//   read off his record, so the job can tell whose they are. endlessRecordSplit(g, gro) drops the records that carry one
+//   (byte-identical copies of one record first count as one: a retry that landed on a second shard) and flags their writer
+//   only for the reasons an honest client cannot write (SANITY_ENDLESS_OWN_SLUGS: a negative duration -- the clock is
+//   monotonic and clamped -- and two different records for one key); a seat index, a roster table and a disposition can
+//   come from the host's frames or an honest host-left (Q109 rework 2 / Q211 / Q305 for the roster), so those drop the
+//   record and flag nobody. The rest settles only when it can stand on its own, else it is held, unsettled and unprocessed
+//   (only the own-field writers flagged):
+//     - two writers are left, or one plus a dropped record at its registered start-roster seat (Q109 rework 2: his record
+//       still agreed to every value of the run);
+//     - every value the settle reads is one the kept records wrote: the agreed tail rides a kept record (zero-tail
+//       abstention), every dropped record names the kept records' roster (Q113: a record with a roster of its own may be the
+//       victim's word on a copied key), a team classic resume carries no tag only a dropped record had (R1-A3-02: the tag
+//       is outside the consistency vector, every writer's tag feeds the chain);
+//     - the kept records pass the whole check (a reason on the agreed fields -- seat count, depths, span, season, continue
+//       nibbles, score, a classic perk tail -- holds the match as Q305 does).
+//   What the job settles is the run's agreed values, the ones the dropped record agreed to as well: what a clean record of
+//   his would have settled, nothing from his own fields. He earns nothing from the segment (best / XP / career / milestones
+//   read the kept records), is no absent seat, and still pays the continues the run names him for: his record's word on his
+//   seat is noted with the others' (noteTestimony, every record of the key), so endlessTestified charges him as before --
+//   breaking one's own record dodges no debit (a record that names another seat or roster holds the match, Q113). A
+//   reason on the agreed fields alone (Q305) or a reason no record carries alone (type, a missing tail, tokens, segment
+//   flags) keeps the whole-group rule. Returns null (no Q306 shape) or { flags, drop: [{ sid, why, recs, own }], keep,
+//   flagSids, dedup, hold }: hold = the reason the rest cannot settle, null = settle with keep (canonical record first).
+const SANITY_ENDLESS_OWN_SLUGS = ['duration', 'dup-writer'];
+const SANITY_ENDLESS_REC_SLUGS = SANITY_RECORD_SLUGS.concat(['disp']);
+const SANITY_ENDLESS_GROUP_HOST = ['pc', 'depth', 'span', 'season', 'cont', 'score', 'classic-perk'];
+const endlessNzTail = (r) => { const tr = endlessTail(r.d); return !!(tr && (tr.startDepth || tr.endDepth || tr.continuesUsed || tr.tokensCp)); };
+function endlessRecordSplit(g, gro) {
+  if (!g || !g.length || baseMt(g[0].d[2] | 0) !== ENDLESS.MT) return null;
+  const flags = sanityFlags(g);
+  if (!flags.length || endlessHostOnly(g, flags)) return null;   // clean, or Q305's hold (nobody flagged)
+  const group = flags.filter((f) => SANITY_ENDLESS_REC_SLUGS.indexOf(f) < 0);
+  if (group.some((f) => SANITY_ENDLESS_GROUP_HOST.indexOf(f) < 0)) return null;   // type / tail / tokens / segment flags: the whole-group rule
+  const pc = g[0].d[8] | 0, t0 = endlessTail(g[0].d), fl = t0 ? (t0.flags | 0) : 0;
+  const cut = !!(fl & (attest.SEG_COMP | attest.SEG_CLASSIC)) && !(fl & attest.SEG_FINAL);   // a checkpoint / save cut: every record says finished
+  const bySid = new Map();
+  for (const r of g) { const s = String(r.steamID); if (!bySid.has(s)) bySid.set(s, []); bySid.get(s).push(r); }
+  const drop = [], keep = [];
+  let dedup = 0;
+  for (const [sid, all] of bySid) {
+    const recs = [], seen = new Set();
+    for (const r of all) { const k = JSON.stringify(r.d); if (seen.has(k)) { dedup++; continue; } seen.add(k); recs.push(r); }
+    const why = recs.length > 1 ? ['dup-writer'] : [];
+    for (const r of recs) {
+      for (const f of recordSanityFlags(r, ENDLESS.MT, pc)) if (why.indexOf(f) < 0) why.push(f);
+      if (cut && (r.dispCode | 0) !== attest.DISP_FINISHED && why.indexOf('disp') < 0) why.push('disp');
+    }
+    if (why.length) drop.push({ sid, why, recs, own: why.some((f) => SANITY_ENDLESS_OWN_SLUGS.indexOf(f) >= 0) });
+    else keep.push(recs[0]);
+  }
+  if (!drop.length && !dedup) return null;   // nothing read off one record: the whole-group rule
+  const res = { flags, drop, keep, flagSids: drop.filter((x) => x.own).map((x) => x.sid), dedup, hold: null };
+  const held = (why) => { res.hold = why; return res; };
+  if (group.length) return held('a reason on the agreed fields too (' + group.join(',') + ')');
+  if (!keep.length) return held('no record left');
+  if (g.some(endlessNzTail) && !keep.some(endlessNzTail)) return held('only a dropped record carries the agreed tail');
+  const ci = keep.findIndex(endlessNzTail);
+  if (ci > 0) keep.unshift(keep.splice(ci, 1)[0]);   // the canonical (non-zero tail) record first, as the grouping leaves it
+  const ro = rosterCanon(rosterConsensus(keep));
+  if (drop.some((x) => x.recs.some((r) => rosterCanon(r.roster) !== ro))) return held('a dropped record names another roster');
+  if ((fl & attest.SEG_CLASSIC) && (fl & attest.SEG_RESUMED)) {
+    const tags = (rs) => resumeTagsOf({ resumeTags: rs.map((r) => { const tr = endlessTail(r.d); return tr ? tr.resumeTag : 0; }) });
+    const kt = tags(keep);
+    if (tags([].concat(...drop.map((x) => x.recs))).some((v) => kt.indexOf(v) < 0)) return held('a dropped record carries a resume tag the others do not');
+  }
+  if (sanityFlags(keep).length) return held('the others do not pass on their own');
+  const witnessN = gro ? drop.filter((x) => x.recs.some((r) => { const s = r.d[5] | 0; return s >= 0 && s < pc && gro[s] === pid(x.sid); })).length : 0;
+  if (keep.length + witnessN < 2) return held('fewer than two writers left');
+  return res;
+}
 // pacing gate: true = this settle group must wait (its start attestation is younger than the
 // physical minimum). No pending entry -> no constraint here; the settle loop never passes one any
 // more (since 2026-10-07 a group with no attestation ever sighted gets a synthetic entry stamped
@@ -3292,6 +3367,7 @@ function writeRunSummary() {
       '| sanity whose every reason is the host\'s seat or table, nobody flagged, not settled (Q292) | ' + s('sanityHost', 0) + ' |',
       '| sanity whose every shared reason is the host\'s match header, only a writer breaking his own fields flagged, not settled (Q294) | ' + s('sanityHeader', 0) + ' |',
       '| endless sanity on fields copied from the host only: held, nobody flagged (Q305) | ' + s('sanityEndHost', 0) + ' |',
+      '| endless sanity on one record only: set aside (its writer flagged only for his own field), the rest settles / held (Q306) | ' + s('sanityEndDrop', 0) + ' / ' + s('sanityEndHeld', 0) + ' |',
       '| starts pending / exit-rate hits | ' + s('pending', 0) + ' / ' + s('convicted', 0) + ' |',
       '| start-orphan seats spared by their own exit note (Q64) | ' + s('exitNoteSpared', 0) + ' |',
       '| keys the host\'s match header held voided at maturity / seats spared there (Q294) | ' + s('headerVoid', 0) + ' / ' + s('headerSpared', 0) + ' |',
@@ -9664,6 +9740,29 @@ async function main() {
     if (c.solo) { if (await soloSettle(c)) settledSolo++; continue; }
     let g = c.g;
     const matchType = g[0].d[2] | 0;   // 2=ranked; visible LP only moves for ranked (quick = MMR only)
+    // Q306: in an endless co-op group, a reason on one record's own fields drops that record (endlessRecordSplit) and flags
+    //   its writer only when an honest client cannot have written it; the rest settles when it stands on its own, else it is
+    //   held.
+    let endDrop = null;
+    const es = endlessRecordSplit(g, seatGateRoster(startsPending[c.m]));
+    if (es) {
+      const who = es.drop.map((x) => plog(x.sid) + '[' + x.why.join(',') + ']' + (x.own ? '' : ' (not his own field: not flagged)')).join(' ')
+        + (es.dedup ? (es.drop.length ? ', ' : '') + es.dedup + ' identical copy(ies) of one record counted once' : '');
+      if (es.flagSids.length && recordFlag(signals, es.flagSids.map((s) => ({ steamID: s })), c.m, nowMs)) sigDirty = true;
+      for (const s of es.flagSids) trustTouched.add(s);
+      const flagWord = es.flagSids.length ? 'only ' + es.flagSids.map(plog).join(' ') + ' flagged' : 'nobody flagged';
+      if (es.hold) {
+        RUN.sanityEndHeld = (RUN.sanityEndHeld | 0) + 1;
+        ghWarn('match=' + c.m + ': endless sanity [' + es.flags.join(',') + '] on ' + who + ' -- ' + flagWord + '; ' + es.hold + ', not settled (Q306)');
+        continue;
+      }
+      RUN.sanityEndDrop = (RUN.sanityEndDrop | 0) + 1;
+      ghWarn('match=' + c.m + ': endless sanity [' + es.flags.join(',') + '] on ' + who + ' -- ' + (es.drop.length ? 'only that record set aside, ' + flagWord + ', the other ' : 'the ')
+        + es.keep.length + ' writer(s) go on to settle' + (es.keep.length < 2 ? ' with a dropped record at its start-roster seat as witness' : '') + ' (Q306)');
+      g = es.keep; endDrop = es.drop;
+      c.void = voidByConsensus(g.map((r) => r.dispCode)).isVoid;
+    }
+    const endDropped = (sid) => !!(endDrop && endDrop.some((x) => x.sid === String(sid)));
     // sanity gate (B5 tier A): a consistent-but-impossible match is flagged, not settled, and NOT
     // marked processed (self-heals if a bound is later loosened). Runs before XP/VOID so garbage
     // never feeds any ledger output or signal stats beyond the flag counter itself.
@@ -9828,6 +9927,7 @@ async function main() {
         const agreedE = pendE.agreed || (pendE.agreed = []);   // writers seen agreeing earlier: a record lost to shard rotation is not a gap
         for (const sid of writerSids) { const h = pid(sid); if (agreedE.indexOf(h) < 0) agreedE.push(h); }
         const absentE = absentRosterSeats(g).filter((x) => agreedE.indexOf(pid(String(x.steamID))) < 0);
+        if (endDrop) for (let i = absentE.length - 1; i >= 0; i--) if (endDropped(absentE[i].steamID)) absentE.splice(i, 1);   // Q306: a dropped record's writer is not absent
         return { absent: absentE, res: absenceHold(absentE, pendE, nowMs, shardsComplete, ABSENT_GRACE_MS) };
       };
       const endlessHeld = (lane, ab) => {
@@ -11454,6 +11554,7 @@ Object.assign(module.exports, { KEY_CHANNEL, loadJobPubTable, soloKeyHeld, soloR
 Object.assign(module.exports, { MSIG, botSignedOf });   // client knife 5.8a: the guard match signature on lone bot records (test/match-sig.js)
 Object.assign(module.exports, { flagPlayer, flagsInWindow, stampLegacyFlags, TRUST_F_WINDOW_MS, SIG_FLAG_KEYS_CAP });   // cloud audit Q98 forgery flags age out of the trust tier (test/trust-decay.js)
 Object.assign(module.exports, { endlessHostOnly, SANITY_ENDLESS_HOST_SLUGS });   // cloud audit Q305 endless sanity on host-copied fields flags nobody (test/endless-host-fields.js)
+Object.assign(module.exports, { endlessRecordSplit, SANITY_ENDLESS_OWN_SLUGS, SANITY_ENDLESS_REC_SLUGS, SANITY_ENDLESS_GROUP_HOST });   // cloud audit Q306 endless: one record's own fields drop that record (test/endless-own-fields.js)
 Object.assign(module.exports, { noteOwnStarts, hasOwnStart, OWN_START_CAP });   // cloud audit Q69 own-record evidence for leaver verdicts
 Object.assign(module.exports, { leaverXpRecordOnlyUntil, LEAVER_XP_RECORD_ONLY, LEAVER_XP_RECORD_ONLY_MAX_MS });   // M194 / W57 demo Next Fest: leaves recorded, XP not discounted
 Object.assign(module.exports, { NL_OPP_CAP, NL_REPEAT });   // cloud audit Q161 named-only losing seats counted on the account

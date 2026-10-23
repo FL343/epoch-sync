@@ -27,7 +27,8 @@
 //       duration breaks its bound is flagged alone
 //   [5] two accounts of one owner disputing friends' rooms / bot matches: nothing paid, nothing to gain
 //   [6] an old key the job before flagged: no flag removed, counted once
-//   [7] a consistent 1V1 whose joiner the host gave an out-of-range seat: dropped, nobody flagged (was: the joiner alone)
+//   [7] a consistent 1V1 whose joiner the host gave an out-of-range seat: dropped, nobody flagged (was: the joiner alone);
+//       the endless run of two goes the Q306 way (its record set aside, the seat not his own field: nobody flagged, not settled)
 //   [8] wiring pins
 // State isolation is structural (every *_FILE var scanned and redirected, cwd = temp dir), like test/seat-gate.js.
 const { spawnSync } = require('child_process');
@@ -189,6 +190,7 @@ const BEFORE = {
     '      if (recordFlag(signals, [r], k, Date.now())) sigDirty = true;\n'],   // Q130: a blank start flags its writer
   host: ['if (!sp.drop.length && sane.every((f) => SANITY_HOST_SLUGS.indexOf(f) >= 0)) {', 'if (false) {'],   // the whole-group sanity rule flags every writer
   drop: ['const sanityDropFlags = (x) => x.why.some((f) => SANITY_HOST_SLUGS.indexOf(f) < 0);', 'const sanityDropFlags = (x) => x.why.some((f) => SANITY_ROSTER_SLUGS.indexOf(f) < 0);'],   // Q109: the seat flags
+  endown: ['    const es = endlessRecordSplit(g, seatGateRoster(startsPending[c.m]));\n', '    const es = null;\n'],   // Q306: an endless group's own-field records were not set aside ahead of the sanity gate
 };
 let mutN = 0;
 function mutant(keys, tag) {
@@ -391,8 +393,10 @@ withMutant(ALL_BEFORE, '[6]', (sc) => {
       mk(1, 0x2971, false), ['drop', 'blank'], [1, 1], /sanity on [^\n]*\[seat\] \(the host's seat or table: not flagged, Q292\)/],
     ['a quick 1V1 with both starts (both blank, Q130 flagged both; the roster contest holds the key until it voids)',
       mk(1, 0x2972, true), ['drop', 'blank'], [1, 1], /start-blank [^\n]*nobody flagged \(the seat table is the host's, Q292\)/],
+    // (Q306 sets an endless record aside on its own seat ahead of the sanity gate, so the run takes its path, not Q292's; the
+    //   job before is the one with neither)
     ['an endless run of two (7): the whole-group sanity rule flagged both',
-      mk(7, 0x2973, true, true), ['host'], [1, 1], /sanity \[seat\] -- the host's seat or table, nobody flagged \(Q292\), not settled/],
+      mk(7, 0x2973, true, true), ['host', 'endown'], [1, 1], /endless sanity \[seat\] on [^\n]*\[seat\] \(not his own field: not flagged\) -- nobody flagged; fewer than two writers left, not settled \(Q306\)/],
     ['a friends\' room (10): Q123 leaves the record out ahead, nobody flagged before or now',
       mk(10, 0x2974, true), ['drop'], [0, 0], /friends' room record\(s\) whose writer is not on his own roster seat -- not counted, nobody flagged \(Q123\)/],
   ];

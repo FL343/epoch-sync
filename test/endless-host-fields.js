@@ -18,9 +18,9 @@
 //   [8] team classic segment, a perk build: held, nobody flagged
 //   [9] casual trio, the seat table names one account twice (dup-sid): held, nobody flagged (the Q292 seat-or-table branch,
 //       landed ahead of this one, takes [dup-sid] alone first)
-//   [10] a writer's own reason keeps the whole-group flag: tokens, a negative duration, a host reason plus a negative
-//        duration; a negative duration hidden behind a roster reason (sanityFlags stops at the first record reason) is the
-//        Q292 branch's (landed ahead of this one: held, nobody flagged; Q306 sets that writer's record aside first)
+//   [10] tokens keep the whole-group flag; a writer's own reason flags that writer only (Q306, test/endless-own-fields.js):
+//        a negative duration, a host reason plus a negative duration, a negative duration hidden behind a roster reason
+//        (sanityFlags stops at the first record reason) -- each held, only B flagged
 //   [11] a clean duo still settles (both credited, nobody flagged); the bad group settles once its record is clean
 //   [12] the run summary counts the held groups
 //   [13] wiring pin + mutation self-check: the Q305 branch removed -> [2] flags both writers again
@@ -228,10 +228,18 @@ heldCase('[9] trio table [A, B, A], A and B write', 0x305D, [A, B, A], CASUAL, [
 // ---- [10] a writer's own reason keeps the whole-group flag ----
 console.log('-- [10] a writer\'s own reason --');
 flaggedCase('[10] tokens', 0x3060, DUO, [0, 6, 0, 1]);
-flaggedCase('[10] B\'s duration negative', 0x3061, DUO, CASUAL, null, { [B]: { dur: -1 } });
-flaggedCase('[10] season 4096 + B\'s duration negative', 0x3062, DUO, [0, 6, 0, 0, 4096, 0], null, { [B]: { dur: -1 } });
-// (sanityFlags stops at the roster reason, so the landed Q292 branch takes the group before the whole-group rule: nobody flagged)
-heldCase('[10] B\'s negative duration behind the roster reason', 0x3063, [A, B, A], CASUAL, ['dup-sid'], DUO, { [B]: { dur: -1 } }, null, 'Q292');
+// Q306: the writer's own reason no longer reaches the whole-group flag -- held, only B flagged, the Q306 line says why
+function ownCase(tag, hash, roster, tail, why, writers, o) {
+  const m = hash + '_5_7', ws = writers || roster;
+  const r = runCron(world(rowsOf(hash, roster, tail, ws, o)), attested(hash));
+  const ln = (r.out.match(new RegExp('::warning::match=' + m + ': endless sanity \\[[^\\]]*\\][^\\n]*\\(Q306\\)')) || [''])[0];
+  T(tag + ': held, only B flagged (Q306)', r.code === 0 && !processedOf(r).has(m) && writes(r, BOARD.progress).length === 0 && flagsOf(r, A) === 0 && flagsOf(r, B) === 1 &&
+    ln.indexOf(why + ', not settled (Q306)') >= 0 && !flagLine(r, m) && !heldLine(r, m), 'f ' + ws.map((s) => flagsOf(r, s)).join('/') + ' ' + (ln || flagLine(r, m) || heldLine(r, m) || r.out.slice(-400)));
+  return r;
+}
+ownCase('[10] B\'s duration negative', 0x3061, DUO, CASUAL, 'fewer than two writers left', null, { [B]: { dur: -1 } });
+ownCase('[10] season 4096 + B\'s duration negative', 0x3062, DUO, [0, 6, 0, 0, 4096, 0], 'a reason on the agreed fields too (season)', null, { [B]: { dur: -1 } });
+ownCase('[10] B\'s negative duration behind the roster reason', 0x3063, [A, B, A], CASUAL, 'no record left', DUO, { [B]: { dur: -1 } });
 
 // ---- [11] a clean group settles; the held group settles once clean ----
 console.log('-- [11] clean groups --');
