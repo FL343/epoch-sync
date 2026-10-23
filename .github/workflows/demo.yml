@@ -79,6 +79,8 @@ jobs:
           SC_STATE_FILE: demo-seedcap.json
           SEEDCAP_ENFORCE: '1'
           SEEDCAP_REJECT: '1'
+          # O198 v1 shadow pool: the reject-window bit on trust_tier rows; '0' clears every bit next run (remote off switch)
+          SHADOW_POOL: '1'
           # O198 v1 trust ledger (knife 5.5b-1): this job writes the channel's trust file; the sanctions twin's file is a
           # read-only consult (its event queue), like the seedcap file above
           TRUST_FILE: demo-trust.json

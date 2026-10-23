@@ -3025,7 +3025,8 @@ function trustTierOf(f, vur, hd) {
 // trust-relevant signals. Union both so decayed players get re-evaluated (and deleted
 // at 0) without any identity leaving the board itself.
 // opt (O198 v1, knife 5.5b-1; optional): onComp(sid, {f, vur, hd}) sees every judged account's inputs (the trust ledger
-//   records an rp / hd rise from them)
+//   records an rp / hd rise from them); rejOf(sid) -> true = the account sits in an open seedcap reject window (S4: the
+//   row's score carries TRUST_REJ_BIT; `tier` of a write is the full row score)
 function trustPlan(s, existing, touched, now, opt) {
   const writes = [], deletes = [];
   const all = new Set([...Object.keys(existing || {}), ...touched]);
@@ -3035,9 +3036,12 @@ function trustPlan(s, existing, touched, now, opt) {
     const comps = { f: flagsInWindow((s.players || {})[p], now), vur: verifiedUniqueReporters(s, sid, idx), hd: hostDissentCount((s.t2lh || {})[p], now == null ? Date.now() : now) };
     if (opt && opt.onComp) opt.onComp(sid, comps);
     const tier = trustTierOf(comps.f, comps.vur, comps.hd);
+    // O198 v1 (S4): the shadow-pool bit rides the same row (score = tier | TRUST_REJ_BIT); a row lives while either is set
+    const rej = !!(opt && opt.rejOf && opt.rejOf(sid));
+    const score = trustLedger.tierScore(tier, rej);
     const cur = (existing || {})[sid];
-    if (tier > 0 && tier !== (cur | 0)) writes.push({ sid, tier });
-    else if (tier === 0 && cur != null) deletes.push(sid);
+    if (score > 0 && score !== (cur | 0)) writes.push(rej ? { sid, tier: score, rej: true } : { sid, tier: score });
+    else if (score === 0 && cur != null) deletes.push(sid);
   }
   return { writes, deletes };
 }
@@ -3194,6 +3198,7 @@ function writeRunSummary() {
       '| gamble-frame refusals naming the host (Q61): strikes, only he flagged / of them judged, record only / held for a seat with no record / named, not a strike, left to the flag rules below | ' + s('gtac', '0 / 0 / 0 / 0') + ' |',
       '| reports seen / counted | ' + s('repSeen', 0) + ' / ' + s('repCounted', 0) + ' |',
       '| trust writes / deletes | ' + s('trustW', 0) + ' / ' + s('trustD', 0) + ' |',
+      '| shadow pool (reject-window bit on trust_tier) rows / suspects not nameable this run | ' + s('shadow', 0) + ' / ' + s('shadowUnnamed', 0) + ' |',
       '| trust ledger events taken (seedcap / sanctions / flags) / mirror rows written | ' + s('trustLedger', '0/0/0') + ' / ' + s('trustMirror', 0) + ' |',
       '| endless rating rows written / deleted / tier cuts (O103) | ' + s('ratingW', 0) + ' / ' + s('ratingD', 0) + ' / ' + s('tiercut', '-') + ' |',
       '| Gold Rush Cup (O180): settled / honor rows written / deleted / carrier | ' + s('cup', '-') + ' / ' + s('cupHonorW', 0) + ' / ' + s('cupHonorD', 0) + ' / ' + s('cupCarrier', '-') + ' |',
@@ -3404,6 +3409,12 @@ function saveLeavers(s) { try { writeStateFile(LEAVERS_FILE, JSON.stringify(s, n
 const SC_STATE_FILE = process.env.SC_STATE_FILE || 'seedcap.json';
 const SEEDCAP_ENFORCE = process.env.SEEDCAP_ENFORCE === '1';
 const SEEDCAP_REJECT = process.env.SEEDCAP_REJECT === '1';
+// O198 v1 shadow pool (knife 5.5b-1 S4): an account inside an open seedcap reject window carries TRUST_REJ_BIT (8) on its
+//   trust_tier row (score = tier | 8); the client matchmaker (knife 5.5b-2) then pairs it only with others carrying the bit.
+//   SHADOW_POOL = the remote off switch (no game update needed): '0' clears every bit on the next run, the clients' 10-minute
+//   cache brings everybody back to the main pool. Default on; the bit is only ever set while SEEDCAP_REJECT judges windows.
+const SHADOW_POOL = process.env.SHADOW_POOL !== '0';
+const TRUST_REJ_BIT = trustLedger.TRUST_REJ_BIT;   // lockstep: the client repo's matchmaker boundary test names it
 // The refusal lever is a WINDOW, not a permanent lock (2026-09-05). suspects[pid].n (cumulative
 // over-cap convictions, seedcap.js) picks the window that starts at the LATEST conviction (t1,
 // minutes since epoch): 1 -> 24h, 2 -> 3 days, 3 -> 7 days, 4+ -> 14 days, hard cap (never
@@ -7997,8 +8008,8 @@ async function main() {
   //   sanctions events) arrive with or without settles. Begin = load trust.json + take the queues + this run's new flags;
   //   end = size fuse + the mirror board rows that are behind + save. The board half below feeds it the rp / hd rises.
   const trustLedgerBegin = () => {
-    const led = { L: loadTrustLedger(), dirty: false, took: { seedcap: 0, sanctions: 0, flags: 0 }, boardSid: new Map() };
-    for (const [name, st] of [['seedcap', loadSeedcap()], ['sanctions', loadSanctionsState()]]) {
+    const led = { L: loadTrustLedger(), dirty: false, took: { seedcap: 0, sanctions: 0, flags: 0 }, boardSid: new Map(), sc: loadSeedcap() };
+    for (const [name, st] of [['seedcap', led.sc], ['sanctions', loadSanctionsState()]]) {
       if (!st || !Array.isArray(st.events)) continue;
       const q = trustLedger.takeQueue(led.L, name, st.events);
       if (q.changed) led.dirty = true;
@@ -8052,12 +8063,26 @@ async function main() {
       const tb = await readBoardAll(tLb.id || tLb.ID, 'trust board');
       for (const e of tb.ents) { existing[String(e.steamID)] = e.score | 0; if (led) led.boardSid.set(pid(String(e.steamID)), String(e.steamID)); }
       const tLedT = Math.floor(nowMs / 60000);
-      const plan = trustPlan(signals, existing, trustTouched, nowMs, {
+      // O198 v1 (S4): the shadow-pool bit. The window is the seedcap reject window, judged by its effective count (n - fp);
+      //   only while SEEDCAP_REJECT judges windows and the SHADOW_POOL switch is on. A suspect the run can name (a record /
+      //   start of his read this run, a flag of this run, his row on this board) joins the judged set; a row already carrying
+      //   the bit is judged anyway (existing) -- the bit clears the run his window closes.
+      const scSus = (SEEDCAP_REJECT && SHADOW_POOL && led && led.sc && led.sc.suspects) || null;
+      const rejOf = (sid) => !!(scSus && seedcapRejectActive(scSus[pid(sid)], tLedT));
+      const judged = new Set(trustTouched);
+      if (scSus) for (const p of Object.keys(scSus)) {
+        if (!seedcapRejectActive(scSus[p], tLedT)) continue;
+        const sid = TRUST_RUN_SID.get(p) || sidByPid.get(p) || (led && led.boardSid.get(p)) || null;
+        if (sid) judged.add(String(sid)); else RUN.shadowUnnamed = (RUN.shadowUnnamed | 0) + 1;
+      }
+      const plan = trustPlan(signals, existing, judged, nowMs, {
         onComp: (sid, comps) => { if (led && trustLedger.noteLevels(led.L, pid(sid), tLedT, comps, TRUST_T)) { led.dirty = true; TRUST_RUN_SID.set(pid(sid), sid); } },
+        rejOf,
       });
+      RUN.shadow = plan.writes.filter((w) => w.rej).length + Object.keys(existing).filter((sid) => (existing[sid] & TRUST_REJ_BIT) && !plan.deletes.includes(sid) && !plan.writes.some((w) => w.sid === sid)).length;
       RUN.trustW = plan.writes.length; RUN.trustD = plan.deletes.length;
       if (!plan.writes.length && !plan.deletes.length) return;
-      console.log('trust: ' + plan.writes.length + ' tier writes [' + plan.writes.map(w => plog(w.sid) + '=' + w.tier).join(' ') + '], ' +
+      console.log('trust: ' + plan.writes.length + ' tier writes [' + plan.writes.map(w => plog(w.sid) + '=' + w.tier + (w.rej ? ' (shadow pool)' : '')).join(' ') + '], ' +
                   plan.deletes.length + ' decayed deletes [' + plan.deletes.map(plog).join(' ') + ']');
       if (!APPLY_MMR) { console.log('trust: dry-run, board untouched'); return; }
       const tId = tLb.id || tLb.ID;
@@ -11216,7 +11241,7 @@ async function main() {
 if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
-module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CLASSIC_OWNERS: classicOwners.CLASSIC, CLASSIC_FILE, CHAT_MUTE: chatMute.CHAT_MUTE, CHAT_MUTE_FILE, CHAT_MUTE_LB, CHAT_REPORT_LB, isVoidDisp, voidByConsensus, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, RS_SOLO_VS_TRIO, RS_TRIO_WIN, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, DISPUTE_FLOOR, disputeFloorOf, disputeFloorAdmit, disputeFloorXp, CONSOLE_OWED, owedTag, owedItem, owedItemXp, owedRefund, owedUnsent, consoleOwedTake, consoleOwedPlan, consoleOwedRebase, CONFESS_MAGIC, NOTE_MAGIC, NOTE_DISP, reconcileConfessions, SANITY, sanityFlags, sanitySplit, recordSanityFlags, SANITY_RECORD_SLUGS, SANITY_ROSTER_SLUGS, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, rekeyReports, repKeysReady, REP_KEYS, REP_KEYS_VER, CHAT_KEYS, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, trustIndex, TRUST_T, TRUST_LB, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan, postForm, postFormDetails, findOrCreateBoard, isTestBoardName, sandboxOn, ghWarn, ghErr, PT_MODE, PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, ACTIVE_MATCH_LB, ptSeedCp, ptBoardPlan, PRIVATE_XP, isPrivateMt, privateProgressOf, creditXpPrivate, BOT_XP, isBotMt, botTierOf, botTierMult, botSeatSplit, botRanksOf, botRankEffOf, botXpGain, botProgressOf, creditXpBot, DEMO_APPID, ENDLESS_XP, computeXpEndless, creditXpEndless, CAMPAIGN_LB, SEEDCAP_REJECT_LADDER_MIN, seedcapRejectWindowMin, seedcapRejectUntilMin, seedcapRejectActive, seedcapNEff,
+module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CLASSIC_OWNERS: classicOwners.CLASSIC, CLASSIC_FILE, CHAT_MUTE: chatMute.CHAT_MUTE, CHAT_MUTE_FILE, CHAT_MUTE_LB, CHAT_REPORT_LB, isVoidDisp, voidByConsensus, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, RS_SOLO_VS_TRIO, RS_TRIO_WIN, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, DISPUTE_FLOOR, disputeFloorOf, disputeFloorAdmit, disputeFloorXp, CONSOLE_OWED, owedTag, owedItem, owedItemXp, owedRefund, owedUnsent, consoleOwedTake, consoleOwedPlan, consoleOwedRebase, CONFESS_MAGIC, NOTE_MAGIC, NOTE_DISP, reconcileConfessions, SANITY, sanityFlags, sanitySplit, recordSanityFlags, SANITY_RECORD_SLUGS, SANITY_ROSTER_SLUGS, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, rekeyReports, repKeysReady, REP_KEYS, REP_KEYS_VER, CHAT_KEYS, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, trustIndex, TRUST_T, TRUST_LB, TRUST_REJ_BIT, SHADOW_POOL, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan, postForm, postFormDetails, findOrCreateBoard, isTestBoardName, sandboxOn, ghWarn, ghErr, PT_MODE, PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, ACTIVE_MATCH_LB, ptSeedCp, ptBoardPlan, PRIVATE_XP, isPrivateMt, privateProgressOf, creditXpPrivate, BOT_XP, isBotMt, botTierOf, botTierMult, botSeatSplit, botRanksOf, botRankEffOf, botXpGain, botProgressOf, creditXpBot, DEMO_APPID, ENDLESS_XP, computeXpEndless, creditXpEndless, CAMPAIGN_LB, SEEDCAP_REJECT_LADDER_MIN, seedcapRejectWindowMin, seedcapRejectUntilMin, seedcapRejectActive, seedcapNEff,
   ENDLESS_COMP_LB, SAVE_BOX_LB, SOLO_FILE, COMP, soloSanity, soloChainPlan, rerollChain, soloMilestones, soloAdvance, soloRunKey, soloStartAttested, loadSolo, saveSolo, segOrderOf, segStartOf, freshOrder, freshOrderPaced, writerReadyAt, writerClaim,
   ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, SAVE_BOX_LB_DUO, SAVE_BOX_LB_TRIO, teamRunKey, soloMsSlot, groupRecords,
   ENDLESS_COMP_LB_QUAD, SAVE_BOX_LB_QUAD, ENDLESS_LB_QUAD, ENDLESS_MAX_PC, compFamKeyOf,   // client knife 3.7a (O178 four seats)

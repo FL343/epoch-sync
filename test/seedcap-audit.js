@@ -241,9 +241,12 @@ const SIDA = '76561198000000001', SIDB = '76561198000000002', SIDX = '7656119800
   ok('[7] playtest reconcile ENFORCE armed (2026-09-01; flipping back is a deliberate act)', /SEEDCAP_ENFORCE: '1'/.test(ptyml));
   ok('[7] playtest REJECT armed (2026-09-18, after the clean 2-week enforce soak; flipping back is a deliberate act)', /SEEDCAP_REJECT: '1'/.test(ptyml));
   ok('[7] demo REJECT armed with its twin', /SEEDCAP_REJECT: '1'/.test(fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'demo.yml'), 'utf8')));
-  ok('[7] main-app REJECT still off (arms in the EA pre-launch batch with ENFORCE)', !/SEEDCAP_REJECT: '1'/.test(fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'validate.yml'), 'utf8')));
+  // knife 5.5b-1 S4 (user ruling 2026-10-23): the main app takes the playtest / demo stance three weeks before EA; flipping
+  //   back is a deliberate act (and channels.json ea.seedcapEnforce in the client repo moves with it)
   const mainyml = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'validate.yml'), 'utf8');
-  ok('[7] main-app reconcile still observe-only (flips in the EA pre-launch batch)', /SEEDCAP_ENFORCE: '0'/.test(mainyml));
+  ok('[7] main-app REJECT armed (2026-10-23, knife 5.5b-1)', /SEEDCAP_REJECT: '1'/.test(mainyml));
+  ok('[7] main-app reconcile ENFORCE armed (2026-10-23, knife 5.5b-1)', /SEEDCAP_ENFORCE: '1'/.test(mainyml) && !/SEEDCAP_ENFORCE: '0'/.test(mainyml));
+  ok('[7] the shadow-pool switch is on, on every reconcile job (O198 v1)', [mainyml, ptyml, fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'demo.yml'), 'utf8')].every((y) => /SHADOW_POOL: '1'/.test(y)));
   ok('[7] state stays ascii-escaped (public-repo discipline)', /\\\\u0080-\\\\uffff|u0080-/.test(scjs.replace(/\n/g, ' ')) || /charCodeAt\(0\)\.toString\(16\)/.test(scjs));
 }
 
@@ -277,7 +280,7 @@ const SIDA = '76561198000000001', SIDB = '76561198000000002', SIDX = '7656119800
   ok('[8] growth past watermark -> mail again', sc.mailDecision(0, sc.SC_MAIL_SUS_MIN + 1, d1.mailedSus).send === true);
   const scjs2 = fs.readFileSync(path.join(__dirname, '..', 'seedcap.js'), 'utf8');
   ok('[8] unconfigured mail returns false BEFORE any fetch (watermark stays put)', /if \(!to \|\| !apiKey\) return false/.test(scjs2));
-  ok('[8] watermark advances only on a delivered mail', /md\.send && await sendAlertMail[\s\S]{0,200}st\.mailSus = md\.mailedSus/.test(scjs2));
+  ok('[8] watermark advances only on a delivered mail', /md\.send && await sendAlertMail[\s\S]{0,300}st\.mailSus = md\.mailedSus/.test(scjs2));   // (O198 S2 / O285: the call carries the core / reversal / observed lines)
   // comments and the mail-body advice string may NAME the switches; code must never READ them
   ok('[8] offense write is unconditional on the enforce switches (analysis record from observation on)',
     scjs2.indexOf('process.env.SEEDCAP_ENFORCE') < 0 && scjs2.indexOf('process.env.SEEDCAP_REJECT') < 0);
@@ -472,7 +475,7 @@ const SIDA = '76561198000000001', SIDB = '76561198000000002', SIDX = '7656119800
   ok('[14] coreForBuildNum: registered package -> its core; unknown / pre-core package -> null', sc.coreForBuildNum(live, 'demo', 2026093001) === 'bbbbbbbbbbbb' && sc.coreForBuildNum(live, 'demo', 2026090703) === 'aaaaaaaaaaaa' && sc.coreForBuildNum(live, 'demo', 2026070100) === null && sc.coreForBuildNum(live, 'demo', 1) === null && sc.coreForBuildNum(live, 'nope', 2026093001) === null && sc.coreForBuildNum(null, 'demo', 2026093001) === null);
   const src = require('fs').readFileSync(path.join(__dirname, '..', 'seedcap.js'), 'utf8');
   ok('[14] auditPending routes solo records to the core of the package that signed them (keyId -> live window -> disk), exact verdict replaces window/overlap', /const c = coreForBuildNum\(live, channel, x\.keyId\);/.test(src) && /res\.map\[k\] = Object\.assign\(\{\}, r3\.map\[k\], \{ via: 'exact:' \+ ex\.label \}\)/.test(src) && /if \(!\(x\.keyId > 0\) \|\| !live \|\| !channel\) return;/.test(src));
-  ok('[14] main(): readGroups -> takeSkips(pickAuditable) -> auditPending -> applyAudit (shared with tools/seedcap-reaudit.js)', /const picked = takeSkips\(st, pickAuditable\(st, groups\), nowMin\(\)\);/.test(src) && /audited = auditPending\(picked\.pending, \{ cores, live: cf\.live, channel: SEEDCAP_CHANNEL, distDir: SEEDCAP_DIST_DIR \}\);/.test(src) && /stats = applyAudit\(st, audited\.pending, audited\.map, processed, nowMin\(\), \{ primary: primaryHash \}\);/.test(src));
+  ok('[14] main(): readGroups -> takeSkips(pickAuditable) -> auditPending -> applyAudit (shared with tools/seedcap-reaudit.js)', /const picked = takeSkips\(st, pickAuditable\(st, groups\), nowMin\(\)\);/.test(src) && /audited = auditPending\(picked\.pending, \{ cores, live: cf\.live, channel: SEEDCAP_CHANNEL, distDir: SEEDCAP_DIST_DIR \}\);/.test(src) && /stats = applyAudit\(st, audited\.pending, audited\.map, processed, nowMin\(\), \{ primary: primaryHash, obsOf: observationOf\(st, cf\.live, SEEDCAP_CHANNEL, nowMin\(\)\) \}\);/.test(src));
   ok('[14] reaudit tool exists, is read-only (no saveState / writeOffense / sendAlertMail) and shares the audit routine', (() => { let t = ''; try { t = require('fs').readFileSync(path.join(__dirname, '..', 'tools', 'seedcap-reaudit.js'), 'utf8'); } catch (e) { return false; } return /sc\.readGroups\(\)/.test(t) && /sc\.auditPending\(/.test(t) && /sc\.applyAudit\(/.test(t) && !/saveState\(/.test(t) && !/writeOffense\(/.test(t) && !/sendAlertMail\(/.test(t); })());
 }
 // ---- [15] debt-pact cash replay + fee= / rv= tokens (client knife 5.10b) ----

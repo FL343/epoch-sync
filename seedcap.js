@@ -126,6 +126,14 @@ const CORE_HOURS_KEEP = 7 * 24;
 const REPLAY_DAYS = 14;
 const REPLAY_MAX = Math.max(1, Number(process.env.SC_REPLAY_MAX || 100));
 const CONVICTION_KEEP = 8;   // su.cv / su.fpm: the latest convictions [m, t] and the reversed match keys
+// O285 (1) observation window (knife 5.5b-1 S4, user 2026-10-23): a world core is new for SC_OBS_H hours after it first went
+//   live in this channel (the earliest live.json window naming it, else the first run that filed a verdict under it), or until
+//   SC_OBS_N honest audits ran on it, whichever comes first. Inside it an over-cap group is still VETOED (it settles for
+//   nobody: no one gains), but nobody is convicted -- no suspect count, no reject window, no shadow-pool bit, no offense row,
+//   no endless correction (a new core's cap bug would otherwise land on honest players); the ledger gets an observation
+//   record (sev 0) and the mail goes out at once (once per core per day). Past it the core enforces with no ops action.
+const SC_OBS_H = Math.max(0, Number(process.env.SC_OBS_H != null ? process.env.SC_OBS_H : 72));
+const SC_OBS_N = Math.max(0, Number(process.env.SC_OBS_N != null ? process.env.SC_OBS_N : 200));
 
 const nowMin = () => Math.floor(Date.now() / 60000);
 
@@ -486,6 +494,35 @@ function coreAlerts(st, tNow) {
   }
   return out;
 }
+// O285 (1): first minute a core was live in this channel -- the earliest live.json window naming it, else the first verdict
+//   filed under it (st.cores[k].t0); null = never seen
+function coreFirstSeen(st, live, channel, k) {
+  let t = null;
+  for (const w of ((live && live.channels && live.channels[channel]) || [])) {
+    if (!w || String(w.core) !== String(k)) continue;
+    const ms = Date.parse(w.liveAt);
+    if (Number.isFinite(ms)) { const m = Math.floor(ms / 60000); if (t == null || m < t) t = m; }
+  }
+  const c = st.cores && st.cores[k];
+  if (c && c.t0 > 0 && (t == null || (c.t0 | 0) < t)) t = c.t0 | 0;
+  return t;
+}
+// the observation judge of one run (pure): snapshot of each core's honest audits BEFORE this run's verdicts are filed
+function observationOf(st, live, channel, tNow) {
+  const ok0 = {};
+  for (const k of Object.keys(st.cores || {})) ok0[k] = Math.max(0, (st.cores[k].n | 0) - (st.cores[k].o | 0));
+  return (k) => {
+    const t0 = coreFirstSeen(st, live, channel, k);
+    const age = t0 == null ? 0 : (tNow | 0) - t0;
+    return age < SC_OBS_H * 60 && (ok0[k] | 0) < SC_OBS_N;
+  };
+}
+// observed over-cap groups of this run per core, not mailed today (pure)
+function observedAlerts(st, flags, tNow) {
+  const by = {}, day = Math.floor((tNow | 0) / 1440);
+  for (const f of (flags || [])) if (f.obs) by[f.k] = (by[f.k] | 0) + 1;
+  return Object.keys(by).filter((k) => !(st.cores && st.cores[k] && (st.cores[k].mo | 0) === day)).map((k) => ({ k, n: by[k] }));
+}
 // the latest conviction still standing (not reversed) -> su.t1e; none standing in the kept list -> t0 (the earliest: a shorter
 //   window is the safe side, architecture decision 10)
 function standingT1(su) {
@@ -532,9 +569,16 @@ function applyAudit(st, pending, cliMap, processed, t, opt) {
       //   CONVICTION (suspect ledger -> reject window, offense board) only on a self-written seat (selfSeatsOf)
       st.veto[x.m] = { t, seats: overSeats };
       const selfSet = new Set(x.self || []);
-      const blamed = overSeats.filter(s2 => selfSet.has(s2) && x.roster[s2]);
-      const unblamed = overSeats.filter(s2 => blamed.indexOf(s2) < 0);
+      const selfOver = overSeats.filter(s2 => selfSet.has(s2) && x.roster[s2]);
+      // O285 (1): a core inside its observation window convicts nobody (the veto above stands)
+      const obs = !!(opt && opt.obsOf && opt.obsOf(k));
+      const blamed = obs ? [] : selfOver;
+      const unblamed = overSeats.filter(s2 => selfOver.indexOf(s2) < 0);
       const nOf = {};
+      if (obs) for (const seat of selfOver) {
+        const sc0 = x.scores[seat] | 0;
+        trustLedger.queuePush(st, { t, src: 'sc', p: v.pid(x.roster[seat]), sev: 0, m: x.m, ctx: { k, obs: 1, cap: capEff | 0, s: sc0, over: sc0 - (capEff | 0), mt: x.mt | 0, pc: x.pc | 0, w: x.w | 0 } });
+      }
       for (const seat of blamed) {
         const sid = x.roster[seat];
         const p2 = v.pid(sid);
@@ -552,14 +596,16 @@ function applyAudit(st, pending, cliMap, processed, t, opt) {
         if (x.tail) { ctx.d0 = x.tail.startDepth | 0; ctx.d1 = x.tail.endDepth | 0; }
         trustLedger.queuePush(st, { t, src: 'sc', p: p2, sev: 3, m: x.m, ctx });   // O198 v1
       }
-      if (processed.has(x.m) && x.p.entry === 'endless' && !st.corrections.some(c => c.m === x.m)) {
+      if (!obs && processed.has(x.m) && x.p.entry === 'endless' && !st.corrections.some(c => c.m === x.m)) {   // (O285 (1): no correction while observed)
         st.corrections.push({ id: 'sc-' + x.m, m: x.m, seats: overSeats, t });
       }
       flags.push({
-        m: x.m, t, runSeed: x.runSeed | 0, mt: x.mt | 0, cap: capEff | 0,
+        m: x.m, t, runSeed: x.runSeed | 0, mt: x.mt | 0, cap: capEff | 0, k, obs,
+        observed: obs ? selfOver.map(s2 => ({ seat: s2, score: x.scores[s2] | 0 })) : [],
         offenders: blamed.map(s2 => ({ seat: s2, sid: String(x.roster[s2]), score: x.scores[s2] | 0, n: nOf[s2] | 0, ne: v.seedcapNEff(st.suspects[v.pid(x.roster[s2])]) })),
         unattributed: unblamed.map(s2 => ({ seat: s2, score: x.scores[s2] | 0 })),
       });
+      if (obs) console.log('seedcap: core ' + k + ' is inside its observation window (first ' + SC_OBS_H + ' h / ' + SC_OBS_N + ' honest audits) -- m=' + x.m + ' vetoed, nobody convicted (' + selfOver.length + ' self-written seat(s) recorded only)');
       // pids only in logs -- never sids (public run logs)
       console.log('::warning::seedcap OVER-CAP m=' + x.m + ' cap=' + capEff + ' scores=' + x.scores.join(',') +
         ' seats=' + overSeats.join(',') + ' pids=' + blamed.map(s2 => v.pid(x.roster[s2]).slice(0, 8)).join(',') +
@@ -689,8 +735,9 @@ function alertMailText(reasons, flags, totals, windows, more) {
   const lines = ['seedcap anomaly alert: ' + reasons.join(' + '), ''];
   // O198 v1 (S2): the per-core rate lines and the reversals of this run
   for (const c of ((more && more.cores) || [])) lines.push('CORE ' + c.k + ': ' + c.o + ' of ' + c.a + ' audits over the cap in 24 h (' + (c.permil / 10) + '%) -- more like a cap bug of this core than cheating; check its scoring sources');
+  for (const o of ((more && more.observed) || [])) lines.push('OBSERVED core ' + o.k + ': ' + o.n + ' over-cap group(s) this run inside its observation window (first ' + SC_OBS_H + ' h / ' + SC_OBS_N + ' honest audits) -- vetoed, nobody convicted; a new core over the cap this early is most likely its own cap bug');
   for (const x of ((more && more.reversed) || [])) lines.push('REVERSED m=' + x.m + ' core ' + x.k0 + ' -> ' + x.k1 + ' cap ' + x.cap0 + ' -> ' + x.cap1 + ' score ' + x.score + ' pid ' + x.pid.slice(0, 8) + ' (the window now reads n - fp)');
-  if (more && ((more.cores || []).length || (more.reversed || []).length)) lines.push('');
+  if (more && ((more.cores || []).length || (more.reversed || []).length || (more.observed || []).length)) lines.push('');
   for (const f of flags || []) {
     lines.push('OVER m=' + f.m + ' mt=' + f.mt + ' seed=' + f.runSeed + ' cap=' + f.cap + '  ' +
       (f.offenders || []).map(o => 'seat' + o.seat + '=' + o.score + ' sid=' + (o.sid || '?') +
@@ -930,7 +977,7 @@ async function main() {
     if (audited.fail) { console.log('::error::seedcap: ' + audited.fail); process.exit(1); }
     if (audited.pending.length) {
       console.log('seedcap: ' + audited.head + ' auditing ' + audited.pending.length + ' groups' + (audited.exact ? ' (' + audited.exact + ' solo records on the core of the package that signed them)' : ''));
-      stats = applyAudit(st, audited.pending, audited.map, processed, nowMin(), { primary: primaryHash });
+      stats = applyAudit(st, audited.pending, audited.map, processed, nowMin(), { primary: primaryHash, obsOf: observationOf(st, cf.live, SEEDCAP_CHANNEL, nowMin()) });
     }
   }
   if (stats.flags && stats.flags.length) await writeOffense(st, stats.flags);
@@ -951,12 +998,15 @@ async function main() {
     }
   }
   const ca = coreAlerts(st, nowMin());
-  const extra = ca.map(c => 'core ' + c.k + ' over-cap ' + c.o + '/' + c.a + ' in 24h').concat(rp.reversed.length ? ['replay reversed ' + rp.reversed.length + ' conviction(s)'] : []);
+  const oa = observedAlerts(st, stats.flags, nowMin());   // O285 (1)
+  const extra = ca.map(c => 'core ' + c.k + ' over-cap ' + c.o + '/' + c.a + ' in 24h').concat(oa.map(o => 'new core ' + o.k + ' over-cap x' + o.n + ' (observation, nobody convicted)'),
+    rp.reversed.length ? ['replay reversed ' + rp.reversed.length + ' conviction(s)'] : []);
   const md = mailDecision(stats.over, Object.keys(st.suspects).length, st.mailSus | 0, extra);
   if (md.send && await sendAlertMail(md.reasons, stats.flags,
-      { veto: Object.keys(st.veto).length, suspects: Object.keys(st.suspects).length }, rejectWindowsOf(st, nowMin()), { cores: ca, reversed: rp.reversed })) {
+      { veto: Object.keys(st.veto).length, suspects: Object.keys(st.suspects).length }, rejectWindowsOf(st, nowMin()), { cores: ca, reversed: rp.reversed, observed: oa })) {
     st.mailSus = md.mailedSus;   // advance only on a delivered mail (failed send retries next run)
     for (const c of ca) st.cores[c.k].md = Math.floor(nowMin() / 1440);   // a core's rate alert: once a day
+    for (const o of oa) if (st.cores[o.k]) st.cores[o.k].mo = Math.floor(nowMin() / 1440);   // an observed core: once a day
     console.log('seedcap: anomaly mail sent (' + md.reasons.join(' + ') + ')');
   }
   pruneState(st, applied, nowMin());
@@ -971,7 +1021,7 @@ async function main() {
     ' suspects=' + Object.keys(st.suspects).length + ' corrections=' + st.corrections.length);
 }
 
-module.exports = { pendingOfGroup, coreOfVerdict, coreStat, coreRate24, coreAlerts, standingT1, convictedFor, replayCandidates, applyReplay, headHashOf, coreHashOf,
+module.exports = { coreFirstSeen, observationOf, observedAlerts, SC_OBS_H, SC_OBS_N, pendingOfGroup, coreOfVerdict, coreStat, coreRate24, coreAlerts, standingT1, convictedFor, replayCandidates, applyReplay, headHashOf, coreHashOf,
   REPLAY_DAYS, REPLAY_MAX, CONVICTION_KEEP, SC_RATE_PERMIL, SC_RATE_MIN_OVER, CORE_HOURS_KEEP,
   selectCores, resolveCores, mergeCaps, corePathOf, OVERLAP_GRACE_MS, OVERLAP_MAX_MS, cliSupportsRerolls, cliSupportsClassic, cliSupportsBuilds, cliSupportsFee, cliSupportsRv, capParamsOf, cliLineOf, cliSupportsBuild, chainKey, chainStartBank, tailOf, coreForBuildNum, selfSeatsOf, pickAuditable, takeSkips, applyAudit, pruneState, readGroups, coresForNow, auditPending, runCli, loadState, saveState, SC_STATE_FILE, AUDITED_KEEP, VETO_KEEP_MIN, CHAIN_LEGACY_KEEP_MIN, CHAIN_KEEP_MIN, offensePlanOf, writeOffense, mailDecision, sendAlertMail, alertMailText, rejectWindowsOf, OFFENSE_LB, OFFENSE_MAGIC, SC_MAIL_MIN_OVER, SC_MAIL_SUS_MIN };
 if (require.main === module) {

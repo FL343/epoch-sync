@@ -20,6 +20,11 @@
 //   [11] S2: replay on a new core -- candidates (14 days, other core, not replayed, records still there), reversal (fp,
 //        window gone, n stays, veto stands, fp event -> ledger), negatives (still over / CLI error), main wiring
 //   [12] S2 end to end over main(): an account whose only conviction was reversed settles again under SEEDCAP_REJECT
+//   [13] S4: trust_tier row score = tier | 8 while the reject window is open; the bit clears (row rewritten / deleted)
+//   [14] S4 end to end over main(): the bit is written, kept, cleared when the window passes; SHADOW_POOL=0 clears it at once;
+//        no bit while SEEDCAP_REJECT is off
+//   [15] S4: O285 (1) a new world core (72 h / 200 honest audits) vetoes but convicts nobody (no window, no offense, no
+//        correction), records an observation (sev 0), mails once a day; past it the core convicts
 const fs = require('fs'), path = require('path');
 process.env.STATE_SALT = 's';
 const TL = require(path.join(__dirname, '..', 'trust-ledger.js'));
@@ -339,6 +344,98 @@ console.log('=== trust ledger (O198 v1, knife 5.5b-1) ===');
   T('[12] runs ok + the match settles both times', open.code === 0 && rev.code === 0 && (open.state.PROCESSED_FILE || []).indexOf(m) >= 0 && (rev.state.PROCESSED_FILE || []).indexOf(m) >= 0, open.out.slice(-600) + rev.out.slice(-600));
   T('[12] window open (n 1): C (the winner) gets no points', pointsOf(open, C) == null && pointsOf(open, A) != null && /inside reject window/.test(open.out));
   T('[12] the same conviction reversed (fp 1): C settles like everyone else', pointsOf(rev, C) != null && pointsOf(rev, C) > 2500 && !/inside reject window/.test(rev.out), JSON.stringify([A, B, C].map((s) => pointsOf(rev, s))));
+}
+
+// ---- [13] S4: the shadow-pool bit on trust_tier rows ----
+{
+  const T0 = 1000000;
+  const sig = { players: {}, rep: {}, pairs: {} };
+  const S1 = SID(6001), S2 = SID(6002), S3 = SID(6003);
+  const rejSet = new Set([S1, S3]);
+  const plan = v.trustPlan(sig, { [S2]: 8, [S3]: 8 }, new Set([S1]), T0, { rejOf: (sid) => rejSet.has(sid) });
+  eq('[13] tier 0 + open window -> row score 8 (written once, marked rej); a row already at 8 untouched', plan.writes, [{ sid: S1, tier: 8, rej: true }]);
+  eq('[13] a row whose window closed (tier 0, no bit) is deleted', plan.deletes, [S2]);
+  const plan2 = v.trustPlan(sig, { [S1]: 8 }, new Set(), T0);
+  eq('[13] no rejOf (switch off / SEEDCAP_REJECT off): the bit clears -> row deleted', [plan2.writes, plan2.deletes], [[], [S1]]);
+  T('[13] the lockstep constant', v.TRUST_REJ_BIT === 8 && TL.TRUST_REJ_BIT === 8);
+  // a tier-1 account in a window: score 9; the bit goes, the tier stays (score 1)
+  const sigF = { players: { [v.pid(S1)]: { f: 3, fx: 3, fm: { a: T0, b: T0, c: T0 }, at: T0 } }, rep: {}, pairs: {} };
+  eq('[13] tier 1 + window -> 9', v.trustPlan(sigF, {}, new Set([S1]), T0, { rejOf: () => true }).writes, [{ sid: S1, tier: 9, rej: true }]);
+  eq('[13] window closes -> back to 1 (rewritten, not deleted)', v.trustPlan(sigF, { [S1]: 9 }, new Set(), T0, { rejOf: () => false }).writes, [{ sid: S1, tier: 1 }]);
+  const VJ = read('validate.js');
+  T('[13] the bit is judged only while SEEDCAP_REJECT judges windows and SHADOW_POOL is on, by the window itself (n - fp)', /const scSus = \(SEEDCAP_REJECT && SHADOW_POOL && led && led\.sc && led\.sc\.suspects\) \|\| null;/.test(VJ) && /const rejOf = \(sid\) => !!\(scSus && seedcapRejectActive\(scSus\[pid\(sid\)\], tLedT\)\);/.test(VJ));
+  T('[13] SHADOW_POOL defaults on (only an explicit 0 turns it off)', /const SHADOW_POOL = process\.env\.SHADOW_POOL !== '0';/.test(VJ));
+}
+
+// ---- [14] S4 end to end: the bit appears on the row, then goes ----
+{
+  const { rec: srec, keyOf } = require('./lib/settle-stub.js');
+  const A = SID(6101), B = SID(6102), C = SID(6103), ros = [A, B, C];
+  const h = 0x6101, scs = [3000, 6000, 9000];
+  const recs = ros.map((sid, i) => ({ sid, d: srec(0xB1, 2, h, i, 3 - i, i === 2, ros, scs) }));
+  const boards = (trust) => {
+    const b = [];
+    for (let i = 0; i < 50; i++) b.push({ id: 1000 + i, name: 'shard_' + i, entries: [] });
+    for (const r of recs) b[0].entries.push({ steamID: r.sid, score: 1, details: r.d });
+    b.push({ id: 5, name: 'progress', entries: [] }, { id: 6, name: 'rating', entries: [] },
+      { id: 7, name: 'points', entries: ros.map((s) => ({ steamID: s, score: 2500 })) }, { id: 8, name: 'cp_bank', entries: [] },
+      { id: 9, name: 'trust_tier', entries: trust || [] });
+    return b;
+  };
+  const trustPosts = (r) => r.posts.filter((p) => /leaderboardid=9(&|$)/.test(p.body)).map((p) => ({ op: /Delete/.test(p.url) ? 'del' : 'set', sid: (/steamid=([0-9]+)/.exec(p.body) || [])[1], score: Number((/score=(-?[0-9]+)/.exec(p.body) || [])[1]) }));
+  const nowM = Math.floor(Date.now() / 60000);
+  const susOpen = { suspects: { [v.pid(C)]: { n: 1, t0: nowM, t1: nowM, ms: ['x'] } } };
+  const susOld = { suspects: { [v.pid(C)]: { n: 1, t0: nowM - 3000, t1: nowM - 3000, ms: ['x'] } } };
+  const r1 = runCron(boards(), { SC_STATE_FILE: susOpen }, { SEEDCAP_REJECT: '1' }, null, 'trust-ledger-14');
+  eq('[14] an open window: C\'s trust_tier row is written with score 8 (tier 0 | the bit)', trustPosts(r1), [{ op: 'set', sid: C, score: 8 }]);
+  T('[14] summary counts the shadow-pool row', /shadow pool \(reject-window bit on trust_tier\) rows \/ suspects not nameable this run \| 1 \/ 0/.test(r1.summary), r1.summary.split('\n').filter((l) => /shadow/.test(l)).join(' | '));
+  const r2 = runCron(boards([{ steamID: C, score: 8 }]), Object.assign(advance(r1.state, 60000), { SC_STATE_FILE: susOpen }), { SEEDCAP_REJECT: '1' }, null, 'trust-ledger-14');
+  eq('[14] still open: no rewrite', trustPosts(r2), []);
+  const r3 = runCron(boards([{ steamID: C, score: 8 }]), Object.assign(advance(r2.state, 60000), { SC_STATE_FILE: susOld }), { SEEDCAP_REJECT: '1' }, null, 'trust-ledger-14');
+  T('[14] the window passed (the conviction 50 h ago, a 24 h window): the row goes', trustPosts(r3).length === 1 && trustPosts(r3)[0].op === 'del' && trustPosts(r3)[0].sid === C, JSON.stringify(trustPosts(r3)));
+  const r4 = runCron(boards([{ steamID: C, score: 8 }]), Object.assign(advance(r2.state, 60000), { SC_STATE_FILE: susOpen }), { SEEDCAP_REJECT: '1', SHADOW_POOL: '0' }, null, 'trust-ledger-14');
+  T('[14] the remote switch SHADOW_POOL=0 clears the bit at once (row deleted, window still open)', trustPosts(r4).length === 1 && trustPosts(r4)[0].op === 'del' && trustPosts(r4)[0].sid === C, JSON.stringify(trustPosts(r4)));
+  const r5 = runCron(boards(), { SC_STATE_FILE: susOpen }, null, null, 'trust-ledger-14');
+  eq('[14] SEEDCAP_REJECT off (no windows judged): no bit', trustPosts(r5), []);
+}
+
+// ---- [15] S4: O285 (1) a new world core convicts nobody for its first 72 h / 200 honest audits ----
+{
+  const SIDA = SID(6201), SIDB = SID(6202);
+  const tNow = 29000000;
+  const live = { v: 1, channels: { demo: [
+    { buildNum: 1, core: 'oldcoreoldco', liveAt: new Date((tNow - 10 * 1440) * 60000).toISOString(), gateAt: null },
+    { buildNum: 2, core: 'newcorenewco', liveAt: new Date((tNow - 60) * 60000).toISOString(), gateAt: null },
+  ] } };
+  const st = { audited: {}, chain: {}, suspects: {}, veto: {}, corrections: [] };
+  const obsOf = sc.observationOf(st, live, 'demo', tNow);
+  T('[15] a core live for 1 h is in observation; one live for 10 days is not', obsOf('newcorenewco') === true && obsOf('oldcoreoldco') === false);
+  T('[15] a core never seen (no window, no verdict yet) is in observation', obsOf('nevernevern1') === true);
+  T('[15] first seen = the earliest window naming it (minutes)', sc.coreFirstSeen(st, live, 'demo', 'oldcoreoldco') === tNow - 10 * 1440);
+  const mk = (m) => ({ m, mt: 7, pc: 1, scores: [9000], p: { entry: 'endless' }, tail: { startDepth: 0, endDepth: 3 }, roster: { 0: SIDB }, self: [0], runSeed: 3, w: 1 });
+  const processed = new Set(['o1']);
+  const out = sc.applyAudit(st, [mk('o1')], { m0: { cap: 5000 } }, processed, tNow, { primary: 'newcorenewco', obsOf });
+  T('[15] observed over-cap: vetoed, nobody convicted, no correction, no offense', !!st.veto.o1 && !st.suspects[v.pid(SIDB)] && st.corrections.length === 0 && Object.keys(sc.offensePlanOf(st, out.flags)).length === 0, JSON.stringify({ sus: st.suspects, cor: st.corrections }));
+  const ev = (st.events || [])[0] || {};
+  T('[15] the ledger gets an observation record (sev 0, obs, the core)', ev.src === 'sc' && ev.sev === 0 && ev.ctx.obs === 1 && ev.ctx.k === 'newcorenewco' && ev.p === v.pid(SIDB), JSON.stringify(ev));
+  const L = TL.loadLedger({}); TL.takeQueue(L, 'seedcap', st.events);
+  T('[15] ... which counts nothing (n.sc 0) and opens no window', L.acct[v.pid(SIDB)].n.sc === 0 && !v.seedcapRejectActive(st.suspects[v.pid(SIDB)], tNow));
+  const oa = sc.observedAlerts(st, out.flags, tNow);
+  eq('[15] observed alert for that core', oa, [{ k: 'newcorenewco', n: 1 }]);
+  st.cores.newcorenewco.mo = Math.floor(tNow / 1440);
+  eq('[15] mailed today -> no second observed alert today', sc.observedAlerts(st, out.flags, tNow), []);
+  T('[15] mail text names the observed core', /OBSERVED core newcorenewco: 1 over-cap group/.test(sc.alertMailText(['x'], out.flags, { veto: 1, suspects: 0 }, [], { observed: oa })));
+  // past the window: the same core convicts
+  const st2 = { audited: {}, chain: {}, suspects: {}, veto: {}, corrections: [] };
+  const later = tNow + sc.SC_OBS_H * 60 + 1;
+  sc.applyAudit(st2, [mk('o2')], { m0: { cap: 5000 } }, new Set(), later, { primary: 'newcorenewco', obsOf: sc.observationOf(st2, live, 'demo', later) });
+  T('[15] after ' + sc.SC_OBS_H + ' h the core convicts as usual', st2.suspects[v.pid(SIDB)] && st2.suspects[v.pid(SIDB)].n === 1);
+  // the honest-audit count ends it early
+  const st3 = { audited: {}, chain: {}, suspects: {}, veto: {}, corrections: [], cores: { newcorenewco: { t0: tNow - 60, n: sc.SC_OBS_N, o: 0, h: {} } } };
+  T('[15] ' + sc.SC_OBS_N + ' honest audits end the observation early', sc.observationOf(st3, live, 'demo', tNow)('newcorenewco') === false);
+  const SJ = read('seedcap.js');
+  T('[15] main passes the observation judge of this run (snapshot before the verdicts)', /obsOf: observationOf\(st, cf\.live, SEEDCAP_CHANNEL, nowMin\(\)\)/.test(SJ));
+  T('[15] the observed branch never touches the suspect ledger', /const blamed = obs \? \[\] : selfOver;/.test(SJ));
 }
 
 console.log(failN ? '=== FAIL (' + failN + ') ===' : '=== trust-ledger: ALL PASS ===');

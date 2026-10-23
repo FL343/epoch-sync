@@ -100,10 +100,14 @@ jobs:
           SUPPORTER_DLC_APPID: ${{ secrets.SUPPORTER_DLC_APPID }}   # supporter pack DLC (no game ids in this repo)
           CLASSIC_APPID: ${{ secrets.CLASSIC_APPID }}   # classic loyalty crate: the older game (classic.js; unset = lane off)
           STATE_SALT: ${{ secrets.STATE_SALT }}
-          # O124 seedcap consult (read-only; seedcap.yml owns seedcap.json). Observe-first
-          # switch: flip to '1' after the audit soak looks clean (SEEDCAP_REJECT likewise).
+          # O124 seedcap consult (read-only; seedcap.yml owns seedcap.json). Enforce + the bounded reject window armed
+          # 2026-10-23 (knife 5.5b-1 S4, user ruling: the main channel takes the playtest / demo stance of 2026-09-18 with
+          # three weeks before EA to watch it; a new world core is observation-only for its first 72 h / 200 honest audits).
           SC_STATE_FILE: seedcap.json
-          SEEDCAP_ENFORCE: '0'
+          SEEDCAP_ENFORCE: '1'
+          SEEDCAP_REJECT: '1'
+          # O198 v1 shadow pool: the reject-window bit on trust_tier rows; '0' clears every bit next run (remote off switch)
+          SHADOW_POOL: '1'
           # O198 v1 trust ledger (knife 5.5b-1): this job writes trust.json; the sanctions twin's file is a read-only
           # consult (its event queue), like seedcap.json above
           TRUST_FILE: trust.json
