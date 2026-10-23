@@ -209,9 +209,13 @@ for (const [ch, state, until, exp] of CELLS) {
   if (state === 'on' && ch !== 'demo') T(tag + ' warns: set on a non-demo channel is ignored', /::warning::LEAVER_XP_RECORD_ONLY_UNTIL is set on the [a-z]+ channel -- ignored \(demo only\)/.test(c.out));
 }
 {
-  const c = cell('demo', '2026-10-27', 2);   // date only: not strict UTC
+  // date only: not strict UTC. Two days ahead of the clock, like FUTURE / PAST above (Q321: the fixed '2026-10-27' turned this
+  //   cell red from that day on -- a date-only value already past is not warned about, its window is over anyway -- and with it
+  //   the reconcile's pre-settlement suite and every land gate's unpinned pass)
+  const DATE_ONLY = new Date(Date.now() + 2 * 86400000).toISOString().slice(0, 10);
+  const c = cell('demo', DATE_ONLY, 2);
   eq('[2] demo / malformed value: A discounted (fail-safe to the status quo)', c.xpA, want.half);
-  T('[2] demo / malformed value: warned', /::warning::LEAVER_XP_RECORD_ONLY_UNTIL="2026-10-27" not honored/.test(c.out));
+  T('[2] demo / malformed value: warned', c.out.indexOf('::warning::LEAVER_XP_RECORD_ONLY_UNTIL="' + DATE_ONLY + '" not honored') >= 0, c.out.slice(-600));
 }
 {
   // the value demo.yml actually carries: a quoted strict UTC instant, within the cap whenever it is still ahead
