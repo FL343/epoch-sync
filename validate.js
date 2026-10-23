@@ -2814,6 +2814,37 @@ function endlessRerollCanon(g) {
   }
   return { canon: best, moved, minority: n - Math.max(0, bestN), n: votes.size };
 }
+// Q317 (cloud audit 2026-10, found doing Q314): an endless co-op run of three writers or more whose records disagree, on a
+//   key the seat gate covers (the flag loop in main; an ungated key is Q128's, a run of two the rules after it). Every value
+//   the records are compared on (vecOf: the score table, the depth tail, the perk build and pick log) is the host's
+//   broadcast, copied as it came by every honest joiner, and the outcome is the team's: there is no winner to dispute it.
+//   Records that disagree mean one writer wrote his own value (a modified joiner), the host sent the joiners different
+//   frames (a modified host), or a client fell out of step; the job cannot tell which, and the writers who agreed were
+//   flagged with the one who did not -- one modified joiner writing another build in a casual or team competitive run of
+//   three put a forgery flag on both honest teammates (probe-q314.js E1 / E3). Nobody is flagged for the disagreement
+//   (architecture decision 10, as Q114 / Q128 and Q291 for a run of two); a writer whose own record breaks its own clock's
+//   bound is still flagged alone (a negative duration: the clock is his client's, monotonic and clamped; Q306 / Q291 flag
+//   it the same). Two different records of one account flag nobody here, as in Q291 (its own-field reason is the duration
+//   alone): Q306 flags them as his own on a run whose records agree, here they are one more disagreement and nothing
+//   settles on them -- not flagging is the side architecture decision 10 prefers. The run still does not settle while its
+//   records disagree: no majority settle (ASK_USER A42). endlessDispute(g, vecOf) -> null (not such a run) or
+//   { writers, own: [{ sid, recs }], most: [the largest set of writers naming one value], apart: [the other writers] } --
+//   most / apart only for the log (a writer whose own records disagree, or whose record is malformed, votes for no value).
+function endlessDispute(g, vecOf) {
+  if (!g || !g.length || !isEndlessMt(g[0].d[2] | 0)) return null;
+  const bySid = new Map();
+  for (const r of g) { const s = String(r.steamID); if (!bySid.has(s)) bySid.set(s, []); bySid.get(s).push(r); }
+  if (bySid.size < 3) return null;
+  const own = [], byVec = new Map();
+  for (const [sid, rs] of bySid) {
+    if (rs.some((r) => recordSanityFlags(r, ENDLESS.MT, r.d[8] | 0).indexOf('duration') >= 0)) own.push({ sid, recs: rs });
+    const vs = new Set(rs.map(vecOf)), k = vs.size === 1 ? [...vs][0] : null;
+    if (k != null && k.indexOf('BAD') !== 0) byVec.set(k, (byVec.get(k) || []).concat([sid]));
+  }
+  let most = [];
+  for (const sids of byVec.values()) if (sids.length > most.length) most = sids;
+  return { writers: bySid.size, own, most, apart: [...bySid.keys()].filter((s) => most.indexOf(s) < 0) };
+}
 // pacing gate: true = this settle group must wait (its start attestation is younger than the
 // physical minimum). No pending entry -> no constraint here; the settle loop never passes one any
 // more (since 2026-10-07 a group with no attestation ever sighted gets a synthetic entry stamped
@@ -3462,6 +3493,7 @@ function writeRunSummary() {
       '| match keys with two accounts on one seat or two seat layouts, not settled (Q75) | ' + s('contested', 0) + ' |',
       '| records off their start-roster seat, not counted / start keys with a seat claimed twice / start rosters the voters split, no seat gate (Q80) | ' + s('offSeat', 0) + ' / ' + s('disputed', 0) + ' / ' + s('split', 0) + ' |',
       '| endless co-op groups held (records disagree on the roster, Q113) | ' + s('endlessHeld', 0) + ' |',
+      '| endless runs of three writers or more whose records disagree, nobody flagged for it, not settled (Q317) / of them a writer flagged alone for a negative duration on his own record | ' + s('endlessDispute', 0) + ' / ' + s('endlessDisputeOwn', 0) + ' |',
       '| endless keys without a seat gate whose records disagree, nobody flagged (Q128) | ' + s('endlessUngated', 0) + ' |',
       '| keys of two voices (a 1V1, a friends\' room / endless run / bot match of two) whose writers disagree, nobody flagged for it (Q289 / Q291) / of them a writer flagged alone for his own record\'s duration / accounts newly at ' + PAIR_DISPUTE.LOOK + ' different dispute opponents (record only) | ' + s('pairDispute', 0) + ' / ' + s('pairDisputeOwn', 0) + ' / ' + s('pairDisputeLook', 0) + ' |',
       '| voided disputed 1V1s: writers paid the loser\'s XP instead of the flat ' + CONSOLATION_XP + ' (Q308) / kept at ' + CONSOLATION_XP + ', past ' + DISPUTE_FLOOR.DAY_CAP + ' such payments in a day | ' + s('disputeFloor', 0) + ' / ' + s('disputeFloorCapped', 0) + ' |',
@@ -8171,13 +8203,28 @@ async function main() {
       console.log('  late-mismatch ' + m + ': ' + g.length + ' records disagree after the key settled -- nobody flagged (Q114)');
       continue;
     }
+    // Q317: an endless co-op run of three writers or more on a gated key (endlessDispute): nobody flagged for the
+    //   disagreement, a writer's own negative duration flags him alone, the run does not settle while its records disagree
+    const ed = seatGateRoster(startsPending[m]) ? endlessDispute(g, vecOf) : null;
+    if (ed) {
+      RUN.endlessDispute = (RUN.endlessDispute | 0) + 1;
+      if (ed.own.length) {
+        RUN.endlessDisputeOwn = (RUN.endlessDisputeOwn | 0) + 1;
+        if (recordFlag(signals, [].concat(...ed.own.map((x) => x.recs)), m, nowMs)) sigDirty = true;
+        for (const x of ed.own) trustTouched.add(x.sid);
+      }
+      console.log('  endless-dispute ' + m + ': ' + g.length + ' records of a run of ' + ed.writers + ' writers disagree -- nobody flagged for the disagreement'
+        + (ed.own.length ? ', ' + ed.own.map((x) => plog(x.sid)).join(', ') + ' (negative duration on his own record) flagged alone' : '')
+        + ', not settled; largest agreeing set ' + ed.most.length + ' of ' + ed.writers + (ed.apart.length ? ', apart: ' + ed.apart.map(plog).join(', ') : '') + ' (Q317)');
+      continue;
+    }
     // Q128: an endless key the seat gate does not cover -- no roster registered for it (none read yet, the job waiting for
     //   a full read, a synthetic anchor) or a roster its starts split -- keeps every record written for it, an outside
     //   account's included: the key is in every public start record. One settle record of his that does not match the
     //   run's turned the group inconsistent and flagged every teammate once (REVIEW-2 of Q113, A5 / A5b; with Q118 any
     //   time in the provisional window, a split start of his own first). Nobody is flagged there; the group stays
     //   unsettled while the records disagree, as a matchmade key the roster contest holds (Q114 review). On a gated key the
-    //   records are the players' own: one who writes a result that disagrees is still flagged with the others.
+    //   records are the players' own: a run of three writers or more is Q317's (above), a run of two goes on below.
     if (isEndlessMt(g[0].d[2] | 0) && !seatGateRoster(startsPending[m])) {
       RUN.endlessUngated = (RUN.endlessUngated | 0) + 1;
       console.log('  ungated-mismatch ' + m + ': ' + g.length + ' records disagree on an endless key without a seat gate -- nobody flagged (Q128)');
@@ -11613,6 +11660,7 @@ Object.assign(module.exports, { MSIG, botSignedOf });   // client knife 5.8a: th
 Object.assign(module.exports, { flagPlayer, flagsInWindow, stampLegacyFlags, TRUST_F_WINDOW_MS, SIG_FLAG_KEYS_CAP });   // cloud audit Q98 forgery flags age out of the trust tier (test/trust-decay.js)
 Object.assign(module.exports, { endlessHostOnly, SANITY_ENDLESS_HOST_SLUGS });   // cloud audit Q305 endless sanity on host-copied fields flags nobody (test/endless-host-fields.js)
 Object.assign(module.exports, { endlessRecordSplit, endlessRerollCanon, SANITY_ENDLESS_OWN_SLUGS, SANITY_ENDLESS_REC_SLUGS, SANITY_ENDLESS_GROUP_HOST });   // cloud audit Q306 endless: one record's own fields drop that record (test/endless-own-fields.js)
+Object.assign(module.exports, { endlessDispute });   // cloud audit Q317 endless co-op run of three writers or more whose records disagree (test/endless-co-op-dispute.js)
 Object.assign(module.exports, { noteOwnStarts, hasOwnStart, OWN_START_CAP });   // cloud audit Q69 own-record evidence for leaver verdicts
 Object.assign(module.exports, { leaverXpRecordOnlyUntil, LEAVER_XP_RECORD_ONLY, LEAVER_XP_RECORD_ONLY_MAX_MS });   // M194 / W57 demo Next Fest: leaves recorded, XP not discounted
 Object.assign(module.exports, { NL_OPP_CAP, NL_REPEAT });   // cloud audit Q161 named-only losing seats counted on the account

@@ -447,8 +447,8 @@ const settledHonest = (tag, rs, key, settleRun) => {
     && /const sig = \(r\) => \(r\.d\[8\] \| 0\) \+ '\|' \+ rosterCanon\(r\.roster\);/.test(SRC));
   const main = SRC.slice(SRC.indexOf('const registeredEarly = registerStartRosters('));
   T('[6] main: registration (and the later-start check) runs before the seat gate', main.indexOf('registerStartRosters(') < main.indexOf('applySeatGate('));
-  T('[6] main: the inconsistent-group flag loop skips settled keys before recordFlag (Q128: ungated endless keys between; Q289 / Q291: disputes of two voices)',
-    /for \(const \{ m, g \} of inconsistentGroups\) \{[\s\S]{0,700}?if \(processed\.has\(m\)\) \{[\s\S]{0,300}?continue;\n\s+\}\n[\s\S]{0,3200}?if \(recordFlag\(signals, g, m, nowMs\)\)/.test(main));
+  T('[6] main: the inconsistent-group flag loop skips settled keys before recordFlag (Q317: endless runs of three writers or more, Q128: ungated endless keys between; Q289 / Q291: disputes of two voices)',
+    /for \(const \{ m, g \} of inconsistentGroups\) \{[\s\S]{0,700}?if \(processed\.has\(m\)\) \{[\s\S]{0,300}?continue;\n\s+\}\n[\s\S]{0,6400}?if \(recordFlag\(signals, g, m, nowMs\)\)/.test(main));
   T('[6] summary rows', /start rosters split by a later start \/ confirmed \(Q118\)/.test(SRC) && /settled keys with records that disagree, nobody flagged \(Q114\)/.test(SRC));
 }
 

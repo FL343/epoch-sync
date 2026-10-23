@@ -725,17 +725,18 @@ for (const late of [false, true]) {
     JSON.stringify([flagsOf(p, V), flagsOf(p, W), pdOf(V), pdOf(W)]) + ' ' + JSON.stringify(pendOf(p.last, h)));
 }
 {
-  // [7e] control: a gated key of three (V, W and Y's starts agree) where W writes a result of his own that disagrees: three
-  //   voices, the whole-group rule as before -- every writer flagged once, nothing settles
+  // [7e] a gated key of three (V, W and Y's starts agree) where W writes a result of his own that disagrees: three voices,
+  //   not the two-voice rule; an endless run of three is Q317's -- nobody flagged for the disagreement, nothing settles
   const [V, W, Y] = R4(730), h = 0x1731, S = starts(h, [V, W, Y]);
   const F = settles(h, [V, W, Y], 0, [0, 2], { endDepth: 3 }).concat([{ sid: W, d: xSettle(h, [V, W, Y], 1, 999) }]);
   const p = timeline([S, S.concat(F), S.concat(F)], [V, W, Y]);
-  T('[7e] control: a gated key of three whose players disagree still flags all three once, nothing settles', allZero(p) && !!seatGateRosterOf(p, h)
-    && [V, W, Y].every(s => flagsOf(p, s) === 1) && ungatedN(p) === 0 && !/pair-dispute /.test(p.all) && !processedOf(p.last).has(keyOf(h)),
+  T('[7e] a gated endless key of three whose players disagree: nobody flagged (Q317), not the two-voice rule, nothing settles', allZero(p) && !!seatGateRosterOf(p, h)
+    && [V, W, Y].every(s => flagsOf(p, s) === 0) && ungatedN(p) === 0 && !/pair-dispute /.test(p.all)
+    && new RegExp('endless-dispute ' + keyOf(h) + ': ').test(p.all) && !processedOf(p.last).has(keyOf(h)),
     JSON.stringify([V, W, Y].map(s => flagsOf(p, s))) + ' ' + JSON.stringify(pendOf(p.last, h)));
 }
 {
-  T('[7] wiring: after the settled-key skip, before recordFlag; summary row', /RUN\.lateMismatch = [\s\S]{0,300}?continue;\n\s+\}\n[\s\S]{0,900}?if \(isEndlessMt\(g\[0\]\.d\[2\] \| 0\) && !seatGateRoster\(startsPending\[m\]\)\) \{[\s\S]{0,300}?continue;\n\s+\}\n(?:[\s\S]{0,400}?const pd1 = pairDispute1v1\(g\);[\s\S]{0,1600}?continue;\n\s+\}\n)?\s+if \(recordFlag\(signals, g, m, nowMs\)\)/.test(SRC)
+  T('[7] wiring: after the settled-key skip (and the Q317 rule for runs of three writers or more), before recordFlag; summary row', /RUN\.lateMismatch = [\s\S]{0,300}?continue;\n\s+\}\n(?:[\s\S]{0,400}?const ed = seatGateRoster\(startsPending\[m\]\) \? endlessDispute\(g, vecOf\) : null;[\s\S]{0,1200}?continue;\n\s+\}\n)?[\s\S]{0,900}?if \(isEndlessMt\(g\[0\]\.d\[2\] \| 0\) && !seatGateRoster\(startsPending\[m\]\)\) \{[\s\S]{0,300}?continue;\n\s+\}\n(?:[\s\S]{0,400}?const pd1 = pairDispute1v1\(g\);[\s\S]{0,1600}?continue;\n\s+\}\n)?\s+if \(recordFlag\(signals, g, m, nowMs\)\)/.test(SRC)
     && /'\| endless keys without a seat gate whose records disagree, nobody flagged \(Q128\) \| ' \+ s\('endlessUngated', 0\)/.test(SRC));
   const from = 'if (isEndlessMt(g[0].d[2] | 0) && !seatGateRoster(startsPending[m])) {';
   if (SRC.split(from).length !== 2) bad('[7] mutant: anchor not found exactly once');
