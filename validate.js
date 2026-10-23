@@ -2777,6 +2777,43 @@ function endlessRecordSplit(g, gro) {
   if (keep.length + witnessN < 2) return held('fewer than two writers left');
   return res;
 }
+// Q306 (b): the affix reroll bitmap (tail ints 10-11, O213) is outside the consistency vector (vecOf reads 9 tail ints) and
+//   every read of it takes g[0]'s -- the classic 'classic-perk' sanity, the casual co-op bitmap check (flags every writer,
+//   processed) and the team competitive chain (rejects the segment, processed). g[0] is the first record read (the zero-tail
+//   abstention moves the canonical tail there, it keeps its own bitmap), so a modified joiner whose record landed on an
+//   early shard put his own bitmap in: an out-of-reach one flagged every honest teammate (casual) or rejected the segment
+//   (competitive). Every honest record of a key carries the host's bitmap (each LEVEL_BEGIN and snapshot adopts it; no reroll
+//   window opens between a verdict and the segment write on it). endlessRerollCanon(g) counts one vote per writer whose tail
+//   is not an abstention (a writer whose copies name two bitmaps votes for neither) and, when the writers disagree, reads
+//   the bitmap the segment could have reached (classic: none; else no bit past the run's end depth, the check the lanes
+//   apply) with the most votes -- a tie keeps g[0]'s when it is one of them, so a group that settled before still settles on
+//   the same bitmap -- by moving a record carrying it to the front, in place (its first 9 tail ints equal g[0]'s: one
+//   consistent group). It never holds and flags nobody: when no named bitmap is reachable the group goes on as before (the
+//   lanes reject it). Returns null when the writers agree, else { canon (null: none reachable), moved, minority, n }.
+function endlessRerollCanon(g) {
+  if (!g || g.length < 2 || baseMt(g[0].d[2] | 0) !== ENDLESS.MT) return null;
+  const t0 = endlessTail(g[0].d);
+  if (!t0) return null;
+  const rrOf = (r) => { const tr = endlessTail(r.d); return (tr.rerollHi >>> 0) + ':' + (tr.rerollLo >>> 0); };
+  const bySid = new Map();
+  for (const r of g) { if (!endlessNzTail(r)) continue; const s = String(r.steamID); if (!bySid.has(s)) bySid.set(s, new Set()); bySid.get(s).add(rrOf(r)); }
+  const votes = new Map();
+  let n = 0, split = false;
+  for (const [, ks] of bySid) { if (ks.size > 1) { split = true; for (const k of ks) if (!votes.has(k)) votes.set(k, 0); continue; } n++; const k = [...ks][0]; votes.set(k, (votes.get(k) || 0) + 1); }
+  if (!split && votes.size <= 1) return null;
+  const classic = !!((t0.flags | 0) & attest.SEG_CLASSIC);
+  const reach = (k) => { const [hi, lo] = k.split(':').map(Number); return classic ? !(hi || lo) : !rerollChain({ rerollLo: lo | 0, rerollHi: hi | 0, endDepth: t0.endDepth | 0 }, null); };
+  const k0 = endlessNzTail(g[0]) ? rrOf(g[0]) : null;
+  let best = null, bestN = -1;
+  for (const [k, c] of votes) { if (!reach(k)) continue; if (c > bestN || (c === bestN && k === k0)) { best = k; bestN = c; } }
+  if (best == null) return { canon: null, moved: false, minority: n, n: votes.size };
+  let moved = false;
+  if (best !== k0) {
+    const at = g.findIndex((r) => endlessNzTail(r) && rrOf(r) === best);
+    if (at > 0) { g.unshift(g.splice(at, 1)[0]); moved = true; }
+  }
+  return { canon: best, moved, minority: n - Math.max(0, bestN), n: votes.size };
+}
 // pacing gate: true = this settle group must wait (its start attestation is younger than the
 // physical minimum). No pending entry -> no constraint here; the settle loop never passes one any
 // more (since 2026-10-07 a group with no attestation ever sighted gets a synthetic entry stamped
@@ -3368,6 +3405,7 @@ function writeRunSummary() {
       '| sanity whose every shared reason is the host\'s match header, only a writer breaking his own fields flagged, not settled (Q294) | ' + s('sanityHeader', 0) + ' |',
       '| endless sanity on fields copied from the host only: held, nobody flagged (Q305) | ' + s('sanityEndHost', 0) + ' |',
       '| endless sanity on one record only: set aside (its writer flagged only for his own field), the rest settles / held (Q306) | ' + s('sanityEndDrop', 0) + ' / ' + s('sanityEndHeld', 0) + ' |',
+      '| endless writers naming different affix reroll bitmaps: the reachable one with the most votes read, nobody flagged (Q306) | ' + s('endlessRrDiff', 0) + ' |',
       '| starts pending / exit-rate hits | ' + s('pending', 0) + ' / ' + s('convicted', 0) + ' |',
       '| start-orphan seats spared by their own exit note (Q64) | ' + s('exitNoteSpared', 0) + ' |',
       '| keys the host\'s match header held voided at maturity / seats spared there (Q294) | ' + s('headerVoid', 0) + ' / ' + s('headerSpared', 0) + ' |',
@@ -9742,8 +9780,14 @@ async function main() {
     const matchType = g[0].d[2] | 0;   // 2=ranked; visible LP only moves for ranked (quick = MMR only)
     // Q306: in an endless co-op group, a reason on one record's own fields drops that record (endlessRecordSplit) and flags
     //   its writer only when an honest client cannot have written it; the rest settles when it stands on its own, else it is
-    //   held.
+    //   held. The reroll bitmap every settle read takes from g[0] is first the one the writers' votes name (endlessRerollCanon).
     let endDrop = null;
+    const rc = endlessRerollCanon(g);   // null off endless (both)
+    if (rc) {
+      RUN.endlessRrDiff = (RUN.endlessRrDiff | 0) + 1;
+      ghWarn('match=' + c.m + ': the endless writers name ' + rc.n + ' affix reroll bitmaps -- ' + (rc.canon ? 'the reachable ' + rc.canon + ' read' + (rc.moved ? ' (its record moved first)' : ' (the first record\'s)') + ', nobody flagged' : 'none reachable, the first record\'s read as before')
+        + ' (Q306): ' + g.map((r) => { const tr = endlessTail(r.d); return plog(r.steamID) + '@' + r.shard + (tr ? '=' + (tr.rerollHi >>> 0) + ':' + (tr.rerollLo >>> 0) : ''); }).join(' '));
+    }
     const es = endlessRecordSplit(g, seatGateRoster(startsPending[c.m]));
     if (es) {
       const who = es.drop.map((x) => plog(x.sid) + '[' + x.why.join(',') + ']' + (x.own ? '' : ' (not his own field: not flagged)')).join(' ')
@@ -11554,7 +11598,7 @@ Object.assign(module.exports, { KEY_CHANNEL, loadJobPubTable, soloKeyHeld, soloR
 Object.assign(module.exports, { MSIG, botSignedOf });   // client knife 5.8a: the guard match signature on lone bot records (test/match-sig.js)
 Object.assign(module.exports, { flagPlayer, flagsInWindow, stampLegacyFlags, TRUST_F_WINDOW_MS, SIG_FLAG_KEYS_CAP });   // cloud audit Q98 forgery flags age out of the trust tier (test/trust-decay.js)
 Object.assign(module.exports, { endlessHostOnly, SANITY_ENDLESS_HOST_SLUGS });   // cloud audit Q305 endless sanity on host-copied fields flags nobody (test/endless-host-fields.js)
-Object.assign(module.exports, { endlessRecordSplit, SANITY_ENDLESS_OWN_SLUGS, SANITY_ENDLESS_REC_SLUGS, SANITY_ENDLESS_GROUP_HOST });   // cloud audit Q306 endless: one record's own fields drop that record (test/endless-own-fields.js)
+Object.assign(module.exports, { endlessRecordSplit, endlessRerollCanon, SANITY_ENDLESS_OWN_SLUGS, SANITY_ENDLESS_REC_SLUGS, SANITY_ENDLESS_GROUP_HOST });   // cloud audit Q306 endless: one record's own fields drop that record (test/endless-own-fields.js)
 Object.assign(module.exports, { noteOwnStarts, hasOwnStart, OWN_START_CAP });   // cloud audit Q69 own-record evidence for leaver verdicts
 Object.assign(module.exports, { leaverXpRecordOnlyUntil, LEAVER_XP_RECORD_ONLY, LEAVER_XP_RECORD_ONLY_MAX_MS });   // M194 / W57 demo Next Fest: leaves recorded, XP not discounted
 Object.assign(module.exports, { NL_OPP_CAP, NL_REPEAT });   // cloud audit Q161 named-only losing seats counted on the account
