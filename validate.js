@@ -3051,6 +3051,11 @@ const NL_OPP_CAP = 8, NL_REPEAT = 3;
 //   shares it); the lower half is below the middle place: 2nd of 2, 3rd of 3, 3rd-4th of 4, 4th-5th of 5, 4th-6th of 6.
 function ffaPlaceOf(scores, seat) { const x = scores[seat] | 0; let n = 1; for (let i = 0; i < scores.length; i++) if ((scores[i] | 0) > x) n++; return n; }
 const ffaLowerHalf = (place, pc) => 2 * place > pc + 1;
+// Q227: at a matchmade FFA settle, a seat seen agreeing to one result whose record is gone while the scores or his seat read
+//   now are another (the Q185 review pin: not put back) is counted on his account (.am), and a writer of the settle first seen
+//   agreeing to another result for the match (his own pin differs from the one his record gives now) on his (.rc). An honest
+//   client writes one result a match, the same for every honest player, so .rc does not reach an honest account; .am can (his
+//   own record gone while the players left wrote another result), a weaker count. Counted only, nobody flagged.
 const SIG_PAIRS_CAP = Number(process.env.SIG_PAIRS_CAP || 200000);
 function loadSignals() { try { const s = JSON.parse(fs.readFileSync(SIGNALS_FILE, 'utf8')) || {}; s.day = s.day || { d: 0, n: {} }; s.players = s.players || {}; s.pairs = s.pairs || {}; s.flagged = s.flagged || {}; s.rep = s.rep || {}; s.rseen = s.rseen || {}; return s; } catch (e) { return { day: { d: 0, n: {} }, players: {}, pairs: {}, flagged: {}, rep: {}, rseen: {} }; } }
 function pruneSignals(s, now) {
@@ -3637,6 +3642,8 @@ function writeRunSummary() {
       '| absent seats named by others only, not convicted (Q69) | ' + s('unattested', 0) + ' |',
       '| matchmade FFA seats seen agreeing whose record is gone at the settle: settled at their agreed place / left out, their own confession for the match standing (Q185) | ' + s('agreedBack', 0) + ' / ' + s('agreedConf', 0) + ' |',
       '| of those seats, left out: the scores or the seat read at the settle are not the ones they were seen agreeing to (Q185 review) | ' + s('agreedMoved', 0) + ' |',
+      '| of those, seen agreeing to another result (a pin, not an entry from before the pin): counted on the account (Q227, nobody flagged) | ' + s('agreedAway', 0) + ' |',
+      '| matchmade FFA writers at the settle first seen agreeing to another result for the match, counted on the account (Q227, nobody flagged) | ' + s('recanted', 0) + ' |',
       '| team matches with nobody on the losing team, settled without a rating move (Q136) | ' + s('noLoser', 0) + ' |',
       '| team matches with a losing seat nobody accounts for (named by the others only or left blank), settled without a rating move (Q149) | ' + s('namedLoser', 0) + ' |',
       '| named-only losing seats counted on their account / of them repeated: ' + NL_REPEAT + ' or more such matches and different opponents / of those more losses unwritten than written / not counted, no signals of his own (Q161, nobody flagged) | ' + s('nlSeat', 0) + ' / ' + s('nlRepeat', 0) + ' / ' + s('nlUnwritten', 0) + ' / ' + s('nlNone', 0) + ' |',
@@ -10651,13 +10658,29 @@ async function main() {
     //   XP / CP stay per record (no record, none for him, as before). A seat whose own confession for this match still
     //   stands (penalty not refunded) stays out as before: the confession already charged that leave. Team matches read such
     //   seats in the points plan only (Q183), unchanged.
+    //   Q227 (cloud audit, found by the Q185 review 2): two accounts in one ranked FFA wrote a made-up result early with
+    //   themselves on top (seen agreeing, pinned on it), the honest players wrote the real one (the records disagree, nothing
+    //   settles), then the two blanked their rows: not convicted (seen agreeing), not put back (not the result read now), so
+    //   the match settled among the honest ones: the two kept their points, the honest 2nd of 4 took last of 2 (-17, not +15).
+    //   Counted here (see .am / .rc at ffaLowerHalf): such a seat on its account, and a writer of this settle first seen
+    //   agreeing to another result for the match on his.
     if (baseMt(matchType) === 1 || baseMt(matchType) === 2) {
       let back = 0;
+      if (pend.agv) for (const r of g) {
+        const h = pid(String(r.steamID));
+        if (pend.agv[h] == null || pend.agv[h] === agreedPin(r.d[5])) continue;
+        const p = sigPlayer(signals, h, nowMs); p.rc = (p.rc | 0) + 1; sigDirty = true; RUN.recanted = (RUN.recanted | 0) + 1;
+        console.log('  recant ' + c.m + ': seat ' + (r.d[5] | 0) + ' = ' + plog(r.steamID) + ' first seen agreeing to another result for this match -- counted, nobody flagged (Q227)');
+      }
       for (const x of detectLeavers(g)) {
         const hx = pid(String(x.steamID));
         if (!(pend.agreed && pend.agreed.indexOf(hx) >= 0) || parts.some((p) => String(p.steamID) === String(x.steamID))) continue;
         if (!(pend.agv && pend.agv[hx] === agreedPin(x.seat))) {   // Q185 review: not the scores or the seat he agreed to (or no pin yet)
           RUN.agreedMoved = (RUN.agreedMoved | 0) + 1;
+          if (pend.agv && pend.agv[hx] != null) {   // Q227: a pin of another result (not an entry from before the pin)
+            const p = sigPlayer(signals, hx, nowMs); p.am = (p.am | 0) + 1; sigDirty = true; RUN.agreedAway = (RUN.agreedAway | 0) + 1;
+            console.log('  agreed-away ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' seen agreeing to another result for this match -- counted, nobody flagged (Q227)');
+          }
           console.log('  agreed-back ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' record gone, but the result read now is not the one he was seen agreeing to -- left out (Q185 review)');
           continue;
         }
