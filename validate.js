@@ -1728,7 +1728,7 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
     }
     noteOwnStarts(p, sg[m], now);   // Q69: who wrote his OWN start for this key, cumulative (entries from older builds start empty); Q121: and when
     if (isEndlessMt(p.mt)) noteTestimony(p, (sg[m] || []).concat(groups[m] || []));   // Q113: and what his records said about his seat
-    if (consistentKeys.has(m)) continue;   // consistent settle group -> the normal pipeline owns this key
+    if (consistentKeys.has(m) && !rankConflictHeld(groups[m])) continue;   // consistent settle group -> the normal pipeline owns this key (Q66: unless only a rank conflict holds it)
     // endless (type 7): never convicted from an orphaned start. Co-op runs are excluded from the
     // exit-rate economy by design (client parity), and a legit endless run outlives the matchmade
     // maturity window many times over -- convicting at 2h would hit players who are still playing.
@@ -2005,6 +2005,21 @@ function lone1v1Count(claims, signals, now, sidOfPid) {
     res.pay.push(p);
   }
   return res;
+}
+// Q66 (cloud audit): a consistent group that the sanity gate holds for nothing but a team-gamble rank conflict (the
+// winner claims disagree; the refusal shape no dissent pass took, e.g. more refusers than agreeing writers) never
+// settles: the settle loop flags it and moves on every run, and unlike a calibration bound nothing ever loosens a
+// conflicting claim. reconcileStarts (above) used to count it as "owned by the normal pipeline", so the orphan verdict
+// skipped it for good: a player who really quit mid-match kept a clean exit rate and the players who stayed never got
+// the consolation credit. Such a key now matures like an inconsistent group (or a Q51 free verdict). `g` is the key's
+// record set as the dissent passes left it (a settle verdict narrows groups[m] to the agreeing side, which is sane).
+// A void-consensus group stays with the settle loop: its VOID path convicts nobody, and this verdict must not be
+// harsher than the settle it stands in for. Any other flag beside the conflict keeps the self-healing hold.
+function rankConflictHeld(g) {
+  if (!g || !g.length || !isSubScoreMt(g[0].d[2] | 0)) return false;
+  if (voidByConsensus(g.map(r => r.dispCode)).isVoid) return false;
+  const f = sanityFlags(g);
+  return f.length === 1 && f[0] === 'rank-conflict';
 }
 // ---- deterministic sanity bounds (B5 tier A: flag-don't-settle) ----
 // Catches the case consensus can't: colluding clients writing IDENTICAL impossible records.
