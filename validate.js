@@ -3086,10 +3086,25 @@ const ffaLowerHalf = (place, pc) => 2 * place > pc + 1;
 //   took turns still climb once (the two who stood in are marked, the two who settled are paired with them: 4P +27, 6P
 //   +32), and two who settle again with the same two standing in get nothing more; an honest player is protected each
 //   time other accounts withdraw against him, on his own history only. Left: the same account withdrawing against him
-//   again in the window (in the ledger the same as the pair above settling again), and a group of more accounts giving
-//   each settler fresh stand-ins (each settler and stand-in once in the window: 6 accounts in 4P matches +81, Q263 +54).
-//   His repeat-group decay step (and its memory) reads the roster without the stand-ins too, and so does a convicted
-//   leaver's late-result shadow for his gain.
+//   again in the window (in the ledger the same as the pair above settling again; Q265 below), and a group of more
+//   accounts giving each settler fresh stand-ins (each settler and stand-in once in the window: 6 accounts in 4P matches
+//   +81, Q263 +54). His repeat-group decay step (and its memory) reads the roster without the stand-ins too, and so does a
+//   convicted leaver's late-result shadow for his gain.
+// Q265 (cloud audit, left by Q264): a player who settled with a stand-in settled as before Q227 when the same account
+//   withdrew against him again in the window (the honest 2nd of 4 took last of 2 again: -17, not +15), and in the ledger
+//   that is the same as the two who settled with the stand-ins settling with them again. Such a seat (a player rated at
+//   the settle settled with him standing in, in the window: his sxw) is rated now instead, at the place the scores read
+//   now give him, as a seat put back (Q185; .rated on his parts entry): in the ranking, the player count, the rating update
+//   and the points plan, and his own rating, points, signals and seed move by that place (no XP / CP: no record of his).
+//   The players there settle as in the result they wrote, the one their clients showed, and he pays what the place costs,
+//   so withdrawing against the same player a second time gains nobody anything: the old account with a new one each
+//   match and the same two withdrawing every time made +54 above the same matches played honestly with Q264, +27 now (the
+//   first match only; at grandmaster). He is marked again as one who stood in (sx) and the players rated with him paired
+//   with him (sxw), so it holds while they keep meeting in the window; next to other stand-ins he settles as before Q227
+//   himself (he stood in). The cost is the Q185 review case twice: an honest seat whose record rotated off while the
+//   others rewrote the result, met again the same way by the same player in the window, is rated at the rewritten place
+//   the second time. A seat no player there settled with goes on to the Q263 / Q264 check unchanged (so that check meets
+//   no player paired with one of the stand-ins left: such a one has him rated); quick settles have no stand-ins.
 const STAND_IN_WINDOW_MS = Number(process.env.STAND_IN_WINDOW_MS || 30 * 86400000);
 const SIG_PAIRS_CAP = Number(process.env.SIG_PAIRS_CAP || 200000);
 function loadSignals() { try { const s = JSON.parse(fs.readFileSync(SIGNALS_FILE, 'utf8')) || {}; s.day = s.day || { d: 0, n: {} }; s.players = s.players || {}; s.pairs = s.pairs || {}; s.flagged = s.flagged || {}; s.rep = s.rep || {}; s.rseen = s.rseen || {}; return s; } catch (e) { return { day: { d: 0, n: {} }, players: {}, pairs: {}, flagged: {}, rep: {}, rseen: {} }; } }
@@ -3680,6 +3695,7 @@ function writeRunSummary() {
       '| of those, seen agreeing to another result (a pin, not an entry from before the pin): counted on the account (Q227, nobody flagged) | ' + s('agreedAway', 0) + ' |',
       '| of those, at a ranked settle with no confession of their own standing: stood in for the players there at the place read now, not rated themselves (Q227) | ' + s('agreedStood', 0) + ' |',
       '| of those, left out instead: every player rated at the settle stood in or settled with one of them in the window (Q263 / Q264) | ' + s('agreedStoodHeld', 0) + ' |',
+      '| of those, rated instead at the place read now, as a seat put back: a player rated at the settle settled with him standing in in the window (Q265) | ' + s('agreedStoodRated', 0) + ' |',
       '| players rated at a settle with stand-ins who settled as before Q227 instead: each stood in or settled with one of them in the window (Q264) | ' + s('agreedStoodOwn', 0) + ' |',
       '| matchmade FFA writers at the settle first seen agreeing to another result for the match, counted on the account (Q227, nobody flagged) | ' + s('recanted', 0) + ' |',
       '| team matches with nobody on the losing team, settled without a rating move (Q136) | ' + s('noLoser', 0) + ' |',
@@ -10715,6 +10731,8 @@ async function main() {
     //   Q264: read per player: one who stood in himself in the window, or settled with one of these stand-ins in it, settles
     //   as before Q227 himself (stoodOwn), the others with the stand-ins; the seats stay out only when every player rated
     //   here is such a one.
+    //   Q265: before that check, a seat that stood in for one of the players rated here in the window is rated instead
+    //   (.rated), at the place the scores read now give him, as a seat put back above.
     const stoodCand = [];   // Q227: the seats that would stand in (see Q263 at the end of this block)
     const stoodOwn = new Set();   // Q264: the players rated here who settle as before Q227 (see STAND_IN_WINDOW_MS)
     if (baseMt(matchType) === 1 || baseMt(matchType) === 2) {
@@ -10751,10 +10769,26 @@ async function main() {
         back++; RUN.agreedBack = (RUN.agreedBack | 0) + 1;
         console.log('  agreed-back ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' record gone but seen agreeing earlier -- settled at his agreed place ' + (1 + scores.filter((y) => (y | 0) > (scores[x.seat] | 0)).length) + ' of ' + pc + ', as if his record were still there (Q185)');
       }
+      // Q265 (see STAND_IN_WINDOW_MS): a seat that stood in for one of the players rated here (the writers and the seats put
+      //   back above) in the window is rated this time instead, at the place read now, as a seat put back (.rated): that player
+      //   settles as in the result he wrote, as with a stand-in, and the seat pays what the place costs
+      if (stoodCand.length) {
+        const rated0 = parts.slice(), inDays = ' in the last ' + Math.round(STAND_IN_WINDOW_MS / 86400000) + ' days';
+        const stoodFor = (h) => rated0.filter((p) => { const e = signals.players[pid(String(p.steamID))]; return !!(e && (e.sxw || []).some((y) => y[0] === h && nowMs - y[1] < STAND_IN_WINDOW_MS)); });
+        for (const x of stoodCand.splice(0)) {
+          const by = stoodFor(pid(String(x.steamID)));
+          if (!by.length) { stoodCand.push(x); continue; }
+          parts.push({ steamID: x.steamID, seat: x.seat, score: scores[x.seat] | 0, rated: true });
+          back++; RUN.agreedStoodRated = (RUN.agreedStoodRated | 0) + 1;
+          console.log('  agreed-stood-rated ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' rated at place ' + (1 + scores.filter((y) => (y | 0) > (scores[x.seat] | 0)).length) + ' of ' + pc
+            + ' read now, as a seat put back: he stood in for ' + by.map((p) => 'seat ' + p.seat + ' = ' + plog(p.steamID)).join(', ') + inDays + ' (Q265)');
+        }
+      }
       // Q263 (see STAND_IN_WINDOW_MS): the stand-ins only while none of the players rated here (the writers and the seats put
       //   back above) settled with a stand-in in the window; otherwise they stay out as before Q227
       //   Q264: only when every one of them stood in himself or settled with one of these stand-ins in the window; otherwise the
-      //   stand-ins are used and those settle as before Q227
+      //   stand-ins are used and those settle as before Q227 (since Q265 a stand-in one of them settled with is rated above,
+      //   so it is the first that is met; the second stays as a guard)
       if (stoodCand.length) {
         const candH = new Map(stoodCand.map((x) => [pid(String(x.steamID)), x.seat]));
         const why = (p) => {   // Q264: '' unless he settles as before Q227
@@ -10899,12 +10933,13 @@ async function main() {
     // B6 collection for a real settle: per-player counters + pairwise co-occurrence.
     recordMatchSignals(signals, g, live, rankOf, matchType, false, nowMs);
     for (const p of live) if (stoodOwn.has(String(p.steamID)) && rankNo[p.steamID] === 1 && rankOf[p.steamID] !== 1) signals.players[pid(String(p.steamID))].w += 1;   // Q264: his win as before Q227
-    if (stoodIds.size) {   // Q263 / Q264 (see STAND_IN_WINDOW_MS): a stand-in marked, a player rated with them paired with each of them
-      const sh = [...stoodIds].map((s) => pid(s));
+    const ratedIds = parts.filter((p) => p.rated).map((p) => String(p.steamID));   // Q265: the seats rated where they would have stood in
+    if (stoodIds.size || ratedIds.length) {   // Q263 / Q264 / Q265 (see STAND_IN_WINDOW_MS): a stand-in (or a seat rated instead) marked, a player rated with them paired with each of them
+      const sh = [...stoodIds].concat(ratedIds).map((s) => pid(s));
       for (const p of parts) {
-        if (stoodOwn.has(String(p.steamID))) continue;
+        if (stoodOwn.has(String(p.steamID)) && !p.rated) continue;
         const e = sigPlayer(signals, pid(String(p.steamID)), nowMs);
-        if (p.stood) e.sx = nowMs;
+        if (p.stood || p.rated) e.sx = nowMs;
         else e.sxw = (e.sxw || []).filter((y) => nowMs - y[1] < STAND_IN_WINDOW_MS && sh.indexOf(y[0]) < 0).concat(sh.map((h) => [h, nowMs]));
       }
       sigDirty = true;

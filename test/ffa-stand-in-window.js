@@ -5,22 +5,29 @@
 //   settled with the blanked seats standing in at the bottom; the next match the other way round. At the zero-sum top
 //   (grandmaster) that made +27 a 4P match out of nothing, without end. Now a stand-in is used only while none of the players
 //   rated at the settle settled with a stand-in in the last STAND_IN_WINDOW_MS; otherwise the seats stay out as before
-//   Q227. (Q264 below reads it per player and per stand-in; the sections here run on that.)
+//   Q227. (Q264 below reads it per player and per stand-in, and Q265 rates a seat that already stood in for a player there;
+//   the sections here run on that.)
 // End-to-end over the REAL validate.js main() against an offline board stub (the harness of test/ffa-agreed-recant.js).
-//   [0] wiring pins: the window and its default, the candidates collected where Q227 pushed the stand-in, the check after
-//       the absent-seat loop (so the seats put back count too), the mark right after the settle's signals, the summary row
-//   [1] the ring: four accounts at grandmaster, six matches taking turns -> stand-ins in the first match only, nobody gains
-//       after it (the sum after six = the sum after one), the held lines and rows; the honest rotation of the same four:
-//       zero-sum, no mark; mutant (the check never true) -> stand-ins every match, the sum grows
+//   [0] wiring pins: the window and its default, the candidates collected where Q227 pushed the stand-in, the Q265 step and
+//       the check after the absent-seat loop (so the seats put back count too), the mark right after the settle's signals,
+//       the summary rows
+//   [1] the ring: four accounts at grandmaster, six matches taking turns -> stand-ins in the first match only, then the two
+//       who stood in held out when they settle (Q263) and rated when they withdraw again (Q265); nobody gains after the first
+//       match (the sum never above its +27); the honest rotation of the same four: zero-sum, no mark; mutant (no rating, as
+//       Q264) -> held every match after the first; mutant (neither check) -> stand-ins every match, the sum grows
 //   [2] two liars doing Q227 match after match against different honest pairs: each honest pair settles as the honest twin
 //       (the 2nd up, not last of 2), the liars' own marks not read; mutant (the stand-ins' marks read too) -> the second
 //       honest pair held, its 2nd down
-//   [3] the same honest pair again inside the window, with the same two liars: held -> the posts exactly as with Q227 step
-//       two off (as before Q227), the held line and row, the liars not rated, not convicted, no mark refreshed; mutant (no
-//       mark) -> stood in again. With two other liars (Q264): settled as the honest twin (the 2nd up); with one of the
-//       same and one other: held; mutant (any stand-in read, not these) / (the settlers marked as the stand-ins) -> held
-//   [4] the window: the marks 31 days old -> stood in again (the 2nd up); 29 days -> held; STAND_IN_WINDOW_MS read from the
-//       env; mutant (the age not read) -> held after 31 days too
+//   [3] the same honest pair again inside the window, with the same two liars (Q265): the two rated at their place read now
+//       -> every points and rating write of the four exactly the honest twin's (the two: no XP, no record of theirs), the
+//       rated lines and row, not convicted, the marks refreshed; mutant (no rating, as Q264) -> held, the 2nd down; mutant
+//       (no mark) -> stood in again. With two other liars (Q264): settled as the honest twin (the 2nd up); with one of the
+//       same and one other: the same one rated (as before Q227 himself next to the other: he stood in), the other stood in,
+//       the pair as the honest twin; mutant (any stand-in read, not these) / (the settlers marked as the stand-ins) -> held
+//   [4] the window: the marks 31 days old -> stood in again (the 2nd up); 29 days -> rated (the 2nd up); STAND_IN_WINDOW_MS
+//       read from the env; mutant (the age not read by the Q264 check) -> held after 31 days; mutant (the age not read by the
+//       Q265 step) -> rated after 31 days; a rated settle 15 days ago, the first meeting 35 days ago -> rated again; mutant
+//       (a rated settle marks nobody) -> stood in
 //   [5] marks only at a real settle with a stand-in: the honest twin, quick C1 -> no mark; ranked C1 -> the stood seats
 //       marked (sx), the two rated paired with each of them (sxw), all with the settle's clock, nobody else; mutant (marked
 //       at every settle) -> the honest twin marked
@@ -29,24 +36,33 @@
 //   withdrew brought along), and an honest player met by other liars in the window got nothing again. It is read per player
 //   and per stand-in now: a player who stood in himself in the window (sx) or settled with one of these stand-ins in it
 //   (sxw) settles as before Q227 himself (as if the stand-ins were not there), the others with the stand-ins; the seats stay
-//   out only when every player rated there is such a one.
-//   [6] a marked honest player next to a fresh one, the same two liars again: the fresh one settles as the honest twin, the
-//       marked one exactly as with Q227 step two off (points, ranked and stored rating, XP, career, win count, the
-//       repeat-group step); the own line and row; mutant (the whole match read, as Q263) -> the fresh one held (down);
-//       mutant (no own settle) -> the marked one as the twin; mutant (his decay step with the stand-ins) -> his rating moves
-//       (Q264 review: his stored and ranked rating compared in the state, where no board write shows the ranked one;
-//       mutant (his ranked rating with the stand-ins) -> another ranked rating)
-//   [7] marks: the fresh one paired with the stand-ins and they marked, with the settle's clock, the marked one's marks
-//       not refreshed; mutant (every one marked) -> refreshed
+//   out only when every player rated there is such a one. (Since Q265 a player meets "one of these stand-ins" no more: that
+//   seat is rated; the sections below mark the player who settles as before Q227 by his own stand-in at C1.)
+//   [6] a liar who stood in at C1 settles next to an honest player while two other liars withdraw: the honest one settles
+//       as the honest twin, the liar exactly as with Q227 step two off (points, ranked and stored rating, XP, career, win
+//       count, the repeat-group step); the own line and row; mutant (the whole match read, as Q263) -> the honest one held
+//       (down); mutant (no own settle) -> the liar as the twin; mutant (his decay step with the stand-ins) -> his rating
+//       moves more (Q264 review: his stored and ranked rating compared in the state, where no board write shows the ranked
+//       one; mutant (his ranked rating with the stand-ins) -> another ranked rating)
+//   [7] marks: the honest one paired with the stand-ins and they marked, with the settle's clock, the liar's marks not
+//       refreshed; mutant (every one marked) -> refreshed
 //   [8] a marked account the liars bring along, writing his real place in a 6P match: the three honest players settle as
 //       the honest twin, he as with Q227 step two off; mutant (the whole match read) -> held, the honest 2nd / 3rd lower
 //   [9] a marked account placed right behind a fresh one (the farming a per-match "anybody fresh" rule would open): he takes
 //       last of 2 as before Q227 (down); mutant (no own settle) -> up; his stand-in mark 31 days old -> up; mutant (that
 //       age not read) -> down
-//   [10] a convicted leaver's late-result shadow: the gain of his marked party mate is read without the stand-ins (as with
-//       Q227 step two off); mutant (read with them) -> another gain
+//   [10] a convicted leaver's late-result shadow: the gain of his marked party mate (stood in at C1) is read without the
+//       stand-ins (as with Q227 step two off); mutant (read with them) -> another gain
 //   Not here: a ring of six accounts in 4P matches giving each settler fresh stand-ins (+81 against Q263's +54) is a probe
 //   in the Q264 delivery (cloud audit fixes/Q264-stood-taint), not a test.
+// Q265 (cloud audit 2026-10, left by Q264): a player who settled with a stand-in settled as before Q227 when the same account
+//   withdrew against him again in the window (the honest 2nd of 4 took last of 2 again), and in the ledger that is the same
+//   as the two who settled with the stand-ins settling with them again. Such a seat is rated now instead, at the place the
+//   scores read now give him, as a seat put back (Q185): the player settles as in the result he wrote, and the seat pays its
+//   place ([3] / [4] above).
+//   [11] the fixed old account with a new one each match, the same two withdrawing every time: +27 in the first match
+//       (they stood in), after it each match moves the points sum exactly as the same match played honestly from the same
+//       state (the two rated); mutant (no rating, as Q264) -> the second match makes more than played honestly
 // State isolation is structural (every *_FILE var scanned and redirected, cwd = temp dir), like test/ffa-agreed-recant.js.
 const { spawnSync } = require('child_process');
 const fs = require('fs'), path = require('path'), os = require('os');
@@ -206,10 +222,15 @@ const ratingOf = (rs, sid) => [].concat(...rs.map(r => posts(r, 6).filter(p => n
 const pts = (rs, sids) => JSON.stringify(sids.map(s => ptsIn(rs, s)));
 const flags = (r, sids) => JSON.stringify(sids.map(s => fOf(r, s)));
 const firstProcessed = (rs, key) => rs.findIndex(r => processedOf(r).has(key));
+// from / to: one replacement, or from = [[from, to], ...] (to unused) for several in one mutant
 function mutant(tag, from, to) {
-  if (SRC.split(from).length !== 2) { bad(tag + ' mutant anchor not found exactly once'); return null; }
+  let src = SRC;
+  for (const [f, t] of Array.isArray(from) ? from : [[from, to]]) {
+    if (src.split(f).length !== 2) { bad(tag + ' mutant anchor not found exactly once'); return null; }
+    src = src.replace(f, () => t);
+  }
   const script = path.join(__dirname, '..', '.mutant-ffa-stand-in-window-' + tag + '-' + process.pid + '.js');
-  fs.writeFileSync(script, SRC.replace(from, to));
+  fs.writeFileSync(script, src);
   return script;
 }
 function withMutant(tag, from, to, fn) {
@@ -257,9 +278,10 @@ const AGE_SX = "          if (e.sx && nowMs - e.sx < STAND_IN_WINDOW_MS) return 
 const AGE_W = 'nowMs - y[1] < STAND_IN_WINDOW_MS && candH.has(y[0])';
 const SORT = '      if (back) parts.sort((a, b) => a.seat - b.seat);\n';
 const RMS = '    recordMatchSignals(signals, g, live, rankOf, matchType, false, nowMs);\n';
-const SX = '    if (stoodIds.size) {   // Q263 / Q264 (see STAND_IN_WINDOW_MS): a stand-in marked, a player rated with them paired with each of them\n';
-const SX_SKIP = '        if (stoodOwn.has(String(p.steamID))) continue;\n';
-const SX_STOOD = '        if (p.stood) e.sx = nowMs;\n';
+const RATED_IDS = '    const ratedIds = parts.filter((p) => p.rated).map((p) => String(p.steamID));   // Q265: the seats rated where they would have stood in\n';
+const SX = '    if (stoodIds.size || ratedIds.length) {   // Q263 / Q264 / Q265 (see STAND_IN_WINDOW_MS): a stand-in (or a seat rated instead) marked, a player rated with them paired with each of them\n';
+const SX_SKIP = '        if (stoodOwn.has(String(p.steamID)) && !p.rated) continue;\n';
+const SX_STOOD = '        if (p.stood || p.rated) e.sx = nowMs;\n';
 const SX_PAIR = '        else e.sxw = (e.sxw || []).filter((y) => nowMs - y[1] < STAND_IN_WINDOW_MS && sh.indexOf(y[0]) < 0).concat(sh.map((h) => [h, nowMs]));\n';
 const OWN_DECL = '    const stoodOwn = new Set();   // Q264: the players rated here who settle as before Q227 (see STAND_IN_WINDOW_MS)\n';
 const HELD_IF = '        if (lately.length && lately.length === parts.length) {\n';
@@ -268,11 +290,21 @@ const WFIX = "    for (const p of live) if (stoodOwn.has(String(p.steamID)) && r
 const GOWN = '      if (gOwn) for (const p of live) if (stoodOwn.has(String(p.steamID))) { const k = pid(p.steamID); gPlan[k] = gOwn[k]; groupMem[k] = gShadow[k]; }\n';
 const G2 = '            lateSh[x.steamID].g = lateSh[x.steamID].g.filter((y) => !stoodOwn.has(y[0])).concat(g2.filter((y) => stoodOwn.has(y[0])));\n';
 const RANKED_OWN = '          if (stoodOwn.size) playedOut = ownUpdate(playedOut, asPlayed);   // Q264: his ranked rating as before Q227 too\n';   // Q264 review
+const BACK = '        back++; RUN.agreedBack = (RUN.agreedBack | 0) + 1;\n';   // Q185: a seat put back
+const RATE_AGE = 'y[0] === h && nowMs - y[1] < STAND_IN_WINDOW_MS';   // Q265: the step (the age of the pairing read)
+const RATE_LOOP = '        for (const x of stoodCand.splice(0)) {\n';
+const RATE_IF = '          if (!by.length) { stoodCand.push(x); continue; }\n';
+const RATE_PUSH = '          parts.push({ steamID: x.steamID, seat: x.seat, score: scores[x.seat] | 0, rated: true });\n';
+const RATE_OFF = ['norate', RATE_IF, '          if (true) { stoodCand.push(x); continue; }\n'];   // nobody rated: Q264
+const RATED_RE = /\| of those, rated instead at the place read now, as a seat put back: a player rated at the settle settled with him standing in in the window \(Q265\) \| (\d+) \|/;
+const RATED_LINE = (key, sid, place, pc, by, days) => new RegExp('agreed-stood-rated ' + key + ': seat [0-9] = ' + v.pid(sid).slice(0, 8) + ' rated at place ' + place + ' of ' + pc
+  + ' read now, as a seat put back: he stood in for ' + by + ' in the last ' + (days || 30) + ' days \\(Q265\\)');
 const HELD_RE = /\| of those, left out instead: every player rated at the settle stood in or settled with one of them in the window \(Q263 \/ Q264\) \| (\d+) \|/;
 const HELD_LINE = (key, days) => new RegExp('agreed-stood-held ' + key + ': seats? [0-9,]+ left out as before Q227: [^\\n]* (stood in himself|settled with seats? [0-9,]+ standing in) in the last ' + (days || 30) + ' days \\(Q263 / Q264\\)');
 const nStood = (rs) => (outOf(rs).match(/  agreed-stood [0-9]/g) || []).length;
 const nHeld = (rs) => (outOf(rs).match(/  agreed-stood-held [0-9]/g) || []).length;
 const nOwn = (rs) => (outOf(rs).match(/  agreed-stood-own [0-9]/g) || []).length;
+const nRated = (rs) => (outOf(rs).match(/  agreed-stood-rated [0-9]/g) || []).length;
 const sxOf = (r, sid) => sigOf(r, sid).sx || 0;   // stood in himself (Q264: a stand-in only)
 const swOf = (r, sid) => sigOf(r, sid).sxw || [];   // [[stand-in pid, when], ...] he settled with (Q264)
 const sxs = (r, sids) => sids.map((s) => sxOf(r, s) > 0 || swOf(r, s).length > 0);   // any mark
@@ -289,6 +321,18 @@ function ageSx(state, ms) {
   return f;
 }
 const S4 = [6100, 5200, 4800, 3900], F = [3000, 2900, 6100, 5200];
+const OWN_RE = /\| players rated at a settle with stand-ins who settled as before Q227 instead: each stood in or settled with one of them in the window \(Q264\) \| (\d+) \|/;
+const OWN_LINE = (key, sid, why) => new RegExp('agreed-stood-own ' + key + ': seat [0-9] = ' + v.pid(sid).slice(0, 8) + ' settles as before Q227, as if the stand-ins were not there: he ' + (why || '(stood in himself|settled with seats? [0-9,]+ standing in)') + ' in the last 30 days \\(Q264\\)');
+// every points / rating / XP (+ career) write for sid, in order (the board ids are fixed in boardsWith)
+const writesOf = (rs, sid) => JSON.stringify([].concat(...rs.map((r) => r.posts.filter((p) => /SetLeaderboardScore/.test(p.url) && new RegExp('steamid=' + sid + '(&|$)').test(p.body)).map((p) => p.body))));
+const sigCore = (r, sid) => { const e = sigOf(r, sid); return JSON.stringify([e.g, e.w, e.v, e.s1, e.s2, e.smax, e.disp]); };
+const grpOf = (r, sid) => { const e = ((r.state.GROUPS_FILE || {})[v.pid(sid)]) || {}; return JSON.stringify([e.r, e.k]); };
+const skOf = (r, sid) => JSON.stringify(((r.state.SKILL_FILE || {})[v.pid(sid)]) || null);   // Q264 review: his stored and ranked rating as kept in the state
+const xps = (rs, sids) => JSON.stringify(sids.map((s) => xpOf(rs, s)));
+const PERMATCH = ['permatch', HELD_IF, '        if (lately.length) {\n'];   // Q263: the whole match read
+const NOOWN = ['noown', OWN_ADD, '            RUN.agreedStoodOwn = (RUN.agreedStoodOwn | 0) + 1;\n'];   // nobody settles as before: the stand-ins for everybody
+const NOSTAND = ['nostand', STAND, '          if (false) {\n'];   // Q227 step two off: today's settle
+const from3 = () => advance(st3, 3 * HOUR);   // after C1 of [3] (st3 below)
 
 console.log('=== a stand-in only while nobody rated there settled with one in the window (Q263), read per player (Q264) ===');
 
@@ -304,12 +348,18 @@ console.log('=== a stand-in only while nobody rated there settled with one in th
     [CANDH, LATELY, DAYS, HELD_IF, OWN_ADD, SORT, AGE_SX].every((a) => SRC.split(a).length === 2) && at(CAND) < cnd && cnd < at(AGE_SX) && at(AGE_SX) < lat
     && lat - cnd < 1000 && at(LATELY) + LATELY.length === at(DAYS) && at(DAYS) + DAYS.length === at(HELD_IF) && at(HELD_IF) < at(OWN_ADD) && at(OWN_ADD) < srt
     && srt - lat < 2400 && SRC.split(AGE_W).length === 2 && cnd < at(AGE_W) && at(AGE_W) < lat);
-  T('[0] the mark right after the real settle\'s signals (and the Q264 win fix), not on the players who settled as before Q227',
-    [RMS, WFIX, SX, SX_SKIP, SX_STOOD, SX_PAIR].every((a) => SRC.split(a).length === 2) && at(RMS) + RMS.length === at(WFIX) && at(WFIX) + WFIX.length === at(SX)
-    && at(SX) < at(SX_SKIP) && at(SX_SKIP) < at(SX_STOOD) && at(SX_STOOD) + SX_STOOD.length === at(SX_PAIR) && at(SX_PAIR) - at(SX) < 600);
+  T('[0] Q265: the step after the absent-seat loop (the writers and the seats put back read), before the Q263 / Q264 check: the age of the pairing read, a seat not rated left a candidate',
+    [BACK, RATE_AGE, RATE_LOOP, RATE_IF, RATE_PUSH].every((a) => SRC.split(a).length === 2) && at(CAND) < at(BACK) && at(BACK) < at(RATE_AGE) && at(RATE_AGE) < at(RATE_LOOP)
+    && at(RATE_LOOP) < at(RATE_IF) && at(RATE_IF) + RATE_IF.length === at(RATE_PUSH) && at(RATE_PUSH) < cnd && cnd - at(RATE_AGE) < 1600, String(cnd - at(RATE_AGE)));
+  T('[0] the mark right after the real settle\'s signals (and the Q264 win fix): a seat rated instead marked as one who stood in, not the players who settled as before Q227',
+    [RMS, WFIX, RATED_IDS, SX, SX_SKIP, SX_STOOD, SX_PAIR].every((a) => SRC.split(a).length === 2) && at(RMS) + RMS.length === at(WFIX) && at(WFIX) + WFIX.length === at(RATED_IDS)
+    && at(RATED_IDS) + RATED_IDS.length === at(SX) && at(SX) < at(SX_SKIP) && at(SX_SKIP) < at(SX_STOOD) && at(SX_STOOD) + SX_STOOD.length === at(SX_PAIR) && at(SX_PAIR) - at(SX) < 700,
+    String(at(SX_PAIR) - at(SX)));
   T('[0] Q264: the own decay step and the late-result shadow pinned', [GOWN, G2].every((a) => SRC.split(a).length === 2));
-  T('[0] the summary row, right after the Q227 stood row', /'\| of those, left out instead: every player rated at the settle stood in or settled with one of them in the window \(Q263 \/ Q264\) \| ' \+ s\('agreedStoodHeld', 0\) \+ ' \|',/.test(SRC)
-    && at("s('agreedStood', 0)") < at("s('agreedStoodHeld', 0)") && at("s('agreedStoodHeld', 0)") < at("s('agreedStoodOwn', 0)") && at("s('agreedStoodOwn', 0)") < at("s('recanted', 0)"));
+  T('[0] the summary rows, right after the Q227 stood row: held (Q263 / Q264), rated (Q265), own (Q264)', /'\| of those, left out instead: every player rated at the settle stood in or settled with one of them in the window \(Q263 \/ Q264\) \| ' \+ s\('agreedStoodHeld', 0\) \+ ' \|',/.test(SRC)
+    && /'\| of those, rated instead at the place read now, as a seat put back: a player rated at the settle settled with him standing in in the window \(Q265\) \| ' \+ s\('agreedStoodRated', 0\) \+ ' \|',/.test(SRC)
+    && at("s('agreedStood', 0)") < at("s('agreedStoodHeld', 0)") && at("s('agreedStoodHeld', 0)") < at("s('agreedStoodRated', 0)") && at("s('agreedStoodRated', 0)") < at("s('agreedStoodOwn', 0)")
+    && at("s('agreedStoodOwn', 0)") < at("s('recanted', 0)"));
 }
 
 // ---- [1] the ring: four accounts alone in ranked FFA, taking turns ----
@@ -340,18 +390,29 @@ function ring(n, honest, script) {
 }
 {
   const o = ring(6, false), r = last(o.rs);
-  T('[1] the ring: stand-ins in the first match only (2 stood, then 5 matches held), every match settled', o.ok && nStood(o.rs) === 2 && nHeld(o.rs) === 5
-    && sumRow(o.rs, HELD_RE) === 10 && sumRow(o.rs, STOOD_RE) === 2, JSON.stringify([o.ok, nStood(o.rs), nHeld(o.rs), o.sums]) + (o.ok ? '' : last(o.rs).out.slice(-800)));
-  T('[1] nobody gains after the first match: the sum after six = the sum after one (+27), all four marked (the two who stood in, the two paired with them)',
-    o.ok && o.sums[0] === 27 && o.sums[5] === o.sums[0] && JSON.stringify(sxs(r, P)) === '[true,true,true,true]'
+  T('[1] the ring: stand-ins in the first match only, then the two who stood in held out when they settle (Q263) and rated when they withdraw again (Q265), every match settled',
+    o.ok && nStood(o.rs) === 2 && nHeld(o.rs) === 3 && nRated(o.rs) === 4 && sumRow(o.rs, STOOD_RE) === 2 && sumRow(o.rs, HELD_RE) === 6 && sumRow(o.rs, RATED_RE) === 4,
+    JSON.stringify([o.ok, nStood(o.rs), nHeld(o.rs), nRated(o.rs), o.sums]) + (o.ok ? '' : last(o.rs).out.slice(-800)));
+  T('[1] nobody gains after the first match: the sum never above its +27, all four marked (the two who stood in, the two paired with them)',
+    o.ok && o.sums[0] === 27 && o.sums.every((x) => x <= 27) && JSON.stringify(sxs(r, P)) === '[true,true,true,true]'
     && sxOf(r, P[2]) > 0 && sxOf(r, P[3]) > 0 && swOf(r, P[0]).length === 2 && swOf(r, P[1]).length === 2, JSON.stringify([o.sums, o.lp, sxs(r, P)]));
   const hn = ring(6, true);
   T('[1] the honest rotation of the same four: zero-sum, no stand-in, no mark', hn.ok && hn.sums.every((x) => x === 0) && nStood(hn.rs) === 0 && nHeld(hn.rs) === 0
-    && JSON.stringify(sxs(last(hn.rs), P)) === '[false,false,false,false]', JSON.stringify([hn.ok, hn.sums]));
+    && nRated(hn.rs) === 0 && JSON.stringify(sxs(last(hn.rs), P)) === '[false,false,false,false]', JSON.stringify([hn.ok, hn.sums]));
+  withMutant(RATE_OFF[0], RATE_OFF[1], RATE_OFF[2], (script) => {
+    const m = ring(6, false, script);
+    T('[1] mutant: nobody rated (as Q264) -> held every match after the first, the sum still +27', m.ok && nStood(m.rs) === 2 && nHeld(m.rs) === 5 && nRated(m.rs) === 0
+      && m.sums[5] === 27 && m.sums.every((x) => x <= 27), JSON.stringify([m.ok, nStood(m.rs), nHeld(m.rs), m.sums]));
+  });
   withMutant('nocheck', LATELY, '        const lately = [];\n', (script) => {
     const m = ring(6, false, script);
-    T('[1] mutant: the check never true -> stand-ins every match, the sum grows', m.ok && nStood(m.rs) === 12 && nHeld(m.rs) === 0 && m.sums[5] >= 5 * m.sums[0] && m.sums[0] === 27,
-      JSON.stringify([m.ok, nStood(m.rs), m.sums]));
+    T('[1] mutant: the Q263 check never true -> stand-ins in the first two matches, rated after: +54, no more', m.ok && nStood(m.rs) === 4 && nRated(m.rs) === 8 && nHeld(m.rs) === 0
+      && m.sums[1] === 54 && m.sums.every((x) => x <= 54), JSON.stringify([m.ok, nStood(m.rs), nRated(m.rs), m.sums]));
+  });
+  withMutant('nocheck-norate', [[LATELY, '        const lately = [];\n'], [RATE_OFF[1], RATE_OFF[2]]], null, (script) => {
+    const m = ring(6, false, script);
+    T('[1] mutant: neither check -> stand-ins every match, the sum grows', m.ok && nStood(m.rs) === 12 && nHeld(m.rs) === 0 && nRated(m.rs) === 0 && m.sums[5] >= 5 * m.sums[0]
+      && m.sums[0] === 27, JSON.stringify([m.ok, nStood(m.rs), m.sums]));
   });
 }
 
@@ -381,33 +442,53 @@ ALL.push(H3, A3, L3, L4, L5, L6);
 const w3a = wd2(2, 0xC265, [H3, A3, L3, L4], [2, 3], S4, F), w3b = wd2(2, 0xC266, [H3, A3, L3, L4], [2, 3], S4, F);
 const a3 = timeline(w3a.steps);
 const st3 = allOk(a3, 6) ? last(a3).state : null;
-{
-  const b = timeline(w3b.steps, null, advance(st3, 3 * HOUR)), r = last(b);
-  T('[3] held: the held line and row, A3 last of 2 (down), L3 / L4 not rated, not convicted', allOk(b, 6) && processedOf(r).has(w3b.k.key) && HELD_LINE(w3b.k.key).test(outOf(b))
-    && /left out as before Q227: seat 0 = [0-9a-f]{8} settled with seats 2,3 standing in, seat 1 = [0-9a-f]{8} settled with seats 2,3 standing in in the last 30 days/.test(outOf(b))
-    && sumRow(b, HELD_RE) === 2 && nStood(b) === 0 && down(b, A3) && none(b, L3) && none(b, L4) && rOf(b, L3).length === 0 && leavesOf(r, L3) === 0 && leavesOf(r, L4) === 0,
-    show(b, w3b.ros) + r.out.slice(-600));
-  T('[3] no mark refreshed by the held settle', [H3, A3, L3, L4].every((s) => marks(r, s) === marks(last(a3), s)) && swOf(r, H3).length === 2 && sxOf(r, L3) > 0);
-  withMutant('nostand', STAND, '          if (false) {\n', (script) => {
-    const m = timeline(w3b.steps, script, advance(st3, 3 * HOUR));
-    T('[3] the held settle exactly as with Q227 step two off (as before Q227)', allOk(m, 6) && JSON.stringify(last(m).posts) === JSON.stringify(r.posts)
-      && pts(m, w3b.ros) === pts(b, w3b.ros), show(m, w3b.ros) + ' vs ' + show(b, w3b.ros));
+{   // Q265: the same two withdrawing again
+  const b = timeline(w3b.steps, null, from3()), r = last(b), tw = timeline(w3b.twin, null, from3()), q = [H3, A3, L3, L4], by = 'seat 0 = [0-9a-f]{8}, seat 1 = [0-9a-f]{8}';
+  T('[3] the same two again: rated at their place read now (3rd and 4th of 4), the rated lines and row, not convicted', allOk(b, 6) && processedOf(r).has(w3b.k.key)
+    && RATED_LINE(w3b.k.key, L3, 3, 4, by).test(outOf(b)) && RATED_LINE(w3b.k.key, L4, 4, 4, by).test(outOf(b)) && nRated(b) === 2 && nStood(b) === 0 && nHeld(b) === 0
+    && nOwn(b) === 0 && sumRow(b, RATED_RE) === 2 && sumRow(b, STOOD_RE) === 0 && leavesOf(r, L3) === 0 && leavesOf(r, L4) === 0, outOf(b).slice(-900));
+  T('[3] ... every points and rating write of the four exactly the honest twin\'s (A3 2nd of 4: up, L3 / L4 down), the pair\'s XP the twin\'s, none for the two (no record of theirs)',
+    allOk(tw, 6) && sameFor(b, tw, q) && up(b, A3) && down(b, L3) && down(b, L4) && xps(b, [H3, A3]) === xps(tw, [H3, A3]) && xpOf(b, L3) === 0 && xpOf(b, L4) === 0
+    && xpOf(tw, L3) > 0, show(b, q) + ' vs ' + show(tw, q) + ' xp ' + xps(b, q) + ' vs ' + xps(tw, q));
+  const t = sxOf(r, L3);
+  T('[3] the marks refreshed: L3 / L4 marked again, H3 / A3 paired with them again, all with this settle\'s clock', t > sxOf(last(a3), L3) && sxOf(r, L4) === t
+    && [H3, A3].every((s) => sxOf(r, s) === 0 && JSON.stringify(swOf(r, s)) === JSON.stringify([[v.pid(L3), t], [v.pid(L4), t]])), JSON.stringify(q.map((s) => marks(r, s))));
+  withMutant(RATE_OFF[0], RATE_OFF[1], RATE_OFF[2], (script) => {
+    const m = timeline(w3b.steps, script, from3());
+    T('[3] mutant: nobody rated (as Q264) -> held, A3 last of 2 (down), L3 / L4 not rated', allOk(m, 6) && nHeld(m) === 1 && nRated(m) === 0 && HELD_LINE(w3b.k.key).test(outOf(m))
+      && /left out as before Q227: seat 0 = [0-9a-f]{8} settled with seats 2,3 standing in, seat 1 = [0-9a-f]{8} settled with seats 2,3 standing in in the last 30 days/.test(outOf(m))
+      && down(m, A3) && none(m, L3) && none(m, L4), show(m, q));
   });
   withMutant('nosx', SX, '    if (false) {\n', (script) => {
     const ma = timeline(w3a.steps, script), mb = allOk(ma, 6) ? timeline(w3b.steps, script, advance(last(ma).state, 3 * HOUR)) : [];
-    T('[3] mutant: no mark -> stood in again, A3 up', allOk(mb, 6) && up(mb, A3) && nStood(mb) === 2 && nHeld(mb) === 0, show(mb, w3b.ros));
+    T('[3] mutant: no mark -> stood in again, A3 up, L3 / L4 not rated', allOk(mb, 6) && up(mb, A3) && nStood(mb) === 2 && nRated(mb) === 0 && nHeld(mb) === 0 && none(mb, L3),
+      show(mb, w3b.ros));
+  });
+}
+{   // Q263: the two who stood in writing their own result while two others withdraw: held, exactly as before Q227
+  const wh = wd2(2, 0xC26F, [L3, L4, L5, L6], [2, 3], S4, F), b = timeline(wh.steps, null, from3()), r = last(b);
+  T('[3] the two who stood in settle while two others withdraw: held (both stood in themselves), L3 1st of 2, L5 / L6 not rated, no mark refreshed', allOk(b, 6)
+    && processedOf(r).has(wh.k.key) && nHeld(b) === 1 && nStood(b) === 0 && nRated(b) === 0 && HELD_LINE(wh.k.key).test(outOf(b))
+    && /left out as before Q227: seat 0 = [0-9a-f]{8} stood in himself, seat 1 = [0-9a-f]{8} stood in himself in the last 30 days/.test(outOf(b)) && sumRow(b, HELD_RE) === 2
+    && up(b, L3) && down(b, L4) && none(b, L5) && none(b, L6) && [L3, L4, L5, L6].every((s) => marks(r, s) === marks(last(a3), s)), show(b, wh.ros) + outOf(b).slice(-600));
+  withMutant(NOSTAND[0], NOSTAND[1], NOSTAND[2], (script) => {
+    const m = timeline(wh.steps, script, from3());
+    T('[3] the held settle exactly as with Q227 step two off (as before Q227)', allOk(m, 6) && JSON.stringify(last(m).posts) === JSON.stringify(r.posts)
+      && pts(m, wh.ros) === pts(b, wh.ros), show(m, wh.ros) + ' vs ' + show(b, wh.ros));
   });
 }
 {   // Q264: the same honest pair met again in the window by two other liars, and by one of the same and one other
   const w3c = wd2(2, 0xC268, [H3, A3, L5, L6], [2, 3], S4, F), w3d = wd2(2, 0xC269, [H3, A3, L3, L5], [2, 3], S4, F);
-  const c = timeline(w3c.steps, null, advance(st3, 3 * HOUR)), tc = timeline(w3c.twin, null, advance(st3, 3 * HOUR));
-  T('[3] two other liars: both stood in, the pair settles as the honest twin (A3 2nd of 4: up), paired with them too', allOk(c, 6) && allOk(tc, 6) && nStood(c) === 2 && nHeld(c) === 0
-    && nOwn(c) === 0 && sameFor(c, tc, [H3, A3]) && up(c, A3) && swOf(last(c), A3).length === 4 && sxOf(last(c), L5) > 0, show(c, w3c.ros) + ' vs ' + show(tc, w3c.ros));
-  const d = timeline(w3d.steps, null, advance(st3, 3 * HOUR));
-  T('[3] one of the same liars and one other: held, A3 down, the reason names the seat of the same one only', allOk(d, 6) && nHeld(d) === 1 && nStood(d) === 0 && down(d, A3)
-    && /seat 1 = [0-9a-f]{8} settled with seat 2 standing in in the last 30 days/.test(outOf(d)), show(d, w3d.ros) + last(d).out.slice(-600));
+  const c = timeline(w3c.steps, null, from3()), tc = timeline(w3c.twin, null, from3());
+  T('[3] two other liars (Q264): both stood in, the pair settles as the honest twin (A3 2nd of 4: up), paired with them too', allOk(c, 6) && allOk(tc, 6) && nStood(c) === 2 && nHeld(c) === 0
+    && nOwn(c) === 0 && nRated(c) === 0 && sameFor(c, tc, [H3, A3]) && up(c, A3) && swOf(last(c), A3).length === 4 && sxOf(last(c), L5) > 0, show(c, w3c.ros) + ' vs ' + show(tc, w3c.ros));
+  const d = timeline(w3d.steps, null, from3()), td = timeline(w3d.twin, null, from3());
+  T('[3] one of the same liars and one other (Q265): the same one rated (settling as before Q227 himself: he stood in), the other stood in, the pair as the honest twin (A3 up)',
+    allOk(d, 6) && allOk(td, 6) && nRated(d) === 1 && nStood(d) === 1 && nHeld(d) === 0 && nOwn(d) === 1 && RATED_LINE(w3d.k.key, L3, 3, 4, 'seat 0 = [0-9a-f]{8}, seat 1 = [0-9a-f]{8}').test(outOf(d))
+    && OWN_LINE(w3d.k.key, L3, 'stood in himself').test(outOf(d)) && sameFor(d, td, [H3, A3]) && up(d, A3) && down(d, L3) && none(d, L5) && swOf(last(d), A3).length === 3,
+    show(d, w3d.ros) + ' vs ' + show(td, w3d.ros) + outOf(d).slice(-900));
   withMutant('nopair', AGE_W, 'nowMs - y[1] < STAND_IN_WINDOW_MS', (script) => {
-    const m = timeline(w3c.steps, script, advance(st3, 3 * HOUR));
+    const m = timeline(w3c.steps, script, from3());
     T('[3] mutant: any stand-in he settled with read, not these -> held, A3 down', allOk(m, 6) && nHeld(m) === 1 && down(m, A3), show(m, w3c.ros));
   });
   withMutant('settlersx', SX_STOOD, '        if (true) e.sx = nowMs;\n', (script) => {
@@ -419,15 +500,31 @@ const st3 = allOk(a3, 6) ? last(a3).state : null;
 // ---- [4] the window ----
 {
   const run = (agedMs, env, script) => timeline(w3b.steps.map((s) => [s[0], s[1], env || null]), script, advance(ageSx(st3, agedMs), 3 * HOUR));
-  const old = run(WIN + DAY), young = run(WIN - DAY);
-  T('[4] the marks 31 days old: stood in again, A3 2nd of 4 (up)', allOk(old, 6) && nStood(old) === 2 && nHeld(old) === 0 && up(old, A3), show(old, w3b.ros));
-  T('[4] the marks 29 days old: held, A3 down', allOk(young, 6) && nStood(young) === 0 && nHeld(young) === 1 && down(young, A3), show(young, w3b.ros));
-  const e1 = run(2 * DAY, { STAND_IN_WINDOW_MS: String(DAY) }), e2 = run(2 * DAY);
-  T('[4] STAND_IN_WINDOW_MS from the env: one day -> marks 2 days old stood in again; 30 days -> held', allOk(e1, 6) && nStood(e1) === 2 && allOk(e2, 6) && nHeld(e2) === 1
-    && HELD_LINE(w3b.k.key).test(outOf(e2)), JSON.stringify([nStood(e1), nHeld(e2)]));
+  const old = run(WIN + DAY), young = run(WIN - DAY), by = 'seat 0 = [0-9a-f]{8}, seat 1 = [0-9a-f]{8}';
+  T('[4] the marks 31 days old: stood in again, A3 2nd of 4 (up)', allOk(old, 6) && nStood(old) === 2 && nHeld(old) === 0 && nRated(old) === 0 && up(old, A3), show(old, w3b.ros));
+  T('[4] the marks 29 days old: rated (Q265), A3 up, L3 down', allOk(young, 6) && nRated(young) === 2 && nStood(young) === 0 && nHeld(young) === 0 && up(young, A3)
+    && down(young, L3), show(young, w3b.ros));
+  const e1 = run(2 * DAY, { STAND_IN_WINDOW_MS: String(DAY) }), e2 = run(2 * DAY), e3 = run(2 * DAY, { STAND_IN_WINDOW_MS: String(3 * DAY) });
+  T('[4] STAND_IN_WINDOW_MS from the env: one day -> marks 2 days old stood in again; 3 days -> rated, the line says 3 days; unset -> rated, 30 days', allOk(e1, 6)
+    && nStood(e1) === 2 && nRated(e1) === 0 && allOk(e3, 6) && nRated(e3) === 2 && RATED_LINE(w3b.k.key, L3, 3, 4, by, 3).test(outOf(e3)) && allOk(e2, 6) && nRated(e2) === 2
+    && RATED_LINE(w3b.k.key, L3, 3, 4, by).test(outOf(e2)), JSON.stringify([nStood(e1), nRated(e3), nRated(e2)]));
   withMutant('noage', AGE_W, 'true && candH.has(y[0])', (script) => {
     const m = run(WIN + DAY, null, script);
-    T('[4] mutant: the age not read -> held after 31 days too', allOk(m, 6) && nHeld(m) === 1 && down(m, A3), show(m, w3b.ros));
+    T('[4] mutant: the age not read by the Q264 check -> held after 31 days', allOk(m, 6) && nHeld(m) === 1 && nRated(m) === 0 && down(m, A3), show(m, w3b.ros));
+  });
+  withMutant('norateage', RATE_AGE, 'y[0] === h', (script) => {
+    const m = run(WIN + DAY, null, script);
+    T('[4] mutant: the age not read by the Q265 step -> rated after 31 days', allOk(m, 6) && nRated(m) === 2 && nStood(m) === 0, show(m, w3b.ros));
+  });
+  // a rated settle marks them again: rated 15 days ago, the first meeting (C1) 35 days ago
+  const w3e = wd2(2, 0xC26E, [H3, A3, L3, L4], [2, 3], S4, F), third = (ra, script) => timeline(w3e.steps, script, advance(ageSx(last(ra).state, 15 * DAY), 3 * HOUR));
+  const ra = run(20 * DAY), re = allOk(ra, 6) ? third(ra) : [];
+  T('[4] rated 15 days ago, the first meeting 35 days ago: rated again (the rated settle marked them)', allOk(ra, 6) && nRated(ra) === 2 && allOk(re, 6) && nRated(re) === 2
+    && nStood(re) === 0 && up(re, A3), show(re, w3e.ros));
+  withMutant('noratedmark', RATED_IDS, '    const ratedIds = [];\n', (script) => {
+    const ma = run(20 * DAY, null, script), me = allOk(ma, 6) ? third(ma, script) : [];
+    T('[4] mutant: a rated settle marks nobody -> stood in at the third meeting', allOk(ma, 6) && nRated(ma) === 2 && allOk(me, 6) && nStood(me) === 2 && nRated(me) === 0,
+      show(me, w3e.ros));
   });
 }
 
@@ -440,7 +537,7 @@ const st3 = allOk(a3, 6) ? last(a3).state : null;
   const qa = timeline(q.steps);
   T('[5] quick C1: no stand-in, no mark', allOk(qa, 6) && processedOf(last(qa)).has(q.k.key) && nStood(qa) === 0 && JSON.stringify(sxs(last(qa), q.ros)) === '[false,false,false,false]');
   const r5 = last(a3), t5 = sxOf(r5, L3), pl5 = Object.values((r5.state.SIGNALS_FILE || {}).players || {});
-  T('[5] ranked C1: the stood seats marked, the two rated paired with each of them, all with the settle\'s clock, nobody else', allOk(a3, 6) && t5 > 0 && sxOf(r5, L4) === t5
+  T('[5] ranked C1: the stood seats marked, the two who settled paired with each of them, all with the settle\'s clock, nobody else', allOk(a3, 6) && t5 > 0 && sxOf(r5, L4) === t5
     && [H3, A3].every((s) => sxOf(r5, s) === 0 && JSON.stringify(swOf(r5, s)) === JSON.stringify([[v.pid(L3), t5], [v.pid(L4), t5]]))
     && swOf(r5, L3).length === 0 && pl5.filter((e) => e.sx).length === 2 && pl5.filter((e) => e.sxw).length === 2, JSON.stringify([H3, A3, L3, L4].map((s) => marks(r5, s))));
   withMutant('sxall', SX, '    for (const p of parts) sigPlayer(signals, pid(String(p.steamID)), nowMs).sx = nowMs;\n' + SX, (script) => {
@@ -450,60 +547,51 @@ const st3 = allOk(a3, 6) ? last(a3).state : null;
 }
 
 // ======== Q264: read per player ========
-const OWN_RE = /\| players rated at a settle with stand-ins who settled as before Q227 instead: each stood in or settled with one of them in the window \(Q264\) \| (\d+) \|/;
-const OWN_LINE = (key, sid, why) => new RegExp('agreed-stood-own ' + key + ': seat [0-9] = ' + v.pid(sid).slice(0, 8) + ' settles as before Q227, as if the stand-ins were not there: he ' + (why || '(stood in himself|settled with seats? [0-9,]+ standing in)') + ' in the last 30 days \\(Q264\\)');
-// every points / rating / XP (+ career) write for sid, in order (the board ids are fixed in boardsWith)
-const writesOf = (rs, sid) => JSON.stringify([].concat(...rs.map((r) => r.posts.filter((p) => /SetLeaderboardScore/.test(p.url) && new RegExp('steamid=' + sid + '(&|$)').test(p.body)).map((p) => p.body))));
-const sigCore = (r, sid) => { const e = sigOf(r, sid); return JSON.stringify([e.g, e.w, e.v, e.s1, e.s2, e.smax, e.disp]); };
-const grpOf = (r, sid) => { const e = ((r.state.GROUPS_FILE || {})[v.pid(sid)]) || {}; return JSON.stringify([e.r, e.k]); };
-const skOf = (r, sid) => JSON.stringify(((r.state.SKILL_FILE || {})[v.pid(sid)]) || null);   // Q264 review: his stored and ranked rating as kept in the state
-const xps = (rs, sids) => JSON.stringify(sids.map((s) => xpOf(rs, s)));
-const PERMATCH = ['permatch', HELD_IF, '        if (lately.length) {\n'];   // Q263: the whole match read
-const NOOWN = ['noown', OWN_ADD, '            RUN.agreedStoodOwn = (RUN.agreedStoodOwn | 0) + 1;\n'];   // nobody settles as before: the stand-ins for everybody
-const NOSTAND = ['nostand', STAND, '          if (false) {\n'];   // Q227 step two off: today's settle
-const from3 = () => advance(st3, 3 * HOUR);
 
-// ---- [6] a marked honest player next to a fresh one; the two liars of his last match again ----
-const H7 = SID(941);
-ALL.push(H7);
-const w6 = wd2(2, 0xC26A, [L3, H3, H7, L4], [0, 3], S4, [6100, 3000, 2900, 5200]);   // L3 1st (stands in above H3), H3 2nd, H7 3rd, L4 4th
+// ---- [6] a marked player (he stood in at C1) next to one he played with there; two other liars withdraw ----
+const w6 = wd2(2, 0xC26A, [L5, L3, H3, L6], [0, 3], S4, [6100, 3000, 2900, 5200]);   // L5 1st (stands in above L3), L3 2nd, H3 3rd, L6 4th
 const b6 = timeline(w6.steps, null, from3());
 {
   const r = last(b6), tw = timeline(w6.twin, null, from3());
   const m = { nostand: [], permatch: [], noown: [], nogown: [] };   // stays empty where a mutant anchor is missing (a fail, not a crash)
   for (const mu of [NOSTAND, PERMATCH, NOOWN, ['nogown', GOWN, '']]) withMutant(mu[0], mu[1], mu[2], (script) => { m[mu[0]] = timeline(w6.steps, script, from3()); });
-  T('[6] settled with the stand-ins, H3 settling as before Q227: the own line and row, both liars stood in', allOk(b6, 6) && processedOf(r).has(w6.k.key) && nStood(b6) === 2 && nHeld(b6) === 0
-    && nOwn(b6) === 1 && OWN_LINE(w6.k.key, H3, 'settled with seats 0,3 standing in').test(outOf(b6)) && sumRow(b6, OWN_RE) === 1, outOf(b6).slice(-900));
-  T('[6] the fresh H7 as the honest twin (3rd of 4, not last of 2)', allOk(tw, 6) && sameFor(b6, tw, [H7]) && xps(b6, [H7]) === xps(tw, [H7]), show(b6, [H7]) + ' vs ' + show(tw, [H7]));
+  T('[6] settled with the stand-ins, L3 settling as before Q227: the own line and row, both liars stood in, nobody rated', allOk(b6, 6) && processedOf(r).has(w6.k.key)
+    && nStood(b6) === 2 && nHeld(b6) === 0 && nRated(b6) === 0 && nOwn(b6) === 1 && OWN_LINE(w6.k.key, L3, 'stood in himself').test(outOf(b6)) && sumRow(b6, OWN_RE) === 1,
+    outOf(b6).slice(-900));
+  T('[6] H3 (paired with L3 / L4 at C1, not with these two) as the honest twin (3rd of 4, not last of 2)', allOk(tw, 6) && sameFor(b6, tw, [H3]) && xps(b6, [H3]) === xps(tw, [H3]),
+    show(b6, [H3]) + ' vs ' + show(tw, [H3]));
   const n = m.nostand;
-  T('[6] the marked H3 exactly as with Q227 step two off: every write of his, his win count and his repeat-group memory', allOk(n, 6) && writesOf(b6, H3) === writesOf(n, H3)
-    && sigCore(r, H3) === sigCore(last(n), H3) && grpOf(r, H3) === grpOf(last(n), H3) && writesOf(b6, H3) !== '[]', writesOf(b6, H3) + ' vs ' + writesOf(n, H3));
-  T('[6] ... which here is not his twin result (1st of 2 there, 2nd of 4 here: points, rating, XP and the win all differ)', allOk(tw, 6) && pts(b6, [H3]) !== pts(tw, [H3])
-    && JSON.stringify(rOf(b6, H3)) !== JSON.stringify(rOf(tw, H3)) && xpOf(b6, H3) !== xpOf(tw, H3) && sigOf(r, H3).w === sigOf(last(tw), H3).w + 1, show(b6, [H3]) + ' vs ' + show(tw, [H3]));
-  T('[6] mutant: the whole match read (Q263) -> held, H7 lower (last of 2)', allOk(m.permatch, 6) && nHeld(m.permatch) === 1 && ptsIn(m.permatch, H7)[0] < ptsIn(b6, H7)[0], show(m.permatch, [H7]));
-  T('[6] mutant: nobody settles as before -> H3 as his twin', allOk(m.noown, 6) && sameFor(m.noown, tw, [H3]) && pts(m.noown, [H3]) !== pts(b6, [H3]), show(m.noown, [H3]));
-  T('[6] mutant: his repeat-group step read with the stand-ins -> his rating moves less, his points the same', allOk(m.nogown, 6) && pts(m.nogown, [H3]) === pts(b6, [H3])
-    && JSON.stringify(rOf(m.nogown, H3)) !== JSON.stringify(rOf(b6, H3)) && /group-decay [^\n]*repeat-group streak 2/.test(outOf(m.nogown)), show(m.nogown, [H3]) + ' vs ' + show(b6, [H3]));
+  T('[6] the marked L3 exactly as with Q227 step two off: every write of his, his win count and his repeat-group memory', allOk(n, 6) && writesOf(b6, L3) === writesOf(n, L3)
+    && sigCore(r, L3) === sigCore(last(n), L3) && grpOf(r, L3) === grpOf(last(n), L3) && writesOf(b6, L3) !== '[]', writesOf(b6, L3) + ' vs ' + writesOf(n, L3));
+  T('[6] ... which here is not his twin result (1st of 2 there, 2nd of 4 here: points, rating, XP and the win all differ)', allOk(tw, 6) && pts(b6, [L3]) !== pts(tw, [L3])
+    && JSON.stringify(rOf(b6, L3)) !== JSON.stringify(rOf(tw, L3)) && xpOf(b6, L3) !== xpOf(tw, L3) && sigOf(r, L3).w === sigOf(last(tw), L3).w + 1, show(b6, [L3]) + ' vs ' + show(tw, [L3]));
+  T('[6] mutant: the whole match read (Q263) -> held, H3 lower (last of 2)', allOk(m.permatch, 6) && nHeld(m.permatch) === 1 && ptsIn(m.permatch, H3)[0] < ptsIn(b6, H3)[0], show(m.permatch, [H3]));
+  T('[6] mutant: nobody settles as before -> L3 as his twin', allOk(m.noown, 6) && sameFor(m.noown, tw, [L3]) && pts(m.noown, [L3]) !== pts(b6, [L3]), show(m.noown, [L3]));
+  const streak2 = new RegExp('group-decay [^\\n]*' + v.pid(L3).slice(0, 8) + ' repeat-group streak 2');
+  T('[6] his repeat-group step on the roster without the stand-ins (H3 again: streak 2); mutant (with them: a new group) -> his rating moves otherwise, his points the same',
+    streak2.test(outOf(b6)) && allOk(m.nogown, 6) && !streak2.test(outOf(m.nogown)) && pts(m.nogown, [L3]) === pts(b6, [L3])
+    && JSON.stringify(rOf(m.nogown, L3)) !== JSON.stringify(rOf(b6, L3)), show(m.nogown, [L3]) + ' vs ' + show(b6, [L3]));
   // Q264 review: his ranked rating (rm / rv, read by the points plan of his later matches) as with Q227 step two off too;
   //   it is in the state only, no board write shows it, so the writes compared above cannot catch it
-  T('[6] review: the marked H3\'s stored and ranked rating in the state exactly as with Q227 step two off', allOk(n, 6) && skOf(r, H3) === skOf(last(n), H3)
-    && skOf(r, H3) !== 'null', skOf(r, H3) + ' vs ' + skOf(last(n), H3));
+  T('[6] review: the marked L3\'s stored and ranked rating in the state exactly as with Q227 step two off', allOk(n, 6) && skOf(r, L3) === skOf(last(n), L3)
+    && skOf(r, L3) !== 'null', skOf(r, L3) + ' vs ' + skOf(last(n), L3));
   withMutant('noranked', RANKED_OWN, '', (script) => {
     const mr = timeline(w6.steps, script, from3());
-    T('[6] review mutant: his ranked rating read with the stand-ins -> another ranked rating, every write of his the same', allOk(mr, 6) && skOf(last(mr), H3) !== skOf(r, H3)
-      && writesOf(mr, H3) === writesOf(b6, H3), skOf(last(mr), H3) + ' vs ' + skOf(r, H3));
+    T('[6] review mutant: his ranked rating read with the stand-ins -> another ranked rating, every write of his the same', allOk(mr, 6) && skOf(last(mr), L3) !== skOf(r, L3)
+      && writesOf(mr, L3) === writesOf(b6, L3), skOf(last(mr), L3) + ' vs ' + skOf(r, L3));
   });
 }
 
 // ---- [7] marks: the players who settled with the stand-ins, not the one who settled as before ----
 {
-  const r = last(b6), at = sxOf(r, L3);
-  T('[7] H7 paired with the stand-ins and they marked, with the settle\'s clock, H3\'s marks as after his last match', at > 0 && sxOf(r, L4) === at && sxOf(r, H7) === 0
-    && JSON.stringify(swOf(r, H7)) === JSON.stringify([[v.pid(L3), at], [v.pid(L4), at]]) && marks(r, H3) === marks(last(a3), H3) && swOf(r, H3).length === 2
-    && swOf(r, H3)[0][1] < at, JSON.stringify([marks(r, H3), marks(last(a3), H3), marks(r, H7), at]));
+  const r = last(b6), at = sxOf(r, L5);
+  T('[7] L5 / L6 marked, H3 paired with them too (his pairing with L3 / L4 kept), all with the settle\'s clock, L3\'s marks as after C1', at > 0 && sxOf(r, L6) === at
+    && sxOf(r, H3) === 0 && JSON.stringify(swOf(r, H3)) === JSON.stringify(swOf(last(a3), H3).concat([[v.pid(L5), at], [v.pid(L6), at]])) && swOf(last(a3), H3).length === 2
+    && marks(r, L3) === marks(last(a3), L3) && sxOf(r, L3) > 0 && sxOf(r, L3) < at, JSON.stringify([marks(r, L3), marks(last(a3), L3), marks(r, H3), at]));
   withMutant('sxown', SX_SKIP, '', (script) => {
     const m = timeline(w6.steps, script, from3());
-    T('[7] mutant: every one marked -> H3\'s marks refreshed', allOk(m, 6) && marks(last(m), H3) !== marks(last(a3), H3) && swOf(last(m), H3)[0][1] === sxOf(last(m), L3));
+    T('[7] mutant: every one marked -> L3 paired with the two (his marks changed)', allOk(m, 6) && marks(last(m), L3) !== marks(last(a3), L3) && swOf(last(m), L3).length === 2
+      && swOf(last(m), L3)[0][1] === sxOf(last(m), L5));
   });
 }
 
@@ -549,7 +637,7 @@ const w9 = wd2(2, 0xC26C, [F9, L3, C9, D9], [2, 3], S4, F);   // F9 1st, L3 (mar
 const H11 = SID(950), H12 = SID(957), X10 = SID(958);
 ALL.push(H11, H12, X10);
 {
-  const mt = 2 | (1 << 4), h = 0xC26D, ros = [X10, A3, H11, H12, L3, L4];   // seats 0-1 a party: X10 (leaves) + A3 (paired with L3 / L4 at C1)
+  const mt = 2 | (1 << 4), h = 0xC26D, ros = [X10, L3, H11, H12, L5, L6];   // seats 0-1 a party: X10 (leaves) + L3 (stood in at C1)
   const truth = [3900, 4800, 6100, 3500, 5200, 4400], fake = [2000, 1900, 1800, 1700, 6100, 5200];
   const k = keyRecs(mt, h, ros, truth), pick = (xs, is) => is.map((i) => xs[i]);
   const Rf = ros.map((s, i) => ({ sid: s, d: rec(0xB1, mt, h, i, placeIn(fake, i), placeIn(fake, i) === 1, ros, fake) }));
@@ -558,15 +646,56 @@ ALL.push(H11, H12, X10);
   const steps = [[0, k.S], [2 * MIN, k.S.concat(pick(Rf, Ls))], [5 * MIN, k.S.concat(pick(k.R, Ws), pick(Rf, Ls))], [GRACE, left], [LEAVE, left], [3 * HOUR, left]];
   const cvG = (rs) => { const e = ((last(rs).state.CONFESSIONS_FILE || {})[v.pid(X10) + '|' + k.key]) || {}; return e.cv ? e.g | 0 : null; };
   const b = timeline(steps, null, from3());
-  T('[10] settled with the stand-ins, X10 convicted, A3 settling as before Q227', allOk(b, 6) && processedOf(last(b)).has(k.key) && nStood(b) === 2 && nOwn(b) === 1 && leavesOf(last(b), X10) === 1
+  T('[10] settled with the stand-ins, X10 convicted, L3 settling as before Q227', allOk(b, 6) && processedOf(last(b)).has(k.key) && nStood(b) === 2 && nOwn(b) === 1 && leavesOf(last(b), X10) === 1
     && cvG(b) != null, outOf(b).slice(-900));
   withMutant(NOSTAND[0], NOSTAND[1], NOSTAND[2], (script) => {
     const n = timeline(steps, script, from3());
-    T('[10] A3\'s gain by the leave as with Q227 step two off', allOk(n, 6) && cvG(n) === cvG(b) && writesOf(b, A3) === writesOf(n, A3), JSON.stringify([cvG(b), cvG(n)]));
+    T('[10] L3\'s gain by the leave as with Q227 step two off', allOk(n, 6) && cvG(n) === cvG(b) && writesOf(b, L3) === writesOf(n, L3), JSON.stringify([cvG(b), cvG(n)]));
   });
   withMutant('nog2', G2, '', (script) => {
     const m = timeline(steps, script, from3());
     T('[10] mutant: his gain read with the stand-ins -> another gain', allOk(m, 6) && cvG(m) !== cvG(b), JSON.stringify([cvG(b), cvG(m)]));
+  });
+}
+
+// ======== Q265: a seat that stood in for a player there is rated ========
+
+// ---- [11] the fixed old account with a new one each match, the same two withdrawing every time ----
+const Q0 = SID(961), Q2 = SID(962), Q3 = SID(963), QN = [SID(964), SID(965), SID(966)];
+ALL.push(Q0, Q2, Q3, ...QN);
+// each match after the first also played honestly from the same state (everybody keeps his rows): its change of the sum in twinD
+function fixedNew(script) {
+  const who = [Q0, Q2, Q3].concat(QN), pick = (xs, is) => is.map((j) => xs[j]);
+  for (const s of who) LP_AT[s] = 8500;   // grandmaster (Q160: rs 0, an expected result in a mismatch moves nothing)
+  let state = null; const sums = [], twinD = [], all = [];
+  for (let i = 0; i < QN.length; i++) {
+    const ros = [Q0, QN[i], Q2, Q3], G = [6100, 5200, 3000, 2900], Fk = [3000, 2900, 6100, 5200], h = 0xE2A0 + i, k = keyRecs(2, h, ros, G);
+    const Rf = ros.map((s, j) => ({ sid: s, d: rec(0xB1, 2, h, j, placeIn(Fk, j), placeIn(Fk, j) === 1, ros, Fk) }));
+    const left = pick(k.S, [0, 1]).concat(pick(k.R, [0, 1])), both = k.S.concat(k.R), files = state ? advance(state, 3 * HOUR) : null;
+    if (i > 0) {
+      const tw = timeline([[0, k.S], [2 * MIN, k.S.concat(pick(k.R, [2, 3]))], [5 * MIN, both], [MIN, both], [GRACE, both], [LEAVE, both], [3 * HOUR, both]], script, files);
+      if (!allOk(tw, 7)) return { ok: false, rs: all.concat(tw), sums, twinD };
+      twinD.push(ros.reduce((a, s) => { const p = ptsIn(tw, s); return a + (p.length ? p[p.length - 1] - LP_AT[s] : 0); }, 0));
+    }
+    const rs = timeline([[0, k.S], [2 * MIN, k.S.concat(pick(Rf, [2, 3]))], [5 * MIN, pick(k.S, [0, 1])], [MIN, left], [GRACE, left], [LEAVE, left], [3 * HOUR, left]], script, files);
+    all.push(...rs);
+    if (!allOk(rs, 7)) return { ok: false, rs: all, sums, twinD };
+    for (const s of ros) { const p = ptsIn(rs, s); if (p.length) LP_AT[s] = p[p.length - 1]; }
+    state = last(rs).state; sums.push(who.reduce((a, s) => a + LP_AT[s] - 8500, 0));
+  }
+  return { ok: true, rs: all, sums, twinD, moved: sums.slice(1).map((x, i) => x - sums[i]) };
+}
+{
+  const o = fixedNew();
+  T('[11] the fixed old account with a new one each match, the same two withdrawing every time: +27 in the first match (they stood in), the two rated after',
+    o.ok && o.sums[0] === 27 && nStood(o.rs) === 2 && nRated(o.rs) === 4 && nOwn(o.rs) === 0 && nHeld(o.rs) === 0 && none(o.rs.slice(0, 7), Q2) && ptsIn(o.rs, Q2).length === 2,
+    JSON.stringify([o.ok, nStood(o.rs), nRated(o.rs), nOwn(o.rs), o.sums]) + (o.ok ? '' : last(o.rs).out.slice(-800)));
+  T('[11] ... and each match after the first moves the points sum exactly as the same match played honestly (nothing out of the withdrawal)', o.ok
+    && JSON.stringify(o.moved) === JSON.stringify(o.twinD), JSON.stringify([o.moved, o.twinD]));
+  withMutant(RATE_OFF[0], RATE_OFF[1], RATE_OFF[2], (script) => {
+    const m = fixedNew(script);
+    T('[11] mutant: nobody rated (as Q264) -> the old one settles as before Q227 next to each new one: the second match makes more than played honestly, the sum ends higher',
+      m.ok && nStood(m.rs) === 6 && nOwn(m.rs) === 2 && m.moved[0] > m.twinD[0] && m.sums[2] > o.sums[2], JSON.stringify([m.ok, nStood(m.rs), nOwn(m.rs), m.sums, m.moved, m.twinD]));
   });
 }
 
