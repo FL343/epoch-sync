@@ -203,3 +203,22 @@ jobs:
           git push --force --quiet "$MIRROR_URL" HEAD:main \
             && echo "replica updated" \
             || echo "::warning::replica push failed (replica stale; weekly drift check will flag if sustained)"
+      # O393 tier 3 (2026-10-25): push the exact post-persist tree (code + state) to the Cloud Run failover service, so a fallback that
+      # finds github AND gitlab unreachable starts from state <=1 run stale (bucket state/main/latest.tar.gz) instead of an older snapshot.
+      # Best-effort like replicate: a failure only warns. The request is signed the same way the monitor signs it (ts / nonce / HMAC-SHA256
+      # over "ts\nnonce\nPOST /state-push"); the secret never leaves this step. Skipped when VAULT_URL / VAULT_HMAC are unset.
+      - name: vault-state
+        if: always() && steps.gate.outputs.yield != 'true' && steps.persist.outcome == 'success'
+        env:
+          VAULT_URL: ${{ secrets.VAULT_URL }}
+          VAULT_HMAC: ${{ secrets.VAULT_HMAC }}
+        run: |
+          if [ -z "$VAULT_URL" ] || [ -z "$VAULT_HMAC" ]; then echo "vault state push not configured - skip"; exit 0; fi
+          git archive --format=tar HEAD | gzip -n > "$RUNNER_TEMP/state-tree.tgz"
+          ts=$(date +%s%3N); nonce=$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')
+          sig=$(printf '%s\n%s\nPOST /state-push' "$ts" "$nonce" | openssl dgst -sha256 -hmac "$VAULT_HMAC" -r | cut -d' ' -f1)
+          curl -fsS --max-time 90 -X POST "${VAULT_URL%/}/state-push" -H "x-gmt-ts: $ts" -H "x-gmt-nonce: $nonce" -H "x-gmt-sig: $sig" \
+            -H "x-gmt-sha: $(git rev-parse HEAD)" -H "x-gmt-run: $GITHUB_RUN_ID" -H "content-type: application/gzip" \
+            --data-binary "@$RUNNER_TEMP/state-tree.tgz" -o /dev/null \
+            && echo "vault state pushed ($(stat -c %s "$RUNNER_TEMP/state-tree.tgz") bytes)" \
+            || echo "::warning::vault state push failed (tier-3 fallback would start from an older state; mvp/KNIFE_O393_FAILOVER_VAULT_PLAN.md)"
