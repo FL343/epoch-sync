@@ -351,8 +351,13 @@ function ageSx(state, ms) {
 const S4 = [6100, 5200, 4800, 3900], F = [3000, 2900, 6100, 5200];
 const OWN_RE = /\| players rated at a settle with stand-ins who settled as before Q227 instead: each stood in or settled with one of them in the window \(Q264\) \| (\d+) \|/;
 const OWN_LINE = (key, sid, why) => new RegExp('agreed-stood-own ' + key + ': seat [0-9] = ' + v.pid(sid).slice(0, 8) + ' settles as before Q227, as if the stand-ins were not there: he ' + (why || '(stood in himself|settled with seats? [0-9,]+ standing in)') + ' in the last 30 days \\(Q264\\)');
-// every points / rating / XP (+ career) write for sid, in order (the board ids are fixed in boardsWith)
-const writesOf = (rs, sid) => JSON.stringify([].concat(...rs.map((r) => r.posts.filter((p) => /SetLeaderboardScore/.test(p.url) && new RegExp('steamid=' + sid + '(&|$)').test(p.body)).map((p) => p.body))));
+// the trust_ledger mirror row (knife 5.5b-1): details = [0xE4 | 1 << 8, n.sc, n.sa, n.at, n.fl, n.rp, n.hd, n.tm, fp, last.t, last.src];
+//   last.t is the minute the reconcile run wrote it, so two separate settles compared below differ there when they straddle a
+//   minute. Only that one int is left out; the row's other ints and every other write are still compared.
+const TRUST_ROW_T = /(&details=%e4%01%00%00(?:%[0-9a-f]{2}){32})(?:%[0-9a-f]{2}){4}/;
+const noMinute = (b) => b.replace(TRUST_ROW_T, '$1%TT');
+// every points / rating / XP (+ career, + trust_ledger) write for sid, in order (the board ids are fixed in boardsWith)
+const writesOf = (rs, sid) => JSON.stringify([].concat(...rs.map((r) => r.posts.filter((p) => /SetLeaderboardScore/.test(p.url) && new RegExp('steamid=' + sid + '(&|$)').test(p.body)).map((p) => noMinute(p.body)))));
 const sigCore = (r, sid) => { const e = sigOf(r, sid); return JSON.stringify([e.g, e.w, e.v, e.s1, e.s2, e.smax, e.disp]); };
 const grpOf = (r, sid) => { const e = ((r.state.GROUPS_FILE || {})[v.pid(sid)]) || {}; return JSON.stringify([e.r, e.k]); };
 const skOf = (r, sid) => JSON.stringify(((r.state.SKILL_FILE || {})[v.pid(sid)]) || null);   // Q264 review: his stored and ranked rating as kept in the state
@@ -389,6 +394,14 @@ console.log('=== a stand-in only while nobody rated there settled with one in th
     && at(RATED_IDS) + RATED_IDS.length === at(SX) && at(SX) < at(SX_SKIP) && at(SX_SKIP) < at(SX_STOOD) && at(SX_STOOD) + SX_STOOD.length === at(SX_PAIR) && at(SX_PAIR) - at(SX) < 700,
     String(at(SX_PAIR) - at(SX)));
   T('[0] Q264: the own decay step and the late-result shadow pinned', [GOWN, G2].every((a) => SRC.split(a).length === 2));
+  {   // the write compare leaves out the trust_ledger row's minute only
+    const le = (x) => [0, 8, 16, 24].map((b) => '%' + ((x >>> b) & 0xff).toString(16).padStart(2, '0')).join('');
+    const row = (sc, t, src) => 'score=2&details=%e4%01%00%00' + le(sc) + le(0).repeat(7) + le(t) + le(src);
+    const a = noMinute(row(2, 29879567, 4));
+    T('[0] the write compare: the trust_ledger row\'s minute left out, its other ints and other rows still compared', a === noMinute(row(2, 29879568, 4))
+      && a !== noMinute(row(3, 29879567, 4)) && a !== noMinute(row(2, 29879567, 5)) && a.endsWith('%TT' + le(4))
+      && noMinute('score=2&details=%cb%01%00%00' + le(29879567).repeat(10)) === 'score=2&details=%cb%01%00%00' + le(29879567).repeat(10), a);
+  }
   T('[0] the summary rows, right after the Q227 stood row: held (Q263 / Q264), rated (Q265), passed on (Q275), own (Q264)', /'\| of those, left out instead: every player rated at the settle stood in or settled with one of them in the window \(Q263 \/ Q264\) \| ' \+ s\('agreedStoodHeld', 0\) \+ ' \|',/.test(SRC)
     && /'\| of those, rated instead at the place read now, as a seat put back: a player rated at the settle settled with him standing in in the window \(Q265\) \| ' \+ s\('agreedStoodRated', 0\) \+ ' \|',/.test(SRC)
     && /'\| seats Q265 would rate, passed on to the Q263 \/ Q264 checks instead: every player rated at the settle first agreed to another result for the match \(Q275\) \| ' \+ s\('agreedStoodRecant', 0\) \+ ' \|',/.test(SRC)
@@ -598,6 +611,7 @@ const b6 = timeline(w6.steps, null, from3());
   const n = m.nostand;
   T('[6] the marked L3 exactly as with Q227 step two off: every write of his, his win count and his repeat-group memory', allOk(n, 6) && writesOf(b6, L3) === writesOf(n, L3)
     && sigCore(r, L3) === sigCore(last(n), L3) && grpOf(r, L3) === grpOf(last(n), L3) && writesOf(b6, L3) !== '[]', writesOf(b6, L3) + ' vs ' + writesOf(n, L3));
+  T('[6] ... his writes compared there carry his trust_ledger row (its minute left out)', /&details=%e4%01%00%00(?:%[0-9a-f]{2}){32}%TT/.test(writesOf(b6, L3)), writesOf(b6, L3));
   T('[6] ... which here is not his twin result (1st of 2 there, 2nd of 4 here: points, rating, XP and the win all differ)', allOk(tw, 6) && pts(b6, [L3]) !== pts(tw, [L3])
     && JSON.stringify(rOf(b6, L3)) !== JSON.stringify(rOf(tw, L3)) && xpOf(b6, L3) !== xpOf(tw, L3) && sigOf(r, L3).w === sigOf(last(tw), L3).w + 1, show(b6, [L3]) + ' vs ' + show(tw, [L3]));
   T('[6] mutant: the whole match read (Q263) -> held, H3 lower (last of 2)', allOk(m.permatch, 6) && nHeld(m.permatch) === 1 && ptsIn(m.permatch, H3)[0] < ptsIn(b6, H3)[0], show(m.permatch, [H3]));
