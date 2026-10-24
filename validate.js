@@ -309,9 +309,16 @@ const NOTE_DISP = new Set([2, 3, 4]);
 // still gets innocent-class credit (base XP / consolation path).
 // 'eac-drop' (9) = this client lost anti-cheat protection mid-match and was removed alone (innocent;
 // like 'kicked' it never appears in a shard -- the dropped client leaves without writing).
-const DISP_NAME = ['finished', 'peers-gone', 'host-left', 'level-begin-timeout', 'migrate-disband', 'user-quit', 'reconnect-failed', 'kicked', 'eac-kick', 'eac-drop'];
+// 'finished-nosummary' (10, cloud audit Q68) = the writer played the match to its end, but the host guard's final summary
+// never reached them (client finalGuardCheck: 12 s wait, then their own judgement of the seats, Q59). Valid class (present
+// and finished: XP, career and points as 'finished'), never a VOID vote. Its seat scores are the writer's own judgement, so they
+// do not take part in the score-vector consensus when they differ from the others' (nosumVerdict). Only a joiner whose
+// own base result was clean writes it (no gamble refusal, no endless segment); the host never does.
+const DISP_NAME = ['finished', 'peers-gone', 'host-left', 'level-begin-timeout', 'migrate-disband', 'user-quit', 'reconnect-failed', 'kicked', 'eac-kick', 'eac-drop', 'finished-nosummary'];
+const DISP_NOSUMMARY = 10;
 const dispName = c => (DISP_NAME[c | 0] || ('disp' + (c | 0)));
-const isVoidDisp = c => (c | 0) >= 2;
+const isVoidDisp = c => (c | 0) >= 2 && (c | 0) !== DISP_NOSUMMARY;
+const isFinishDisp = c => (c | 0) === 0 || (c | 0) === DISP_NOSUMMARY;   // Q68: a finish with or without the summary
 
 function voidByConsensus(dispCodes) {
   const present = dispCodes.length;
@@ -1799,7 +1806,7 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
     if (hdr) RUN.headerVoid = (RUN.headerVoid | 0) + 1;   // Q294
     if (hdrSpared.length) RUN.headerSpared = (RUN.headerSpared | 0) + hdrSpared.length;
     processed.add(m);   // idempotent: a super-late settlement of a convicted key is skipped as stale
-    voided.push({ m, pids: Object.keys(p.roster).map((seat) => p.roster[seat]), note: pending['~' + m] || null });   // Q216: + the note
+    voided.push({ m, pids: Object.keys(p.roster).map((seat) => p.roster[seat]), note: pending['~' + m] || null, p });   // Q216: + the note; Q68: + the entry as decided (the no-summary host flag in main reads it)
     delete pending[m];
     const cn = pending['~' + m], wasContested = !!(cn && cn.c), who = wasContested ? noteParties(cn) : '';   // Q143: a contested key voids here
     if (wasContested) RUN.contestHeldVoid = (RUN.contestHeldVoid | 0) + 1;
@@ -1824,7 +1831,7 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
 // every record of it is one account's: the starts the two seated accounts wrote that were read before the result (the
 // note's s, Q127) are all his, from one seat, naming one table -- at least one, or his own start read late with his result
 // (the note's lo, Q254; an account the table does not seat counts nowhere here: when its start votes it registers or
-// contests the key, which ends this path anyway) -- and his results are sanity-clean 'finished' records from that seat,
+// contests the key, which ends this path anyway) -- and his results are sanity-clean 'finished' (or Q68 'finished-nosummary') records from that seat,
 // naming that table, with his score above the other seat's. The other seat's account wrote no start the job kept, no
 // result and no abandon confession for the key. The key is then processed (one verdict; the pair's later rows count nowhere). lone1v1Count, on the signals:
 //   - counted on the silent seat's account only when it has signals of its own (a record of his this job kept within
@@ -1852,7 +1859,7 @@ function lone1v1Claim(e, key, g, confState, confSeen) {
   if (!o || o === w) return null;
   const sig = startSig(r0), vec = JSON.stringify(r0.d.slice(10, 12));
   for (const r of g) {
-    if (String(r.steamID) !== w || (r.d[5] | 0) !== seat || (r.dispCode | 0) !== 0) return null;   // (the match type is in the key)
+    if (String(r.steamID) !== w || (r.d[5] | 0) !== seat || !isFinishDisp(r.dispCode)) return null;   // (the match type is in the key; Q68: a finish without the summary is the writer's own word as well)
     if (startSig(r) !== sig || JSON.stringify(r.d.slice(10, 12)) !== vec || sanityFlags([r]).length) return null;
   }
   if (!((r0.d[10 + seat] | 0) > (r0.d[11 - seat] | 0))) return null;   // his record says he won (a tie or a loss counts nothing)
@@ -1904,7 +1911,7 @@ function lone1v1Spoiled(e, key, g, confState, confSeen, strict, pids) {
     const o = ro[1 - seat] != null ? String(ro[1 - seat]) : '';
     if (!o || o === w || writers.indexOf(o) < 0) continue;   // the other writer is the account his table seats there
     const sig = startSig(r0), vec = JSON.stringify(r0.d.slice(10, 12));
-    if (mine.some((r) => (r.d[5] | 0) !== seat || (r.dispCode | 0) !== 0 || startSig(r) !== sig || JSON.stringify(r.d.slice(10, 12)) !== vec || sanityFlags([r]).length)) continue;
+    if (mine.some((r) => (r.d[5] | 0) !== seat || !isFinishDisp(r.dispCode) || startSig(r) !== sig || JSON.stringify(r.d.slice(10, 12)) !== vec || sanityFlags([r]).length)) continue;
     if (!((r0.d[10 + seat] | 0) > (r0.d[11 - seat] | 0))) continue;   // his record says he won
     const his = g.filter((r) => String(r.steamID) === o);
     if (his.some((r) => JSON.stringify(r.d.slice(10, 12)) !== vec)) continue;   // the loser's record disputes the result
@@ -2086,7 +2093,8 @@ function isPrivateMt(mt) { return baseMt(mt) === PRIVATE_XP.MT; }
 // player who stayed to the end got nothing, although his client showed him the room's XP. No modified client needed
 // (the job's side of it was reproduced in the Q224 review, N1).
 // So such a key settles for its one writer (privateLoneVerdicts, main: after the start pass) once all of this holds:
-//   - one account wrote its results, all from one seat, finished (disp 0), the same scores, none sanity-flagged;
+//   - one account wrote its results, all from one seat, finished (disp 0, or Q68's 10: a finish without the host guard's
+//     final summary is his own word as much as a 0 is), the same scores, none sanity-flagged;
 //   - the key's start roster is registered and final (not provisional, not split, no contest note, the key never split
 //     into tables) and his results name exactly that roster;
 //   - every other seat of it wrote its OWN start for the key (no account can write another account's start: a lone
@@ -2115,7 +2123,7 @@ function privateLoneClaim(p, key, g, pending, processed, confState, confSeen, ve
   if (ro[seat] !== wp || String(v0).indexOf('BAD') === 0) return null;
   const seats = Object.keys(ro);
   for (const r of g) {
-    if (String(r.steamID) !== w || (r.d[5] | 0) !== seat || (r.dispCode | 0) !== 0) return null;
+    if (String(r.steamID) !== w || (r.d[5] | 0) !== seat || !isFinishDisp(r.dispCode)) return null;
     if (vecOf(r) !== v0 || sanityFlags([r]).length) return null;
     const rr = r.roster || {};
     if (Object.keys(rr).length !== seats.length || seats.some((s) => rr[s] == null || pid(String(rr[s])) !== ro[s])) return null;
@@ -2353,8 +2361,11 @@ function dualSignedCount(signals, pair, m, now) {
 function applySignedPair(gr, ctx) {
   const res = { pending: 0, dual: 0, one: 0, oneBad: 0, would: 0, moved: 0, insane: 0, other: 0, dirty: false, touched: [] };
   if (!ctx || !ctx.mode) return res;
-  for (let i = gr.inconsistentGroups.length - 1; i >= 0; i--) {
-    const { m, g } = gr.inconsistentGroups[i];
+  // cloud audit Q68: a two-voice key held because one writer judged the seats without the host guard's final summary
+  //   (groupRecords' nosumHeld) is the same dispute to this lane -- that writer's 10 carries no block (the client asks its
+  //   guard for one on a 'finished' record only), so one usable signed side settles it as it would a disputed key
+  for (const list of [gr.inconsistentGroups, gr.nosumHeld || []]) for (let i = list.length - 1; i >= 0; i--) {
+    const { m, g } = list[i];
     if (ctx.processed.has(m) || (ctx.contested && ctx.contested.has(m))) continue;
     const sp = signedPairOf(g, ctx.pubTable, ctx.allowDevKey);
     if (sp.state === 'skip') continue;
@@ -2374,7 +2385,7 @@ function applySignedPair(gr, ctx) {
     if (bad.length) { res.insane++; console.log('  msig-pair ' + m + ': ' + plog(sp.a) + '\'s signed table does not pass the settle with the other seat filled [' + bad.join(',') + '] -- today\'s path'); continue; }
     const what = plog(sp.a) + '\'s signed table [' + synth.d.slice(10, 12).join(',') + '], ' + plog(sp.o) + ' (' + (sp.oWhy === 'bad' ? 'broken block ' + sp.kinds[sp.o].join('+') : 'no block') + ') at seat ' + synth.d[5];
     if (ctx.mode !== 'enforce') { res.would++; console.log('  msig-pair ' + m + ': would settle by ' + what + ' -- record only (MSIG_PAIR=record)'); continue; }
-    gr.inconsistentGroups.splice(i, 1);
+    list.splice(i, 1);
     gr.consistentMatches.push({ m, g: g2, void: voidByConsensus(g2.map((r) => r.dispCode)).isVoid, signedPair: { a: sp.a, o: sp.o, why: sp.oWhy } });
     res.moved++;
     if (sp.oWhy === 'bad' && recordFlag(ctx.signals, sp.recsO, m, ctx.now, 'at')) { res.dirty = true; res.touched.push(String(sp.o)); }
@@ -3182,8 +3193,13 @@ function sigPlayer(s, h, now) { const p = s.players[h] || (s.players[h] = { g: 0
 //   default) or 'at' (a guard-signature failure on the solo lane); the tier still reads every flag through f as before
 function recordFlag(s, g, m, now, src) {
   if (s.flagged[m]) return false;
+  // Q68: a record set aside as written without the host guard's final summary (nosumVerdict: nosumOwn on a key settled on the
+  //   others' scores, nosumAside on a fork of the others) is its writer's own judgement, never the scores a flag is about --
+  //   the writer's other records of the key, if any, still count (a record of their own flags them)
+  const who = new Set(g.filter(r => r.nosumOwn == null && !r.nosumAside).map(r => String(r.steamID)));
+  if (!who.size) return false;
   s.flagged[m] = now;
-  for (const sid of new Set(g.map(r => String(r.steamID)))) { if (flagPlayer(s, pid(sid), m, now, src)) TRUST_RUN_SID.set(pid(sid), sid); }
+  for (const sid of who) { if (flagPlayer(s, pid(sid), m, now, src)) TRUST_RUN_SID.set(pid(sid), sid); }
   return true;
 }
 // O198 v1: this run's new flags, taken into the trust ledger at the trust upkeep (maintainTrust) -- one per (account, key)
@@ -3531,7 +3547,8 @@ function recordMatchSignals(s, g, parts, rankOf, matchType, isVoid, now) {
   const dispOf = {}; for (const r of g) dispOf[String(r.steamID)] = r.dispCode | 0;
   for (const p of parts) {
     const h = sigPlayer(s, pid(p.steamID), now);
-    const dc = Math.min(6, Math.max(0, dispOf[String(p.steamID)] | 0));
+    const dc0 = dispOf[String(p.steamID)] | 0;
+    const dc = dc0 === DISP_NOSUMMARY ? 0 : Math.min(6, Math.max(0, dc0));   // Q68: a finish without the summary counts as a finish (the array keeps its 7 slots)
     h.disp[dc] += 1;
     if (isVoid) { h.v += 1; continue; }
     h.g += 1;
@@ -3651,6 +3668,7 @@ function writeRunSummary() {
       '| records / start attestations | ' + s('rec', 0) + ' / ' + s('starts', 0) + ' |',
       '| consistent / fresh | ' + s('consistent', 0) + ' / ' + s('fresh', 0) + ' |',
       '| flagged inconsistent / sanity | ' + s('flagged', 0) + ' / ' + s('sanity', 0) + ' |',
+      '| keys with a result written without the host guard\'s final summary (Q68): settled on the others\' scores / held, one writer got it / nobody got it | ' + s('nosum', '0 / 0 / 0') + ' |',
       '| sanity on one record only: dropped, rest settles / too few writers left (Q109) | ' + s('sanityDrop', 0) + ' / ' + s('sanityDropHeld', 0) + ' |',
       '| sanity whose every reason is the host\'s seat or table, nobody flagged, not settled (Q292) | ' + s('sanityHost', 0) + ' |',
       '| sanity whose every shared reason is the host\'s match header, only a writer breaking his own fields flagged, not settled (Q294) | ' + s('sanityHeader', 0) + ' |',
@@ -5594,8 +5612,8 @@ function fillCareerDetails(changedXp, careerDet, xpState) {
 function careerWon(matchType, rank) { return isTeamMt(matchType) ? ((rank | 0) <= teamSizeOfMt(matchType)) : ((rank | 0) === 1); }
 // repeat-leaver discount: gradient + minimum-sample gate in one, via min-denominator smoothing. values tunable on real data.
 const LEAVER_XP = { minSample: 20, tiers: [{ maxRate: 0.05, factor: 1.0 }, { maxRate: 0.15, factor: 0.5 }, { maxRate: 1.01, factor: 0.3 }] };
-// per-end disposition -> credit class (lockstep mirror of client table): 0,1 valid / 5,7 abandoner / else innocent.
-function dispClassOf(code) { const c = code | 0; return (c === 0 || c === 1) ? 'valid' : ((c === 5 || c === 7) ? 'abandoner' : 'innocent'); }
+// per-end disposition -> credit class (lockstep mirror of client table): 0,1,10 valid / 5,7 abandoner / else innocent.
+function dispClassOf(code) { const c = code | 0; return (c === 0 || c === 1 || c === DISP_NOSUMMARY) ? 'valid' : ((c === 5 || c === 7) ? 'abandoner' : 'innocent'); }
 // effective leave rate with min-denominator smoothing -> tier factor. leaves/games cumulative per player; a first leave cannot spike to 100%.
 function effectiveLeaverFactor(leaves, games) {
   const total = (leaves | 0) + (games | 0);
@@ -7409,19 +7427,100 @@ function applyGambleAccusations(gr, signals, processed, now, vecOf, opts) {
   return res;
 }
 
+// ===== a result written without the host guard's final summary (cloud audit Q68) =====
+// A joiner the host guard's final summary does not reach within 12 s judges the seats on their own (client Q59) and, since Q68,
+// says so: disp 10 'finished-nosummary'. Whether the summary gets through differs from end to end, so their seat scores can
+// differ from the others'. That used to leave the match unsettled and flag every writer of it, the honest ones included --
+// and a loser who blocked their own guard's link for a dozen seconds at the end got exactly that on purpose. Read only when
+// the score vectors differ (all equal: the group settles as before, whoever wrote a 10). The writers of any other disp are
+// the ones who got the summary (or the host, its source):
+//   settle  -- they agree, and with the 10s that agree with them they are at least two accounts: the match settles on their
+//              scores. A 10 that differs is set aside: a copy of it (nosumOwn = the scores as written) takes the agreed seat scores and,
+//              on a sub-score team match, the agreed winner (the shard row is never touched), so its writer stays present, is
+//              ranked on the agreed scores and is not flagged (recordFlag skips a set-aside record).
+//   pending -- they agree but are one account: not settled, nobody flagged. The key waits for the start-orphan verdict like
+//              a lone record (every writer exempt and consoled once with CONSOLATION_XP -- the Q308 floor on a two-seat
+//              matchmade key -- no rating or points move). A two-seat quick / ranked key in this shape is also the client
+//              knife 5.8b signed lane's (groupRecords lists it in nosumHeld; applySignedPair reads it like a disputed key).
+//   host    -- nobody got it (every record is a 10): not settled. Only the opening host can have kept it from all of them,
+//              so they alone are flagged, once per key, when the records agree on who sits at seat 0, they wrote no record of
+//              the key and the match has 3+ seats -- and only at the key's start-orphan verdict (main: a late record of theirs
+//              settles or holds it first; on a registered start roster that seats them at 0, their own start read). Two seats
+//              cannot be told apart: nobody is flagged (architecture decision 10).
+//   fork    -- the writers who got it disagree among themselves: the rule as before (unsettled, flagged), except that the
+//              writers of a 10 only are not flagged (their own judgement says nothing about the others' fork): groupRecords
+//              marks their records nosumAside, which recordFlag skips.
+// Endless keys never carry a 10 (segment dispositions are their own lane) and keep their rules; so does a group with a 10 the
+// job cannot line up with the rest (another seat count, a malformed vector). Pure. Returns null or { kind, ... } (real ids).
+function nosumVerdict(g, vecOf) {
+  if (!g || g.length < 2 || isEndlessMt(g[0].d[2] | 0)) return null;
+  const nos = g.filter((r) => (r.dispCode | 0) === DISP_NOSUMMARY);
+  if (!nos.length) return null;
+  const pc = g[0].d[8] | 0;
+  for (const r of g) if ((r.d[8] | 0) !== pc || String(vecOf(r)).indexOf('BAD') === 0) return null;
+  // a 10 is written only by a joiner whose own base result was clean (client: no team-gamble refusal of theirs); a 10 that
+  //   names a refusal (Q43's T2BY_TAG int, Q61's gamble block) is not one, so the key keeps the gamble lanes' rules (Q43 / Q51 / Q56 / Q61)
+  for (const r of nos) { const i = 11 + 3 * pc; if ((r.d.length > i && ((r.d[i] | 0) & ~0x3F) === T2BY_TAG) || gambleTagOf(r)) return null; }
+  const sidsOf = (rs) => [...new Set(rs.map((r) => String(r.steamID)))];
+  const recv = g.filter((r) => (r.dispCode | 0) !== DISP_NOSUMMARY);
+  if (!recv.length) {
+    let host = null, split = false;
+    for (const r of nos) {
+      const h = (r.roster || {})[0];
+      if (h == null) continue;
+      if (host == null) host = String(h);
+      else if (host !== String(h)) split = true;
+    }
+    const ok = !split && host != null && pc >= 3 && sidsOf(g).indexOf(host) < 0;
+    return { kind: 'host', host: ok ? host : null, nos: sidsOf(nos),
+      why: ok ? '' : (pc < 3 ? 'two seats' : (host == null ? 'no seat 0 named' : (split ? 'seat 0 named differently' : 'seat 0 wrote a record'))) };
+  }
+  const v0 = vecOf(recv[0]);
+  if (!recv.every((r) => vecOf(r) === v0)) {
+    const rs = sidsOf(recv);
+    return { kind: 'fork', exempt: sidsOf(nos).filter((s) => rs.indexOf(s) < 0) };
+  }
+  const agree = sidsOf(g.filter((r) => vecOf(r) === v0));
+  if (agree.length < 2) return { kind: 'pending', recv: sidsOf(recv), nos: sidsOf(nos) };
+  const scores = recv[0].d.slice(10, 10 + pc);
+  // a team match decided by sub-scores takes its winner from the writers' rank claims (team2WinTeamOf): a set-aside copy
+  //   also claims the agreeing writers' winner from its own seat (rank 1 on the winning team, teamSize + 1 on the other), so
+  //   a winner of its writer's own judgement does not conflict with the agreeing writers' either (their own conflict, if any, stays: sanity)
+  const mt = g[0].d[2] | 0, ts = isSubScoreMt(mt) ? teamSizeOfMt(mt) : 0;
+  const win = ts ? team2WinTeamOf(g.filter((r) => vecOf(r) === v0)) : null;
+  const out = g.map((r) => {
+    if (vecOf(r) === v0) return r;
+    const d = r.d.slice();
+    for (let i = 0; i < pc; i++) d[10 + i] = scores[i];
+    if (win != null) d[6] = (teamOfSeat(d[5] | 0, ts) === win) ? 1 : ts + 1;
+    return Object.assign({}, r, { d, nosumOwn: vecOf(r) });
+  });
+  // the canonical record (g[0]: sanity, the settle's reads -- match type, seat count, seed, scores, roster, and since client
+  //   knife 5.8a / 5.8b the guard signature block the 10 never carries) is one that got the summary
+  const ci = out.indexOf(recv[0]);
+  if (ci > 0) { out.splice(ci, 1); out.unshift(recv[0]); }
+  // set = the accounts whose only word on the scores was set aside (never flagged on the agreed scores' account, main)
+  return { kind: 'settle', g: out, set: sidsOf(out.filter((r) => r.nosumOwn != null)).filter((s) => agree.indexOf(s) < 0) };
+}
+
 // ===== consensus grouping (audit 2026-09-06 D-F11 / B-F10 / E-G3: extracted from main() so the "N ends agree" rule is testable) =====
 //   - one voice per ACCOUNT: consensus counts distinct writers, not records. The same account writing the same key twice (cold
 //     reconnect double-write; a results record written on a suspended segment's key) used to pass as "2 consistent" = a single
 //     end settling its own claim.
 //   - the solo lane takes every pc=1 endless record of a group (guard-signed segments; soloSettle verifies signature + owner and
 //     settles the first that verifies), so a foreign same-key record can no longer push a real solo segment into the co-op lane.
-//   Returns { groups, consistentMatches, inconsistentGroups, consistent, flagged, lone, soloN }.
+//   - Q68: a group whose vectors differ goes through nosumVerdict first (results written without the host guard's final
+//     summary); a settle there is a consistent entry with nosum = the set-aside accounts, a held key is in neither list (but
+//     in nosumHeld, for the client knife 5.8b signed lane), a fork stays inconsistent with the records of the writers without
+//     the summary marked nosumAside (never flagged).
+//   Returns { groups, consistentMatches, inconsistentGroups, consistent, flagged, lone, soloN, nosum, nosumHost, nosumHeld }.
 function groupRecords(recs, opts) {
   const vecOf = opts.vecOf, MAX_SEATS = opts.MAX_SEATS || 8;
   const groups = {};
   for (const r of recs) { const m = r.d[3] + '_' + r.d[4] + '_' + r.d[2]; (groups[m] = groups[m] || []).push(r); }
   let consistent = 0, flagged = 0, lone = 0, soloN = 0;
   const consistentMatches = [], inconsistentGroups = [];
+  const nosum = { settle: 0, pending: 0, host: 0 }, nosumHost = [], nosumHeld = [];   // Q68
   for (const m of Object.keys(groups)) {
     const g = groups[m];
     // O93 solo competitive segment (pc=1 endless, guard-signed): one seat = no consensus lane. It enters
@@ -7467,10 +7566,39 @@ function groupRecords(recs, opts) {
         + (cons.isVoid ? ' -> consensus VOID, not settled (' + cons.voidVotes + '/' + cons.present + ')'
           : (cons.voidVotes ? ' (VOID votes ' + cons.voidVotes + '/' + cons.present + ' below majority -> settled)' : '')));
     }
-    else { flagged++; inconsistentGroups.push({ m, g }); ghWarn('match=' + m + ': ' + g.length + ' inconsistent/invalid (suspected forgery): ' + g.map((r, i) => plog(r.steamID) + '@' + r.shard + '=' + vecs[i]).join('  ')); }
+    else {
+      const ns = nosumVerdict(g, vecOf);   // Q68
+      const own = () => g.map((r, i) => plog(r.steamID) + '@' + r.shard + '=' + vecs[i] + ((r.dispCode | 0) === DISP_NOSUMMARY ? ' (no summary)' : '')).join('  ');
+      if (ns && ns.kind === 'settle') {
+        const was = own();
+        g.splice(0, g.length, ...ns.g);   // in place: groups[m] is this array (the later passes and the start cross-check read it)
+        consistent++; nosum.settle++;
+        const cons = voidByConsensus(g.map(r => r.dispCode));
+        consistentMatches.push({ m, g, void: cons.isVoid, nosum: ns.set });
+        console.log('  match=' + m + ': ' + g.length + ' consistent on the scores of the writers who got the final summary, '
+          + ns.set.length + ' own judgement(s) without it set aside, nobody flagged (Q68) disp=[' + g.map(r => r.disp).join(',') + ']'
+          + (cons.isVoid ? ' -> consensus VOID, not settled (' + cons.voidVotes + '/' + cons.present + ')' : '') + ' -- as written: ' + was);
+      } else if (ns && (ns.kind === 'pending' || ns.kind === 'host')) {
+        if (ns.kind === 'host') { nosum.host++; if (ns.host) nosumHost.push({ m, host: ns.host }); } else nosum.pending++;
+        nosumHeld.push({ m, g });
+        console.log('  match=' + m + ': ' + (ns.kind === 'host' ? 'nobody got the final summary and their own judgements differ -- not settled, '
+          + (ns.host ? 'the opening host ' + plog(ns.host) + ' flagged at the start verdict if the key is still in this shape then and a start roster seats that host at 0 (Q68)' : 'nobody flagged (' + ns.why + ', Q68)')
+          : 'only ' + ns.recv.length + ' writer got the final summary, ' + ns.nos.length + ' judged without it and differ -- not settled, nobody flagged, waits for the start verdict (Q68)')
+          + ': ' + own());
+      } else {
+        flagged++;
+        const aside = (ns && ns.kind === 'fork') ? ns.exempt : [];
+        // Q68 fork: the 10s of the writers who got no summary at all are marked aside in place (recordFlag skips them)
+        if (aside.length) g.splice(0, g.length, ...g.map((r) => (aside.indexOf(String(r.steamID)) >= 0 ? Object.assign({}, r, { nosumAside: true }) : r)));
+        inconsistentGroups.push({ m, g });
+        ghWarn('match=' + m + ': ' + g.length + ' inconsistent/invalid (suspected forgery): ' + own()
+          + (aside.length ? ' -- the ' + aside.length + ' writer(s) without the final summary not flagged (Q68)' : ''));
+      }
+    }
   }
-  console.log('reconciled: ' + Object.keys(groups).length + ' (consistent ' + consistent + ' / lone ' + lone + ' / inconsistent ' + flagged + (soloN ? ' / solo ' + soloN : '') + ')');
-  return { groups, consistentMatches, inconsistentGroups, consistent, flagged, lone, soloN };
+  console.log('reconciled: ' + Object.keys(groups).length + ' (consistent ' + consistent + ' / lone ' + lone + ' / inconsistent ' + flagged + (soloN ? ' / solo ' + soloN : '')
+    + ((nosum.settle || nosum.pending || nosum.host) ? ' / without the final summary: settled ' + nosum.settle + ', held ' + nosum.pending + ', nobody got it ' + nosum.host : '') + ')');
+  return { groups, consistentMatches, inconsistentGroups, consistent, flagged, lone, soloN, nosum, nosumHost, nosumHeld };
 }
 
 async function main() {
@@ -8108,6 +8236,7 @@ async function main() {
   const gr = groupRecords(recs, { vecOf, MAX_SEATS });   // audit 2026-09-06: pure, testable consensus grouping (writer-deduped); O156 lone bot lane (type 11, every channel)
   const groups = gr.groups, consistentMatches = gr.consistentMatches, inconsistentGroups = gr.inconsistentGroups;
   RUN.flagged = gr.flagged;
+  RUN.nosum = gr.nosum.settle + ' / ' + gr.nosum.pending + ' / ' + gr.nosum.host;   // Q68
 
   // start/settle cross-check runs BEFORE the early returns: the very scenario it exists for
   // (a match that started and was never settled by anyone) produces no consistent matches at all,
@@ -8530,6 +8659,26 @@ async function main() {
     }
     if (recordFlag(signals, g, m, nowMs)) sigDirty = true;
     for (const r of g) trustTouched.add(String(r.steamID));
+  }
+  // Q68: nobody got the host guard's final summary and their own judgements differ (nosumVerdict 'host'). The key is not
+  //   settled; the opening host alone is flagged, once per key, and only when the start-orphan verdict decides the key this
+  //   run (startsRes.voided) with the records still in that shape: a host whose own record is only late (a retried write)
+  //   settles or holds the key before that and is never flagged (a flag is not taken back). Only on the registered start
+  //   roster (Q80) seating them at 0 with their own start read (Q69: an account named by the others only is never charged),
+  //   never contested (Q127), no record of theirs ever read for the key (p.settled), no confession of theirs for it (the verdict
+  //   spares that from the exit rate as well; an exit note is never the host's -- the writers finished): the records' roster is
+  //   their writers' word.
+  const nosumHostOf = new Map(gr.nosumHost.map((x) => [x.m, x.host]));
+  for (const vk of (startsRes.voided || [])) {
+    const host = nosumHostOf.get(vk.m), p = vk.p;
+    if (host == null || !p) continue;
+    const ro = seatGateRoster(p), hp = pid(String(host));
+    if (!ro || ro[0] !== hp || !hasOwnStart(p, hp) || (vk.note && vk.note.c) || (p.settled || []).indexOf(hp) >= 0 || confState[hp + '|' + vk.m]) {
+      console.log('  no-summary ' + vk.m + ': nobody got the final summary, seat 0 not charged (not seated by a start roster with their own start, contested, or a record / confession of theirs read) -- nobody flagged (Q68)');
+      continue;
+    }
+    if (recordFlag(signals, [{ steamID: host }], vk.m, nowMs)) { sigDirty = true; console.log('  no-summary ' + vk.m + ': nobody got the final summary -- the opening host ' + plog(host) + ' flagged at the start verdict (Q68)'); }
+    trustTouched.add(String(host));
   }
   // player reports: harvest the client-written report box into directional edges (record-only).
   // Runs before the no-consistent-matches early returns -- reports arrive with or without settles.
@@ -12178,7 +12327,7 @@ if (require.main === module) {
 }
 module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CLASSIC_OWNERS: classicOwners.CLASSIC, CLASSIC_FILE, CHAT_MUTE: chatMute.CHAT_MUTE, CHAT_MUTE_FILE, CHAT_MUTE_LB, CHAT_REPORT_LB, isVoidDisp, voidByConsensus, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, RS_SOLO_VS_TRIO, RS_TRIO_WIN, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, DISPUTE_FLOOR, disputeFloorOf, disputeFloorAdmit, disputeFloorXp, CONSOLE_OWED, owedTag, owedItem, owedItemXp, owedRefund, owedUnsent, consoleOwedTake, consoleOwedPlan, consoleOwedRebase, CONFESS_MAGIC, NOTE_MAGIC, NOTE_DISP, reconcileConfessions, SANITY, sanityFlags, sanitySplit, recordSanityFlags, SANITY_RECORD_SLUGS, SANITY_ROSTER_SLUGS, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, rekeyReports, repKeysReady, REP_KEYS, REP_KEYS_VER, CHAT_KEYS, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, trustIndex, TRUST_T, TRUST_LB, TRUST_REJ_BIT, SHADOW_POOL, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan, postForm, postFormDetails, findOrCreateBoard, isTestBoardName, sandboxOn, ghWarn, ghErr, PT_MODE, PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, ACTIVE_MATCH_LB, ptSeedCp, ptBoardPlan, PRIVATE_XP, isPrivateMt, privateProgressOf, creditXpPrivate, BOT_XP, isBotMt, botTierOf, botTierMult, botSeatSplit, botRanksOf, botRankEffOf, botXpGain, botProgressOf, creditXpBot, DEMO_APPID, ENDLESS_XP, computeXpEndless, creditXpEndless, CAMPAIGN_LB, SEEDCAP_REJECT_LADDER_MIN, seedcapRejectWindowMin, seedcapRejectUntilMin, seedcapRejectActive, seedcapNEff,
   ENDLESS_COMP_LB, SAVE_BOX_LB, SOLO_FILE, COMP, soloSanity, soloChainPlan, rerollChain, soloMilestones, soloAdvance, soloRunKey, soloStartAttested, loadSolo, saveSolo, segOrderOf, segStartOf, freshOrder, freshOrderPaced, writerReadyAt, writerClaim,
-  ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, SAVE_BOX_LB_DUO, SAVE_BOX_LB_TRIO, teamRunKey, soloMsSlot, groupRecords,
+  ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, SAVE_BOX_LB_DUO, SAVE_BOX_LB_TRIO, teamRunKey, soloMsSlot, groupRecords, nosumVerdict, DISP_NOSUMMARY, isFinishDisp,
   ENDLESS_COMP_LB_QUAD, SAVE_BOX_LB_QUAD, ENDLESS_LB_QUAD, ENDLESS_MAX_PC, compFamKeyOf,   // client knife 3.7a (O178 four seats)
   ENDLESS_LB_SOLO, SAVE_BOX_LB_CASUAL, CASUAL_LIVES,   // client knife 3.7a (O218 casual solo lane)
   soloClockBack,   // cloud audit Q242 a verified solo segment whose guard clock went back (counted, never a reason to reject)

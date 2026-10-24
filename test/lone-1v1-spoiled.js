@@ -392,7 +392,7 @@ console.log('=== a ranked 1V1 whose loser wrote only records the job cannot use:
 // ---- [5] wiring pins ----
 {
   T('[5] the contest void and the start-orphan void carry their note', /voided\.push\(\{ m: key, pids: \[\], note: e \}\);/.test(SRC)
-    && /voided\.push\(\{ m, pids: Object\.keys\(p\.roster\)\.map\(\(seat\) => p\.roster\[seat\]\), note: pending\['~' \+ m\] \|\| null \}\);/.test(SRC));
+    && /voided\.push\(\{ m, pids: Object\.keys\(p\.roster\)\.map\(\(seat\) => p\.roster\[seat\]\), note: pending\['~' \+ m\] \|\| null, p \}\);/.test(SRC));   // Q68: + the entry (the no-summary host flag)
   T('[5] main: the voided keys\' claims join the verdicts\' ahead of the count', /lone1v1Verdicts\(startsPending, groups, processed, nowMs, STARTS_MATURITY_MS, confState, confSeen, shardsComplete\)\n    \.concat\(lone1v1VoidClaims\(startsRes\.voided, groups, startsRes\.consoledSids, confState, confSeen, shardsComplete\)\)/.test(SRC));
   T('[5] lone1v1Verdicts: lone1v1Claim, else lone1v1Spoiled (not strict)', /const c = lone1v1Claim\(e, key, groups\[key\], confState, confSeen\) \|\| lone1v1Spoiled\(e, key, groups\[key\], confState, confSeen, false, null\);/.test(SRC));
 }

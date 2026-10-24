@@ -192,7 +192,7 @@ try {
     T('enforce: an untrusted block (stale joiner events) -> nothing moves', okAll(un) && !/msig-pair settle/.test(out(un)));
     // mutant: the lane never moves a key -> the same enforce timeline must not settle it (the settle above is this lane's doing)
     const vsrc = fs.readFileSync(SCRIPT, 'utf8');
-    const ANCHOR = '    gr.inconsistentGroups.splice(i, 1);\n';
+    const ANCHOR = '    list.splice(i, 1);\n';   // Q68: the lane walks the disputed keys and the held no-summary ones in one loop
     if (vsrc.split(ANCHOR).length !== 2) bad('mutant anchor not found exactly once');
     else {
       fs.writeFileSync(SCRIPT, vsrc.replace(ANCHOR, '    continue;\n' + ANCHOR));

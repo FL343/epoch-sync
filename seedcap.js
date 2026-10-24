@@ -422,11 +422,21 @@ function signedSideOf(g) {
 }
 function pendingOfGroup(st, m, g) {
   {
+    let all = g;   // the records whose writers can be seats the verdict convicts (cloud audit Q68: those claiming the audited scores)
     const mt0 = g[0].d[2] | 0, pc0 = g[0].d[8] | 0;
     if (pc0 >= 1 && g[0].d.length >= 10 + pc0 && !g.every(r => r.d.slice(10, 10 + pc0).join(',') === g[0].d.slice(10, 10 + pc0).join(','))) {
-      const side = (v.baseMt(mt0) === 1 || v.baseMt(mt0) === 2) ? signedSideOf(g) : null;
-      if (!side) return null;   // forgery-suspect groups are the reconcile's own flag lane
-      g = side;
+      // Q68: a result written without the host guard's final summary (disp 10, never on an endless key) carries its writer's own
+      //   judgement of the seats; when it differs, the reconcile settles on the other writers' agreed scores (nosumVerdict), so
+      //   theirs is the vector audited here, and only the writers who claimed it are seats the verdict can convict
+      const nos = (d) => { const p = d[8] | 0; return p >= 1 && d.length > 10 + p && (d[10 + p] | 0) === v.DISP_NOSUMMARY && !v.isEndlessMt(d[2] | 0); };
+      const vk = (r) => r.d.slice(10, 10 + pc0).join(',');
+      const vg = g.filter(r => !nos(r.d));
+      if (vg.length && vg.length < g.length && g.every(r => (r.d[8] | 0) === pc0) && vg.every(r => vk(r) === vk(vg[0]))) g = vg;
+      else {
+        const side = (v.baseMt(mt0) === 1 || v.baseMt(mt0) === 2) ? signedSideOf(g) : null;
+        if (!side) return null;   // forgery-suspect groups are the reconcile's own flag lane
+        g = all = side;
+      }
     }
     const d0 = g[0].d;
     const mt = d0[2] | 0, pc = d0[8] | 0, base = v.baseMt(mt);
@@ -449,14 +459,17 @@ function pendingOfGroup(st, m, g) {
       if ((tail.startDepth | 0) < 0 || (tail.endDepth | 0) > v.ENDLESS.DEPTH_CAP) return { m, mt, pc, scores, p: null, tail, roster: {}, self: [], runSeed: d0[4] | 0, skip: 'depth' };
     }
     const p = capParamsOf(mt, pc, tail);
-    const roster = v.rosterConsensus(g);
+    const roster = v.rosterConsensus(all);
     const rosterPids = Object.keys(roster).map(s2 => v.pid(roster[s2]));
     const runSeed = d0[4] | 0;
     if (p.replayErr) return { m, mt, pc, scores, p, tail, roster, self: [], runSeed, skip: 'perk-replay:' + p.replayErr };   // forged pick log: not capped (reconcile perk_forge lane)
     if (p.entry === 'endless') p.startBank = chainStartBank(st, rosterPids, pc, p.startDepth, runSeed);
     // w (O198 v1 context): distinct accounts that wrote a record of the group
-    return { m, mt, pc, scores, p, tail, roster, self: selfSeatsOf(g, roster), runSeed, keyId: (p.entry === 'endless' && p.keyId > 0) ? (p.keyId | 0) : 0,
-      w: new Set(g.map(r => String((r && (r.w || r.steamID)) || ''))).size };
+    // Q68: a writer whose own record carries the audited scores claimed them; a result written without the final summary that
+    //   judged the seats differently never did, so it is not a seat the verdict may convict (every other group: all of g, as before)
+    const claimed = all.filter(r => vecOf(r.d) === vecOf(d0));
+    return { m, mt, pc, scores, p, tail, roster, self: selfSeatsOf(claimed, roster), runSeed, keyId: (p.entry === 'endless' && p.keyId > 0) ? (p.keyId | 0) : 0,
+      w: new Set(all.map(r => String((r && (r.w || r.steamID)) || ''))).size };
   }
 }
 function pickAuditable(st, groups) {
