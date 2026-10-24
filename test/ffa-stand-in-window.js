@@ -63,6 +63,10 @@
 //   [11] the fixed old account with a new one each match, the same two withdrawing every time: +27 in the first match
 //       (they stood in), after it each match moves the points sum exactly as the same match played honestly from the same
 //       state (the two rated); mutant (no rating, as Q264) -> the second match makes more than played honestly
+//   [12] (Q265 review) the pairing carried by a seat put back: the same two withdraw against the same honest player again,
+//       his row gone after he was seen agreeing (put back, Q185), the two who write met neither of them -> the two rated at
+//       their place read now (for him alone), all five exactly the honest twin's; mutant (only the writers read) -> the
+//       two stand in, he settles as before Q227 (another gain)
 // State isolation is structural (every *_FILE var scanned and redirected, cwd = temp dir), like test/ffa-agreed-recant.js.
 const { spawnSync } = require('child_process');
 const fs = require('fs'), path = require('path'), os = require('os');
@@ -696,6 +700,38 @@ function fixedNew(script) {
     const m = fixedNew(script);
     T('[11] mutant: nobody rated (as Q264) -> the old one settles as before Q227 next to each new one: the second match makes more than played honestly, the sum ends higher',
       m.ok && nStood(m.rs) === 6 && nOwn(m.rs) === 2 && m.moved[0] > m.twinD[0] && m.sums[2] > o.sums[2], JSON.stringify([m.ok, nStood(m.rs), nOwn(m.rs), m.sums, m.moved, m.twinD]));
+  });
+}
+
+// ---- [12] (Q265 review) the pairing carried by a seat put back (Q185), not by a writer ----
+// C1 as [3]: H13 / A13 honest, L13 / L14 withdraw and stand in (H13 paired with them). C2, inside the window, 5P: the two
+//   write a made-up result with themselves on top (seen agreeing), then blank their rows; H13 and two fresh honest players
+//   write the real one (seen agreeing); then H13's row is gone (overwritten by a later record of his): he is put back at his
+//   agreed place, and the two who write met neither L13 nor L14.
+const H13 = SID(971), A13 = SID(972), L13 = SID(973), L14 = SID(974), B13 = SID(975), C13 = SID(976);
+ALL.push(H13, A13, L13, L14, B13, C13);
+{
+  const c1 = timeline(wd2(2, 0xC2C1, [H13, A13, L13, L14], [2, 3], S4, F).steps);
+  const ros = [H13, B13, C13, L13, L14], T5 = [5200, 6100, 4800, 3000, 2900], F5 = [3000, 2900, 2800, 6100, 5200], h = 0xC2C2, k = keyRecs(2, h, ros, T5);
+  const pick = (xs, is) => is.map((i) => xs[i]), all = k.S.concat(k.R), gone = k.S.concat(pick(k.R, [1, 2]));
+  const Rf = ros.map((s, i) => ({ sid: s, d: rec(0xB1, 2, h, i, placeIn(F5, i), placeIn(F5, i) === 1, ros, F5) }));
+  const steps = [[0, k.S], [MIN, k.S.concat(pick(Rf, [3, 4]))], [MIN, k.S.concat(pick(k.R, [0, 1, 2]))], [MIN, gone], [GRACE, gone], [LEAVE, gone], [3 * HOUR, gone]];
+  const twin = [[0, k.S], [MIN, all], [MIN, all], [MIN, all], [GRACE, all], [LEAVE, all], [3 * HOUR, all]];
+  const from = () => advance(last(c1).state, 3 * HOUR);
+  const BACKED = new RegExp('agreed-back ' + k.key + ': seat 0 = ' + v.pid(H13).slice(0, 8) + ' record gone but seen agreeing earlier -- settled at his agreed place 2 of 5, as if his record were still there \\(Q185\\)');
+  const b = allOk(c1, 6) && nStood(c1) === 2 ? timeline(steps, null, from()) : [], tw = allOk(c1, 6) ? timeline(twin, null, from()) : [], r = b.length ? last(b) : null;
+  T('[12] put back (Q185) and the two rated at their place read now (4th and 5th of 5) for him alone, nobody held or settling as before Q227', allOk(b, 7) && processedOf(r).has(k.key)
+    && BACKED.test(outOf(b)) && RATED_LINE(k.key, L13, 4, 5, 'seat 0 = [0-9a-f]{8}').test(outOf(b)) && RATED_LINE(k.key, L14, 5, 5, 'seat 0 = [0-9a-f]{8}').test(outOf(b))
+    && nRated(b) === 2 && nStood(b) === 0 && nHeld(b) === 0 && nOwn(b) === 0 && leavesOf(r, L13) === 0 && leavesOf(r, L14) === 0, (r ? outOf(b) : outOf(c1)).slice(-900));
+  T('[12] ... every points and rating write of the five exactly the honest twin\'s (all five wrote the real result)', allOk(tw, 7) && sameFor(b, tw, ros) && ptsIn(b, L13).length === 1,
+    show(b, ros) + ' vs ' + show(tw, ros));
+  T('[12] ... the marks: L13 / L14 marked again, H13 (put back) and the two who wrote paired with them, all with this settle\'s clock', !!r && sxOf(r, L13) > 0 && sxOf(r, L14) === sxOf(r, L13)
+    && [H13, B13, C13].every((s) => sxOf(r, s) === 0 && JSON.stringify(swOf(r, s)) === JSON.stringify([[v.pid(L13), sxOf(r, L13)], [v.pid(L14), sxOf(r, L13)]])),
+    r ? JSON.stringify(ros.map((s) => marks(r, s))) : '');
+  withMutant('writersonly', 'const rated0 = parts.slice(),', 'const rated0 = parts.filter((p) => g.some((x) => String(x.steamID) === String(p.steamID))),', (script) => {
+    const m = timeline(steps, script, from());
+    T('[12] mutant: only the writers read -> the two stand in, H13 settles as before Q227 (another gain than the honest twin\'s)', allOk(m, 7) && nRated(m) === 0 && nStood(m) === 2
+      && nOwn(m) === 1 && OWN_LINE(k.key, H13).test(outOf(m)) && none(m, L13) && pts(m, [H13]) !== pts(tw, [H13]), show(m, ros) + ' vs ' + show(tw, ros));
   });
 }
 
