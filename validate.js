@@ -3072,6 +3072,24 @@ const ffaLowerHalf = (place, pc) => 2 * place > pc + 1;
 //   read: a pair that does Q227 match after match against different honest players still stands in for each of them (each
 //   honest player once in the window), while an account climbs by a stand-in at most once in the window (fresh accounts
 //   each time: the cost is the accounts). Nobody is flagged or rated more than before Q227.
+// Q264 (cloud audit, found by the Q263 review): that check read the whole match, so one player rated there with a mark in
+//   the window kept the stand-ins out for everybody: an honest player who had been protected once (marked), or a third
+//   account the two who withdrew brought along with a mark of its own, took the protection away from the honest players
+//   next to him (the honest 2nd of 4 took last of 2 again: -17, not +15); and an honest player met by another pair who
+//   withdrew in the window got no protection again. It is read per player now, and per stand-in. A player rated at the
+//   settle settles as before Q227 himself (stoodOwn), as if the stand-ins were not there (his place among the players
+//   rated here and their count, in his points, his ranked and stored rating, XP, CP, career and win count), when in the
+//   window he stood in himself (sx: since Q264 set on a stand-in only) or settled with one of these stand-ins
+//   (signals.players[pid].sxw = [[stand-in pid, when], ...]: every stand-in a real settle rated him with, kept for the
+//   window). The others settle with the stand-ins; only when every player rated there is such a one do the seats stay out
+//   (Q263). Nothing is written for the ones who settled as before (the stand-ins were not used for them). So the four who
+//   took turns still climb once (the two who stood in are marked, the two who settled are paired with them: 4P +27, 6P
+//   +32), and two who settle again with the same two standing in get nothing more; an honest player is protected each
+//   time other accounts withdraw against him, on his own history only. Left: the same account withdrawing against him
+//   again in the window (in the ledger the same as the pair above settling again), and a group of more accounts giving
+//   each settler fresh stand-ins (each settler and stand-in once in the window: 6 accounts in 4P matches +81, Q263 +54).
+//   His repeat-group decay step (and its memory) reads the roster without the stand-ins too, and so does a convicted
+//   leaver's late-result shadow for his gain.
 const STAND_IN_WINDOW_MS = Number(process.env.STAND_IN_WINDOW_MS || 30 * 86400000);
 const SIG_PAIRS_CAP = Number(process.env.SIG_PAIRS_CAP || 200000);
 function loadSignals() { try { const s = JSON.parse(fs.readFileSync(SIGNALS_FILE, 'utf8')) || {}; s.day = s.day || { d: 0, n: {} }; s.players = s.players || {}; s.pairs = s.pairs || {}; s.flagged = s.flagged || {}; s.rep = s.rep || {}; s.rseen = s.rseen || {}; return s; } catch (e) { return { day: { d: 0, n: {} }, players: {}, pairs: {}, flagged: {}, rep: {}, rseen: {} }; } }
@@ -3661,7 +3679,8 @@ function writeRunSummary() {
       '| of those seats, left out: the scores or the seat read at the settle are not the ones they were seen agreeing to (Q185 review) | ' + s('agreedMoved', 0) + ' |',
       '| of those, seen agreeing to another result (a pin, not an entry from before the pin): counted on the account (Q227, nobody flagged) | ' + s('agreedAway', 0) + ' |',
       '| of those, at a ranked settle with no confession of their own standing: stood in for the players there at the place read now, not rated themselves (Q227) | ' + s('agreedStood', 0) + ' |',
-      '| of those, left out instead: a player rated at the settle settled with a stand-in in the window (Q263) | ' + s('agreedStoodHeld', 0) + ' |',
+      '| of those, left out instead: every player rated at the settle stood in or settled with one of them in the window (Q263 / Q264) | ' + s('agreedStoodHeld', 0) + ' |',
+      '| players rated at a settle with stand-ins who settled as before Q227 instead: each stood in or settled with one of them in the window (Q264) | ' + s('agreedStoodOwn', 0) + ' |',
       '| matchmade FFA writers at the settle first seen agreeing to another result for the match, counted on the account (Q227, nobody flagged) | ' + s('recanted', 0) + ' |',
       '| team matches with nobody on the losing team, settled without a rating move (Q136) | ' + s('noLoser', 0) + ' |',
       '| team matches with a losing seat nobody accounts for (named by the others only or left blank), settled without a rating move (Q149) | ' + s('namedLoser', 0) + ' |',
@@ -10693,7 +10712,11 @@ async function main() {
     //   Q263: a stand-in is used only while none of the players rated here settled with a stand-in in the last
     //   STAND_IN_WINDOW_MS (four modified clients took turns standing in for each other: points out of nothing); otherwise
     //   the seat stays out as before Q227.
+    //   Q264: read per player: one who stood in himself in the window, or settled with one of these stand-ins in it, settles
+    //   as before Q227 himself (stoodOwn), the others with the stand-ins; the seats stay out only when every player rated
+    //   here is such a one.
     const stoodCand = [];   // Q227: the seats that would stand in (see Q263 at the end of this block)
+    const stoodOwn = new Set();   // Q264: the players rated here who settle as before Q227 (see STAND_IN_WINDOW_MS)
     if (baseMt(matchType) === 1 || baseMt(matchType) === 2) {
       let back = 0;
       if (pend.agv) for (const r of g) {
@@ -10730,18 +10753,33 @@ async function main() {
       }
       // Q263 (see STAND_IN_WINDOW_MS): the stand-ins only while none of the players rated here (the writers and the seats put
       //   back above) settled with a stand-in in the window; otherwise they stay out as before Q227
+      //   Q264: only when every one of them stood in himself or settled with one of these stand-ins in the window; otherwise the
+      //   stand-ins are used and those settle as before Q227
       if (stoodCand.length) {
-        const lately = parts.filter((p) => { const e = signals.players[pid(String(p.steamID))]; return !!(e && e.sx && nowMs - e.sx < STAND_IN_WINDOW_MS); });
-        if (lately.length) {
+        const candH = new Map(stoodCand.map((x) => [pid(String(x.steamID)), x.seat]));
+        const why = (p) => {   // Q264: '' unless he settles as before Q227
+          const e = signals.players[pid(String(p.steamID))];
+          if (!e) return '';
+          if (e.sx && nowMs - e.sx < STAND_IN_WINDOW_MS) return 'stood in himself';
+          const s = (e.sxw || []).filter((y) => nowMs - y[1] < STAND_IN_WINDOW_MS && candH.has(y[0])).map((y) => candH.get(y[0]));
+          return s.length ? 'settled with seat' + (s.length > 1 ? 's ' : ' ') + s.join(',') + ' standing in' : '';
+        };
+        const lately = parts.map((p) => [p, why(p)]).filter((y) => y[1]);
+        const days = ' in the last ' + Math.round(STAND_IN_WINDOW_MS / 86400000) + ' days';
+        if (lately.length && lately.length === parts.length) {
           RUN.agreedStoodHeld = (RUN.agreedStoodHeld | 0) + stoodCand.length;
           console.log('  agreed-stood-held ' + c.m + ': seat' + (stoodCand.length > 1 ? 's ' : ' ') + stoodCand.map((x) => x.seat).join(',') + ' left out as before Q227: '
-            + lately.map((p) => 'seat ' + p.seat + ' = ' + plog(p.steamID)).join(', ') + ' settled with a stand-in in the last ' + Math.round(STAND_IN_WINDOW_MS / 86400000) + ' days (Q263)');
+            + lately.map((y) => 'seat ' + y[0].seat + ' = ' + plog(y[0].steamID) + ' ' + y[1]).join(', ') + days + ' (Q263 / Q264)');
         } else {
           for (const x of stoodCand) {
             parts.push({ steamID: x.steamID, seat: x.seat, score: scores[x.seat] | 0, stood: true });
             back++; RUN.agreedStood = (RUN.agreedStood | 0) + 1;
             console.log('  agreed-stood ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' stands in at place ' + (1 + scores.filter((y) => (y | 0) > (scores[x.seat] | 0)).length) + ' of ' + pc
               + ' read now for the players there, his own rating and points unchanged (Q227)');
+          }
+          for (const [p, w] of lately) {   // Q264: his own history in the window
+            stoodOwn.add(String(p.steamID)); RUN.agreedStoodOwn = (RUN.agreedStoodOwn | 0) + 1;
+            console.log('  agreed-stood-own ' + c.m + ': seat ' + p.seat + ' = ' + plog(p.steamID) + ' settles as before Q227, as if the stand-ins were not there: he ' + w + days + ' (Q264)');
           }
         }
       }
@@ -10828,20 +10866,28 @@ async function main() {
     //   update and points plan only: no signals, no seed, no rating or points of his own move (live = parts without them)
     const stoodIds = new Set(parts.filter((p) => p.stood).map((p) => String(p.steamID)));
     const live = stoodIds.size ? parts.filter((p) => !p.stood) : parts;
+    // Q264: a player who settles as before Q227 (stoodOwn, see STAND_IN_WINDOW_MS) reads his place among the players rated
+    //   here (rankNo: the settle's ranking of live) and their count; rankX = the place each one's XP, CP and career read
+    const rankNo = {}, rankX = stoodOwn.size ? Object.assign({}, rankOf) : rankOf;
+    if (stoodOwn.size) {
+      const so = [...live].sort((a, b) => b.score - a.score); let rr = 1;
+      for (let i = 0; i < so.length; i++) { if (i > 0 && so[i].score < so[i - 1].score) rr = i + 1; rankNo[so[i].steamID] = rr; }
+      for (const p of live) if (stoodOwn.has(String(p.steamID))) rankX[p.steamID] = rankNo[p.steamID];
+    }
     // points are credited for BOTH settled AND consensus-VOID matches -- VOID only gates MMR/LP; an innocent victim
     //   still earns participation points (mirrors the client crediting innocent records). per-record class-driven.
     //   Early-settled matches (everyone else left) award progress/levelCount of the points (min-of-writers, see matchProgressOf).
     const prog = matchProgressOf(g);
     const progFrac = xpProgressFrac(prog);
     if (progFrac !== 1) console.log('  progress ' + c.m + ': ' + prog + '/' + XP_CFG.progressLevels + ' levels -> points x' + progFrac);
-    if (xpId) creditXp(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers, today, progFrac, careerDet, spSet,
+    if (xpId) creditXp(g, matchType, scores, rankX, xp, changedXp, xpState, leavers, today, progFrac, careerDet, spSet,
       { t0: pend.t0 || nowMs, nowMs, absentSeats: new Set(absentNow.map((x) => x.seat | 0)) });   // O181: the streak orders by the match's start
     if (xpId) creditCareerMatch(g, matchType, rankOf, xpState, careerTouched);   // 5.4a career matrix (mode x character; W/L in quick / ranked cells)
     // CP (the endless-economy wallet) earns from matchmade records on the same credit classes.
     // Playtest starter wallet first: writers only (a leaver whose first-ever appearance is the
     // leave itself earns the baseline on their first finished game instead).
     if (PT_MODE && cpId) ptSeedCp(cp, changedCp, writerSids);
-    if (cpId) creditCp(g, matchType, rankOf, cp, changedCp);
+    if (cpId) creditCp(g, matchType, rankX, cp, changedCp);
     if (c.void) {
       recordMatchSignals(signals, g, live, null, matchType, true, nowMs); sigDirty = true;   // co-presence + void counters (dodge-ring history)
       // O480: every account of a voided ranked match gets a VOID receipt (delta 0): its client rolls the optimistic points back.
@@ -10852,7 +10898,17 @@ async function main() {
     if (parts.length < 2) { processed.add(c.m); continue; }
     // B6 collection for a real settle: per-player counters + pairwise co-occurrence.
     recordMatchSignals(signals, g, live, rankOf, matchType, false, nowMs);
-    if (stoodIds.size) { for (const p of parts) sigPlayer(signals, pid(String(p.steamID)), nowMs).sx = nowMs; sigDirty = true; }   // Q263: see STAND_IN_WINDOW_MS
+    for (const p of live) if (stoodOwn.has(String(p.steamID)) && rankNo[p.steamID] === 1 && rankOf[p.steamID] !== 1) signals.players[pid(String(p.steamID))].w += 1;   // Q264: his win as before Q227
+    if (stoodIds.size) {   // Q263 / Q264 (see STAND_IN_WINDOW_MS): a stand-in marked, a player rated with them paired with each of them
+      const sh = [...stoodIds].map((s) => pid(s));
+      for (const p of parts) {
+        if (stoodOwn.has(String(p.steamID))) continue;
+        const e = sigPlayer(signals, pid(String(p.steamID)), nowMs);
+        if (p.stood) e.sx = nowMs;
+        else e.sxw = (e.sxw || []).filter((y) => nowMs - y[1] < STAND_IN_WINDOW_MS && sh.indexOf(y[0]) < 0).concat(sh.map((h) => [h, nowMs]));
+      }
+      sigDirty = true;
+    }
     // (no start attestation ever sighted = the per-writer ns signal, counted once when the synthetic
     //  first-sighting entry was created at the pacing gate above -- a cheap fabrication tell for the
     //  judgment layer now that every live build attests)
@@ -11085,9 +11141,22 @@ async function main() {
       // repeat-group decay: advance streak memory for the WHOLE consensus roster (writers + leavers)
       //   and fetch each rated player's update weight. Applied to the TrueSkill delta below;
       //   points/XP/CP untouched (real play is not zero-sum -- only rating farming is sealed).
+      // Q264: a player who settles as before Q227 takes the step of the roster without the stand-ins, and keeps that memory
+      const gShadow = {}; let gOwn = null;
+      if (stoodOwn.size && !noRating) {
+        const ro = live.map(p => pid(p.steamID)).concat(leavers0.map(x => pid(x.steamID)));
+        for (const k of ro) if (groupMem[k]) gShadow[k] = groupMem[k];
+        gOwn = groupDecayPlan(gShadow, ro, nowMs);
+      }
       const gPlan = noRating ? {} : groupDecayPlan(groupMem,
         parts.map(p => pid(p.steamID)).concat(leavers0.map(x => pid(x.steamID))), nowMs);
       if (!noRating) groupsDirty = true;
+      if (gOwn) for (const p of live) if (stoodOwn.has(String(p.steamID))) { const k = pid(p.steamID); gPlan[k] = gOwn[k]; groupMem[k] = gShadow[k]; }
+      // Q264: the update a player who settles as before Q227 takes: the one among the players rated here at his place there
+      const ownUpdate = (out, ins) => {
+        const no = ts.updateMatch(ins.filter((t) => !stoodIds.has(String(t.id))).map((t) => Object.assign({}, t, { rank: rankNo[t.id] })));
+        return out.map((r) => (stoodOwn.has(String(r.id)) ? no.find((o) => o.id === r.id) : r));
+      };
       let tsOut;
       const ghostLoss = [];   // Q167: the losing team's convicted leavers rated against in the winners' update (below)
       if (noRating) {
@@ -11164,6 +11233,7 @@ async function main() {
       } else {
         tsOut = ts.updateMatch(tsIn);
         if (stoodIds.size) tsOut = tsOut.filter((r) => !stoodIds.has(String(r.id)));   // Q227: rated against, never rated
+        if (stoodOwn.size) tsOut = ownUpdate(tsOut, tsIn);   // Q264: as before Q227 for those
       }
       // visible-LP plan uses PRE-match ratings (tsIn) + current LP -> per-player adjusted delta + reveal flag.
       //   team matches: halved team-LP path (teamLpPlan); FFA: per-unit plan (premade pairs from the
@@ -11210,7 +11280,10 @@ async function main() {
             playedOut = full.filter((o) => !gIds.has(o.id));
             for (const o of full) if (gIds.has(o.id)) ghostRanked.push(o);   // Q167 rework: the absent losers' side of the same update
           }
-        } else playedOut = ts.updateMatch(asPlayed);
+        } else {
+          playedOut = ts.updateMatch(asPlayed);
+          if (stoodOwn.size) playedOut = ownUpdate(playedOut, asPlayed);   // Q264: his ranked rating as before Q227 too
+        }
       }
       if (rankedNow) {
         const bare = tsIn.map((t) => ts.displayRating(t.mu, t.sigma)), used = planIn.map((x) => x.mmr | 0);
@@ -11255,6 +11328,9 @@ async function main() {
       }
       // the match's points plan (points-plan.js matchPlan: the team planner for a team code, else the FFA planner on the code's party bits)
       const rsPlan = matchPlan(planIn, matchType, { scores, leaverSeats: leavers0.concat(namedOnly).map(x => x.seat), winTeam: t2Win, absent: absentIn, finished: finishedIn });   // Q69: named-only seats still shield their teammates
+      // Q264: the points plan of a player who settles as before Q227: the players rated here at their places there
+      const ownRows = stoodOwn.size ? planIn.filter((q) => !stoodIds.has(String(q.steamID))).map((q) => Object.assign({}, q, { rank: rankNo[q.steamID] })) : null;
+      const rsPlanOwn = ownRows ? reducedStakesPlan(ownRows, matchType, premadeMaskOf(matchType), premadeTrioAtOf(matchType)) : null;
       for (const r of tsOut) {
         // repeat-group decay: blend the update toward the pre-match rating by the streak weight
         //   (w=1 full, w=0 frozen). Blending sigma the same way keeps a frozen player's uncertainty
@@ -11279,12 +11355,13 @@ async function main() {
         let lpLine = '';
         if (lpId && appliesLp(matchType)) {   // quick = MMR only; visible LP ladder is ranked-only
           const cur = lp[r.id] == null ? 0 : lp[r.id];
-          const rs = rsPlan && rsPlan[r.id];
+          const own = stoodOwn.has(String(r.id)), nP = own ? live.length : parts.length;   // Q264: as before Q227 for him
+          const rs = own ? (rsPlanOwn && rsPlanOwn[r.id]) : (rsPlan && rsPlan[r.id]);
           // the plan's delta (or the plain lpDelta at his own place), then the promotion/relegation series clamp: decisive line
           //   crossing for the boundary-zone match (won: plan-supplied -- unit average rank / team outcome -- else top-half at his
           //   own rank). PROTECTED (flag 2) keeps its compressed natural loss; a seed settle (first ranked) skips the clamp too.
           //   One composition with the client and lateShadow (points-plan.js settleLine, O480).
-          const sl = settleLine(cur, rs, rankOf[r.id], parts.length, seededNow.has(r.id));
+          const sl = settleLine(cur, rs, rankX[r.id], nP, seededNow.has(r.id));
           const d0 = sl.d0, wonLike = sl.won, d = sl.d, nv = sl.nv;
           lp[r.id] = nv; changedLp[r.id] = nv; lpMoved[r.id] = nv - cur;
           // O480: the match's points receipt on his row (what this settle moved, why: reveal flag / series clamp / seeded)
@@ -11293,7 +11370,7 @@ async function main() {
           lpLine = ' | pts ' + cur + (d >= 0 ? '+' : '') + d + '->' + nv + (rs && rs.flag ? (' [' + (rs.flag === 1 ? 'UPSET' : 'PROTECTED') + ' normal ' + rs.normalDelta + ']') : '')
             + (d !== d0 ? (' [SERIES ' + (wonLike ? 'PROMOTED' : 'RELEGATED') + ' from ' + d0 + ']') : '');
         }
-        console.log('  settle ' + c.m + ': ' + plog(r.id) + ' rank' + rankOf[r.id] + ' mu' + r.mu.toFixed(2) + ' sigma' + r.sigma.toFixed(2) + ' -> ' + ts.displayRating(r.mu, r.sigma) + lpLine);
+        console.log('  settle ' + c.m + ': ' + plog(r.id) + ' rank' + rankX[r.id] + ' mu' + r.mu.toFixed(2) + ' sigma' + r.sigma.toFixed(2) + ' -> ' + ts.displayRating(r.mu, r.sigma) + lpLine);
       }
       // Q228: what each leaver convicted below would have taken with his record there, and what the other members of his
       //   premade unit gained by his absence (lateShadow) -- kept on his conviction's entry for a late result of his own
@@ -11324,8 +11401,15 @@ async function main() {
           const rk = rankWith(planIn.concat([xr]).map((q) => ({ steamID: q.steamID, seat: q.seat | 0, score: scores[q.seat | 0] | 0 })));
           const withRank = (q) => Object.assign({}, q, { rank: rk[q.steamID] });
           const xs = x.seat | 0;
-          lateSh[x.steamID] = lateShadow(planIn.map(withRank), withRank(xr), lpMoved, seededNow, (all) => matchPlan(all, matchType,
-            { scores, leaverSeats: lSeats.filter((s) => (s | 0) !== xs), winTeam: t2Win, absent: absentIn.filter((a) => (a.seat | 0) !== xs), finished: finishedIn }), unitMates(xs));
+          const planX = (all) => matchPlan(all, matchType,
+            { scores, leaverSeats: lSeats.filter((s) => (s | 0) !== xs), winTeam: t2Win, absent: absentIn.filter((a) => (a.seat | 0) !== xs), finished: finishedIn });
+          lateSh[x.steamID] = lateShadow(planIn.map(withRank), withRank(xr), lpMoved, seededNow, planX, unitMates(xs));
+          if (ownRows) {   // Q264: the gain of a mate who settled as before Q227, read the same way without the stand-ins
+            const rk2 = rankWith(ownRows.concat([xr]).map((q) => ({ steamID: q.steamID, seat: q.seat | 0, score: scores[q.seat | 0] | 0 })));
+            const with2 = (q) => Object.assign({}, q, { rank: rk2[q.steamID] });
+            const g2 = lateShadow(ownRows.map(with2), with2(xr), lpMoved, seededNow, planX, unitMates(xs)).g;
+            lateSh[x.steamID].g = lateSh[x.steamID].g.filter((y) => !stoodOwn.has(y[0])).concat(g2.filter((y) => stoodOwn.has(y[0])));
+          }
         }
       }
       // Q167 rework: the losing team's absent players the winners were rated against take the loss of the full team on their
