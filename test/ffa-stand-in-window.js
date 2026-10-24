@@ -34,6 +34,8 @@
 //       marked one exactly as with Q227 step two off (points, ranked and stored rating, XP, career, win count, the
 //       repeat-group step); the own line and row; mutant (the whole match read, as Q263) -> the fresh one held (down);
 //       mutant (no own settle) -> the marked one as the twin; mutant (his decay step with the stand-ins) -> his rating moves
+//       (Q264 review: his stored and ranked rating compared in the state, where no board write shows the ranked one;
+//       mutant (his ranked rating with the stand-ins) -> another ranked rating)
 //   [7] marks: the fresh one paired with the stand-ins and they marked, with the settle's clock, the marked one's marks
 //       not refreshed; mutant (every one marked) -> refreshed
 //   [8] a marked account the liars bring along, writing his real place in a 6P match: the three honest players settle as
@@ -265,6 +267,7 @@ const OWN_ADD = '            stoodOwn.add(String(p.steamID)); RUN.agreedStoodOwn
 const WFIX = "    for (const p of live) if (stoodOwn.has(String(p.steamID)) && rankNo[p.steamID] === 1 && rankOf[p.steamID] !== 1) signals.players[pid(String(p.steamID))].w += 1;   // Q264: his win as before Q227\n";
 const GOWN = '      if (gOwn) for (const p of live) if (stoodOwn.has(String(p.steamID))) { const k = pid(p.steamID); gPlan[k] = gOwn[k]; groupMem[k] = gShadow[k]; }\n';
 const G2 = '            lateSh[x.steamID].g = lateSh[x.steamID].g.filter((y) => !stoodOwn.has(y[0])).concat(g2.filter((y) => stoodOwn.has(y[0])));\n';
+const RANKED_OWN = '          if (stoodOwn.size) playedOut = ownUpdate(playedOut, asPlayed);   // Q264: his ranked rating as before Q227 too\n';   // Q264 review
 const HELD_RE = /\| of those, left out instead: every player rated at the settle stood in or settled with one of them in the window \(Q263 \/ Q264\) \| (\d+) \|/;
 const HELD_LINE = (key, days) => new RegExp('agreed-stood-held ' + key + ': seats? [0-9,]+ left out as before Q227: [^\\n]* (stood in himself|settled with seats? [0-9,]+ standing in) in the last ' + (days || 30) + ' days \\(Q263 / Q264\\)');
 const nStood = (rs) => (outOf(rs).match(/  agreed-stood [0-9]/g) || []).length;
@@ -453,6 +456,7 @@ const OWN_LINE = (key, sid, why) => new RegExp('agreed-stood-own ' + key + ': se
 const writesOf = (rs, sid) => JSON.stringify([].concat(...rs.map((r) => r.posts.filter((p) => /SetLeaderboardScore/.test(p.url) && new RegExp('steamid=' + sid + '(&|$)').test(p.body)).map((p) => p.body))));
 const sigCore = (r, sid) => { const e = sigOf(r, sid); return JSON.stringify([e.g, e.w, e.v, e.s1, e.s2, e.smax, e.disp]); };
 const grpOf = (r, sid) => { const e = ((r.state.GROUPS_FILE || {})[v.pid(sid)]) || {}; return JSON.stringify([e.r, e.k]); };
+const skOf = (r, sid) => JSON.stringify(((r.state.SKILL_FILE || {})[v.pid(sid)]) || null);   // Q264 review: his stored and ranked rating as kept in the state
 const xps = (rs, sids) => JSON.stringify(sids.map((s) => xpOf(rs, s)));
 const PERMATCH = ['permatch', HELD_IF, '        if (lately.length) {\n'];   // Q263: the whole match read
 const NOOWN = ['noown', OWN_ADD, '            RUN.agreedStoodOwn = (RUN.agreedStoodOwn | 0) + 1;\n'];   // nobody settles as before: the stand-ins for everybody
@@ -480,6 +484,15 @@ const b6 = timeline(w6.steps, null, from3());
   T('[6] mutant: nobody settles as before -> H3 as his twin', allOk(m.noown, 6) && sameFor(m.noown, tw, [H3]) && pts(m.noown, [H3]) !== pts(b6, [H3]), show(m.noown, [H3]));
   T('[6] mutant: his repeat-group step read with the stand-ins -> his rating moves less, his points the same', allOk(m.nogown, 6) && pts(m.nogown, [H3]) === pts(b6, [H3])
     && JSON.stringify(rOf(m.nogown, H3)) !== JSON.stringify(rOf(b6, H3)) && /group-decay [^\n]*repeat-group streak 2/.test(outOf(m.nogown)), show(m.nogown, [H3]) + ' vs ' + show(b6, [H3]));
+  // Q264 review: his ranked rating (rm / rv, read by the points plan of his later matches) as with Q227 step two off too;
+  //   it is in the state only, no board write shows it, so the writes compared above cannot catch it
+  T('[6] review: the marked H3\'s stored and ranked rating in the state exactly as with Q227 step two off', allOk(n, 6) && skOf(r, H3) === skOf(last(n), H3)
+    && skOf(r, H3) !== 'null', skOf(r, H3) + ' vs ' + skOf(last(n), H3));
+  withMutant('noranked', RANKED_OWN, '', (script) => {
+    const mr = timeline(w6.steps, script, from3());
+    T('[6] review mutant: his ranked rating read with the stand-ins -> another ranked rating, every write of his the same', allOk(mr, 6) && skOf(last(mr), H3) !== skOf(r, H3)
+      && writesOf(mr, H3) === writesOf(b6, H3), skOf(last(mr), H3) + ' vs ' + skOf(r, H3));
+  });
 }
 
 // ---- [7] marks: the players who settled with the stand-ins, not the one who settled as before ----
