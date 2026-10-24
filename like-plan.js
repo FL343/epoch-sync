@@ -17,7 +17,8 @@
 //   kind 1 (in a match), voter V, target T:
 //     1. V != T
 //     2. V's OWN record of that match is on the shards: matchmade (quick / ranked, team kinds included -- no endless, no
-//        friend room, no bot match), disposition finished; and the match was SETTLED by this job and not voided (validate.js
+//        friend room, no bot match), disposition finished (0, or 10 = finished, the seat scores judged without the host
+//        guard's final summary: validate.js settles it as finished, cloud audit Q68); and the match was SETTLED by this job and not voided (validate.js
 //        certifies the key at the settle; a like seen before that waits in `pend`, PENDING_TTL_MIN)
 //     3. T sits at a seat of the match's consensus roster (majority per seat; a bot seat holds no SteamID), V at his own
 //     4. V and T are not one premade unit: an FFA premade pair / trio (the party bits of the match type) does not count.
@@ -154,7 +155,11 @@ const inWeek = (last, now) => last !== undefined && now - (last | 0) < LIKE.PAIR
 // recs = [{ steamID, d, dispCode?, roster? }] (settle records 0xB1). Returns lookup(voterSid, matchHash) ->
 //   null (no record of his with that hash) | { why } (ambiguous) | { m, mt, vSeat, vDisp, roster }
 // roster = consensus seat -> SteamID over the key's records (one record per writer, strict majority per seat, as
-// validate.js rosterConsensus); vDisp = 0 when one of the voter's own records of the key says finished.
+// validate.js rosterConsensus); vDisp = a finished code (0 or 10, isFinished) when one of the voter's own records of the key
+// says finished.
+// Q68: 10 (finished-nosummary) is a finished match too -- validate.js settles it like 0 (the copy takes the agreed seat
+// scores); the client counts that like as finished (its match-end disposition stays 'finished'), so the lane must as well.
+const isFinished = (c) => (c | 0) === 0 || (c | 0) === 10;
 function matchIndex(recs) {
   const byKey = new Map(), byVoter = new Map();
   for (const r of recs || []) {
@@ -170,7 +175,7 @@ function matchIndex(recs) {
     const rec = { sid, m, mt: d[2] | 0, mh: d[3] | 0, seat: d[5] | 0, disp, roster };
     if (!byKey.has(m)) byKey.set(m, new Map());
     const w = byKey.get(m);
-    if (!w.has(sid) || (w.get(sid).disp !== 0 && disp === 0)) w.set(sid, rec);   // one record per writer (a finished one first)
+    if (!w.has(sid) || (!isFinished(w.get(sid).disp) && isFinished(disp))) w.set(sid, rec);   // one record per writer (a finished one first)
     if (!byVoter.has(sid)) byVoter.set(sid, []);
     byVoter.get(sid).push(rec);
   }
@@ -300,7 +305,7 @@ function harvest(st, rows, ctx) {
         if (!info) { why('norec'); continue; }
         if (info.why) { why(info.why); continue; }
         if (!isMatchmadeMt(info.mt)) { why('notmm'); continue; }
-        if ((info.vDisp | 0) !== 0) { why('unfinished'); continue; }
+        if (!isFinished(info.vDisp)) { why('unfinished'); continue; }
         const ros = info.roster || {};
         if (String(ros[info.vSeat]) !== V) { why('seat'); continue; }
         const tSeats = Object.keys(ros).filter((s) => String(ros[s]) === T).map((s) => s | 0);

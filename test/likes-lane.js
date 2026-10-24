@@ -26,6 +26,8 @@
 //       count DOWN), the like still counted into the state; LIKES_STRICT_BODY=0 shows what the strict read prevents
 //   [11] (W79 rework) team match: a stranger teammate's like counts, under the pair token (one per pair per 7 days, shared
 //       with board likes; a waiting one is checked at its settle), an opponent's every match
+//   [12] (Q68) a voter whose own record is 10 (finished, the voter's seat scores judged without the host guard's final summary):
+//       the match settles on the others' vector and the voter's match like counts as a finished voter's
 const { spawnSync } = require('child_process');
 const fs = require('fs'), path = require('path'), os = require('os');
 const SCRUB = ['PT_MODE', 'STRICT_BOARDS', 'APPLY_MMR', 'ALLOW_TEST', 'DEMO_APPID', 'RANKED_LB', 'LP_LB', 'XP_LB', 'STARTS_MATURITY_MS', 'CONFESS_PRUNE_MS', 'CONSOLATION_XP', 'REPORT_LB', 'TRUST_LB', 'SEEDCAP_ENFORCE', 'SEEDCAP_REJECT', 'GITHUB_STEP_SUMMARY',
@@ -450,6 +452,37 @@ console.log('=== likes-lane [11] team match: a stranger teammate counts, one per
     (t3.out.match(/likes: [^\n]*/) || [''])[0] + ' || ' + (t4.out.match(/likes: [^\n]*/) || [''])[0] + tail(t4));
   const t5 = runCron(world(Object.assign({}, BOXT2, { [W]: BOXT2[W].concat([BL(X, T1 + 90 * MIN)]) }), null, null, false, M2), carry(t4), { FAKE_NOW: String(T1 + 90 * MIN + v.STARTS_MATURITY_MS) });
   T('[11] a board like of the same pair inside the week: refused by the shared token (week), X stays 1', t5.code === 0 && /week 1/.test(t5.out) && nOf(likesOf(t5), X) === 1, (t5.out.match(/likes: [^\n]*/) || [''])[0] + tail(t5));
+}
+
+console.log('=== likes-lane [12] (Q68) a voter who finished without the host guard\'s final summary (disp 10) ===');
+{
+  // C (seat 2, a joiner) wrote 10: C's seat scores were judged by C's own client (the summary never came); A and B got it
+  //   and agree. validate.js settles the match on A / B's vector (nosumVerdict) and C is credited as finished -- the like C
+  //   gave in that match counts like any finished voter's (the client counted it: its match-end disposition stays finished)
+  function worldQ(boxes, cBump) {
+    const boards = [];
+    for (let i = 0; i < 8; i++) boards.push({ id: 1000 + i, name: 'shard_' + i, entries: [] });
+    const sids = [A, B, C];
+    sids.forEach((sid, seat) => {
+      boards[0].entries.push({ steamID: sid, score: 1, details: rec(0xB2, 1, K1, seat, sids) });
+      const d = rec(0xB1, 1, K1, seat, sids);
+      if (sid === C) { d[10 + sids.length] = 10; d[10 + 2] += cBump; }   // disp 10, C's own vector (+cBump on C's seat)
+      boards[1 + (K1 & 3)].entries.push({ steamID: sid, score: 1, details: d });
+    });
+    boards.push({ id: 5, name: 'progress', entries: [] }, { id: 8, name: 'cp_bank', entries: [] });
+    boards.push({ id: BOX, name: 'like_box', entries: Object.keys(boxes).map(sid => ({ steamID: sid, score: boxes[sid].length, details: LP.encodeBox(boxes[sid]) })) });
+    boards.push({ id: CNT, name: 'like_count', entries: [] });
+    return boards;
+  }
+  const BOXQ = { [C]: [ML(A, K1, T0 - 3 * MIN)], [A]: [ML(C, K1, T0 - 3 * MIN)] };
+  for (const [cBump, label] of [[0, 'C\'s vector the same'], [500, 'C\'s own vector differs']]) {
+    const q1 = runCron(worldQ(BOXQ, cBump), null, {});
+    const q2 = runCron(worldQ(BOXQ, cBump), carry(q1), { FAKE_NOW: String(T1) });
+    const st = likesOf(q2), line = (q2.out.match(/likes: [^\n]*/) || [''])[0];
+    T('[12] disp 10, ' + label + ': the match settles, both match likes count (C -> A, A -> C), none unfinished',
+      q1.code === 0 && q2.code === 0 && JSON.parse(q2.left['processed.json'] || '[]').indexOf(KEY1) >= 0 && /likes: counted \+2 \(match 2, board 0\)/.test(q2.out) &&
+      !/unfinished/.test(line) && (cntOf(st, A) || {}).n === 1 && (cntOf(st, C) || {}).n === 1, line + tail(q2));
+  }
 }
 
 console.log(failN ? ('FAIL x' + failN + ' (likes-lane)') : 'likes-lane: ALL OK');

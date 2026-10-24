@@ -120,6 +120,16 @@ console.log('=== like-plan (O520 likes lane, L0) ===');
     r = harvest(s2, [row(P[1], [ML(P[2], mh, T0)])], ctxOf(rq, T0 + 1));
     T('[2d] another voter of the same match who finished: counted', r.counted.length === 1);
   }
+  // d2. (Q68) the voter's own record is 10 = finished, the voter's seat scores judged without the host guard's final summary:
+  //     validate.js settles that match as finished (nosumVerdict) and the client counts the like -- the lane counts it too
+  {
+    const rq = matchRecs(mt, mh, roster, { disp: { 0: 10 } });
+    const s2 = {}; certify(s2, [m], { kh, now: T0, season: 0 });
+    r = harvest(s2, [row(P[0], [ML(P[2], mh, T0)])], ctxOf(rq, T0 + 1));
+    T('[2d2] voter finished without the final summary (disp 10): counted', r.counted.length === 1 && !r.why.unfinished && cnt(s2, P[2]).n === 1, J(r.why));
+    r = harvest(s2, [row(P[1], [ML(P[0], mh, T0)])], ctxOf(rq, T0 + 1));
+    T('[2d2] a like TO the disp 10 writer: counted', r.counted.length === 1 && cnt(s2, P[0]).n === 1, J(r.why));
+  }
   // e. not matchmade
   for (const [mt2, label] of [[7, 'endless'], [10, 'friend room'], [11, 'bot match']]) {
     const s2 = {}, m2 = keyOf(mt2, mh); certify(s2, [m2], { kh, now: T0, season: 0 });
@@ -437,6 +447,8 @@ console.log('=== like-plan (O520 likes lane, L0) ===');
   T('[9] two records split on seat 1: no majority there', ix(P[0], mh).roster[1] === undefined && ix(P[0], mh).roster[0] === P[0]);
   ix = matchIndex([rec({ sid: P[0], mt, mh, seat: 0, roster, disp: 6 }), rec({ sid: P[0], mt, mh, seat: 0, roster, disp: 0 }), rec({ sid: P[1], mt, mh, seat: 1, roster })]);
   T('[9] one record per writer, a finished one first', ix(P[0], mh).vDisp === 0);
+  ix = matchIndex([rec({ sid: P[0], mt, mh, seat: 0, roster, disp: 6 }), rec({ sid: P[0], mt, mh, seat: 0, roster, disp: 10 }), rec({ sid: P[1], mt, mh, seat: 1, roster })]);
+  T('[9] (Q68) a 10 is a finished record too: taken over an unfinished one', ix(P[0], mh).vDisp === 10);
   ix = matchIndex([rec({ sid: P[0], mt, mh, seat: 0, roster }), { steamID: P[1], d: [0xB2, 3, mt, mh, 77, 1, 0, 0, 4, 0] }, { steamID: P[2], d: null }]);
   T('[9] non-settle rows are ignored', ix(P[1], mh) === null);
   ix = matchIndex([{ steamID: P[0], d: rec({ sid: P[0], mt, mh, seat: 0, roster }).d, dispCode: 4, roster: { 0: P[0], 1: P[1] } }]);
