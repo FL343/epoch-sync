@@ -407,7 +407,7 @@ const e7 = (P) => {
   T('[11] verdict order: settled, own start, confession, note, then the hit', iSettled > 0 && iSettled < iOwn && iOwn < iConf && iConf < iNote && iNote < iHit, [iSettled, iOwn, iConf, iNote, iHit].join(','));
   T('[11] p.noted is gathered before the consistent-key exit (a pending key keeps its notes whatever happens next)',
     rs.indexOf("if (notedSet && notedSet.size) for (const seat of Object.keys(p.roster))") > 0
-    && rs.indexOf("if (notedSet && notedSet.size) for (const seat of Object.keys(p.roster))") < rs.indexOf('if (consistentKeys.has(m)) continue;'));
+    && rs.indexOf("if (notedSet && notedSet.size) for (const seat of Object.keys(p.roster))") < rs.search(/if \(consistentKeys\.has\(m\)(?: && !rankConflictHeld\(groups\[m\]\))?\) continue;/));   // Q66: the exit may carry the rank-conflict test
   T('[11] the summary row', /'\| start-orphan seats spared by their own exit note \(Q64\) \| ' \+ s\('exitNoteSpared', 0\) \+ ' \|'/.test(SRC));
 }
 
