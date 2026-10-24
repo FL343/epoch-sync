@@ -3056,6 +3056,9 @@ const ffaLowerHalf = (place, pc) => 2 * place > pc + 1;
 //   agreeing to another result for the match (his own pin differs from the one his record gives now) on his (.rc). An honest
 //   client writes one result a match, the same for every honest player, so .rc does not reach an honest account; .am can (his
 //   own record gone while the players left wrote another result), a weaker count. Counted only, nobody flagged.
+//   At a RANKED FFA settle such a seat (no standing confession of his own for the match) also stands in for the others: at the
+//   place the scores read now give him, in the ranking, the player count, the rating update and the points plan of the players
+//   there, while his own rating, points, signals and seed stay as they were (.stood on his parts entry). See the Q185 block.
 const SIG_PAIRS_CAP = Number(process.env.SIG_PAIRS_CAP || 200000);
 function loadSignals() { try { const s = JSON.parse(fs.readFileSync(SIGNALS_FILE, 'utf8')) || {}; s.day = s.day || { d: 0, n: {} }; s.players = s.players || {}; s.pairs = s.pairs || {}; s.flagged = s.flagged || {}; s.rep = s.rep || {}; s.rseen = s.rseen || {}; return s; } catch (e) { return { day: { d: 0, n: {} }, players: {}, pairs: {}, flagged: {}, rep: {}, rseen: {} }; } }
 function pruneSignals(s, now) {
@@ -3643,6 +3646,7 @@ function writeRunSummary() {
       '| matchmade FFA seats seen agreeing whose record is gone at the settle: settled at their agreed place / left out, their own confession for the match standing (Q185) | ' + s('agreedBack', 0) + ' / ' + s('agreedConf', 0) + ' |',
       '| of those seats, left out: the scores or the seat read at the settle are not the ones they were seen agreeing to (Q185 review) | ' + s('agreedMoved', 0) + ' |',
       '| of those, seen agreeing to another result (a pin, not an entry from before the pin): counted on the account (Q227, nobody flagged) | ' + s('agreedAway', 0) + ' |',
+      '| of those, at a ranked settle with no confession of their own standing: stood in for the players there at the place read now, not rated themselves (Q227) | ' + s('agreedStood', 0) + ' |',
       '| matchmade FFA writers at the settle first seen agreeing to another result for the match, counted on the account (Q227, nobody flagged) | ' + s('recanted', 0) + ' |',
       '| team matches with nobody on the losing team, settled without a rating move (Q136) | ' + s('noLoser', 0) + ' |',
       '| team matches with a losing seat nobody accounts for (named by the others only or left blank), settled without a rating move (Q149) | ' + s('namedLoser', 0) + ' |',
@@ -10664,6 +10668,13 @@ async function main() {
     //   the match settled among the honest ones: the two kept their points, the honest 2nd of 4 took last of 2 (-17, not +15).
     //   Counted here (see .am / .rc at ffaLowerHalf): such a seat on its account, and a writer of this settle first seen
     //   agreeing to another result for the match on his.
+    //   At a ranked settle such a seat also stands in (.stood) for the players there, at the place the scores read now give
+    //   him: they settle as in the result they wrote (2nd of 4: +15), the one their clients showed, and he stays where he was
+    //   (no rating, points, signals or seed of his move; his own confession standing, he stays out as above). The players
+    //   there are the ones who decide his place; it is never his own result (that one is not read), so a seat whose record
+    //   rotated off while the others rewrote it (the Q185 review case) stands in at the rewritten place without moving. Not
+    //   at a quick settle: no points move there, and a stand-in kept at his pre-match rating was a lever on the stored rating
+    //   (Q210, Q167 rework 2); there the count above is all.
     if (baseMt(matchType) === 1 || baseMt(matchType) === 2) {
       let back = 0;
       if (pend.agv) for (const r of g) {
@@ -10682,6 +10693,13 @@ async function main() {
             console.log('  agreed-away ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' seen agreeing to another result for this match -- counted, nobody flagged (Q227)');
           }
           console.log('  agreed-back ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' record gone, but the result read now is not the one he was seen agreeing to -- left out (Q185 review)');
+          const cx = confState[hx + '|' + c.m];
+          if (baseMt(matchType) === 2 && !PT_MODE && pend.agv && pend.agv[hx] != null && !(cx && !cx.refunded && (cx.ded > 0 || cx.ex))) {
+            parts.push({ steamID: x.steamID, seat: x.seat, score: scores[x.seat] | 0, stood: true });
+            back++; RUN.agreedStood = (RUN.agreedStood | 0) + 1;
+            console.log('  agreed-stood ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' stands in at place ' + (1 + scores.filter((y) => (y | 0) > (scores[x.seat] | 0)).length) + ' of ' + pc
+              + ' read now for the players there, his own rating and points unchanged (Q227)');
+          }
           continue;
         }
         const cs = confState[hx + '|' + c.m];
@@ -10773,6 +10791,10 @@ async function main() {
       processed.add(c.m); settledBots++;
       continue;
     }
+    // Q227: a seat standing in (.stood, ranked FFA, see the Q185 block) counts in the others' ranking, player count, rating
+    //   update and points plan only: no signals, no seed, no rating or points of his own move (live = parts without them)
+    const stoodIds = new Set(parts.filter((p) => p.stood).map((p) => String(p.steamID)));
+    const live = stoodIds.size ? parts.filter((p) => !p.stood) : parts;
     // points are credited for BOTH settled AND consensus-VOID matches -- VOID only gates MMR/LP; an innocent victim
     //   still earns participation points (mirrors the client crediting innocent records). per-record class-driven.
     //   Early-settled matches (everyone else left) award progress/levelCount of the points (min-of-writers, see matchProgressOf).
@@ -10788,7 +10810,7 @@ async function main() {
     if (PT_MODE && cpId) ptSeedCp(cp, changedCp, writerSids);
     if (cpId) creditCp(g, matchType, rankOf, cp, changedCp);
     if (c.void) {
-      recordMatchSignals(signals, g, parts, null, matchType, true, nowMs); sigDirty = true;   // co-presence + void counters (dodge-ring history)
+      recordMatchSignals(signals, g, live, null, matchType, true, nowMs); sigDirty = true;   // co-presence + void counters (dodge-ring history)
       // O480: every account of a voided ranked match gets a VOID receipt (delta 0): its client rolls the optimistic points back.
       //   A void writes nobody's row: the receipt rides the player's next points write (the backlog keeps it meanwhile)
       if (lpId && appliesLp(matchType)) for (const sid of groupSids(g)) noteReceipt(sid, g[0].d[3] | 0, 0, RECEIPT_F.VOID, 0);
@@ -10796,7 +10818,7 @@ async function main() {
     }
     if (parts.length < 2) { processed.add(c.m); continue; }
     // B6 collection for a real settle: per-player counters + pairwise co-occurrence.
-    recordMatchSignals(signals, g, parts, rankOf, matchType, false, nowMs);
+    recordMatchSignals(signals, g, live, rankOf, matchType, false, nowMs);
     // (no start attestation ever sighted = the per-writer ns signal, counted once when the synthetic
     //  first-sighting entry was created at the pacing gate above -- a cheap fabrication tell for the
     //  judgment layer now that every live build attests)
@@ -10954,10 +10976,10 @@ async function main() {
     if (!PT_MODE && (baseMt(matchType) === 1 || baseMt(matchType) === 2)) {
       for (const p of parts) {
         if (!ffaLowerHalf(ffaPlaceOf(scores, p.seat), pc)) continue;
-        const h = signals.players[pid(String(p.steamID))];
+        const h = p.stood ? null : signals.players[pid(String(p.steamID))];   // Q227: a seat standing in wrote nothing here
         if (h) { h.wb = (h.wb | 0) + 1; sigDirty = true; }
       }
-      const nbOpp = parts.map((p) => pid(String(p.steamID)));
+      const nbOpp = live.map((p) => pid(String(p.steamID)));
       for (const x of namedOnly) {
         const place = ffaPlaceOf(scores, x.seat);   // a roster names seats 0..pc-1 only (decodeRoster), the group agrees on pc
         if (!ffaLowerHalf(place, pc)) continue;
@@ -11017,7 +11039,7 @@ async function main() {
           console.log('  seed ' + c.m + ': ' + plog(sid) + ' ' + tag +
             (prevE ? (', soft-reset from ' + (prevE.score | 0)) : (', display ' + disp)) + ' -> pts ' + lp[sid]);
         };
-        for (const t of tsIn) if (!noRating && lp[t.id] == null) await seedOne(t.id, t.mu, t.sigma, 'first settle this season');
+        for (const t of tsIn) if (!noRating && lp[t.id] == null && !stoodIds.has(String(t.id))) await seedOne(t.id, t.mu, t.sigma, 'first settle this season');
         for (const x of leavers0) {
           if (t2ex.has(pid(String(x.steamID)))) continue;   // Q56 excused: this match does not count for him
           if (lp[x.steamID] == null) {
@@ -11107,6 +11129,7 @@ async function main() {
         }
       } else {
         tsOut = ts.updateMatch(tsIn);
+        if (stoodIds.size) tsOut = tsOut.filter((r) => !stoodIds.has(String(r.id)));   // Q227: rated against, never rated
       }
       // visible-LP plan uses PRE-match ratings (tsIn) + current LP -> per-player adjusted delta + reveal flag.
       //   team matches: halved team-LP path (teamLpPlan); FFA: per-unit plan (premade pairs from the
@@ -11186,6 +11209,9 @@ async function main() {
         }
         return { seat: x.seat | 0, mmr: ts.displayRating(r.mu, r.sigma), lp: lpx == null ? 0 : lpx };
       };
+      // Q227: a seat standing in with no points yet this season reads, in the plan only, the placement seed the settle would
+      //   have given him (not persisted), as a finished member reads at Q183
+      if (stoodIds.size && lpId && appliesLp(matchType)) for (const q of planIn) if (stoodIds.has(String(q.steamID)) && lp[q.steamID] == null) q.lp = (await planRow(q)).lp;
       const absentIn = [], finishedIn = [];
       if (!noRating && isTeamMt(matchType)) {
         for (const x of ghostLoss) if (!agreedIds.has(String(x.steamID))) absentIn.push(await planRow(x, true));

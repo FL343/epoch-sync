@@ -4,7 +4,9 @@
 //   result, the records disagree and nothing settles; then the two blank their rows. Not convicted (seen agreeing), not put
 //   back (the result read now is not the one they agreed to), so the match settles among the honest ones: the two keep their
 //   points, the honest 2nd of 4 takes last of 2 (-17, not +15). Counted here: such a seat on its account (.am), and a writer
-//   of the settle first seen agreeing to another result for the match on his (.rc). Nobody is flagged.
+//   of the settle first seen agreeing to another result for the match on his (.rc). Nobody is flagged. At a ranked settle
+//   such a seat also stands in for the players there, at the place the scores read now give him, while his own rating,
+//   points, signals and seed stay as they were: the honest settle as in the result they wrote (the one their clients showed).
 // End-to-end over the REAL validate.js main() against an offline board stub (the harness of test/ffa-agreed-gone.js).
 //   [0] wiring pins: the recant count inside the FFA guard, before the absent-seat loop; the .am count right after the Q185
 //       review's moved count, only for a pin that is there; the two summary rows
@@ -18,6 +20,17 @@
 //   [4] quick FFA (C1): counted the same way
 //   [5] the deploy: an entry from before the pin (pend.agreed, no pend.agv) -> left out as before, the moved count, no .am;
 //       mutant (a missing pin counted) -> .am 1
+//   step two (the stand-in, ranked only):
+//   [6] [1] again: Hh / A as the honest twin (points, rating, XP; A 2nd of 4: up, not last of 2); M1 / M2 no points, no
+//       rating, no settle signals (no game, no lower place written), not convicted, the stood lines, the stood row 2;
+//       mutants (no stand-in -> A down; stand-ins kept in the update -> M1 / M2 rated; kept in the signals -> M1 counted
+//       a game; kept in the Q174 writers' places -> a lower place written)
+//   [7] quick C1: no stand-in, the posts as with the stand-in taken out
+//   [8] a liar whose own quit confession stands stays out (-100 and one leave only), the other stands in; mutant (the
+//       confession check off) -> he stands in too, still not rated
+//   [9] an honest player queued with a liar (premade pair) who has no points yet this season: the honest as the twin (the
+//       liar read at his placement seed in the plan), the liars not seeded; mutants (seed skip off -> seeded; no plan seed
+//       -> the honest partner's points differ)
 // State isolation is structural (every *_FILE var scanned and redirected, cwd = temp dir), like test/ffa-agreed-gone.js.
 const { spawnSync } = require('child_process');
 const fs = require('fs'), path = require('path'), os = require('os');
@@ -312,6 +325,104 @@ const a1 = C1R.run();
   withMutant('nopinok', AM_IF, '          {\n', (script) => {
     const m = run(script);
     T('[5] mutant: a missing pin counted -> .am 1', m.had === 1 && allOk(m.rs, 6) && cnt(last(m.rs), C1R.ros, 'am') === '[0,0,1,1]');
+  });
+}
+
+// ===== step two: at a ranked settle such a seat stands in for the players there, never rated himself =====
+const STAND = "          if (baseMt(matchType) === 2 && !PT_MODE && pend.agv && pend.agv[hx] != null && !(cx && !cx.refunded && (cx.ded > 0 || cx.ex))) {\n";
+const STAND_CX = '!(cx && !cx.refunded && (cx.ded > 0 || cx.ex))) {\n';
+const FILTER = "        if (stoodIds.size) tsOut = tsOut.filter((r) => !stoodIds.has(String(r.id)));   // Q227: rated against, never rated\n";
+const LIVE = '    const live = stoodIds.size ? parts.filter((p) => !p.stood) : parts;\n';
+const SEED_SKIP = "lp[t.id] == null && !stoodIds.has(String(t.id))) await seedOne(";
+const PLAN_SEED = "      if (stoodIds.size && lpId && appliesLp(matchType)) for (const q of planIn) if (stoodIds.has(String(q.steamID)) && lp[q.steamID] == null) q.lp = (await planRow(q)).lp;\n";
+const STOOD_RE = /\| of those, at a ranked settle with no confession of their own standing: stood in for the players there at the place read now, not rated themselves \(Q227\) \| (\d+) \|/;
+const STOOD_LINE = (key, sid) => new RegExp('agreed-stood ' + key + ': seat [0-9] = ' + v.pid(sid).slice(0, 8) + ' stands in at place [0-9] of [0-9] read now for the players there, his own rating and points unchanged \\(Q227\\)');
+const xpIn = (rs, sid) => [].concat(...rs.map(r => posts(r, 5).filter(p => new RegExp('steamid=' + sid + '(&|$)').test(p.body)).map(p => Number(/score=(-?[0-9]+)/.exec(p.body)[1]))));
+const sameXp = (a, b, sids) => sids.every((s) => JSON.stringify(xpIn(a, s)) === JSON.stringify(xpIn(b, s)));
+// the C1 timeline for any seats: the liars (seats Ls) write `fake` early, the honest the truth, then the liars blank both rows
+function wd2(mt, h, ros, Ls, truth, fake, extra) {
+  const k = keyRecs(mt, h, ros, truth), Hs = ros.map((_, i) => i).filter((i) => Ls.indexOf(i) < 0);
+  const Rf = ros.map((s, i) => ({ sid: s, d: rec(0xB1, mt, h, i, placeIn(fake, i), placeIn(fake, i) === 1, ros, fake) }));
+  const pick = (xs, is) => is.map((i) => xs[i]);
+  const early = k.S.concat(pick(Rf, Ls)), clash = k.S.concat(pick(k.R, Hs), pick(Rf, Ls));
+  const left = pick(k.S, Hs).concat(pick(k.R, Hs), extra || []), all = k.S.concat(k.R);
+  return { k, ros, steps: [[0, k.S], [2 * MIN, early], [5 * MIN, clash], [GRACE, left], [LEAVE, left], [3 * HOUR, left]],
+    twin: [[0, k.S], [2 * MIN, k.S.concat(pick(k.R, Ls))], [5 * MIN, all], [GRACE, all], [LEAVE, all], [3 * HOUR, all]] };
+}
+
+// ---- [6] C1 ranked: the honest as in the real result, M1 / M2 not rated ----
+const b1 = timeline(C1R.twin);
+{
+  const { k, ros } = C1R, r = last(a1);
+  T('[6] Hh / A as the honest twin: points, rating and XP (A 2nd of 4: up, not last of 2)', allOk(b1, 6) && sameFor(a1, b1, [Hh, A]) && sameXp(a1, b1, [Hh, A]) && up(a1, A) && up(a1, Hh),
+    show(a1, ros) + ' vs ' + show(b1, ros));
+  T('[6] M1 / M2 stand in: no points, no rating, no settle signals, not convicted; the stood lines, the stood row 2', none(a1, M1) && none(a1, M2) && rOf(a1, M1).length === 0 && rOf(a1, M2).length === 0
+    && (sigOf(r, M1).g | 0) === 0 && (sigOf(r, M2).g | 0) === 0 && (sigOf(r, M1).wb | 0) === 0 && (sigOf(r, M2).wb | 0) === 0 && leavesOf(r, M1) === 0 && leavesOf(r, M2) === 0
+    && STOOD_LINE(k.key, M1).test(outOf(a1)) && STOOD_LINE(k.key, M2).test(outOf(a1)) && sumRow(a1, STOOD_RE) === 2 && sumRow(b1, STOOD_RE) === 0,
+    JSON.stringify([sigOf(r, M1), sumRow(a1, STOOD_RE)]) + show(a1, ros));
+  withMutant('nostand', STAND, '          if (false) {\n', (script) => {
+    const m = C1R.run(script);
+    T('[6] mutant: no stand-in -> A last of 2 (down), Hh / A not as the twin', allOk(m, 6) && down(m, A) && !sameFor(m, b1, [A]) && sumRow(m, STOOD_RE) === 0, show(m, ros));
+  });
+  withMutant('nofilter', FILTER, '', (script) => {
+    const m = C1R.run(script);
+    T('[6] mutant: the stand-ins kept in the update -> M1 / M2 rated and points moved', allOk(m, 6) && !none(m, M1) && rOf(m, M1).length === 1, show(m, ros));
+  });
+  withMutant('nolive', LIVE, '    const live = parts;\n', (script) => {
+    const m = C1R.run(script);
+    T('[6] mutant: the stand-ins kept in the signals -> M1 counted a game', allOk(m, 6) && (sigOf(last(m), M1).g | 0) === 1);
+  });
+  withMutant('nowb', 'const h = p.stood ? null : signals.players[', 'const h = signals.players[', (script) => {
+    const m = C1R.run(script);
+    T('[6] mutant: the stand-ins kept in the Q174 writers\' places -> M1 / M2 a lower place written (wb 1)', allOk(m, 6) && (sigOf(last(m), M1).wb | 0) === 1 && (sigOf(last(m), M2).wb | 0) === 1);
+  });
+}
+
+// ---- [7] quick: no stand-in (the count only), the settle as without step two ----
+{
+  const q = c1(1, 0xC229), a = q.run(), r = last(a);
+  withMutant('nostand', STAND, '          if (false) {\n', (script) => {
+    const m = q.run(script);
+    T('[7] quick: no stood line, the stood row 0, the posts as with the stand-in taken out', allOk(a, 6) && processedOf(r).has(q.k.key) && !/agreed-stood/.test(outOf(a)) && sumRow(a, STOOD_RE) === 0
+      && JSON.stringify(r.posts) === JSON.stringify(last(m).posts), show(a, q.ros));
+  });
+}
+
+// ---- [8] a liar whose own quit confession stands stays out (the confession charged that leave), the other stands in ----
+{
+  const ros = [SID(731), SID(732), SID(733), SID(734)], h = 0xC22A;
+  ALL.push(...ros);
+  const conf = { sid: ros[2], d: rec(0xB5, 2, h, 2, 0, false, ros, S4, 5) };
+  const w = wd2(2, h, ros, [2, 3], S4, F, [conf]), a = timeline(w.steps), r = last(a);
+  T('[8] the confessed liar: -100 and one leave only, not stood in; the other stood in; the stood row 1', allOk(a, 6) && processedOf(r).has(w.k.key)
+    && JSON.stringify(ptsIn(a, ros[2])) === JSON.stringify([2400]) && leavesOf(r, ros[2]) === 1 && !STOOD_LINE(w.k.key, ros[2]).test(outOf(a))
+    && STOOD_LINE(w.k.key, ros[3]).test(outOf(a)) && none(a, ros[3]) && sumRow(a, STOOD_RE) === 1, JSON.stringify([ptsIn(a, ros[2]), leavesOf(r, ros[2])]) + show(a, ros) + r.out.slice(-500));
+  withMutant('nocx', STAND_CX, 'true) {\n', (script) => {
+    const m = timeline(w.steps, script);
+    T('[8] mutant: the confession check off -> he stands in too (still not rated: -100 only)', allOk(m, 6) && STOOD_LINE(w.k.key, ros[2]).test(outOf(m)) && sumRow(m, STOOD_RE) === 2
+      && JSON.stringify(ptsIn(m, ros[2])) === JSON.stringify([2400]));
+  });
+}
+
+// ---- [9] premade: an honest player queued with a liar who has no points yet this season ----
+//   seats 0 / 1 a premade pair (Hh2 honest, N1 a liar), N1 / N2 not on the points board (first ranked match this season):
+//   in the plan N1 reads the placement seed the settle would have given him, not persisted
+{
+  const Hh2 = SID(741), A2 = SID(742), N1 = SID(743), N2 = SID(744), ros = [Hh2, N1, A2, N2], h = 0xC22B;
+  ALL.push(Hh2, A2);   // N1 / N2: no points entry
+  const F9 = [3000, 6100, 2900, 5200], mt = 2 | (1 << 4);
+  const f0 = { SKILL_FILE: { [v.pid(N1)]: { mu: 40, sigma: 2 } } };   // a strong stored rating: his placement seed well above 0
+  const w = wd2(mt, h, ros, [1, 3], S4, F9), a = timeline(w.steps, null, f0), b = timeline(w.twin, null, f0);
+  T('[9] Hh2 / A2 as the honest twin (the pair settled at its average place, N1 read at his seed); N1 / N2 not seeded, no points, no rating',
+    allOk(a, 6) && allOk(b, 6) && sameFor(a, b, [Hh2, A2]) && none(a, N1) && none(a, N2) && rOf(a, N1).length === 0 && !/seed [^\n]*/.test(outOf(a).split('\n').filter((l) => l.indexOf(v.pid(N1).slice(0, 8)) >= 0).join('\n'))
+    && !none(b, N1), show(a, ros) + ' vs ' + show(b, ros));
+  withMutant('noseedskip', SEED_SKIP, "lp[t.id] == null) await seedOne(", (script) => {
+    const m = timeline(w.steps, script, f0);
+    T('[9] mutant: the seed skip off -> N1 / N2 seeded (points written)', allOk(m, 6) && !none(m, N1));
+  });
+  withMutant('noplanseed', PLAN_SEED, '', (script) => {
+    const m = timeline(w.steps, script, f0);
+    T('[9] mutant: no plan seed -> N1 read at 0 points, Hh2 not as the twin', allOk(m, 6) && !sameFor(m, b, [Hh2]), show(m, ros) + ' vs ' + show(b, ros));
   });
 }
 
