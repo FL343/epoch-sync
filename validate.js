@@ -3059,6 +3059,20 @@ const ffaLowerHalf = (place, pc) => 2 * place > pc + 1;
 //   At a RANKED FFA settle such a seat (no standing confession of his own for the match) also stands in for the others: at the
 //   place the scores read now give him, in the ranking, the player count, the rating update and the points plan of the players
 //   there, while his own rating, points, signals and seed stay as they were (.stood on his parts entry). See the Q185 block.
+// Q263 (cloud audit, found by the Q227 review): nobody pays for a stand-in (he is not rated), so the players rated against
+//   him take a win he does not lose. Four modified clients in one ranked FFA with nobody else in it took turns: two wrote a
+//   made-up result with themselves on top (seen agreeing, pinned on it) and blanked their rows at once, the other two wrote
+//   the result with themselves on top and settled, the two blanked seats standing in at the bottom; the next match the
+//   other way round. No two different results were ever read at once (no forgery flag, .am only). At the zero-sum top
+//   (grandmaster, Q160) that made +27 a 4P match out of nothing (1st +20, 2nd +7, the stand-ins -0), without end, and the
+//   group climbed past the honest grandmasters on the top boards. So a stand-in is used only while none of the players
+//   rated at the settle (writers and seats put back) settled with a stand-in in the last STAND_IN_WINDOW_MS:
+//   signals.players[pid].sx = the last time a real (not void) settle with a stand-in rated him or stood him in. Otherwise
+//   the seats stay out as before Q227 (the match settles among the players rated there). The stand-ins' own history is not
+//   read: a pair that does Q227 match after match against different honest players still stands in for each of them (each
+//   honest player once in the window), while an account climbs by a stand-in at most once in the window (fresh accounts
+//   each time: the cost is the accounts). Nobody is flagged or rated more than before Q227.
+const STAND_IN_WINDOW_MS = Number(process.env.STAND_IN_WINDOW_MS || 30 * 86400000);
 const SIG_PAIRS_CAP = Number(process.env.SIG_PAIRS_CAP || 200000);
 function loadSignals() { try { const s = JSON.parse(fs.readFileSync(SIGNALS_FILE, 'utf8')) || {}; s.day = s.day || { d: 0, n: {} }; s.players = s.players || {}; s.pairs = s.pairs || {}; s.flagged = s.flagged || {}; s.rep = s.rep || {}; s.rseen = s.rseen || {}; return s; } catch (e) { return { day: { d: 0, n: {} }, players: {}, pairs: {}, flagged: {}, rep: {}, rseen: {} }; } }
 function pruneSignals(s, now) {
@@ -3647,6 +3661,7 @@ function writeRunSummary() {
       '| of those seats, left out: the scores or the seat read at the settle are not the ones they were seen agreeing to (Q185 review) | ' + s('agreedMoved', 0) + ' |',
       '| of those, seen agreeing to another result (a pin, not an entry from before the pin): counted on the account (Q227, nobody flagged) | ' + s('agreedAway', 0) + ' |',
       '| of those, at a ranked settle with no confession of their own standing: stood in for the players there at the place read now, not rated themselves (Q227) | ' + s('agreedStood', 0) + ' |',
+      '| of those, left out instead: a player rated at the settle settled with a stand-in in the window (Q263) | ' + s('agreedStoodHeld', 0) + ' |',
       '| matchmade FFA writers at the settle first seen agreeing to another result for the match, counted on the account (Q227, nobody flagged) | ' + s('recanted', 0) + ' |',
       '| team matches with nobody on the losing team, settled without a rating move (Q136) | ' + s('noLoser', 0) + ' |',
       '| team matches with a losing seat nobody accounts for (named by the others only or left blank), settled without a rating move (Q149) | ' + s('namedLoser', 0) + ' |',
@@ -10675,6 +10690,10 @@ async function main() {
     //   rotated off while the others rewrote it (the Q185 review case) stands in at the rewritten place without moving. Not
     //   at a quick settle: no points move there, and a stand-in kept at his pre-match rating was a lever on the stored rating
     //   (Q210, Q167 rework 2); there the count above is all.
+    //   Q263: a stand-in is used only while none of the players rated here settled with a stand-in in the last
+    //   STAND_IN_WINDOW_MS (four modified clients took turns standing in for each other: points out of nothing); otherwise
+    //   the seat stays out as before Q227.
+    const stoodCand = [];   // Q227: the seats that would stand in (see Q263 at the end of this block)
     if (baseMt(matchType) === 1 || baseMt(matchType) === 2) {
       let back = 0;
       if (pend.agv) for (const r of g) {
@@ -10695,10 +10714,7 @@ async function main() {
           console.log('  agreed-back ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' record gone, but the result read now is not the one he was seen agreeing to -- left out (Q185 review)');
           const cx = confState[hx + '|' + c.m];
           if (baseMt(matchType) === 2 && !PT_MODE && pend.agv && pend.agv[hx] != null && !(cx && !cx.refunded && (cx.ded > 0 || cx.ex))) {
-            parts.push({ steamID: x.steamID, seat: x.seat, score: scores[x.seat] | 0, stood: true });
-            back++; RUN.agreedStood = (RUN.agreedStood | 0) + 1;
-            console.log('  agreed-stood ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' stands in at place ' + (1 + scores.filter((y) => (y | 0) > (scores[x.seat] | 0)).length) + ' of ' + pc
-              + ' read now for the players there, his own rating and points unchanged (Q227)');
+            stoodCand.push(x);   // Q263: stands in only if no player rated here settled with a stand-in lately (after this loop)
           }
           continue;
         }
@@ -10711,6 +10727,23 @@ async function main() {
         parts.push({ steamID: x.steamID, seat: x.seat, score: scores[x.seat] | 0 });
         back++; RUN.agreedBack = (RUN.agreedBack | 0) + 1;
         console.log('  agreed-back ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' record gone but seen agreeing earlier -- settled at his agreed place ' + (1 + scores.filter((y) => (y | 0) > (scores[x.seat] | 0)).length) + ' of ' + pc + ', as if his record were still there (Q185)');
+      }
+      // Q263 (see STAND_IN_WINDOW_MS): the stand-ins only while none of the players rated here (the writers and the seats put
+      //   back above) settled with a stand-in in the window; otherwise they stay out as before Q227
+      if (stoodCand.length) {
+        const lately = parts.filter((p) => { const e = signals.players[pid(String(p.steamID))]; return !!(e && e.sx && nowMs - e.sx < STAND_IN_WINDOW_MS); });
+        if (lately.length) {
+          RUN.agreedStoodHeld = (RUN.agreedStoodHeld | 0) + stoodCand.length;
+          console.log('  agreed-stood-held ' + c.m + ': seat' + (stoodCand.length > 1 ? 's ' : ' ') + stoodCand.map((x) => x.seat).join(',') + ' left out as before Q227: '
+            + lately.map((p) => 'seat ' + p.seat + ' = ' + plog(p.steamID)).join(', ') + ' settled with a stand-in in the last ' + Math.round(STAND_IN_WINDOW_MS / 86400000) + ' days (Q263)');
+        } else {
+          for (const x of stoodCand) {
+            parts.push({ steamID: x.steamID, seat: x.seat, score: scores[x.seat] | 0, stood: true });
+            back++; RUN.agreedStood = (RUN.agreedStood | 0) + 1;
+            console.log('  agreed-stood ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' stands in at place ' + (1 + scores.filter((y) => (y | 0) > (scores[x.seat] | 0)).length) + ' of ' + pc
+              + ' read now for the players there, his own rating and points unchanged (Q227)');
+          }
+        }
       }
       if (back) parts.sort((a, b) => a.seat - b.seat);
     }
@@ -10819,6 +10852,7 @@ async function main() {
     if (parts.length < 2) { processed.add(c.m); continue; }
     // B6 collection for a real settle: per-player counters + pairwise co-occurrence.
     recordMatchSignals(signals, g, live, rankOf, matchType, false, nowMs);
+    if (stoodIds.size) { for (const p of parts) sigPlayer(signals, pid(String(p.steamID)), nowMs).sx = nowMs; sigDirty = true; }   // Q263: see STAND_IN_WINDOW_MS
     // (no start attestation ever sighted = the per-writer ns signal, counted once when the synthetic
     //  first-sighting entry was created at the pacing gate above -- a cheap fabrication tell for the
     //  judgment layer now that every live build attests)
