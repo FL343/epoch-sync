@@ -47,7 +47,7 @@ for (const k of ['lpSeg', 'lpDelta', 'seedLp', 'softResetLp', 'seasonSeedLp', 'b
 T('[3] the settle\'s exported rules are the module\'s own (identity)', ['LP_SEG', 'LP_SEED', 'SOFT_RESET', 'reducedStakesPlan', 'teamLpPlan', 'lpDelta', 'crosslineDelta'].every((k) => v[k] === PP[k]));
 const VSRC = fs.readFileSync(path.join(ROOT, 'validate.js'), 'utf8');
 T('[3] the settle composes its plan and its points line through the module (matchPlan / settleLine)',
-  /const rsPlan = matchPlan\(planIn, matchType, \{/.test(VSRC) && /const sl = settleLine\(cur, rs, rankOf\[r\.id\], parts\.length, seededNow\.has\(r\.id\)\);/.test(VSRC)
+  /const rsPlan = matchPlan\(planIn, matchType, \{/.test(VSRC) && /const sl = settleLine\(cur, rs, rankX\[r\.id\], nP, seededNow\.has\(r\.id\)\);/.test(VSRC)
   && /return settleLine\(cur, rs, r\.rank \| 0, n, /.test(VSRC));
 // [4]
 {

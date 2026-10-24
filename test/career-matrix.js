@@ -173,7 +173,7 @@ console.log('=== source pins: every credit site is followed by its career call; 
 {
   const src = fs.readFileSync(path.join(__dirname, '..', 'validate.js'), 'utf8');
   const after = (a, b) => { const i = src.indexOf(a); return i >= 0 && src.indexOf(b, i) > i && src.indexOf(b, i) - i < 900; };
-  assert('matchmade creditXp -> creditCareerMatch', after('if (xpId) creditXp(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers, today, progFrac, careerDet, spSet,', 'creditCareerMatch(g, matchType, rankOf, xpState, careerTouched)'));
+  assert('matchmade creditXp -> creditCareerMatch', after('if (xpId) creditXp(g, matchType, scores, rankX, xp, changedXp, xpState, leavers, today, progFrac, careerDet, spSet,', 'creditCareerMatch(g, matchType, rankOf, xpState, careerTouched)'));
   assert('private -> creditCareerMatch', after('if (xpId) creditXpPrivate(g, rankOf, lvP, xp, changedXp, xpState, today, spSet);', 'creditCareerMatch(g, matchType, rankOf, xpState, careerTouched)'));
   assert('bots -> creditCareerMatch (no ranks)', after('if (xpId) creditXpBot(g, lvB, xp, changedXp, xpState, today, spSet, !!c.botLone, sigB.use && MSIG.BOTS);', 'creditCareerMatch(g, matchType, null, xpState, careerTouched)'));
   // O198 v1 (knife 5.5b-1 S3): the solo lane's reject-window branch pays the segment's XP on purpose WITHOUT a career credit
