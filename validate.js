@@ -3696,6 +3696,7 @@ function writeRunSummary() {
       '| of those, at a ranked settle with no confession of their own standing: stood in for the players there at the place read now, not rated themselves (Q227) | ' + s('agreedStood', 0) + ' |',
       '| of those, left out instead: every player rated at the settle stood in or settled with one of them in the window (Q263 / Q264) | ' + s('agreedStoodHeld', 0) + ' |',
       '| of those, rated instead at the place read now, as a seat put back: a player rated at the settle settled with him standing in in the window (Q265) | ' + s('agreedStoodRated', 0) + ' |',
+      '| seats Q265 would rate, passed on to the Q263 / Q264 checks instead: every player rated at the settle first agreed to another result for the match (Q275) | ' + s('agreedStoodRecant', 0) + ' |',
       '| players rated at a settle with stand-ins who settled as before Q227 instead: each stood in or settled with one of them in the window (Q264) | ' + s('agreedStoodOwn', 0) + ' |',
       '| matchmade FFA writers at the settle first seen agreeing to another result for the match, counted on the account (Q227, nobody flagged) | ' + s('recanted', 0) + ' |',
       '| team matches with nobody on the losing team, settled without a rating move (Q136) | ' + s('noLoser', 0) + ' |',
@@ -10089,6 +10090,11 @@ async function main() {
     //   read the records) and is no absent seat / leaver (he wrote one).
     const sane = sanityFlags(g);
     let dropSeat = null;   // Q109: dropped writer sid -> consensus seat (-1 = none: not rated, still no leaver; a kept writer's seat is never taken)
+    const dropRecs = [];   // Q275 review: the records Q109 drops below (in this consistent group: the kept ones' scores)
+    //   are pinned with the kept ones where the Q185 review pins are recorded, and checked for a recant with them. A writer
+    //   whose records are all dropped is not on pend.agreed, so only that check reads his pin (nobody puts him back or has him
+    //   stand in on it). Without it a writer who broke his own record was never seen recanting, and one such record among the
+    //   players who rewrote the result kept the Q265 step on (Q275)
     if (sane.length) {
       const sp = sanitySplit(g);
       // Q292: the whole-group rule (an endless key always takes it) flags nobody when every reason is the host's seat or
@@ -10147,6 +10153,7 @@ async function main() {
       }
       RUN.sanityDrop = (RUN.sanityDrop | 0) + 1;
       g = sp.keep;
+      for (const x of sp.drop) dropRecs.push(...x.recs);   // Q275 review
       c.void = voidByConsensus(g.map(r => r.dispCode)).isVoid;   // the dropped record's disp vote goes with it
       const ros = rosterConsensus(g), pc0 = g[0].d[8] | 0;
       // rework 2: the bot lane pays one kept writer the full rate only when a dropped record stands beside him at a human seat
@@ -10644,7 +10651,7 @@ async function main() {
     //   back, as before Q185. Recorded on every lane that passes here, so a wider guard below still finds pins.
     const vNow = vecOf(g[0]);
     const agreedPin = (seat) => crypto.createHash('sha256').update(vNow + '|' + (seat | 0)).digest('hex').slice(0, 16);
-    { const agv = pend.agv || (pend.agv = {}); for (const r of g) { const h = pid(String(r.steamID)); if (agv[h] == null) agv[h] = agreedPin(r.d[5]); } }
+    { const agv = pend.agv || (pend.agv = {}); for (const r of g.concat(dropRecs)) { const h = pid(String(r.steamID)); if (agv[h] == null) agv[h] = agreedPin(r.d[5]); } }
     // absent-seat hold (R1-B2-04 / R1-X14, see absenceHold): a roster seat with no record is not settled around until this
     //   run read every record shard and the gap has stood for the grace. Stamped before the pacing gate (the grace runs
     //   alongside the start floor), judged after it; ahead of the one-match-at-a-time claim (a held group claims no slot)
@@ -10733,13 +10740,16 @@ async function main() {
     //   here is such a one.
     //   Q265: before that check, a seat that stood in for one of the players rated here in the window is rated instead
     //   (.rated), at the place the scores read now give him, as a seat put back above.
+    const recanted = new Set();   // Q275: the writers of this settle first seen agreeing to another result for this match
     const stoodCand = [];   // Q227: the seats that would stand in (see Q263 at the end of this block)
     const stoodOwn = new Set();   // Q264: the players rated here who settle as before Q227 (see STAND_IN_WINDOW_MS)
     if (baseMt(matchType) === 1 || baseMt(matchType) === 2) {
       let back = 0;
-      if (pend.agv) for (const r of g) {
+      if (pend.agv) for (const r of g.concat(dropRecs)) {   // Q275 review: the records Q109 dropped too (a writer ranked at his seat)
         const h = pid(String(r.steamID));
         if (pend.agv[h] == null || pend.agv[h] === agreedPin(r.d[5])) continue;
+        if (recanted.has(String(r.steamID))) continue;   // Q275 review: once per writer (Q109 drops all of a writer's records)
+        recanted.add(String(r.steamID));
         const p = sigPlayer(signals, h, nowMs); p.rc = (p.rc | 0) + 1; sigDirty = true; RUN.recanted = (RUN.recanted | 0) + 1;
         console.log('  recant ' + c.m + ': seat ' + (r.d[5] | 0) + ' = ' + plog(r.steamID) + ' first seen agreeing to another result for this match -- counted, nobody flagged (Q227)');
       }
@@ -10772,12 +10782,25 @@ async function main() {
       // Q265 (see STAND_IN_WINDOW_MS): a seat that stood in for one of the players rated here (the writers and the seats put
       //   back above) in the window is rated this time instead, at the place read now, as a seat put back (.rated): that player
       //   settles as in the result he wrote, as with a stand-in, and the seat pays what the place costs
+      //   Q275: not when every player rated here is a writer of this settle first seen agreeing to another result for this match
+      //   (recanted above, a record Q109 dropped included): the seats then go to the checks below as before Q265. An honest
+      //   player never changes his result, so an honest one rated here keeps this step; when none is, the scores read now are
+      //   all written by players who changed theirs, and the seat they would rate may be an honest one whose record rotated off
+      //   while they rewrote the result (the Q185 review case: before, he was rated at the rewritten place the second time in
+      //   the window)
       if (stoodCand.length) {
         const rated0 = parts.slice(), inDays = ' in the last ' + Math.round(STAND_IN_WINDOW_MS / 86400000) + ' days';
+        const allRecant = rated0.every((p) => recanted.has(String(p.steamID)));   // Q275
         const stoodFor = (h) => rated0.filter((p) => { const e = signals.players[pid(String(p.steamID))]; return !!(e && (e.sxw || []).some((y) => y[0] === h && nowMs - y[1] < STAND_IN_WINDOW_MS)); });
         for (const x of stoodCand.splice(0)) {
           const by = stoodFor(pid(String(x.steamID)));
           if (!by.length) { stoodCand.push(x); continue; }
+          if (allRecant) {
+            stoodCand.push(x); RUN.agreedStoodRecant = (RUN.agreedStoodRecant | 0) + 1;
+            console.log('  agreed-stood-unrated ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' stood in for '
+              + by.map((p) => 'seat ' + p.seat + ' = ' + plog(p.steamID)).join(', ') + inDays + ', not rated at the place read now: every player rated here first agreed to another result for this match (Q275)');
+            continue;
+          }
           parts.push({ steamID: x.steamID, seat: x.seat, score: scores[x.seat] | 0, rated: true });
           back++; RUN.agreedStoodRated = (RUN.agreedStoodRated | 0) + 1;
           console.log('  agreed-stood-rated ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' rated at place ' + (1 + scores.filter((y) => (y | 0) > (scores[x.seat] | 0)).length) + ' of ' + pc

@@ -265,7 +265,7 @@ const PIN = "        if (!(pend.agv && pend.agv[hx] === agreedPin(x.seat))) {   
   + "          RUN.agreedMoved = (RUN.agreedMoved | 0) + 1;\n";
 const PIN_OFF = "        if (false) {\n          RUN.agreedMoved = (RUN.agreedMoved | 0) + 1;\n";
 const PIN_REC = "    const agreedPin = (seat) => crypto.createHash('sha256').update(vNow + '|' + (seat | 0)).digest('hex').slice(0, 16);\n"
-  + "    { const agv = pend.agv || (pend.agv = {}); for (const r of g) { const h = pid(String(r.steamID)); if (agv[h] == null) agv[h] = agreedPin(r.d[5]); } }\n";
+  + "    { const agv = pend.agv || (pend.agv = {}); for (const r of g.concat(dropRecs)) { const h = pid(String(r.steamID)); if (agv[h] == null) agv[h] = agreedPin(r.d[5]); } }\n";
 const AGREED_PUSH = "    for (const sid of writerSids) { const h = pid(sid); if (agreed.indexOf(h) < 0) agreed.push(h); }\n";
 const PUSH = '        parts.push({ steamID: x.steamID, seat: x.seat, score: scores[x.seat] | 0 });\n';
 const SEATS = '      if (back) parts.sort((a, b) => a.seat - b.seat);\n';

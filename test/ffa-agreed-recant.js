@@ -224,7 +224,7 @@ const AWAY_LINE = (key, sid) => new RegExp('agreed-away ' + key + ': seat [0-9] 
 const RECANT_LINE = (key, sid) => new RegExp('recant ' + key + ': seat [0-9] = ' + v.pid(sid).slice(0, 8) + ' first seen agreeing to another result for this match -- counted, nobody flagged \\(Q227\\)');
 const cnt = (r, sids, f) => JSON.stringify(sids.map((s) => sigOf(r, s)[f] | 0));
 const GUARD = '    if (baseMt(matchType) === 1 || baseMt(matchType) === 2) {\n      let back = 0;\n';
-const RC_IF = '      if (pend.agv) for (const r of g) {\n';
+const RC_IF = '      if (pend.agv) for (const r of g.concat(dropRecs)) {   // Q275 review: the records Q109 dropped too (a writer ranked at his seat)\n';
 const RC_CHK = '        if (pend.agv[h] == null || pend.agv[h] === agreedPin(r.d[5])) continue;\n';
 const RC_ADD = '        const p = sigPlayer(signals, h, nowMs); p.rc = (p.rc | 0) + 1; sigDirty = true; RUN.recanted = (RUN.recanted | 0) + 1;\n';
 const LOOP = '      for (const x of detectLeavers(g)) {\n';

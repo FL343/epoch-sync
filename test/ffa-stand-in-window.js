@@ -67,6 +67,20 @@
 //       his row gone after he was seen agreeing (put back, Q185), the two who write met neither of them -> the two rated at
 //       their place read now (for him alone), all five exactly the honest twin's; mutant (only the writers read) -> the
 //       two stand in, he settles as before Q227 (another gain)
+// Q275 (cloud audit 2026-10, the cost the Q265 delivery named): an honest player whose own row was overwritten while the group
+//   waited (Q185 review F1) and the players left all rewrote the result with him last stood in at the rewritten place the
+//   first time (unchanged), and the second time inside the window Q265 rated him there (gold -17, grandmaster -20; before
+//   Q265 unchanged). The step is skipped now when every player rated at the settle is a writer of it first seen agreeing to
+//   another result for the match (recanted, Q227): an honest player never changes his result, so a match with one of them
+//   rated keeps the step; the seats then go to the Q263 / Q264 check as before Q265.
+//   [13] the honest player framed twice by the same three -> the second time not rated (no points or rating write of his,
+//       the unrated and held lines and rows), the three exactly as with the Q265 step off; mutant (no gate) -> rated at 4 of 4
+//       (down); mutant (no recant collected) -> the same. One of the three who settle with the honest 2nd recanted (he wrote
+//       the made-up result with the two who withdraw, then the real one) -> the two rated, the honest 2nd exactly the honest
+//       twin's; mutant (any recant, not every) -> held, the 2nd down. Every writer recanted but a seat put back (Q185, his
+//       pin the result read now) is rated there -> the two rated (for him); mutant (the writers only read) -> not rated. A
+//       group whose settlers recant on purpose every match (the fixed old account with a new one) -> the points sums
+//       exactly those with the Q265 step off (Q264: the patch gives back no more than that)
 // State isolation is structural (every *_FILE var scanned and redirected, cwd = temp dir), like test/ffa-agreed-recant.js.
 const { spawnSync } = require('child_process');
 const fs = require('fs'), path = require('path'), os = require('os');
@@ -303,6 +317,16 @@ const RATE_OFF = ['norate', RATE_IF, '          if (true) { stoodCand.push(x); c
 const RATED_RE = /\| of those, rated instead at the place read now, as a seat put back: a player rated at the settle settled with him standing in in the window \(Q265\) \| (\d+) \|/;
 const RATED_LINE = (key, sid, place, pc, by, days) => new RegExp('agreed-stood-rated ' + key + ': seat [0-9] = ' + v.pid(sid).slice(0, 8) + ' rated at place ' + place + ' of ' + pc
   + ' read now, as a seat put back: he stood in for ' + by + ' in the last ' + (days || 30) + ' days \\(Q265\\)');
+const RECANT_DECL = '    const recanted = new Set();   // Q275: the writers of this settle first seen agreeing to another result for this match\n';
+const RECANT_ADD = '        recanted.add(String(r.steamID));\n';
+const ALL_RECANT = 'const allRecant = rated0.every((p) => recanted.has(String(p.steamID)));   // Q275';
+const RECANT_IF = '          if (allRecant) {\n';
+const RC_ADD = '        const p = sigPlayer(signals, h, nowMs); p.rc = (p.rc | 0) + 1; sigDirty = true; RUN.recanted = (RUN.recanted | 0) + 1;\n';
+const NOGATE = ['nogate', ALL_RECANT, 'const allRecant = false;'];   // as Q265
+const RECANT_LINE_RE = (key, sid) => new RegExp('  recant ' + key + ': seat [0-9] = ' + v.pid(sid).slice(0, 8) + ' first seen agreeing to another result for this match -- counted, nobody flagged \\(Q227\\)', 'g');
+const UNRATED_RE = /\| seats Q265 would rate, passed on to the Q263 \/ Q264 checks instead: every player rated at the settle first agreed to another result for the match \(Q275\) \| (\d+) \|/;
+const UNRATED_LINE = (key, sid, by) => new RegExp('agreed-stood-unrated ' + key + ': seat [0-9] = ' + v.pid(sid).slice(0, 8) + ' stood in for ' + by
+  + ' in the last 30 days, not rated at the place read now: every player rated here first agreed to another result for this match \\(Q275\\)');
 const HELD_RE = /\| of those, left out instead: every player rated at the settle stood in or settled with one of them in the window \(Q263 \/ Q264\) \| (\d+) \|/;
 const HELD_LINE = (key, days) => new RegExp('agreed-stood-held ' + key + ': seats? [0-9,]+ left out as before Q227: [^\\n]* (stood in himself|settled with seats? [0-9,]+ standing in) in the last ' + (days || 30) + ' days \\(Q263 / Q264\\)');
 const nStood = (rs) => (outOf(rs).match(/  agreed-stood [0-9]/g) || []).length;
@@ -354,15 +378,22 @@ console.log('=== a stand-in only while nobody rated there settled with one in th
     && srt - lat < 2400 && SRC.split(AGE_W).length === 2 && cnd < at(AGE_W) && at(AGE_W) < lat);
   T('[0] Q265: the step after the absent-seat loop (the writers and the seats put back read), before the Q263 / Q264 check: the age of the pairing read, a seat not rated left a candidate',
     [BACK, RATE_AGE, RATE_LOOP, RATE_IF, RATE_PUSH].every((a) => SRC.split(a).length === 2) && at(CAND) < at(BACK) && at(BACK) < at(RATE_AGE) && at(RATE_AGE) < at(RATE_LOOP)
-    && at(RATE_LOOP) < at(RATE_IF) && at(RATE_IF) + RATE_IF.length === at(RATE_PUSH) && at(RATE_PUSH) < cnd && cnd - at(RATE_AGE) < 1600, String(cnd - at(RATE_AGE)));
+    && at(RATE_LOOP) < at(RATE_IF) && at(RATE_IF) + RATE_IF.length === at(RECANT_IF) && at(RECANT_IF) < at(RATE_PUSH) && at(RATE_PUSH) - at(RECANT_IF) < 600 && at(RATE_PUSH) < cnd
+    && cnd - at(RATE_AGE) < 2400, String(cnd - at(RATE_AGE)));
+  T('[0] Q275: the recant set declared with the candidates, filled where Q227 counts a recant, read over the players rated here (with the seats put back) in the Q265 step, a seat it passes on left a candidate',
+    [RECANT_DECL, RECANT_ADD, ALL_RECANT, RECANT_IF, RC_ADD].every((a) => SRC.split(a).length === 2) && at(RECANT_DECL) + RECANT_DECL.length === at(DECL) && g < at(RECANT_ADD)
+    && at(RECANT_ADD) + RECANT_ADD.length === at(RC_ADD) && at(RC_ADD) < loop && at(BACK) < at(ALL_RECANT) && at(ALL_RECANT) < at(RATE_AGE) && at(ALL_RECANT) - at('const rated0 = parts.slice(),') < 200
+    && SRC.indexOf('stoodCand.push(x); RUN.agreedStoodRecant = (RUN.agreedStoodRecant | 0) + 1;\n', at(RECANT_IF)) === at(RECANT_IF) + RECANT_IF.length + 12);
   T('[0] the mark right after the real settle\'s signals (and the Q264 win fix): a seat rated instead marked as one who stood in, not the players who settled as before Q227',
     [RMS, WFIX, RATED_IDS, SX, SX_SKIP, SX_STOOD, SX_PAIR].every((a) => SRC.split(a).length === 2) && at(RMS) + RMS.length === at(WFIX) && at(WFIX) + WFIX.length === at(RATED_IDS)
     && at(RATED_IDS) + RATED_IDS.length === at(SX) && at(SX) < at(SX_SKIP) && at(SX_SKIP) < at(SX_STOOD) && at(SX_STOOD) + SX_STOOD.length === at(SX_PAIR) && at(SX_PAIR) - at(SX) < 700,
     String(at(SX_PAIR) - at(SX)));
   T('[0] Q264: the own decay step and the late-result shadow pinned', [GOWN, G2].every((a) => SRC.split(a).length === 2));
-  T('[0] the summary rows, right after the Q227 stood row: held (Q263 / Q264), rated (Q265), own (Q264)', /'\| of those, left out instead: every player rated at the settle stood in or settled with one of them in the window \(Q263 \/ Q264\) \| ' \+ s\('agreedStoodHeld', 0\) \+ ' \|',/.test(SRC)
+  T('[0] the summary rows, right after the Q227 stood row: held (Q263 / Q264), rated (Q265), passed on (Q275), own (Q264)', /'\| of those, left out instead: every player rated at the settle stood in or settled with one of them in the window \(Q263 \/ Q264\) \| ' \+ s\('agreedStoodHeld', 0\) \+ ' \|',/.test(SRC)
     && /'\| of those, rated instead at the place read now, as a seat put back: a player rated at the settle settled with him standing in in the window \(Q265\) \| ' \+ s\('agreedStoodRated', 0\) \+ ' \|',/.test(SRC)
-    && at("s('agreedStood', 0)") < at("s('agreedStoodHeld', 0)") && at("s('agreedStoodHeld', 0)") < at("s('agreedStoodRated', 0)") && at("s('agreedStoodRated', 0)") < at("s('agreedStoodOwn', 0)")
+    && /'\| seats Q265 would rate, passed on to the Q263 \/ Q264 checks instead: every player rated at the settle first agreed to another result for the match \(Q275\) \| ' \+ s\('agreedStoodRecant', 0\) \+ ' \|',/.test(SRC)
+    && at("s('agreedStood', 0)") < at("s('agreedStoodHeld', 0)") && at("s('agreedStoodHeld', 0)") < at("s('agreedStoodRated', 0)") && at("s('agreedStoodRated', 0)") < at("s('agreedStoodRecant', 0)")
+    && at("s('agreedStoodRecant', 0)") < at("s('agreedStoodOwn', 0)")
     && at("s('agreedStoodOwn', 0)") < at("s('recanted', 0)"));
 }
 
@@ -667,8 +698,9 @@ ALL.push(H11, H12, X10);
 // ---- [11] the fixed old account with a new one each match, the same two withdrawing every time ----
 const Q0 = SID(961), Q2 = SID(962), Q3 = SID(963), QN = [SID(964), SID(965), SID(966)];
 ALL.push(Q0, Q2, Q3, ...QN);
-// each match after the first also played honestly from the same state (everybody keeps his rows): its change of the sum in twinD
-function fixedNew(script) {
+// each match after the first also played honestly from the same state (everybody keeps his rows): its change of the sum in twinD;
+//   recant (Q275): the two who settle write the made-up result with the two who withdraw first (seen agreeing), then their own
+function fixedNew(script, recant) {
   const who = [Q0, Q2, Q3].concat(QN), pick = (xs, is) => is.map((j) => xs[j]);
   for (const s of who) LP_AT[s] = 8500;   // grandmaster (Q160: rs 0, an expected result in a mismatch moves nothing)
   let state = null; const sums = [], twinD = [], all = [];
@@ -681,7 +713,7 @@ function fixedNew(script) {
       if (!allOk(tw, 7)) return { ok: false, rs: all.concat(tw), sums, twinD };
       twinD.push(ros.reduce((a, s) => { const p = ptsIn(tw, s); return a + (p.length ? p[p.length - 1] - LP_AT[s] : 0); }, 0));
     }
-    const rs = timeline([[0, k.S], [2 * MIN, k.S.concat(pick(Rf, [2, 3]))], [5 * MIN, pick(k.S, [0, 1])], [MIN, left], [GRACE, left], [LEAVE, left], [3 * HOUR, left]], script, files);
+    const rs = timeline([[0, k.S], [2 * MIN, k.S.concat(pick(Rf, recant ? [0, 1, 2, 3] : [2, 3]))], [5 * MIN, pick(k.S, [0, 1])], [MIN, left], [GRACE, left], [LEAVE, left], [3 * HOUR, left]], script, files);
     all.push(...rs);
     if (!allOk(rs, 7)) return { ok: false, rs: all, sums, twinD };
     for (const s of ros) { const p = ptsIn(rs, s); if (p.length) LP_AT[s] = p[p.length - 1]; }
@@ -732,6 +764,179 @@ ALL.push(H13, A13, L13, L14, B13, C13);
     const m = timeline(steps, script, from());
     T('[12] mutant: only the writers read -> the two stand in, H13 settles as before Q227 (another gain than the honest twin\'s)', allOk(m, 7) && nRated(m) === 0 && nStood(m) === 2
       && nOwn(m) === 1 && OWN_LINE(k.key, H13).test(outOf(m)) && none(m, L13) && pts(m, [H13]) !== pts(tw, [H13]), show(m, ros) + ' vs ' + show(tw, ros));
+  });
+}
+
+// ======== Q275: Q265 skipped when every player rated here changed his result ========
+
+// ---- [13] the honest player framed twice; a recant next to an honest one; a seat put back; a group recanting on purpose ----
+const X13 = SID(981), C13a = SID(982), C13b = SID(983), C13c = SID(984);
+ALL.push(X13, C13a, C13b, C13c);
+// X13 honest, 1st; all four write the real result and are seen agreeing (pinned), then X13's row is overwritten (a later
+//   record of his) and the three rewrite it with him last
+function framed(h) {
+  const ros = [X13, C13a, C13b, C13c], T4 = [6100, 5200, 4800, 3900], F4x = [3000, 6100, 5200, 4800], k = keyRecs(2, h, ros, T4);
+  const Rf = ros.map((s, i) => ({ sid: s, d: rec(0xB1, 2, h, i, placeIn(F4x, i), placeIn(F4x, i) === 1, ros, F4x) }));
+  const re = k.S.concat(Rf.slice(1));
+  return { k, ros, steps: [[0, k.S], [2 * MIN, k.S.concat(k.R)], [MIN, re], [GRACE, re], [LEAVE, re], [3 * HOUR, re]] };
+}
+{
+  const f1 = framed(0xC2D1), f2 = framed(0xC2D2);
+  const a = timeline(f1.steps), from = () => advance(last(a).state, 3 * HOUR);
+  T('[13] the first time: X13 stands in at 4 of 4 (no points or rating of his), the three settle', allOk(a, 6) && processedOf(last(a)).has(f1.k.key) && nStood(a) === 1
+    && STOOD_LINE(f1.k.key, X13).test(outOf(a)) && none(a, X13) && rOf(a, X13).length === 0, outOf(a).slice(-900));
+  const by = 'seat 1 = [0-9a-f]{8}, seat 2 = [0-9a-f]{8}, seat 3 = [0-9a-f]{8}';
+  const b = allOk(a, 6) ? timeline(f2.steps, null, from()) : [], r = b.length ? last(b) : null;
+  T('[13] the second time inside the window, the three all recanted: X13 not rated (no points or rating of his), the unrated and held lines, the row', allOk(b, 6) && processedOf(r).has(f2.k.key)
+    && none(b, X13) && rOf(b, X13).length === 0 && nRated(b) === 0 && nStood(b) === 0 && nHeld(b) === 1 && UNRATED_LINE(f2.k.key, X13, by).test(outOf(b)) && HELD_LINE(f2.k.key).test(outOf(b))
+    && sumRow(b, UNRATED_RE) === 1 && sumRow(b, RATED_RE) === 0 && leavesOf(r, X13) === 0, outOf(b).slice(-900));
+  withMutant(RATE_OFF[0], RATE_OFF[1], RATE_OFF[2], (script) => {
+    const m = allOk(a, 6) ? timeline(f2.steps, script, from()) : [];
+    T('[13] ... the three exactly as with the Q265 step off (Q264)', allOk(m, 6) && sameFor(b, m, f2.ros) && nHeld(m) === 1, show(b, f2.ros) + ' vs ' + show(m, f2.ros));
+  });
+  withMutant(NOGATE[0], NOGATE[1], NOGATE[2], (script) => {
+    const m = allOk(a, 6) ? timeline(f2.steps, script, from()) : [];
+    T('[13] mutant: no gate (as Q265) -> X13 rated at 4 of 4 (down)', allOk(m, 6) && nRated(m) === 1 && RATED_LINE(f2.k.key, X13, 4, 4, by).test(outOf(m)) && down(m, X13), show(m, f2.ros));
+  });
+  withMutant('norc', RECANT_ADD, '', (script) => {
+    const m = allOk(a, 6) ? timeline(f2.steps, script, from()) : [];
+    T('[13] mutant: no recant collected -> X13 rated (down)', allOk(m, 6) && nRated(m) === 1 && down(m, X13), show(m, f2.ros));
+  });
+}
+// L13r (true 1st) writes the made-up result with L13p / L13q (they on top) first, then the real one with H13r (true 2nd); the two blank
+const L13r = SID(985), H13r = SID(986), L13p = SID(987), L13q = SID(988);
+ALL.push(L13r, H13r, L13p, L13q);
+function joined(h) {
+  const ros = [L13r, H13r, L13p, L13q], k = keyRecs(2, h, ros, S4), pick = (xs, is) => is.map((i) => xs[i]);
+  const Rf = ros.map((s, i) => ({ sid: s, d: rec(0xB1, 2, h, i, placeIn(F, i), placeIn(F, i) === 1, ros, F) }));
+  const left = pick(k.S, [0, 1]).concat(pick(k.R, [0, 1])), all = k.S.concat(k.R);
+  return { k, ros, steps: [[0, k.S], [2 * MIN, k.S.concat(pick(Rf, [0, 2, 3]))], [5 * MIN, pick(k.S, [0, 1])], [MIN, left], [GRACE, left], [LEAVE, left], [3 * HOUR, left]],
+    twin: [[0, k.S], [2 * MIN, k.S.concat(pick(k.R, [0, 2, 3]))], [5 * MIN, all], [MIN, all], [GRACE, all], [LEAVE, all], [3 * HOUR, all]] };
+}
+{
+  const j1 = joined(0xC2D3), j2 = joined(0xC2D4);
+  const a = timeline(j1.steps), from = () => advance(last(a).state, 3 * HOUR);
+  T('[13] a recant next to an honest one, the first time: the two stand in, H13r 2nd of 4 (up)', allOk(a, 7) && nStood(a) === 2 && up(a, H13r) && none(a, L13p), outOf(a).slice(-900));
+  const b = allOk(a, 7) ? timeline(j2.steps, null, from()) : [], tw = allOk(a, 7) ? timeline(j2.twin, null, from()) : [];
+  T('[13] ... the second time: L13r recanted, H13r did not -> the two rated (3rd, 4th), H13r exactly the honest twin\'s (2nd: up)', allOk(b, 7) && allOk(tw, 7) && nRated(b) === 2
+    && sumRow(b, UNRATED_RE) === 0 && sameFor(b, tw, [H13r]) && up(b, H13r) && down(b, L13p) && down(b, L13q), show(b, j2.ros) + ' vs twin ' + show(tw, j2.ros));
+  withMutant('g1', ALL_RECANT, 'const allRecant = rated0.some((p) => recanted.has(String(p.steamID)));', (script) => {
+    const m = allOk(a, 7) ? timeline(j2.steps, script, from()) : [];
+    T('[13] mutant: any recant, not every -> the two not rated, held, H13r 2nd of 2 (down)', allOk(m, 7) && nRated(m) === 0 && nHeld(m) === 1 && down(m, H13r), show(m, j2.ros));
+  });
+}
+// C1 as [3]: H13s / A13s honest, L13s / L13t withdraw (H13s paired with them). C2, 5P: W13a / W13b write the made-up result with the
+//   two (all four seen agreeing on it), then the real one with H13s (he is pinned on it); H13s's row goes (put back, Q185)
+const H13s = SID(989), A13s = SID(990), L13s = SID(991), L13t = SID(992), W13a = SID(993), W13b = SID(994);
+ALL.push(H13s, A13s, L13s, L13t, W13a, W13b);
+{
+  const c1 = timeline(wd2(2, 0xC2D5, [H13s, A13s, L13s, L13t], [2, 3], S4, F).steps);
+  const ros = [H13s, W13a, W13b, L13s, L13t], T5 = [5200, 6100, 4800, 3000, 2900], F5 = [3000, 2900, 2800, 6100, 5200], h = 0xC2D6, k = keyRecs(2, h, ros, T5);
+  const pick = (xs, is) => is.map((i) => xs[i]), gone = k.S.concat(pick(k.R, [1, 2]));
+  const Rf = ros.map((s, i) => ({ sid: s, d: rec(0xB1, 2, h, i, placeIn(F5, i), placeIn(F5, i) === 1, ros, F5) }));
+  const steps = [[0, k.S], [MIN, k.S.concat(pick(Rf, [1, 2, 3, 4]))], [MIN, k.S.concat(pick(k.R, [0, 1, 2]))], [MIN, gone], [GRACE, gone], [LEAVE, gone], [3 * HOUR, gone]];
+  const from = () => advance(last(c1).state, 3 * HOUR);
+  const b = allOk(c1, 6) && nStood(c1) === 2 ? timeline(steps, null, from()) : [], o = outOf(b);
+  T('[13] every writer recanted, a seat put back (pinned on the result read now): the two rated at 4th / 5th of 5 for him, nothing passed on', allOk(b, 7) && /agreed-back [^\n]*\(Q185\)/.test(o)
+    && (o.match(/  recant [0-9]/g) || []).length === 2 && RATED_LINE(k.key, L13s, 4, 5, 'seat 0 = [0-9a-f]{8}').test(o) && RATED_LINE(k.key, L13t, 5, 5, 'seat 0 = [0-9a-f]{8}').test(o)
+    && nRated(b) === 2 && sumRow(b, UNRATED_RE) === 0, (b.length ? o : outOf(c1)).slice(-900));
+  withMutant('writers', ALL_RECANT, 'const allRecant = rated0.filter((p) => g.some((x) => String(x.steamID) === String(p.steamID))).every((p) => recanted.has(String(p.steamID)));', (script) => {
+    const m = allOk(c1, 6) ? timeline(steps, script, from()) : [];
+    T('[13] mutant: the writers only read -> the two not rated', allOk(m, 7) && nRated(m) === 0 && sumRow(m, UNRATED_RE) === 2, outOf(m).slice(-600));
+  });
+}
+{
+  const o = fixedNew(undefined, true);
+  withMutant(RATE_OFF[0], RATE_OFF[1], RATE_OFF[2], (script) => {
+    const m = fixedNew(script, true);
+    T('[13] the fixed old account with a new one each match, the two who settle recanting every match: the sums exactly those with the Q265 step off (Q264), passed on every match after the first',
+      o.ok && m.ok && JSON.stringify(o.sums) === JSON.stringify(m.sums) && nRated(o.rs) === 0 && (outOf(o.rs).match(/  agreed-stood-unrated [0-9]/g) || []).length === 4,
+      JSON.stringify([o.ok, m.ok, o.sums, m.sums, nRated(o.rs)]));
+  });
+}
+
+
+// ---- [14] (Q275 review) one of the three breaks a record of his: Q109 drops it, he stays ranked at his seat ----
+// framed() with C13c's records bent: 'ros' = the record names no Steam id at seat 0 (a roster reason, nobody flagged), 'dur' =
+//   a duration of -1 (his own field, he is flagged); `twice` = the rewritten one on two shards (Q109 drops both)
+function framedD(h, real, fake, twice) {
+  const ros = [X13, C13a, C13b, C13c], T4 = [6100, 5200, 4800, 3900], F4x = [3000, 6100, 5200, 4800], k = keyRecs(2, h, ros, T4);
+  const bend = (x, how, sc) => ({ sid: x.sid, d: how === 'ros' ? rec(0xB1, 2, h, 3, placeIn(sc, 3), placeIn(sc, 3) === 1, ['5'].concat(ros.slice(1)), sc)
+    : how === 'dur' ? x.d.slice(0, 9).concat([-1], x.d.slice(10)) : x.d });
+  const Rf = ros.map((s, i) => ({ sid: s, d: rec(0xB1, 2, h, i, placeIn(F4x, i), placeIn(F4x, i) === 1, ros, F4x) }));
+  const R = k.R.slice(0, 3).concat([bend(k.R[3], real, T4)]), re = k.S.concat(Rf.slice(1, 3), [bend(Rf[3], fake, F4x)], twice ? [bend(Rf[3], fake, F4x)] : []);
+  return { k, ros, steps: [[0, k.S], [2 * MIN, k.S.concat(R)], [MIN, re], [GRACE, re], [LEAVE, re], [3 * HOUR, re]] };
+}
+const DROP_FILL = '      for (const x of sp.drop) dropRecs.push(...x.recs);   // Q275 review\n';
+const DROP_PIN = 'for (const r of g.concat(dropRecs)) { const h = pid(String(r.steamID)); if (agv[h] == null) agv[h] = agreedPin(r.d[5]); } }';
+const DROP_RC = '      if (pend.agv) for (const r of g.concat(dropRecs)) {   // Q275 review: the records Q109 dropped too (a writer ranked at his seat)\n';
+const ONCE = "        if (recanted.has(String(r.steamID))) continue;   // Q275 review: once per writer (Q109 drops all of a writer's records)\n";
+const NODROPPIN = ['nodroppin', DROP_PIN, DROP_PIN.replace('g.concat(dropRecs)', 'g')];
+const NODROPRC = ['nodroprc', DROP_RC, DROP_RC.replace('g.concat(dropRecs)', 'g')];
+const NODROPFILL = ['nodropfill', DROP_FILL, ''];
+{
+  const at = (a, from) => SRC.indexOf(a, from || 0);
+  const SEAT_DECL = "    let dropSeat = null;   // Q109: dropped writer sid -> consensus seat (-1 = none: not rated, still no leaver; a kept writer's seat is never taken)\n";
+  const RECS_DECL = "    const dropRecs = [];   // Q275 review: the records Q109 drops below (in this consistent group: the kept ones' scores)\n";
+  const KEEP = '      g = sp.keep;\n';
+  T('[0] Q275 review: the records Q109 drops collected next to dropSeat and right where the kept ones are taken, pinned with them, checked for a recant with them, once per writer',
+    [SEAT_DECL, RECS_DECL, KEEP, DROP_FILL, DROP_PIN, DROP_RC, ONCE, RECANT_ADD].every((a) => SRC.split(a).length === 2) && at(SEAT_DECL) + SEAT_DECL.length === at(RECS_DECL)
+    && at(KEEP) + KEEP.length === at(DROP_FILL) && at(DROP_FILL) < at('const vNow = vecOf(g[0]);') && at('const vNow = vecOf(g[0]);') < at(DROP_PIN)
+    && at(GUARD) + GUARD.length === at(DROP_RC) && at(DROP_RC) < at(ONCE) && at(ONCE) + ONCE.length === at(RECANT_ADD)
+    && SRC.indexOf("        if (pend.agv[h] == null || pend.agv[h] === agreedPin(r.d[5])) continue;\n" + ONCE) > at(DROP_RC));
+}
+{
+  const by = 'seat 1 = [0-9a-f]{8}, seat 2 = [0-9a-f]{8}, seat 3 = [0-9a-f]{8}';
+  const shapes = [['D1', 'none', 'ros', false, 'the rewritten one names no Steam id (a roster reason)', ['nodroprc', 'nodropfill']],
+    ['D2', 'none', 'dur', false, 'the rewritten one says a duration of -1 (his own field)', ['nodroprc', 'nodropfill']],
+    ['D3', 'ros', 'ros', false, 'both his records name no Steam id (never kept, never on the agreed list)', ['nodroppin', 'nodroprc', 'nodropfill']],
+    ['D4', 'ros', 'none', false, 'the real one names no Steam id, the rewritten one clean', ['nodroppin', 'nodropfill']],
+    ['D5', 'none', 'dur', true, 'the rewritten one (duration -1) on two shards', ['nodroprc', 'nodropfill']]];
+  const MU = { nodroppin: NODROPPIN, nodroprc: NODROPRC, nodropfill: NODROPFILL };
+  let n = 0;
+  for (const [tag, real, fake, twice, what, reds] of shapes) {
+    const f1 = framedD(0xC2E1 + 2 * n, real, fake, twice), f2 = framedD(0xC2E2 + 2 * n, real, fake, twice); n++;
+    const a = timeline(f1.steps), from = () => advance(last(a).state, 3 * HOUR);
+    const b = allOk(a, 6) ? timeline(f2.steps, null, from()) : [], o = outOf(b);
+    T('[14] ' + tag + ', ' + what + ': X13 not rated the second time either, C13c ranked at his seat (Q109) and seen recanting once',
+      allOk(a, 6) && nStood(a) === 1 && none(a, X13) && allOk(b, 6) && processedOf(last(b)).has(f2.k.key) && none(b, X13) && rOf(b, X13).length === 0 && nRated(b) === 0
+      && UNRATED_LINE(f2.k.key, X13, by).test(o) && /\(Q109\)/.test(o) && ptsIn(b, C13c).length === 1 && (o.match(RECANT_LINE_RE(f2.k.key, C13c)) || []).length === 1,
+      show(b, f2.ros) + ' ' + o.slice(-700));
+    for (const mu of reds) withMutant(MU[mu][0] + '-' + tag, MU[mu][1], MU[mu][2], (script) => {
+      const m = allOk(a, 6) ? timeline(f2.steps, script, from()) : [];
+      T('[14] ' + tag + ' mutant (' + mu + ') -> X13 rated at 4 of 4 (down)', allOk(m, 6) && nRated(m) === 1 && down(m, X13), show(m, f2.ros));
+    });
+    if (twice) withMutant('once-' + tag, ONCE, '', (script) => {
+      const m = allOk(a, 6) ? timeline(f2.steps, script, from()) : [];
+      T('[14] ' + tag + ' mutant (no once-per-writer) -> C13c counted twice', allOk(m, 6) && (outOf(m).match(RECANT_LINE_RE(f2.k.key, C13c)) || []).length === 2, outOf(m).slice(-500));
+    });
+  }
+}
+// the [13] recant next to an honest one, with H13r's real record naming no Steam id at seat 0 (Q109 drops it for a roster
+//   reason, nobody flagged; he is ranked at his seat): his record never changes, so he is never seen recanting, and every
+//   points and rating write of the four is exactly what it is with the three Q275 review lines off. (Nobody stands in
+//   here: with his record dropped the stand-ins are not used; the same on today's main and on the Q264 / Q265 steps.)
+const L14r = SID(1001), H14r = SID(1002), L14p = SID(1003), L14q = SID(1004);
+ALL.push(L14r, H14r, L14p, L14q);
+function joinedBent(h) {
+  const ros = [L14r, H14r, L14p, L14q], k = keyRecs(2, h, ros, S4), pick = (xs, is) => is.map((i) => xs[i]);
+  const Rf = ros.map((s, i) => ({ sid: s, d: rec(0xB1, 2, h, i, placeIn(F, i), placeIn(F, i) === 1, ros, F) }));
+  const left = pick(k.S, [0, 1]).concat([k.R[0], { sid: H14r, d: rec(0xB1, 2, h, 1, placeIn(S4, 1), false, [L14r, H14r, '5', L14q], S4) }]);
+  return { k, ros, steps: [[0, k.S], [2 * MIN, k.S.concat(pick(Rf, [0, 2, 3]))], [5 * MIN, pick(k.S, [0, 1])], [MIN, left], [GRACE, left], [LEAVE, left], [3 * HOUR, left]] };
+}
+{
+  const run2 = (script) => {
+    const a = timeline(joinedBent(0xC2F1).steps, script), j2 = joinedBent(0xC2F2);
+    return { a, j2, b: allOk(a, 7) ? timeline(j2.steps, script, advance(last(a).state, 3 * HOUR)) : [] };
+  };
+  const bt = run2(), ob = outOf(bt.b), oa = outOf(bt.a), four = [L14r, H14r, L14p, L14q];
+  withMutant(NODROPFILL[0] + '-honest', NODROPFILL[1], NODROPFILL[2], (script) => {
+    const off = run2(script);
+    T('[14] an honest one whose record Q109 drops (a roster reason) next to a recant, twice: ranked at his seat, never seen recanting, every write of the four exactly as with the Q275 review lines off',
+      allOk(bt.a, 7) && allOk(bt.b, 7) && allOk(off.b, 7) && /\(Q109\)/.test(oa) && /\(Q109\)/.test(ob) && ptsIn(bt.b, H14r).length === 1
+      && (oa.match(RECANT_LINE_RE(joinedBent(0xC2F1).k.key, H14r)) || []).length === 0 && (ob.match(RECANT_LINE_RE(bt.j2.k.key, H14r)) || []).length === 0
+      && (ob.match(RECANT_LINE_RE(bt.j2.k.key, L14r)) || []).length === 1 && fOf(last(bt.b), H14r) === 0
+      && sameFor(bt.a, off.a, four) && sameFor(bt.b, off.b, four), show(bt.b, bt.j2.ros) + ' vs off ' + show(off.b, bt.j2.ros) + ' ' + ob.slice(-600));
   });
 }
 
