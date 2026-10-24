@@ -612,8 +612,13 @@ const b6 = timeline(w6.steps, null, from3());
     && skOf(r, L3) !== 'null', skOf(r, L3) + ' vs ' + skOf(last(n), L3));
   withMutant('noranked', RANKED_OWN, '', (script) => {
     const mr = timeline(w6.steps, script, from3());
-    T('[6] review mutant: his ranked rating read with the stand-ins -> another ranked rating, every write of his the same', allOk(mr, 6) && skOf(last(mr), L3) !== skOf(r, L3)
-      && writesOf(mr, L3) === writesOf(b6, L3), skOf(last(mr), L3) + ' vs ' + skOf(r, L3));
+    // O480 (added after Q264 was written): his rating-board row now publishes the ranked rating in its details (0xCB), so
+    //   that one value moves with it; the row's score and every other write of his stay the same
+    const noRating = (rs) => JSON.stringify(JSON.parse(writesOf(rs, L3)).map((b) => b.replace(/&details=%cb[^&]*$/, '&details=%cb')));
+    const ratingRow = (rs) => JSON.parse(writesOf(rs, L3)).filter((b) => /&details=%cb/.test(b)).join();
+    T('[6] review mutant: his ranked rating read with the stand-ins -> another ranked rating (and the one his rating row publishes), every other write of his the same',
+      allOk(mr, 6) && skOf(last(mr), L3) !== skOf(r, L3) && ratingRow(b6) !== '' && ratingRow(mr) !== ratingRow(b6) && noRating(mr) === noRating(b6),
+      skOf(last(mr), L3) + ' vs ' + skOf(r, L3));
   });
 }
 

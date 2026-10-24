@@ -10954,7 +10954,7 @@ async function main() {
     if (progFrac !== 1) console.log('  progress ' + c.m + ': ' + prog + '/' + XP_CFG.progressLevels + ' levels -> points x' + progFrac);
     if (xpId) creditXp(g, matchType, scores, rankX, xp, changedXp, xpState, leavers, today, progFrac, careerDet, spSet,
       { t0: pend.t0 || nowMs, nowMs, absentSeats: new Set(absentNow.map((x) => x.seat | 0)) });   // O181: the streak orders by the match's start
-    if (xpId) creditCareerMatch(g, matchType, rankOf, xpState, careerTouched);   // 5.4a career matrix (mode x character; W/L in quick / ranked cells)
+    if (xpId) creditCareerMatch(g, matchType, rankX, xpState, careerTouched);   // 5.4a career matrix (mode x character; W/L in quick / ranked cells; Q264: rankX, his win as his XP / CP read it)
     // CP (the endless-economy wallet) earns from matchmade records on the same credit classes.
     // Playtest starter wallet first: writers only (a leaver whose first-ever appearance is the
     // leave itself earns the baseline on their first finished game instead).
