@@ -19,8 +19,14 @@
 const fs = require('fs');
 const { readBoardAll, pid, decodeDetails, getJson, BASE, TRUST_LB, REPORT_LB, START_MAGIC, REPORT_MAGIC, CP_LB, ENDLESS_LB, REDEEM_LB, GRANT_LB,
   ENDLESS_LB_SOLO, ENDLESS_LB_TRIO, ENDLESS_LB_QUAD, ENDLESS_LB_OVERALL, ENDLESS_COMP_LB, ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, ENDLESS_COMP_LB_QUAD, ENDLESS_COMP_LB_OVERALL,
-  ENDLESS_LB_CLASSIC_SOLO, ENDLESS_LB_CLASSIC_DUO, ENDLESS_LB_CLASSIC_TRIO, ENDLESS_LB_CLASSIC_QUAD, ENDLESS_LB_CLASSIC_OVERALL, ENDLESS_CUP_HONOR_LB } = require('./validate.js');
+  ENDLESS_LB_CLASSIC_SOLO, ENDLESS_LB_CLASSIC_DUO, ENDLESS_LB_CLASSIC_TRIO, ENDLESS_LB_CLASSIC_QUAD, ENDLESS_LB_CLASSIC_OVERALL, ENDLESS_CUP_HONOR_LB,
+  LIKE_BOX_LB, LIKE_COUNT_LB } = require('./validate.js');
 const v = require('./validate.js');   // O348 (3): shardPlan / LEDGER_SHARDS / sandboxOn
+// O520 likes lane (client knife 5.4d, W79): the like box (client-writable, friends-reads) is inventory only, like the report
+//   box; the like counts are a trusted board in the closure -- the lane counts a like only for a player with settled XP
+//   (validate.js processLikes `known`; xp.json is never pruned), so a row for anybody else is a foreign write.
+const LIKE_BOARDS = [[LIKE_BOX_LB, 'like box'], [LIKE_COUNT_LB, 'like count']];
+const LIKE_TRUSTED = [[LIKE_COUNT_LB, 'like count']];
 // O276 (client knife 5.1b, 2026-10-18): every cron-written endless ladder is a trusted board like endless_board (the closure once held only
 //   endless_board and its season twins). Their names are this repo's public defaults (the jobs never override them), and every writer of
 //   one of them enters the state the closure reads (recordEndlessSignals for every own-record seat, xp for every endless settle).
@@ -97,6 +103,7 @@ async function main() {
   // does not apply and its absence should not fail the audit.
   const want = [[RANKED_LB, 'rating'], [LP_LB, 'points'], [TRUST_LB, 'trust'], [REPORT_LB, 'report'], [CP_LB, 'cp'], [ENDLESS_LB, 'endless'], [REDEEM_LB, 'redeem'], [GRANT_LB, 'grant']];
   if (XP_LB) want.push([XP_LB, 'xp']);
+  for (const w of LIKE_BOARDS) want.push(w);   // O520: provisioned by the reconcile's bootstrap every run
   for (const [name, label] of want) if (!byName[name]) violations.push(label + ' board missing from listing');
   const shardListed = all.filter(b => { const n = String(b.name || b.Name); return n.indexOf(PREFIX) === 0 && n.indexOf('test') < 0; });
   // O348 (3) (knife 5.5b-1 S5): the reconcile's shard set (PREFIX+0..N-1, shardPlan) -- extra prefix boards are reported, not read
@@ -124,6 +131,7 @@ async function main() {
   const trustedWant = [[RANKED_LB, 'rating'], [LP_LB, 'points'], [TRUST_LB, 'trust'], [CP_LB, 'cp'], [ENDLESS_LB, 'endless'], [GRANT_LB, 'grant']];
   if (XP_LB) trustedWant.push([XP_LB, 'xp']);
   for (const n of ENDLESS_TRUSTED) trustedWant.push([n, n]);   // O276: the other cron-written endless ladders (absent ones are skipped below)
+  for (const w of LIKE_TRUSTED) trustedWant.push(w);           // O520: like counts (see LIKE_TRUSTED)
   // seasonal ladders (`<base>_s<N>`, cron-created trusted boards): audit them like their base
   // boards -- the foreign-writer closure applies identically. Discovered from the listing so a
   // new season needs no audit change; test boards are excluded as everywhere else.
@@ -196,4 +204,4 @@ async function main() {
 if (require.main === module) {
   main().catch(e => { ghErr('audit failed: ' + (e && e.stack || e)); process.exit(1); });
 }
-module.exports = { auditTrusted, ENDLESS_TRUSTED, seasonTwinOf };
+module.exports = { auditTrusted, ENDLESS_TRUSTED, seasonTwinOf, LIKE_BOARDS, LIKE_TRUSTED };

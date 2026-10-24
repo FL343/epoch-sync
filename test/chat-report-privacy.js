@@ -173,7 +173,11 @@ console.log('=== chat-report-privacy [1] no mail channel ===');
     for (const s of sids) { const p = sidPair(s); d.push(p[0], p[1]); }
     return d;
   };
-  const w = world(rowsBase, [{ id: 5, name: 'progress', entries: [] }, { id: 8, name: 'cp_bank', entries: [] }]);
+  // O520 likes lane (W79): R1 liked T1 in the match below (a like box row: raw SteamID + match hash in the client's row) -> the
+  //   lane's state file (likes.json) is written this run and scanned with the others
+  const LP = require(path.join(__dirname, '..', 'like-plan.js'));
+  const likeBox = { id: 60, name: 'like_box', entries: [{ steamID: R1, score: 1, details: LP.encodeBox([{ sid: T1, ref: 0x5101, kind: LP.LIKE.KIND_MATCH, min: Math.floor(DAY1 / 60000) - 5 }]) }] };
+  const w = world(rowsBase, [{ id: 5, name: 'progress', entries: [] }, { id: 8, name: 'cp_bank', entries: [] }, likeBox, { id: 61, name: 'like_count', entries: [] }]);
   const sids = [R1, T1];
   w[0].entries.push({ steamID: R1, score: 1, details: rec(0xB1, 1, 0x5101, 0, sids) });
   w[1].entries.push({ steamID: T1, score: 1, details: rec(0xB1, 1, 0x5101, 1, sids) });
@@ -182,6 +186,7 @@ console.log('=== chat-report-privacy [1] no mail channel ===');
   const lr = runCron(w, null, { PT_MODE: '1' });
   const nState = Object.keys(lr.written).filter(f => !/^(stub|fx|post)/.test(f)).length;
   T('[1] with ledger records too: every written state file clean (' + nState + ' files)', lr.code === 0 && nState >= 3 && clean(lr).length === 0, clean(lr).join(' | ') + ' ' + tail(lr));
+  T('[1] ... the likes lane\'s state file among them (a like waiting for its match: not a vacuous scan)', /likes_file\.json/.test(Object.keys(lr.written).join(',')) && /likes: [^\n]*waiting \+1/.test(lr.out), Object.keys(lr.written).join(',') + ' ' + (lr.out.match(/likes: [^\n]*/) || [''])[0]);
 }
 
 console.log('=== chat-report-privacy [2] mail channel, first tick of the day ===');

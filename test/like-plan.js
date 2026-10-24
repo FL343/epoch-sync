@@ -3,8 +3,9 @@
 //   [1] the two row layouts: fixtures/like-box/cases.json is what tools/gen-like-box-fixtures.js gives today, every case
 //       replays, encode / decode round trip, the constants the client mirrors
 //   [2] a like in a match (kind 1), the five rules: not oneself / own record, matchmade, finished, settled and not voided
-//       (waits in pend until the key is certified) / target at a consensus seat, voter at his own / no premade pair or trio,
-//       no teammate in a team match / one per voter per match, the first one taken
+//       (waits in pend until the key is certified) / target at a consensus seat, voter at his own / no premade pair or trio;
+//       a teammate in a team match under the pair rule (W79 rework: one per pair per 7 days, the board likes' token, also
+//       when it waited for the settle) / one per voter per match, the first one taken
 //   [3] a like on a board row / profile (kind 2), the three rules: not oneself, a known player / one per pair per 7 days on
 //       this job's clock (the same click seen again never counts twice) / 50 a voter a day, the rest retried later
 //   [4] lifetimes and fuses: stale entries, a far-future minute, pending expiry and queueing again, a late settle, the size caps
@@ -15,6 +16,8 @@
 //   [8] privacy: no SteamID / match hash / match key in the committed state; two likes of one voter share no token
 //   [9] matchIndex: one record per writer (a finished one first), majority roster, a lone record, a split roster
 //   [10] a state of a newer layout is left alone; the module stays pure (no clock, no env, no IO)
+//   [11] tighter pins (W78 REVIEW section 6): the constants literally, certify never credits a taken like twice, implausible
+//       targets, the day's slots start over, boardPlan reads one row per player
 // Mutation harness (deliverable dir of W78): LIKE_PLAN_FILE=<copy> node test/like-plan.js runs these cases on a copy.
 const fs = require('fs');
 const path = require('path');
@@ -158,15 +161,45 @@ console.log('=== like-plan (O520 likes lane, L0) ===');
     r = harvest(s2, [row(P[1], [ML(P[3], mh, T0)]), row(P[4], [ML(P[0], mh, T0)])], ctxOf(matchRecs(mtt, mh, ro6), T0 + 1));
     T('[2i] trio at seats 1-3: 1 -> 3 premade; 4 -> 0 counted', r.why.premade === 1 && r.counted.length === 1 && r.counted[0].sid === P[0]);
   }
-  // j. team matches: teammates do not count, opponents do
+  // j. team matches (W79 rework): a teammate counts under the pair rule (one per pair per 7 days, the board likes' token),
+  //    an opponent every match
   {
     const mtk5 = keyOf(5, mh), s2 = {}; certify(s2, [mtk5], { kh, now: T0, season: 0 });
     r = harvest(s2, [row(P[0], [ML(P[1], mh, T0)]), row(P[2], [ML(P[0], mh, T0)])], ctxOf(matchRecs(5, mh, roster), T0 + 1));
-    T('[2j] 2V2: teammate (0 -> 1) team; opponent (2 -> 0) counted', r.why.team === 1 && r.counted.length === 1 && r.counted[0].sid === P[0]);
+    T('[2j] 2V2: a stranger teammate (0 -> 1) counted, the opponent (2 -> 0) too', r.counted.length === 2 && !r.why.team && cnt(s2, P[1]).n === 1 && cnt(s2, P[0]).n === 1, J(r));
+    T('[2j] the teammate like took the pair token (job clock), the opponent like none', s2.pr[K.pair(P[0], P[1])] === T0 + 1 && s2.pr[K.pair(P[2], P[0])] === undefined && Object.keys(s2.pr).length === 1);
+    // the same four again in a second 2V2 two days later: the teammate like is held by the pair week, the opponent counts
+    const mh2 = mh + 1, mtk5b = keyOf(5, mh2); certify(s2, [mtk5b], { kh, now: T0 + 2 * DAY, season: 0 });
+    const recs2 = matchRecs(5, mh, roster).concat(matchRecs(5, mh2, roster));
+    r = harvest(s2, [row(P[0], [ML(P[1], mh, T0), ML(P[1], mh2, T0 + 2 * DAY)]), row(P[2], [ML(P[0], mh2, T0 + 2 * DAY)])], ctxOf(recs2, T0 + 2 * DAY + 1));
+    T('[2j] second match within 7 days: the teammate like refused (pair), the opponent like counted', r.why.pair === 1 && r.why.dup === 1 && r.counted.length === 1 && r.counted[0].sid === P[0] && cnt(s2, P[1]).n === 1 && cnt(s2, P[0]).n === 2, J(r));
+    T('[2j] ... not taken: no match token for it, the pair minute unchanged', s2.mt[K.match(P[0], mtk5b)] === undefined && s2.pr[K.pair(P[0], P[1])] === T0 + 1);
+    // a board like of the same pair within the week: held by the same token (week)
+    r = harvest(s2, [row(P[0], [BL(P[1], T0 + 3 * DAY)])], ctxOf(recs2, T0 + 3 * DAY));
+    T('[2j] a board like of the pair within 7 days of the teammate like: week, not counted', r.why.week === 1 && !r.counted.length && cnt(s2, P[1]).n === 1);
+    // the other way round: a board like first, then a teammate like inside its week
+    const s4 = {}; harvest(s4, [row(P[0], [BL(P[1], T0)])], ctxOf([], T0));
+    certify(s4, [mtk5], { kh, now: T0 + 1, season: 0 });
+    r = harvest(s4, [row(P[0], [ML(P[1], mh, T0 + 1)])], ctxOf(matchRecs(5, mh, roster), T0 + 2));
+    T('[2j] a teammate like within 7 days of a board like of the pair: pair, not counted (b 1, m 0)', r.why.pair === 1 && J(cnt(s4, P[1])) === J({ n: 1, s: 1, sn: 0, m: 0, b: 1 }));
+    // after the week the next teammate like counts again
+    const mh3 = mh + 2, mtk5c = keyOf(5, mh3), now3 = T0 + 1 + 7 * DAY;
+    certify(s2, [mtk5c], { kh, now: now3, season: 0 });
+    r = harvest(s2, [row(P[0], [ML(P[1], mh3, now3)])], ctxOf(matchRecs(5, mh3, roster), now3));
+    T('[2j] a teammate like 7 days after the last counted one: counted, the pair minute moves on', r.counted.length === 1 && cnt(s2, P[1]).n === 2 && s2.pr[K.pair(P[0], P[1])] === now3, J(r));
+    // waiting for the settle: the pair rule is checked when it counts (certify), with the token carried in the waiting entry
+    const s5 = {}, rq = matchRecs(5, 7001, roster).concat(matchRecs(5, 7002, roster));
+    r = harvest(s5, [row(P[0], [ML(P[1], 7001, T0), ML(P[1], 7002, T0 + 1)])], ctxOf(rq, T0 + 2));
+    T('[2j] two teammate likes of two matches before their settles: both wait, each holding the pair token', r.pended === 2 && Object.values(s5.pend).every((p) => p.p === K.pair(P[0], P[1])), J(s5.pend));
+    const c5 = certify(s5, [keyOf(5, 7001), keyOf(5, 7002)], { kh, now: T0 + 10, season: 0 });
+    T('[2j] both matches settle in one run: one like counts, the second is dropped by the pair week (pair 1)', c5.resolved.length === 1 && c5.pair === 1 && cnt(s5, P[1]).n === 1 && !Object.keys(s5.pend).length && s5.pr[K.pair(P[0], P[1])] === T0 + 10, J(c5));
+    const s6 = {}; harvest(s6, [row(P[2], [ML(P[0], 7001, T0)])], ctxOf(rq, T0 + 2));
+    T('[2j] a waiting opponent like holds no pair token', Object.values(s6.pend).length === 1 && Object.values(s6.pend)[0].p === undefined);
     const ro6 = [P[0], P[1], P[2], P[3], P[4], P[5]], mtk8 = keyOf(8, mh), s3 = {}; certify(s3, [mtk8], { kh, now: T0, season: 0 });
     r = harvest(s3, [row(P[0], [ML(P[2], mh, T0)]), row(P[3], [ML(P[2], mh, T0)])], ctxOf(matchRecs(8, mh, ro6), T0 + 1));
-    T('[2j] 3V3: seats 0 and 2 teammates (team); 3 -> 2 counted', r.why.team === 1 && r.counted.length === 1);
-    T('[2j] TEAMMATES_COUNT is off', LIKE.TEAMMATES_COUNT === false);
+    T('[2j] 3V3: seats 0 -> 2 teammates counted (pair token), 3 -> 2 opponents counted', r.counted.length === 2 && cnt(s3, P[2]).n === 2 && Object.keys(s3.pr).length === 1 && s3.pr[K.pair(P[0], P[2])] !== undefined, J(r));
+    T('[2j] mateOf: same team in a team match only (2V2 0/1 yes, 0/2 no; 3V3 0/2 yes, 2/3 no; FFA never)', LP.mateOf(5, 0, 1) && !LP.mateOf(5, 0, 2) && LP.mateOf(8, 0, 2) && !LP.mateOf(8, 2, 3) && !LP.mateOf(1, 0, 1) && !LP.mateOf(1 | (1 << 4), 0, 1));
+    T('[2j] unitOf: no team-match reason any more (the pair rule replaces it); the switch is gone', LP.unitOf(5, 0, 1) === null && LP.unitOf(8, 0, 2) === null && LIKE.TEAMMATES_COUNT === undefined);
   }
   // k. one like per voter per match
   {
@@ -243,6 +276,7 @@ console.log('=== like-plan (O520 likes lane, L0) ===');
   T('[3c] the day count sits in slot tokens, not under the voter', s3.day.s.length === 50 && !J(s3).includes(voter));
   r = harvest(s3, [row(voter, queues[3])], ctxOf([], day0 + DAY));
   T('[3c] next day the 10 still queued count', r.counted.length === 10 && !r.why.capped, J(r.why));
+  T('[3c] ... and the day starts over in the state: only the new day\'s 10 slots, the old day\'s dropped', s3.day.d === Math.floor((day0 + DAY) / DAY) && s3.day.s.length === 10, J({ d: s3.day.d, n: s3.day.s.length }));
   r = harvest(s3, [row(P[6], [BL(tg(1), day0 + 20)])], ctxOf([], day0 + 30));
   T('[3c] another voter is not held by the first one\'s cap', r.counted.length === 1);
 }
@@ -426,6 +460,34 @@ console.log('=== like-plan (O520 likes lane, L0) ===');
   const reqs = [...src.matchAll(/require\(([^)]*)\)/g)].map((x) => x[1]);
   T('[10] the module requires only points-plan.js', J(reqs) === J(["'./points-plan.js'"]), J(reqs));
   T('[10] no clock, no env, no IO, no randomness in the module', !/Date\b|process\.|\bfs\b|Math\.random|setTimeout/.test(src));
+}
+
+// ---------------------------------------------------------------- [11] tighter pins (W78 REVIEW section 6, added by W79)
+{
+  // the plan's numbers, literally: a change to any of them has to show up here
+  eq('[11] LIKE constants', LIKE, { BOX_LB: 'like_box', COUNT_LB: 'like_count', BOX_MAGIC: 0xDD, BOX_VER: 1, COUNT_MAGIC: 0xDC, COUNT_VER: 1, BOX_MAX: 15,
+    KIND_MATCH: 1, KIND_BOARD: 2, KV: 1, ENTRY_TTL_MIN: 8 * DAY, PENDING_TTL_MIN: 2 * DAY, OK_TTL_MIN: 3 * DAY, PAIR_WEEK_MIN: 7 * DAY, PAIR_TTL_MIN: 8 * DAY,
+    BOARD_DAILY_CAP: 50, TOKENS_MAX: 100000, PENDING_MAX: 20000, OK_MAX: 30000, PAIRS_MAX: 100000, WRITE_MAX: 400 });
+  // certify never credits a like of a voter / match already taken (a waiting copy of it next to the taken one)
+  const roster = [P[0], P[1], P[2], P[3]], mh = 6060, mt = 1, m = keyOf(mt, mh), recs = matchRecs(mt, mh, roster);
+  const st = {};
+  harvest(st, [row(P[0], [ML(P[2], mh, T0)])], ctxOf(recs, T0 + 1));
+  const pendCopy = J(st.pend);
+  certify(st, [m], { kh, now: T0 + 5, season: 0 });
+  st.pend = JSON.parse(pendCopy);   // the waiting entry back (a state restored next to the taken token)
+  const c = certify(st, [m], { kh, now: T0 + 10, season: 0 });
+  T('[11] certify: a waiting like whose voter / match is taken already is dropped, not counted again', c.resolved.length === 0 && cnt(st, P[2]).n === 1 && !Object.keys(st.pend).length, J(c));
+  // a target that is not a SteamID is refused, a board like and a match like alike (even with everyone known)
+  const s2 = {}; certify(s2, [m], { kh, now: T0, season: 0 });
+  const r = harvest(s2, [row(P[0], [BL('123', T0), ML('42', mh, T0), BL('0', T0)])], ctxOf(recs, T0 + 1));
+  T('[11] implausible targets (too few digits / zero): bad, nothing counted or minted', r.why.bad === 3 && !r.counted.length && !Object.keys(s2.cnt).length && !Object.keys(s2.bt).length, J(r));
+  // boardPlan: one row per player -- a second row of the same SteamID on the board is ignored
+  const s3 = { cnt: { [K.target(P[1])]: { n: 3, s: 3, sn: 0, m: 1, b: 2 } } };
+  const row3 = countRow(s3.cnt[K.target(P[1])]), row5 = countRow({ n: 5, s: 5, sn: 0, m: 1, b: 4 }), row1 = countRow({ n: 1, s: 1, sn: 0, m: 0, b: 1 });
+  let b = boardPlan(s3, [{ sid: P[1], score: row3.score, det: row3.details }, { sid: P[1], score: row5.score, det: row5.details }], [P[1]], ctxOf([], T0));
+  T('[11] boardPlan: a second, higher row of the same player is not adopted (the first one read is his row)', !b.writes.length && b.behind === 0 && cnt(s3, P[1]).n === 3, J(b));
+  b = boardPlan(s3, [{ sid: P[1], score: row1.score, det: row1.details }, { sid: P[1], score: row1.score, det: row1.details }], [P[1]], ctxOf([], T0));
+  T('[11] boardPlan: two low rows of one player -> one write, not two', b.writes.length === 1 && b.writes[0].sid === P[1] && b.writes[0].score === 3, J(b.writes));
 }
 
 console.log(failN ? ('like-plan: ' + failN + ' FAIL') : 'like-plan: all ok');

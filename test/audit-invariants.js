@@ -40,4 +40,13 @@ ok(['endless_board_solo', 'endless_board_overall', 'endless_comp_solo', 'endless
 ok(JSON.stringify(AU.seasonTwinOf('endless_board_s1')) === JSON.stringify({ base: 'endless_board', season: 1 }) && JSON.stringify(AU.seasonTwinOf('endless_comp_overall_s2')) === JSON.stringify({ base: 'endless_comp_overall', season: 2 }) && JSON.stringify(AU.seasonTwinOf('endless_board_overall_s1')) === JSON.stringify({ base: 'endless_board_overall', season: 1 }), 'season twins of the base board and of the seasoned families are found');
 ok(AU.seasonTwinOf('endless_board_solo') === null && AU.seasonTwinOf('endless_classic_solo_s1') === null && AU.seasonTwinOf('endless_save_box_solo_s1') === null && AU.seasonTwinOf('lp_ladder_s1') === null, 'a ladder is not a twin of endless_board by prefix; classic (lifetime only) / save boxes (client-writable) / points never match');
 
+// 6) O520 likes lane (W79): the like box is inventory only (client-writable), the like counts are inventory + trusted closure
+const VL = require('../validate.js');
+ok(JSON.stringify(AU.LIKE_BOARDS) === JSON.stringify([[VL.LIKE_BOX_LB, 'like box'], [VL.LIKE_COUNT_LB, 'like count']]) && VL.LIKE_BOX_LB === 'like_box' && VL.LIKE_COUNT_LB === 'like_count', 'like boards in the inventory (like_box / like_count)');
+ok(AU.LIKE_TRUSTED.length === 1 && AU.LIKE_TRUSTED[0][0] === 'like_count', 'only the like counts are in the trusted closure (the box is client-writable)');
+const auSrc = require('fs').readFileSync(require('path').join(__dirname, '..', 'audit.js'), 'utf8');
+ok(/for \(const w of LIKE_BOARDS\) want\.push\(w\)/.test(auSrc) && /for \(const w of LIKE_TRUSTED\) trustedWant\.push\(w\)/.test(auSrc), 'audit main wires both lists');
+r = auditTrusted({ 'like count': [A, X] }, { skill: {}, xp: { [pid(A)]: {} }, leavers: {}, signals: {} });
+ok(r.violations.length === 1 && r.violations[0].indexOf('like count') === 0, 'a like count row for a player without settled XP is a foreign entry');
+
 console.log('audit-invariants: all ' + n + ' assertions passed');

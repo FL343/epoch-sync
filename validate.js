@@ -10,6 +10,7 @@ const campaignEndless = require('./campaign-endless.js');   // knife 3.9b N4: Ve
 const supporters = require('./supporters.js');   // supporter pack: DLC ownership probe -> wall board / grant bit / points bonus
 const classicOwners = require('./classic.js');   // classic loyalty crate: older-game ownership probe -> revocable grant bit (word 1)
 const chatMute = require('./chat-mute.js');     // chat moderation lane: report snapshots -> automatic mutes + expiry sweep + private mail digest
+const likePlan = require('./like-plan.js');     // likes lane (O520, client knife 5.4d): like_box -> counted likes -> like_count (processLikes)
 // O480: the visible points rules (the LP tables, the series clamp, the mismatch / premade / team plans, the leaver fine) live in
 //   points-plan.js, one copy for this job and for the client (see its header). The environment knobs this file used to read
 //   go in through configure(); the live workflows set none of them (main() warns when one is set: the client's copy then
@@ -3814,9 +3815,13 @@ async function readBoardAll(id, label, opts) {
 // Single-player entry read (score + details) -- on-demand base-value fetch for a player who falls
 // outside the bulk-read window of a larger-than-cap board. null = the player has no entry at all.
 // Without this, settling such a player would use a base of 0 = a silent LP/XP reset.
-async function readUserEntry(id, sid, label) {
+// opts.strictBody (the likes lane only, W79 rework): an HTTP 200 whose body is not JSON or carries no
+//   leaderboardEntryInformation is a failed read (throws), not "this player has no row". Off by default: every other
+//   caller keeps its old handling.
+async function readUserEntry(id, sid, label, opts) {
   const er = await getJson(BASE + '/ISteamLeaderboards/GetLeaderboardEntries/v1/?key=' + KEY + '&appid=' + APPID + '&rangestart=0&rangeend=0&datarequest=RequestAroundUser&steamid=' + sid + '&leaderboardid=' + id + '&format=json');
   if (!er.ok) throw new Error(label + ' user read HTTP ' + er.status);
+  if (opts && opts.strictBody && (er.json == null || !er.json.leaderboardEntryInformation)) throw new Error(label + ' user read HTTP ' + er.status + ' without entry information (malformed body)');
   const ents = (er.json && er.json.leaderboardEntryInformation && er.json.leaderboardEntryInformation.leaderboardEntries) || [];
   for (const e of ents) if (String(e.steamID) === String(sid)) return e;
   return null;
@@ -5255,6 +5260,26 @@ const CHAT_REPORT_LB = process.env.CHAT_REPORT_LB || chatMute.CHAT_MUTE.REPORT_L
 function loadChatMute() { try { const o = JSON.parse(fs.readFileSync(CHAT_MUTE_FILE, 'utf8')); return (o && typeof o === 'object') ? o : {}; } catch (e) { return {}; } }
 // committed to the public repository: chatMute.publicState keeps keyed pseudonyms, counts and times only
 function saveChatMute(st) { try { writeStateFile(CHAT_MUTE_FILE, JSON.stringify(chatMute.publicState(st))); } catch (e) { ghWarn('write ' + CHAT_MUTE_FILE + ' failed: ' + (e && e.message)); } }
+// likes lane state (O520, W79): keyed tokens, counts and times only (like-plan.js publicState; every token = pid of a
+//   'like-*|' domain string, no raw SteamID, no matchHash). Not written while it holds nothing (no empty file on a channel the
+//   client has not reached yet), rewritten only when it changes.
+const LIKES_FILE = process.env.LIKES_FILE || 'likes.json';
+// default names spelled out (the client repo's test/local-cron-test-boards.js reads `|| '<name>'`); = like-plan.js LIKE.BOX_LB / COUNT_LB (test/likes-lane.js)
+const LIKE_BOX_LB = process.env.LIKE_BOX_LB || 'like_box';       // client-written, friends-reads (lockstep: client like-box.js)
+const LIKE_COUNT_LB = process.env.LIKE_COUNT_LB || 'like_count'; // trusted-writes, public (lockstep: client like-dir.js)
+// like_count reads are strict (W79 rework, as the record shards R1-B2-04): an HTTP 200 with a body that is not JSON, or
+//   without leaderboardEntryInformation while the listing says the board holds rows, is a failed read -- no row is
+//   written that run -- never "the board is empty" / "he has no row": with a state file restored from an older copy that
+//   would write his count DOWN, and the next run would take the low row as the truth. Price: should Steam answer a board
+//   that really is empty without the info object while the listing count is still stale, every run reads as failed and the
+//   writes wait (the counts stay in the state, nothing is lost). LIKES_STRICT_BODY=0 is the escape hatch.
+const LIKES_STRICT_BODY = process.env.LIKES_STRICT_BODY !== '0';
+function loadLikes() { try { const t = fs.readFileSync(LIKES_FILE, 'utf8'); const o = JSON.parse(t); return { st: (o && typeof o === 'object' && !Array.isArray(o)) ? o : {}, text: t }; } catch (e) { return { st: {}, text: null }; } }
+function saveLikes(st, prevText) {
+  const text = JSON.stringify(likePlan.publicState(st));
+  if (text === prevText || (prevText == null && st.kv == null)) return false;   // unchanged / still empty (kv is set once it holds an entry)
+  try { writeStateFile(LIKES_FILE, text); return true; } catch (e) { ghWarn('write ' + LIKES_FILE + ' failed: ' + (e && e.message)); return false; }
+}
 function loadXp() { try { return JSON.parse(fs.readFileSync(XP_FILE, 'utf8')) || {}; } catch (e) { return {}; } }
 function saveXp(s) { try { writeStateFile(XP_FILE, JSON.stringify(s, null, 0)); } catch (e) { ghWarn('write ' + XP_FILE + ' failed: ' + (e && e.message)); } }
 // per-game point formula -- lockstep mirror of the client config (asserted by the schema-lockstep test).
@@ -7149,6 +7174,9 @@ function ptBoardPlan(names, cfg) {
   add('card_box', 0);       // cosmetic claim rows (client-writable, zero authority)
   add(UNMATCHED_LB, 0);     // knife-7 host self-incrimination box (client-writable, record-only)
   add(ACTIVE_MATCH_LB, 0, 1);   // client knife 3.10b reconnect-record mirror (client-writable, friends-reads, self-read only)
+  // O520 likes lane (client knife 5.4d, W79): the like box exists before the first client write (client-writable, friends-reads:
+  //   nobody but this job reads who liked whom) + the like counts (trusted, cron-only, read by everyone). Both apps (decision 6)
+  add(cfg.likeBoxLb, 0, 1); add(cfg.likeCountLb, 1);
   const forbidden = [];
   for (const n0 of names) {
     const n = String(n0);
@@ -7484,6 +7512,7 @@ async function main() {
       classicDuoLb: ENDLESS_LB_CLASSIC_DUO, saveBoxClassicDuoLb: SAVE_BOX_LB_CLASSIC_DUO, classicTrioLb: ENDLESS_LB_CLASSIC_TRIO, saveBoxClassicTrioLb: SAVE_BOX_LB_CLASSIC_TRIO,
       classicQuadLb: ENDLESS_LB_CLASSIC_QUAD, saveBoxClassicQuadLb: SAVE_BOX_LB_CLASSIC_QUAD,
       rankedLb: RANKED_LB, lpLb: LP_LB, redeemLb: REDEEM_LB, grantLb: GRANT_LB, mirrorLb: PT_MIRROR_LB,
+      likeBoxLb: LIKE_BOX_LB, likeCountLb: LIKE_COUNT_LB,   // O520 likes lane (W79)
     });
     if (ptPlan.forbidden.length) { ghErr('playtest channel: forbidden board(s) exist on this app: ' + ptPlan.forbidden.join(', ') + ' -- refusing to run (lock layer 3)'); process.exit(1); }
     for (const b of ptPlan.create) {
@@ -7507,6 +7536,14 @@ async function main() {
       const id0 = await findOrCreateBoard(nm, trusted);
       if (id0) console.log('solo boards: provisioned ' + nm + (trusted ? ' (trusted)' : ' (client-writable)'));
       else ghWarn('solo boards: provision failed for ' + nm + ' (solo saves refuse until it exists)');
+    }
+    // O520 likes lane (W79): the like box must exist before the first client write (a missing board = the client's like
+    //   is never read); the count board is cron-only. A failure here is only a warning: processLikes tries again every run.
+    for (const [nm, trusted, friendsReads] of [[LIKE_BOX_LB, false, true], [LIKE_COUNT_LB, true, false]]) {
+      if (names0.indexOf(nm) >= 0) continue;
+      const id0 = await findOrCreateBoard(nm, trusted, friendsReads);
+      if (id0) console.log('like boards: provisioned ' + nm + (trusted ? ' (trusted)' : ' (client-writable, friends-reads)'));
+      else ghWarn('like boards: provision failed for ' + nm + ' (the likes lane retries every run)');
     }
   }
   // seasonal points target (see SEASONS): resolved once per run; the previous season's board
@@ -9279,9 +9316,107 @@ async function main() {
     } catch (e) { ghWarn('chat-mute lane failed: ' + (e && e.message)); }
   };
   const PT_MODE_MAIL_OFF = false;
+  // ---- likes lane (O520, client knife 5.4d; W79 = plan step L1; rules in like-plan.js) ----
+  //   like_box (one row per voter, client-written, friends-reads) -> the likes that count (like-plan.js harvest) ->
+  //   like_count (one row per player liked, cron-only, everyone reads; state likes.json is the truth, the board its
+  //   projection). Rides every path like processChatMute (likes come at any time), but on the main path AFTER the settle
+  //   loop: settledKeys = the matchmade keys this run settled and did not void, so a like given in a match counts the run
+  //   the match settles (certify) and one seen before that waits for it. xpNow = the XP state as this run left it (the
+  //   main path's in-memory copy, the file elsewhere): `known` = has settled XP -- the closure audit.js holds trusted boards
+  //   to (xp.json is never pruned), so every row this lane writes stays inside it.
+  //   Never stops the run (not under STRICT_BOARDS either: a social lane holds no settle back): a missing board or a failed
+  //   read is a warning, the settled keys are certified all the same, and what was not read or written is done next run.
+  //   Writes nothing under APPLY_MMR=0 (no board write, no state file).
+  const processLikes = async (settledKeys, xpNow) => {
+    try {
+      const L = likePlan.LIKE;
+      const loaded = loadLikes(), st = loaded.st;
+      if (!likePlan.ready(st)) { console.log('likes: state of a newer layout (kv ' + st.kv + ') -- lane left alone'); return; }
+      const now = Math.floor(nowMs / 60000);
+      const list = (lr.json && lr.json.response && lr.json.response.leaderboards) || [];
+      const byName = (name) => { const f = list.find(x => String(x.name || x.Name) === name); return f ? (f.id || f.ID) : null; };
+      const boxId = byName(LIKE_BOX_LB) || await findOrCreateBoard(LIKE_BOX_LB, false, true);
+      const cntId = byName(LIKE_COUNT_LB) || await findOrCreateBoard(LIKE_COUNT_LB, true);
+      // a missing board is a failed read, not a skipped lane: this run's settled keys are still certified (they are handed
+      //   over once; skipped here, the likes waiting for them would run out unminted), nothing is read or written on it
+      if (!boxId || !cntId) ghWarn('likes: boards unavailable (box=' + !!boxId + ' count=' + !!cntId + ') -- settled keys certified, nothing read or written on a missing board this run');
+      const xs = (xpNow && Object.keys(xpNow).length) ? xpNow : loadXp();
+      const known = (sid) => !!xs[pid(String(sid))];
+      // target key -> SteamID for the players of this run's records (writers + rosters): a like waiting for its settle is
+      //   named again here (its match settles this run, so its players are in this run's records)
+      let tmap = null;
+      const sidOfTarget = (tk) => {
+        if (!tmap) {
+          tmap = new Map();
+          const K0 = likePlan.keys(pid);
+          const addSid = (x) => { const sx = String(x); if (likePlan.sidPlausible(sx)) tmap.set(K0.target(sx), sx); };
+          for (const r of recs) { addSid(r.steamID); for (const x of Object.values(r.roster || {})) addSid(x); }
+        }
+        return tmap.get(tk) || null;
+      };
+      const ctx = { kh: pid, now, season: seasonId, match: likePlan.matchIndex(recs), known, sidOfTarget };
+      const cert = likePlan.certify(st, settledKeys || [], ctx);
+      let rows = [], boxOk = !!boxId;
+      if (boxId) try {
+        const bb = await readBoardAll(boxId, 'like box');
+        rows = bb.ents.map(e => ({ voterSid: String(e.steamID), det: decodeDetails(e.detailData) }));
+      } catch (e) { boxOk = false; ghWarn('likes: like box read failed (' + (e && e.message) + ') -- no new likes this run'); }
+      const h = likePlan.harvest(st, rows, ctx);
+      const pr = likePlan.prune(st, now);
+      if (pr.evicted) ghWarn('likes: ' + pr.evicted + ' token(s) over the size fuse evicted (oldest first)');
+      // like_count: whole-board read; on a capped read the players of this run not on the pages read are read one by one
+      //   (never a blind write over a row this job has not seen); one whose read fails waits for the next run. Both reads
+      //   strict (LIKES_STRICT_BODY): a 200 with a broken body fails the read instead of reading as "no row"
+      let plan = { writes: [], adopted: 0, behind: 0, more: 0 };
+      const want = Array.from(new Set(h.targets.concat(cert.resolvedSids)));
+      if (cntId) try {
+        const cntLs = list.find(x => String(x.name || x.Name) === LIKE_COUNT_LB);
+        const cb = await readBoardAll(cntId, 'like count board', { strictBody: LIKES_STRICT_BODY, expectEntries: !!cntLs && ((cntLs.entries || cntLs.Entries) | 0) > 0 });
+        const boardRows = cb.ents.map(e => ({ sid: String(e.steamID), score: e.score | 0, det: decodeDetails(e.detailData) }));
+        let sids = want;
+        if (!cb.complete) {
+          const seen = new Set(boardRows.map(r => r.sid));
+          const miss = want.filter(x => !seen.has(x)).slice(0, L.WRITE_MAX);
+          const got = await mapPool(miss, CONCURRENCY, (x) => readUserEntry(cntId, x, 'like count board', { strictBody: LIKES_STRICT_BODY }));
+          const bad = new Set();
+          got.forEach((g, i) => {
+            if (g.status !== 'fulfilled') bad.add(miss[i]);
+            else if (g.value) boardRows.push({ sid: miss[i], score: g.value.score | 0, det: decodeDetails(g.value.detailData) });
+          });
+          sids = want.filter(x => seen.has(x) || (miss.indexOf(x) >= 0 && !bad.has(x)));
+          if (bad.size) ghWarn('likes: ' + bad.size + ' like count row read(s) failed -- not written this run (next run)');
+        }
+        plan = likePlan.boardPlan(st, boardRows, sids, ctx);
+      } catch (e) { ghWarn('likes: like count read failed (' + (e && e.message) + ') -- rows written next run'); }
+      const nCnt = h.counted.length + cert.resolved.length;
+      let nOk = 0, nFail = 0, nGone = 0;
+      if (APPLY_MMR && plan.writes.length) {
+        const wr = await mapPool(plan.writes, CONCURRENCY, async (w) => {
+          const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: cntId, steamid: w.sid, score: w.score, scoremethod: 'ForceUpdate', format: 'json' }, w.details);
+          const code = res.json && res.json.result && res.json.result.result;
+          if (res.ok && !(code && code !== 1)) return 1;
+          if (code === 27) return 2;   // no longer owns the app: nothing to show, not retried until he is liked again
+          ghWarn('likes: like count write failed ' + plog(w.sid) + ' HTTP ' + res.status + ' (rewritten next run: the state keeps the count)');
+          return 0;
+        });
+        for (const x of wr) { const v0 = x.status === 'fulfilled' ? x.value : 0; if (v0 === 1) nOk++; else if (v0 === 2) nGone++; else nFail++; }
+      }
+      const whyTxt = Object.keys(h.why).sort().map(k => k + ' ' + h.why[k]).join(', ');
+      if (nCnt || h.pended || plan.writes.length || cert.unknown || cert.pair || plan.adopted || plan.behind || (boxOk && rows.length && whyTxt)) {
+        console.log('likes: counted +' + nCnt + ' (match ' + (h.counted.filter(c => c.kind === L.KIND_MATCH).length + cert.resolved.length) + ', board ' + h.counted.filter(c => c.kind === L.KIND_BOARD).length + ')' +
+          (h.pended ? ', waiting +' + h.pended : '') + (cert.certified ? ', keys certified ' + cert.certified : '') + (cert.unknown ? ', waiting dropped (unknown target) ' + cert.unknown : '') + (cert.pair ? ', waiting dropped (pair week) ' + cert.pair : '') +
+          (whyTxt ? ', skipped: ' + whyTxt : '') + '; boxes ' + rows.length + ', count rows ' + (APPLY_MMR ? nOk + '/' + plan.writes.length : 'would write ' + plan.writes.length) +
+          (nGone ? ' (' + nGone + ' gone)' : '') + (nFail ? ' (' + nFail + ' failed)' : '') + (plan.more ? ' (+' + plan.more + ' next run)' : '') +
+          (plan.adopted || plan.behind ? '; state took ' + (plan.adopted + plan.behind) + ' row(s) back from the board (adopted ' + plan.adopted + ', behind ' + plan.behind + ')' : '') + (APPLY_MMR ? '' : ' [dry-run]'));
+        RUN.likes = '+' + nCnt + (h.pended ? '/w' + h.pended : '') + (plan.writes.length ? '/r' + nOk + '-' + plan.writes.length : '');
+      }
+      if (!APPLY_MMR) return;
+      saveLikes(st, loaded.text);
+    } catch (e) { ghWarn('likes lane failed: ' + (e && e.message)); }
+  };
 
   RUN.consistent = consistentMatches.length;
-  if (consistentMatches.length === 0) { console.log('no consistent matches'); await ebRetry(); await lpRetry(); await rowRetry(); persistStartsSide(); await maintainTrust(); { const st0 = loadSolo(); await maintainRating(st0, new Set()); if (await maintainCup(st0, null) && APPLY_MMR) saveSolo(st0, nowMs); } await processRedeems(null); await processCampaignGrants(); await processCampaignEndless(); await processChatMute(); await writePulse(); await processSupporters(null, []); await processClassicOwners(null, []); writeRunSummary(); return; }
+  if (consistentMatches.length === 0) { console.log('no consistent matches'); await ebRetry(); await lpRetry(); await rowRetry(); persistStartsSide(); await maintainTrust(); { const st0 = loadSolo(); await maintainRating(st0, new Set()); if (await maintainCup(st0, null) && APPLY_MMR) saveSolo(st0, nowMs); } await processRedeems(null); await processCampaignGrants(); await processCampaignEndless(); await processLikes([], null); await processChatMute(); await writePulse(); await processSupporters(null, []); await processClassicOwners(null, []); writeRunSummary(); return; }
   // cloud audit Q245: the solo chain memory is read before the fresh list -- a processed solo key the done memory remembers
   //   per owner comes back for a writer the lane never processed under it (soloReopenOwners); every other processed key
   //   stays out as before
@@ -9294,7 +9429,7 @@ async function main() {
   }
   RUN.fresh = fresh.length;
   console.log(consistentMatches.length + ' consistent, ' + fresh.length + ' fresh (settled ' + (consistentMatches.length - fresh.length) + ')');
-  if (fresh.length === 0) { console.log('no fresh matches, skip'); await ebRetry(); await lpRetry(); await rowRetry(); persistStartsSide(); await maintainTrust(); { const st0 = loadSolo(); await maintainRating(st0, new Set()); if (await maintainCup(st0, null) && APPLY_MMR) saveSolo(st0, nowMs); } await processRedeems(null); await processCampaignGrants(); await processCampaignEndless(); await processChatMute(); await writePulse(); await processSupporters(null, []); await processClassicOwners(null, []); writeRunSummary(); return; }
+  if (fresh.length === 0) { console.log('no fresh matches, skip'); await ebRetry(); await lpRetry(); await rowRetry(); persistStartsSide(); await maintainTrust(); { const st0 = loadSolo(); await maintainRating(st0, new Set()); if (await maintainCup(st0, null) && APPLY_MMR) saveSolo(st0, nowMs); } await processRedeems(null); await processCampaignGrants(); await processCampaignEndless(); await processLikes([], null); await processChatMute(); await writePulse(); await processSupporters(null, []); await processClassicOwners(null, []); writeRunSummary(); return; }
 
   // playtest channel: no rating board exists (and must not -- lock layer 3); the TrueSkill
   // update block below is skipped wholesale, so the id is never consulted.
@@ -9617,6 +9752,7 @@ async function main() {
   for (const sid of owedSent) owedXpBase[sid] = xp[sid] | 0;
   const today = Math.floor(Date.now() / 86400000);   // UTC day index (matches client lastWinDay) for the daily-first bonus
   const changed = {}; const changedLp = {}; const changedXp = {}; const changedCp = {}; const changedEndless = {}; const changedEndlessSeason = {}; const changedEndlessTrio = {}; const changedEndlessTrioSeason = {}; const changedEndlessQuad = {}; const changedEndlessQuadSeason = {}; const reveal = {}; const careerDet = {}; const careerTouched = new Set(); let settled = 0, voided = 0, settledEndless = 0, settledPrivate = 0, settledSolo = 0, settledEndlessComp = 0, settledBots = 0;
+  const likeKeys = [];   // O520 likes lane (W79): matchmade keys settled this run and not voided -> processLikes certifies them
   const lateCv = [];   // Q228: [entry key, sid, gains] of this run's convictions at a ranked settle (only writes that landed count, below)
   const changedEndlessSolo = {}, changedEndlessSoloSeason = {};   // O218 solo casual ladder write pools (client knife 3.7a)
   const changedEndlessClassicSolo = {};   // O216 classic solo lifetime ladder write pool (client knife 3.9b N2)
@@ -11537,11 +11673,14 @@ async function main() {
         console.log('  leaver LP ' + c.m + ': ' + plog(x.steamID) + ' pts ' + cur + '-' + LEAVER_LP_PENALTY + '->' + nv);
       }
     }
-    processed.add(c.m); settled++;
+    processed.add(c.m); settled++; likeKeys.push(c.m);
   }
   if (scPendingRestore) { scRestore(scPendingRestore); scPendingRestore = null; }
   console.log('settled ' + settled + ' (+' + settledEndless + ' endless, +' + settledPrivate + ' private, +' + settledBots + ' bots, +' + settledSolo + ' solo, +' + settledEndlessComp + ' team-comp, +' + settledEndlessClassic + ' team-classic), voided ' + voided + ', ' + Object.keys(changed).length + ' players changed, ' + leaverHits + ' leavers');
   RUN.endless = settledEndless; RUN.solo = settledSolo; RUN.endlessComp = settledEndlessComp; RUN.endlessClassic = settledEndlessClassic;
+  // O520 likes lane (W79): after the settle loop (this run's matchmade keys are certified now, the XP state holds this run's
+  //   players), before the dry-run return (the lane gates its own writes) -- it touches no settle state
+  await processLikes(likeKeys, xpId ? xpState : null);
 
   if (!APPLY_MMR) { console.log('APPLY_MMR=0 dry-run, nothing written'); return; }
 
@@ -12100,3 +12239,4 @@ Object.assign(module.exports, { careerBlockOf, fillCareerDetails, careerEnsureWr
 Object.assign(module.exports, { V54B3_STREAK, streakPlan, streakApply, streakAbsence, streakPardon, streakApplyEarly, minuteOf });   // O181 matchmade win streak (client knife 5.4b3; test/streak.js, test/streak-plan-fixtures.js, mvp ledger-schema-lockstep)
 Object.assign(module.exports, { PRIVATE_LONE, privateLoneClaim, privateLoneVerdicts });   // cloud audit Q316 a friends' room only one player wrote a result for (test/private-lone-stayer.js)
 Object.assign(module.exports, { START_PROOF_ENFORCE, startProof, proofState, proofTable, proofOwnsId, applyStartProof, screenLateStarts, seenNote, startSeenId, startSig });   // O462 matchmade start proof (test/start-proof-step.js)
+Object.assign(module.exports, { LIKE: likePlan.LIKE, LIKES_FILE, LIKE_BOX_LB, LIKE_COUNT_LB, loadLikes, saveLikes });   // O520 likes lane (client knife 5.4d, W79; test/likes-lane.js)

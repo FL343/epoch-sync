@@ -70,6 +70,7 @@ jobs:
           UNMATCHED_FILE: demo-unmatched.json
           SOLO_FILE: demo-endless-solo.json
           CHAT_MUTE_FILE: demo-chat-mute.json
+          LIKES_FILE: demo-likes.json
           SUPPORTERS_FILE: demo-supporters.json
           PENDING_WRITES_FILE: demo-pending-writes.json
           # O124 seedcap consult (read-only; seedcap.yml's demo twin owns the file). Enforce on
@@ -115,7 +116,7 @@ jobs:
           RUN_OUTCOME: ${{ steps.run.outcome }}
         run: |
           state_files=""
-          for f in demo-processed.json demo-leavers.json demo-xp.json demo-starts.json demo-signals.json demo-confessions.json demo-unmatched.json demo-supporters.json demo-endless-solo.json demo-chat-mute.json demo-pending-writes.json demo-trust.json; do
+          for f in demo-processed.json demo-leavers.json demo-xp.json demo-starts.json demo-signals.json demo-confessions.json demo-unmatched.json demo-supporters.json demo-endless-solo.json demo-chat-mute.json demo-pending-writes.json demo-trust.json demo-likes.json; do
             [ -f "$f" ] && state_files="$state_files $f"
           done
           if [ -n "$state_files" ] && [ -n "$(git status --porcelain -- $state_files)" ]; then

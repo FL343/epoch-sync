@@ -20,14 +20,22 @@
 //        friend room, no bot match), disposition finished; and the match was SETTLED by this job and not voided (validate.js
 //        certifies the key at the settle; a like seen before that waits in `pend`, PENDING_TTL_MIN)
 //     3. T sits at a seat of the match's consensus roster (majority per seat; a bot seat holds no SteamID), V at his own
-//     4. V and T are not one premade unit: an FFA premade pair / trio (the party bits of the match type); in a team match
-//        a record cannot tell a party from strangers (validate.js, the late-result shield note), so teammates do not count
-//        at all (TEAMMATES_COUNT); opponents do
-//     5. one like per voter per match: the first one taken counts
+//     4. V and T are not one premade unit: an FFA premade pair / trio (the party bits of the match type) does not count.
+//        In a team match a record cannot tell a party from strangers (validate.js, the late-result shield note), so a
+//        like to a TEAMMATE counts under the kind 2 pair rule instead (W79 rework, architecture decision 10: the user's
+//        rule leaves out premade parties only, and a stranger teammate's like must not be lost): one per (V, T) pair per
+//        PAIR_WEEK_MIN, the same pair token as a board like (a party that likes each other could do that on a board row
+//        anyway). Opponents count every match
+//     5. one like per voter per match: the first one taken counts (a teammate like held by the pair week is not taken:
+//        it is looked at again while its key is certified, as a board click held by the week)
+//     6. (W79) T is a player this job knows (ctx.known: validate.js = has settled XP), checked when the like counts -- at
+//        the settle for a waiting one (certify, ctx.sidOfTarget) -- so every like_count row stays inside the closure
+//        audit.js holds trusted boards to
 //   kind 2 (on a board row / profile):
 //     1. V != T, and T is a player this job knows (ctx.known: has played a match it settled) -- an entry cannot conjure a
 //        row for an arbitrary SteamID. No bar on V (decision 2026-10-22: any account counts)
-//     2. one per (V, T) pair per PAIR_WEEK_MIN, timed by THIS job's clock (the client minute decides nothing)
+//     2. one per (V, T) pair per PAIR_WEEK_MIN, timed by THIS job's clock (the client minute decides nothing); a teammate
+//        like in a team match (kind 1 rule 4) takes the same pair token
 //     3. at most BOARD_DAILY_CAP counted per voter per UTC day (a state-size fuse far above normal use); over it nothing
 //        is minted, the entry is retried on a later run
 //   -> T: lifetime +1, season +1, matchPart / boardPart +1.
@@ -40,9 +48,10 @@
 //   mt   { tk: stamp }   kind 1 taken: tk = kh('like-mt|' + V + '|' + m), one per voter per match
 //   bt   { et: stamp }   kind 2 entry taken: et = kh('like-bt|' + V + '|' + T + '|' + minute) -- the same click seen again
 //                        (it stays queued) is not counted again after the pair week
-//   pr   { pt: minute }  kind 2 pair: pt = kh('like-pr|' + V + '|' + T), the minute of the last counted like
-//   pend { tk: { k, t, at, w } }  kind 1 waiting for its settle: k = key token, t = target key, at = seen (job clock),
-//                        w = the entry's minute
+//   pr   { pt: minute }  the pair: pt = kh('like-pr|' + V + '|' + T), the minute of the last counted kind 2 or teammate like
+//   pend { tk: { k, t, at, w, p? } }  kind 1 waiting for its settle: k = key token, t = target key, at = seen (job clock),
+//                        w = the entry's minute, p = the pair token (a teammate like only: the pair rule is checked when it
+//                        counts, and the voter is not in the state to make it again)
 //   ok   { kt: stamp }   keys settled and not voided: kt = kh('like-k|' + m), kept OK_TTL_MIN
 //   day  { d, s: [slot] }  today's counted kind 2 likes: one slot token kh('like-day|' + d + '|' + V + '|' + i) each --
 //                        the day's count of a voter is the number of his slots found, no counter sits under his key
@@ -72,7 +81,6 @@ const LIKE = Object.freeze({
   PAIR_WEEK_MIN: 7 * 1440,          // decision 2026-10-22: one like per (voter, target) per 7 days on a board / profile
   PAIR_TTL_MIN: 8 * 1440,
   BOARD_DAILY_CAP: 50,
-  TEAMMATES_COUNT: false,           // team match: a like to a teammate (maybe a party) does not count
   TOKENS_MAX: 100000,               // size fuses (oldest stamps go first)
   PENDING_MAX: 20000,
   OK_MAX: 30000,
@@ -127,13 +135,20 @@ function decodeCount(score, det) {
 function isMatchmadeMt(mt) { const b = PP.baseMt(mt); return b === 1 || b === 2 || PP.isTeamMt(mt); }   // = validate.js isMatchmadeMt
 // why a like between seats a and b of one match does not count by rule 4, or null
 function unitOf(mt, a, b) {
-  if (PP.isTeamMt(mt)) { const ts = PP.teamSizeOfMt(mt); return (!LIKE.TEAMMATES_COUNT && PP.teamOfSeat(a, ts) === PP.teamOfSeat(b, ts)) ? 'team' : null; }
+  if (PP.isTeamMt(mt)) return null;            // a teammate counts under the pair rule (mateOf), an opponent always
   const mask = PP.premadeMaskOf(mt);
   if ((a >> 1) === (b >> 1) && ((mask >> (a >> 1)) & 1) === 1) return 'premade';
   const tr = PP.premadeTrioAtOf(mt);
   if (tr > 0 && a >= tr - 1 && a <= tr + 1 && b >= tr - 1 && b <= tr + 1) return 'premade';
   return null;
 }
+// seats a and b on one team of a team match: the like takes the (V, T) pair token (rule 4)
+function mateOf(mt, a, b) {
+  if (!PP.isTeamMt(mt)) return false;
+  const ts = PP.teamSizeOfMt(mt);
+  return PP.teamOfSeat(a, ts) === PP.teamOfSeat(b, ts);
+}
+const inWeek = (last, now) => last !== undefined && now - (last | 0) < LIKE.PAIR_WEEK_MIN;
 
 // ---- the matches of this run's records (validate.js passes recs after the seat gate) ----
 // recs = [{ steamID, d, dispCode?, roster? }] (settle records 0xB1). Returns lookup(voterSid, matchHash) ->
@@ -223,10 +238,15 @@ function credit(st, tkey, kind, season) {
 }
 
 // Keys settled this run and not voided (validate.js, at the settle sites; matchmade keys only matter): from now on they take
-// kind 1 likes for OK_TTL_MIN, and the likes waiting for them count now. ctx = { kh, now (unix minute), season }.
-// Returns { certified, resolved: [targetKey], deferred }.
+// kind 1 likes for OK_TTL_MIN, and the likes waiting for them count now. ctx = { kh, now (unix minute), season } and, from
+// validate.js (W79 / L1), sidOfTarget(targetKey) -> SteamID | null (the players of this run's records) + known(sid): a
+// waiting like counts only for a target this job knows (has settled XP for -- the same closure audit.js holds every
+// like_count row to); one it cannot name or does not know is dropped unminted (its box entry, still queued, is harvested
+// again and then needs the known rule like any kind 1 like). Without them (the L0 tests) nothing is checked. A waiting
+// teammate like (p, rule 4) counts only outside the pair week, and then takes the pair token (pair: dropped, the same).
+// Returns { certified, resolved: [targetKey], resolvedSids: [sid], unknown, pair, deferred }.
 function certify(st, settledKeys, ctx) {
-  const res = { certified: 0, resolved: [], deferred: false };
+  const res = { certified: 0, resolved: [], resolvedSids: [], unknown: 0, pair: 0, deferred: false };
   if (!ready(st)) { res.deferred = true; return res; }
   norm(st);
   const K = keys(ctx.kh), now = ctx.now | 0;
@@ -236,9 +256,14 @@ function certify(st, settledKeys, ctx) {
     if (!p || st.ok[p.k] === undefined) continue;
     delete st.pend[tk];
     if (st.mt[tk] !== undefined) continue;
+    const sid = ctx.sidOfTarget ? ctx.sidOfTarget(p.t) : null;
+    if (ctx.sidOfTarget && ctx.known && !(sid && ctx.known(sid))) { res.unknown++; continue; }
+    if (p.p && inWeek(st.pr[p.p], now)) { res.pair++; continue; }
     st.mt[tk] = stampOf(p.w == null ? now : p.w, now);
+    if (p.p) st.pr[p.p] = now;
     credit(st, p.t, LIKE.KIND_MATCH, ctx.season);
     res.resolved.push(p.t);
+    if (sid) res.resolvedSids.push(sid);
   }
   if (hasEntries(st)) st.kv = LIKE.KV;
   return res;
@@ -282,16 +307,22 @@ function harvest(st, rows, ctx) {
         if (tSeats.length !== 1) { why('notin'); continue; }
         const u = unitOf(info.mt, info.vSeat | 0, tSeats[0]);
         if (u) { why(u); continue; }
+        const pt = mateOf(info.mt, info.vSeat | 0, tSeats[0]) ? K.pair(V, T) : null;   // a teammate: the pair rule (rule 4)
         const tk = K.match(V, info.m);
         if (st.mt[tk] !== undefined) { why('dup'); continue; }
         const kt = K.key(info.m);
         if (st.ok[kt] !== undefined) {
+          // the match is settled: T must be a player this job knows (W79: the audit closure of like_count; one named only by
+          // the others' rosters who never wrote a result of his own is not) -- nothing minted, the entry may count later
+          if (ctx.known && !ctx.known(T)) { why('unknown'); continue; }
+          if (pt && inWeek(st.pr[pt], now)) { why('pair'); continue; }   // not taken: may count once the week is over
           delete st.pend[tk];
           st.mt[tk] = stampOf(e.min, now);
+          if (pt) st.pr[pt] = now;
           credit(st, K.target(T), LIKE.KIND_MATCH, ctx.season);
           res.counted.push({ sid: T, kind: LIKE.KIND_MATCH });
         } else if (st.pend[tk] !== undefined) why('waiting');
-        else { st.pend[tk] = { k: kt, t: K.target(T), at: now, w: e.min >>> 0 }; res.pended++; }
+        else { st.pend[tk] = pt ? { k: kt, t: K.target(T), at: now, w: e.min >>> 0, p: pt } : { k: kt, t: K.target(T), at: now, w: e.min >>> 0 }; res.pended++; }
       } else {
         if (!ctx.known || !ctx.known(T)) { why('unknown'); continue; }
         const et = K.entry(V, T, e.min);
@@ -373,5 +404,5 @@ function boardPlan(st, boardRows, sids, ctx) {
   return res;
 }
 
-module.exports = { LIKE, sidPlausible, encodeBox, decodeBox, countRow, decodeCount, isMatchmadeMt, unitOf, matchIndex,
+module.exports = { LIKE, sidPlausible, encodeBox, decodeBox, countRow, decodeCount, isMatchmadeMt, unitOf, mateOf, matchIndex,
   norm, ready, publicState, PUBLIC_KEYS, keys, certify, harvest, prune, boardPlan };
