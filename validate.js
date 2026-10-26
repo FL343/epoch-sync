@@ -5810,10 +5810,12 @@ const COMP = {
 };
 // knife 5.1b rollout gate (2026-10-18, KNIFE_51_SEASON_BOARDS_PLAN section 3 note): the composite rule v2, the casual / classic
 //   composites and the team block on team-ladder rows run on the EA job now; the playtest / demo jobs keep the knife 3.5d behaviour
-//   through Next Fest (10-19..10-26, the trial's busiest week) and switch when this constant flips on 10-27. One constant on purpose:
+//   through Next Fest (10-19..10-26, the trial's busiest week) and switch when this constant flips on 10-27 (flipped 2026-10-27,
+//   right after the trial's upload 19 [0.4.16, version gate 2026102602] went live: every trial player now runs a client that reads
+//   the casual / classic composites and the team block). One constant on purpose:
 //   the companion repo's landing pipeline tests the client against this repo's main, so the cron half has to be on main before the
 //   client half lands -- the gate keeps the trial's live behaviour unchanged meanwhile.
-const V51B_PT = false;
+const V51B_PT = true;
 const V51B = !PT_MODE || V51B_PT;
 // Composite score in 0.01-depth units from the per-size packed bests { 1: solo, 2: duo, 3: trio, 4: quad } (0 / missing = never
 //   played that size). v2 (O276, user call 10-07 #5): the BEST of K * depth over the played sizes -- trying another size never

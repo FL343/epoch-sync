@@ -6,12 +6,13 @@
 // [teamScore, build, TEAM_MAGIC | ver << 8 | pc << 16, lo0, hi0, lo1, hi1, ...] (seat order, non-writers included). The client groups
 // rows into one frame per team (src/util/lb-team-group.js; lockstep pinned in the companion repo, ledger-schema-lockstep section 33).
 // [0] / [1] keep their meaning (a shipped client reads only those). Behind the knife 5.1b rollout gate: EA job now, playtest / demo
-// jobs once V51B_PT flips (Next Fest keeps the trial's live behaviour).
+// jobs since V51B_PT flipped on 2026-10-27 (after Next Fest).
 //   [1] teamBlock: layout (magic / version / seat count), steamID lo / hi round trip, seat order kept, out-of-range rosters -> []
 //   [2] ladderDetails: no roster -> the two ints; a roster -> two ints + block; [0] / [1] unchanged
 //   [3] e2e over the REAL main(): a duo competitive segment settles; both writers' rows on endless_comp_duo carry the block naming
 //       both seats in seat order
-//   [4] e2e PT_MODE (gate closed): the same settle writes the two ints only
+//   [4] e2e PT_MODE (gate open since 2026-10-27): the same settle on the trial writes the block too (it wrote the two ints only
+//       through Next Fest)
 // ============================================================
 const fs = require('fs'), path = require('path'), os = require('os');
 const { spawnSync } = require('child_process');
@@ -179,12 +180,16 @@ console.log('-- [3] e2e: duo competitive settle on the EA job writes the block -
   }
 }
 
-console.log('-- [4] e2e PT_MODE (gate closed): the same settle writes the two ints only --');
+console.log('-- [4] e2e PT_MODE (gate open since 2026-10-27): the same settle on the trial writes the block too --');
 {
   const { r2 } = settle(true);
   const w = writesTo(r2, COMP_DUO);
   T('[4] settled in PT_MODE', r2.code === 0 && /endless-comp settle/.test(r2.out), r2.out.split('\n').slice(-12).join(' | '));
-  eq('[4] rows carry [team score, build] only (the trial is unchanged through Next Fest)', [w[SID(1)], w[SID(2)]], [[700, 0], [700, 0]]);
+  T('[4] both writers\' duo rows written on the trial', !!(w[SID(1)] && w[SID(2)]), JSON.stringify(w));
+  if (w[SID(1)] && w[SID(2)]) {
+    eq('[4] [0] / [1] unchanged on the trial', [w[SID(1)].slice(0, 2), w[SID(2)].slice(0, 2)], [[700, 0], [700, 0]]);
+    eq('[4] the trial rows carry the block naming both seats in seat order', [decode(w[SID(1)]), decode(w[SID(2)])], [ros, ros]);
+  }
 }
 
 if (failN) { console.log('FAIL (team-block) ' + failN); process.exit(1); } else console.log('ALL PASS (team-block)');

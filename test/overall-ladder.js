@@ -4,15 +4,16 @@
 // ============================================================
 // One row per player and family across the team-size ladders. Rule v2 (O276, the user's call of 10-07 #5): the BEST of K * depth
 // over the played sizes -- trying another size never lowers it; team depths are discounted (K) for the extra hooks. The knife 3.5d
-// rule (M-weighted mean floored at the solo depth) stays only for the playtest / demo jobs until the knife 5.1b rollout gate flips
-// (V51B_PT; through Next Fest the trial's live behaviour does not change). Families: competitive (lifetime + season twin), casual
+// rule (M-weighted mean floored at the solo depth) stayed on the playtest / demo jobs until the knife 5.1b rollout gate flipped
+// (V51B_PT; flipped 2026-10-27 after Next Fest, all four jobs run rule v2 now; the mean stays as overallScore(b, true)). Families: competitive (lifetime + season twin), casual
 // (lifetime + season twin, endless_board_overall), classic (lifetime only, endless_classic_overall; classic rows carry no build).
 //   [1] overallScore v2 (pure) + the legacy mean (overallScore(b, true) == overallScoreMean(b)) + overallDominant
 //   [2] constants / board names (client RANKED_CONFIG + ENDLESS_LEVELS mirror these; the companion repo pins both sides)
 //   [3] wiring pins (provisioning, the gate, the three-family writer, the reads keep detailData)
 //   [4] O290 e2e over the REAL main(): a current composite row is left alone, a stale one gets its build; mutation (e.details) -> red
 //   [5] O276 e2e (EA job): casual + classic composites written from their per-size bests (v2 rule, dominant build / size)
-//   [6] O276 e2e (PT_MODE job, gate closed): no casual / classic composite boards or rows; the competitive composite keeps the mean
+//   [6] O276 e2e (PT_MODE job, gate open since 2026-10-27): the trial runs rule v2 too and provisions + writes the casual / classic
+//       composites (the gate kept the knife 3.5d mean on the trial through Next Fest)
 // ============================================================
 const fs = require('fs');
 const path = require('path');
@@ -60,10 +61,10 @@ console.log('== [2] constants / board names ==');
 eq('COMP.OVERALL (K live; M read by the legacy mean only)', V.COMP.OVERALL, { K: [1.0, 0.9, 0.8, 0.7], M: [2, 1, 1, 1] });
 eq('board names (defaults)', [V.ENDLESS_COMP_LB_OVERALL, V.ENDLESS_LB_OVERALL, V.ENDLESS_LB_CLASSIC_OVERALL],
   [process.env.ENDLESS_COMP_LB_OVERALL || 'endless_comp_overall', process.env.ENDLESS_LB_OVERALL || 'endless_board_overall', process.env.ENDLESS_LB_CLASSIC_OVERALL || 'endless_classic_overall']);
-eq('rollout gate closed on the playtest / demo jobs (flip on 10-27, after Next Fest)', V.V51B_PT, false);
+eq('rollout gate open on the playtest / demo jobs too (flipped 2026-10-27, after Next Fest)', V.V51B_PT, true);
 
 console.log('== [3] wiring pins (validate.js) ==');
-assert('gate: V51B = !PT_MODE || V51B_PT (one constant; the EA job runs the new rule now)', /const V51B_PT = false;\nconst V51B = !PT_MODE \|\| V51B_PT;/.test(src));
+assert('gate: V51B = !PT_MODE || V51B_PT (one constant; flipped 2026-10-27 = every job runs the new rule)', /const V51B_PT = true;\nconst V51B = !PT_MODE \|\| V51B_PT;/.test(src));
 assert('provisioned up-front with the solo/team ladders (trusted) [+ casual solo ladder / casual save box, client knife 3.7a]', /\[ENDLESS_COMP_LB_OVERALL, true\], \[ENDLESS_LB_SOLO, true\], \[SAVE_BOX_LB_CASUAL, false\],\s*\n\s*\[ENDLESS_LB_CLASSIC_SOLO, true\]/.test(src));   // classic surface continues the list (client knife 3.9b N3)
 assert('O276: the EA list provisions the casual + classic composites at its tail (trusted)', /\[ENDLESS_TIERCUT_LB, true\],\n      \[ENDLESS_LB_OVERALL, true\], \[ENDLESS_LB_CLASSIC_OVERALL, true\],[^\n]*\n      \[ENDLESS_CUP_LB, true\], \[ENDLESS_CUP_HONOR_LB, true\]\]\) \{/.test(src));   // O180 (knife 5.1c-1): the cup boards after them
 assert('playtest board plan adds the overall ladder (trusted); the casual / classic composites only once the gate flips',
@@ -289,22 +290,25 @@ console.log('== [5] O276 e2e (EA job): casual + classic composites from their pe
   assert('[5] the casual / classic composite boards are provisioned on the EA job when missing (trusted)', created(r2, 'endless_board_overall') && created(r2, 'endless_classic_overall'));
 }
 
-console.log('== [6] O276 e2e (PT_MODE job, gate closed): the trial keeps the knife 3.5d behaviour ==');
+console.log('== [6] O276 e2e (PT_MODE job, gate open since 2026-10-27): the trial runs the knife 5.1b rules too ==');
 {
   const ex = {
     compSolo: [{ steamID: SID(80), score: pack(12, 1), details: [1, BUILD_A] }],
     casSolo: [{ steamID: SID(60), score: pack(10, 1), details: [1, BUILD_A] }],
     clsSolo: [{ steamID: SID(70), score: V.packClassicScore(20, 1200000), details: [1200000, 0] }],
   };
-  // the competitive composite on the trial: SID(80) solo 12 + duo 20 -> the MEAN rule (1400), not the v2 best (1800)
+  // the competitive composite on the trial: SID(80) solo 12 + duo 20 -> the v2 best (max(12, 0.9 x 20) = 1800), no longer the
+  //   knife 3.5d mean (1400) it kept through Next Fest
   const duoRow = { steamID: SID(80), score: pack(20, 1), details: [1, BUILD_B] };
   const boards = world(ex, { pt: true, noOverallBoards: true });
   boards.find(b => b.name === 'endless_comp_duo').entries.push(duoRow);
   const r = runCron(VALIDATE, boards, { PT_MODE: '1', RANKED_LB: 'rating', LP_LB: 'points', DEMO_APPID: '2', APPID: '2', PT_SHARD_COUNT: '50' });
   const wo = writesTo(r, BOARD.compOverall);
   assert('[6] run exits 0 in PT_MODE', r.code === 0, r.out.split('\n').slice(-20).join('\n'));
-  eq('[6] competitive composite keeps the mean rule on the trial (solo 12 + duo 20 -> 1400, dominant 2)', wo[SID(80)] && wo[SID(80)].det, [1400, BUILD_B, 2]);
-  assert('[6] no casual / classic composite board created and no such writer ran on the trial', !created(r, 'endless_board_overall') && !created(r, 'endless_classic_overall') && !/overall casual writes|overall classic writes/.test(r.out));
+  eq('[6] competitive composite runs rule v2 on the trial (solo 12 + duo 20 -> 1800, dominant 2)', wo[SID(80)] && wo[SID(80)].det, [1800, BUILD_B, 2]);
+  assert('[6] the casual / classic composite boards are provisioned on the trial when missing and both writers ran',
+    created(r, 'endless_board_overall') && created(r, 'endless_classic_overall') && /overall casual writes: /.test(r.out) && /overall classic writes: /.test(r.out),
+    r.out.split('\n').filter(l => /overall/.test(l)).join(' | '));
 }
 
 if (process.exitCode) console.log('FAIL (overall-ladder)'); else console.log('ALL PASS (overall-ladder)');
