@@ -30,7 +30,8 @@ window.PERKS = (() => {
   function clsOfCreature() { return CLS.creature; }
   const T1_FIELDS = ['valueMul', 'clearBonusMul', 'levelTimeAdd', 'invGrant', 'strengthBonus', 'shopMul', 'flags',
     'cursedMul', 'combo', 'emptyReturn', 'midas', 'drill', 'shatterBonus',
-    'condMul', 'condBonus', 'bagCashMul', 'doomLossMul', 'blastBonus', 'shopFirstMul', 'levelFee', 'wagerWinMul'];
+    'condMul', 'condBonus', 'bagCashMul', 'doomLossMul', 'blastBonus', 'shopFirstMul', 'levelFee', 'wagerWinMul',
+    'blastKeep', 'safeOpenPct', 'gopher', 'dualGood', 'negBeastReward', 'interestPm', 'interestCap', 'finaleMul', 'contTimeAdd', 'negWardN', 'shatterPayPct'];
   const VALUE_MUL_KEYS = CLS_KEYS.concat(['all']);
   const INV_KEYS = ['tnt', 'freeze'];
   const FLAG_KEYS = ['clover'];
@@ -45,12 +46,14 @@ window.PERKS = (() => {
   const COND_MUL_CAP = 3.5;
   const COND_DYN_CAP = 3;
   const COND_TOTAL_CAP = 20;
-  const FIELD_SPEC_T1 = Object.freeze({ bagCashMul: 'mul', doomLossMul: 'mul', blastBonus: 'sum', shopFirstMul: 'mul', wagerWinMul: 'mul' });
+  const FIELD_SPEC_T1 = Object.freeze({ bagCashMul: 'mul', doomLossMul: 'mul', blastBonus: 'sum', shopFirstMul: 'mul', wagerWinMul: 'mul',
+    blastKeep: 'sum', safeOpenPct: 'sum', gopher: 'sum', dualGood: 'sum', negBeastReward: 'sum', interestPm: 'sum', interestCap: 'sum',
+    finaleMul: 'mul', contTimeAdd: 'sum', negWardN: 'sum', shatterPayPct: 'sum' });
   const ONE_PER_TABLE = ['combo', 'emptyReturn', 'midas', 'drill', 'openPull', 'lightPull'];
   const RENDER_ONLY = ['hookSpeedMul', 'pullSpeedMul', 'freezeDurMul', 'highlight', 'laser', 'emptyPullMul',
-    'swingNatMul', 'openPull', 'lightPull', 'hitRadiusMul', 'mechVeteran', 'blind', 'topLit'];
+    'swingNatMul', 'openPull', 'lightPull', 'hitRadiusMul', 'mechVeteran', 'blind', 'topLit', 'earlyDone', 'mayorHook'];
   const FIELD_SPEC = Object.freeze({ hookSpeedMul: 'mul', pullSpeedMul: 'mul', freezeDurMul: 'mul', highlight: 'minPos', laser: 'max', emptyPullMul: 'mul',
-    swingNatMul: 'mul', openPull: 'one', lightPull: 'one', hitRadiusMul: 'mul', mechVeteran: 'max', blind: 'or', topLit: 'max' });
+    swingNatMul: 'mul', openPull: 'one', lightPull: 'one', hitRadiusMul: 'mul', mechVeteran: 'max', blind: 'or', topLit: 'max', earlyDone: 'or', mayorHook: 'max' });
   const AXES = ['time', 'value', 'speed', 'item', 'neg', 'economy', 'collect', 'life', 'info'];
   const RARITIES = ['common', 'rare', 'epic'];
   const SCOPES = ['self', 'team', 'world'];
@@ -96,7 +99,7 @@ window.PERKS = (() => {
     { id: 19, key: 'glassCannon', axis: 'speed', rarity: 'epic', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, contract: true, excl: [47], icon: '⚡',
       lv: [{ hookSpeedMul: 1.5, pullSpeedMul: 1.5, strengthBonus: 2, cursedMul: 2, emptyPullMul: 0.35 }, { hookSpeedMul: 1.75, pullSpeedMul: 1.75, strengthBonus: 3, cursedMul: 2.5, emptyPullMul: 0.28 },
         { hookSpeedMul: 2, pullSpeedMul: 2, strengthBonus: 5, cursedMul: 3, emptyPullMul: 0.22 }], p: [{ a: 50, b: 2, c: 2, d: 35 }, { a: 75, b: 2.5, c: 3, d: 28 }, { a: 100, b: 3, c: 5, d: 22 }] },
-    { id: 20, key: 'miserPact', axis: 'economy', rarity: 'epic', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, contract: true, icon: '💰',
+    { id: 20, key: 'miserPact', axis: 'economy', rarity: 'epic', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, contract: true, excl: [56], icon: '💰',
       lv: [{ shopMul: 0.5, clearBonusMul: 0 }, { shopMul: 0.4, clearBonusMul: 0 }, { shopMul: 0.3, clearBonusMul: 0 }], p: [{ a: 50 }, { a: 40 }, { a: 30 }] },
     { id: 21, key: 'jeweler', axis: 'value', rarity: 'common', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, rulesFrom: 2, tags: ['class'], role: 'steady', icon: '💎',
       lv: [{ valueMul: { gem: 1.12, rock: 0.5 } }, { valueMul: { gem: 1.18, rock: 0.5 } }, { valueMul: { gem: 1.24, rock: 0.5 } }], p: [{ a: 1.12, b: 50 }, { a: 1.18, b: 50 }, { a: 1.24, b: 50 }] },
@@ -151,7 +154,7 @@ window.PERKS = (() => {
       lv: [{ shopFirstMul: 0.7 }, { shopFirstMul: 0.6 }, { shopFirstMul: 0.5 }], p: [{ a: 70 }, { a: 60 }, { a: 50 }] },
     { id: 46, key: 'debtPact', axis: 'economy', rarity: 'epic', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, contract: true, lockSlot: true, rulesFrom: 2, tags: ['econ'], role: 'swing', icon: '💸',
       lv: [{ levelFee: { cash: 1500, fee: 150 } }, { levelFee: { cash: 2500, fee: 225 } }, { levelFee: { cash: 3500, fee: 300 } }], p: [{ a: 1500, b: 150 }, { a: 2500, b: 225 }, { a: 3500, b: 300 }] },
-    { id: 47, key: 'limitPact', axis: 'time', rarity: 'epic', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, contract: true, rulesFrom: 2, tags: ['quick'], role: 'swing', excl: [2, 18, 19], icon: '⏰',
+    { id: 47, key: 'limitPact', axis: 'time', rarity: 'epic', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, contract: true, rulesFrom: 2, tags: ['quick'], role: 'swing', excl: [2, 18, 19, 56], icon: '⏰',
       lv: [{ condMul: [{ when: 'grabWithin', n: 36, mul: 1.5 }, { when: 'grabAfter', n: 36, mul: 0 }] }, { condMul: [{ when: 'grabWithin', n: 40, mul: 1.55 }, { when: 'grabAfter', n: 40, mul: 0 }] },
         { condMul: [{ when: 'grabWithin', n: 44, mul: 1.6 }, { when: 'grabAfter', n: 44, mul: 0 }] }], p: [{ a: 36, b: 1.5 }, { a: 40, b: 1.55 }, { a: 44, b: 1.6 }] },
     { id: 48, key: 'highRoller', axis: 'economy', rarity: 'rare', scope: 'self', modes: { solo: true, coop: true, duel: false }, rollable: true, rulesFrom: 2, tags: ['econ'], role: 'swing', icon: '🎰',
@@ -162,6 +165,32 @@ window.PERKS = (() => {
       lv: [{ condBonus: [{ when: 'splitFirst', amt: 150 }] }, { condBonus: [{ when: 'splitFirst', amt: 250 }] }, { condBonus: [{ when: 'splitFirst', amt: 350 }] }], p: [{ a: 150 }, { a: 250 }, { a: 350 }] },
     { id: 51, key: 'highFive', axis: 'collect', rarity: 'common', scope: 'self', modes: { solo: false, coop: true, duel: false }, rollable: true, rulesFrom: 2, tags: ['team'], role: 'steady', icon: '🙌',
       lv: [{ condBonus: [{ when: 'teamEvery', n: 8, amt: 80 }] }, { condBonus: [{ when: 'teamEvery', n: 8, amt: 120 }] }, { condBonus: [{ when: 'teamEvery', n: 8, amt: 160 }] }], p: [{ a: 80, b: 8 }, { a: 120, b: 8 }, { a: 160, b: 8 }] },
+    { id: 52, key: 'blastHaul', axis: 'item', rarity: 'rare', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, rulesFrom: 2, tags: ['blast'], role: 'swing', icon: '📦',
+      lv: [{ blastKeep: 80 }, { blastKeep: 90 }, { blastKeep: 100, invGrant: { tnt: 1 } }], p: [{ a: 80 }, { a: 90 }, { a: 100, b: 1 }] },
+    { id: 53, key: 'locksmith', axis: 'item', rarity: 'common', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, rulesFrom: 2, tags: ['heavy', 'econ'], role: 'steady', icon: '🗝',
+      lv: [{ safeOpenPct: 100 }, { safeOpenPct: 120 }, { safeOpenPct: 140 }], p: [{ a: 100 }, { a: 120 }, { a: 140 }] },
+    { id: 54, key: 'gopher', axis: 'item', rarity: 'rare', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, rulesFrom: 2, tags: ['class'], role: 'swing', icon: '🐹',
+      lv: [{ gopher: 1 }, { gopher: 2 }, { gopher: 3 }], p: [{}, {}, {}] },
+    { id: 55, key: 'antivenom', axis: 'neg', rarity: 'rare', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, rulesFrom: 2, tags: ['cursed'], role: 'swing', minDepth: 20, icon: '🐍',
+      lv: [{ dualGood: 1 }, { dualGood: 2 }, { dualGood: 2, negBeastReward: 150 }], p: [{}, {}, { a: 150 }] },
+    { id: 56, key: 'cashOut', axis: 'time', rarity: 'common', scope: 'self', modes: { solo: true, coop: true, duel: false }, rollable: true, rulesFrom: 2, tags: ['time'], role: 'swing', excl: [47, 20], icon: '🚪',
+      lv: [{ clearBonusMul: 4, earlyDone: true }, { clearBonusMul: 5, earlyDone: true }, { clearBonusMul: 6, earlyDone: true }], p: [{ a: 20 }, { a: 25 }, { a: 30 }] },
+    { id: 57, key: 'interest', axis: 'economy', rarity: 'common', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, rulesFrom: 2, tags: ['econ'], role: 'steady', icon: '🏦',
+      lv: [{ interestPm: 30, interestCap: 150 }, { interestPm: 30, interestCap: 250 }, { interestPm: 30, interestCap: 350 }], p: [{ a: 3, b: 150 }, { a: 3, b: 250 }, { a: 3, b: 350 }] },
+    { id: 58, key: 'finale', axis: 'value', rarity: 'common', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, rulesFrom: 2, tags: ['rhythm', 'time'], role: 'swing', icon: '🏁',
+      lv: [{ finaleMul: 1.25 }, { finaleMul: 1.45 }, { finaleMul: 1.6 }], p: [{ a: 1.25 }, { a: 1.45 }, { a: 1.6 }] },
+    { id: 59, key: 'sameBoat', axis: 'time', rarity: 'rare', scope: 'self', modes: { solo: false, coop: true, duel: false }, rollable: true, rulesFrom: 2, tags: ['team'], role: 'utility', needs: 'casual', icon: '⛵',
+      lv: [{ contTimeAdd: 10 }, { contTimeAdd: 15 }, { contTimeAdd: 20 }], p: [{ a: 10 }, { a: 15 }, { a: 20 }] },
+    { id: 60, key: 'foreman', axis: 'speed', rarity: 'common', scope: 'self', modes: { solo: false, coop: true, duel: false }, rollable: true, rulesFrom: 2, tags: ['team'], role: 'utility', needs: 'coop2', icon: '👷',
+      lv: [{ mayorHook: 1.2 }, { mayorHook: 1.3 }, { mayorHook: 1.4 }], p: [{ a: 20 }, { a: 30 }, { a: 40 }] },
+    { id: 61, key: 'warder', axis: 'neg', rarity: 'common', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, rulesFrom: 2, tags: ['cursed'], role: 'utility', icon: '🛡',
+      lv: [{ negWardN: 1 }, { negWardN: 2 }, { negWardN: 99 }], p: [{ a: 1 }, { a: 2 }, {}] },
+    { id: 62, key: 'blastMaster', axis: 'item', rarity: 'epic', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: false, rulesFrom: 2, tags: ['blast'], role: 'swing', fuse: [5, 52], icon: '🎆',
+      lv: [{ invGrant: { tnt: 3 }, blastKeep: 100, blastBonus: 20 }, { invGrant: { tnt: 3 }, blastKeep: 100, blastBonus: 20 }, { invGrant: { tnt: 3 }, blastKeep: 100, blastBonus: 20 }],
+      p: [{ a: 3, b: 100, c: 20 }, { a: 3, b: 100, c: 20 }, { a: 3, b: 100, c: 20 }] },
+    { id: 63, key: 'rockCrusher', axis: 'speed', rarity: 'epic', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: false, rulesFrom: 2, tags: ['heavy', 'class'], role: 'swing', fuse: [12, 3], icon: '⚒',
+      lv: [{ drill: { lv: 3 }, valueMul: { rock: 5, gold: 0.9 }, shatterPayPct: 75 }, { drill: { lv: 3 }, valueMul: { rock: 5, gold: 0.9 }, shatterPayPct: 75 }, { drill: { lv: 3 }, valueMul: { rock: 5, gold: 0.9 }, shatterPayPct: 75 }],
+      p: [{ a: 5, b: 10 }, { a: 5, b: 10 }, { a: 5, b: 10 }] },
   ];
   let TABLE = LIST;
   const BY_ID = new Map();
@@ -224,7 +253,8 @@ window.PERKS = (() => {
       });
     }
     for (const f of ONE_PER_TABLE) {
-      const n = TABLE.filter(p => (p.lv || []).some(e => e && e[f] != null)).length;
+      const carries = (p) => (p.lv || []).some(e => e && e[f] != null);
+      const n = TABLE.filter(p => carries(p) && !(Array.isArray(p.fuse) && p.fuse.some(x => get(x) && carries(get(x))))).length;
       if (n > 1) errs.push('field ' + f + ' must appear on at most one perk (max semantics), found ' + n);
     }
     {
@@ -274,7 +304,7 @@ window.PERKS = (() => {
       if (!Array.isArray(f.tags) || !f.tags.length || f.tags.some(t => TAGS.indexOf(t) < 0)) errs.push('tags must be a non-empty subset of TAGS: ' + p.key);
       if (ROLES.indexOf(f.role) < 0) errs.push('unknown role: ' + p.key + ' ' + f.role);
       if (p.minDepth != null && !(p.minDepth === (p.minDepth | 0) && p.minDepth >= 0)) errs.push('minDepth must be int >= 0: ' + p.key);
-      if (p.needs != null && p.needs !== 'coop2') errs.push('unknown needs: ' + p.key + ' ' + p.needs);
+      if (p.needs != null && NEEDS.indexOf(p.needs) < 0) errs.push('unknown needs: ' + p.key + ' ' + p.needs);
       if (p.excl != null) {
         if (!Array.isArray(p.excl)) errs.push('excl must be an array: ' + p.key);
         else for (const x of p.excl) {
@@ -283,10 +313,11 @@ window.PERKS = (() => {
           else if (!Array.isArray(q.excl) || q.excl.indexOf(id) < 0) errs.push('excl must be symmetric: ' + p.key + ' -> ' + q.key);
         }
       }
-      if (p.rulesFrom != null) {
+      if (p.rulesFrom != null && !p.fuse) {
         for (let k = 0; k < 2; k++) if (JSON.stringify(p.lv[k] || {}) === JSON.stringify(p.lv[k + 1] || {})) errs.push('rules v2 entry tiers must differ (no no-op upgrade): ' + p.key + ' Lv' + (k + 1) + '->Lv' + (k + 2));
       }
     }
+    _validate510c(errs);
     for (const ok of Object.keys(POOL_OVERLAY)) for (const sid of Object.keys(POOL_OVERLAY[ok])) {
       if (!get(sid | 0)) errs.push('POOL_OVERLAY ' + ok + ' unknown id ' + sid);
       for (const fk of Object.keys(POOL_OVERLAY[ok][sid])) if (POOL_FIELDS.indexOf(fk) < 0) errs.push('POOL_OVERLAY ' + ok + ' id ' + sid + ' field outside POOL_FIELDS: ' + fk);
@@ -297,8 +328,7 @@ window.PERKS = (() => {
     const top3All = (allMax[0] || 1) * (allMax[1] || 1) * (allMax[2] || 1);
     if (top3All > C.VALUE_MUL_CAP + 1e-9) errs.push('VALUE_MUL_CAP exceeded: 3-slot all product ' + top3All + ' > ' + C.VALUE_MUL_CAP);
     for (const c of CLS_KEYS) {
-      const m = TABLE.map(p => Math.max.apply(null, p.lv.map(e => (e.valueMul && e.valueMul[c]) || 1))).sort((a, b) => b - a);
-      const top3 = (m[0] || 1) * (m[1] || 1) * (m[2] || 1);
+      const top3 = _top3Coexist(TABLE.map(p => Math.max.apply(null, p.lv.map(e => (e.valueMul && e.valueMul[c]) || 1))), 'mul');
       if (top3 > C.CLASS_MUL_CAP + 1e-9) errs.push('CLASS_MUL_CAP exceeded: class ' + c + ' 3-slot product ' + top3 + ' > ' + C.CLASS_MUL_CAP);
     }
     {
@@ -417,6 +447,101 @@ window.PERKS = (() => {
     if (worstS > COND_MUL_CAP + 1e-9) errs.push('COND_MUL_CAP exceeded: 3-slot static condition product ' + worstS + ' > ' + COND_MUL_CAP);
     if (worstT > COND_TOTAL_CAP + 1e-9) errs.push('COND_TOTAL_CAP exceeded: 3-slot static x dynamic condition product ' + worstT + ' > ' + COND_TOTAL_CAP);
   }
+  function _coexist(a, b) {
+    if (!a || !b || a === b) return false;
+    if (Array.isArray(a.excl) && a.excl.indexOf(b.id | 0) >= 0) return false;
+    if (Array.isArray(b.excl) && b.excl.indexOf(a.id | 0) >= 0) return false;
+    if (Array.isArray(a.fuse) && a.fuse.indexOf(b.id | 0) >= 0) return false;
+    if (Array.isArray(b.fuse) && b.fuse.indexOf(a.id | 0) >= 0) return false;
+    return true;
+  }
+  function _top3Coexist(vals, combine) {
+    const neutral = combine === 'sum' ? 0 : 1;
+    const cmb = (x, y) => (combine === 'sum' ? x + y : x * y);
+    const idx = vals.map((v, i) => i).sort((a, b) => vals[b] - vals[a]).slice(0, 8);
+    let best = neutral;
+    for (let x = 0; x < idx.length; x++) {
+      const vx = vals[idx[x]] == null ? neutral : vals[idx[x]];
+      best = Math.max(best, vx);
+      for (let y = x + 1; y < idx.length; y++) {
+        if (!_coexist(TABLE[idx[x]], TABLE[idx[y]])) continue;
+        const vy = vals[idx[y]] == null ? neutral : vals[idx[y]];
+        best = Math.max(best, cmb(vx, vy));
+        for (let z = y + 1; z < idx.length; z++) {
+          if (!_coexist(TABLE[idx[x]], TABLE[idx[z]]) || !_coexist(TABLE[idx[y]], TABLE[idx[z]])) continue;
+          best = Math.max(best, cmb(cmb(vx, vy), vals[idx[z]] == null ? neutral : vals[idx[z]]));
+        }
+      }
+    }
+    return best;
+  }
+  const NEEDS = ['coop2', 'casual'];
+  function _validate510c(errs) {
+    const num = (v) => typeof v === 'number' && isFinite(v);
+    const isInt = (v) => num(v) && v === (v | 0);
+    const INT_DOM = { blastKeep: [1, 100], safeOpenPct: [100, 200], gopher: [1, 3], dualGood: [1, 2], negBeastReward: [0, 200],
+      interestPm: [1, 100], interestCap: [1, 1000], contTimeAdd: [1, 30], negWardN: [1, 99], shatterPayPct: [1, 100] };
+    const CH = window.CHARACTERS;
+    let charNegMax = 200;
+    if (CH && typeof CH.list === 'function') {
+      let m = 0;
+      for (const c of CH.list()) for (const b of [c && c.buff, c && c.buff2]) if (b && b.kind === 'beastWard') m = Math.max(m, b.negReward | 0);
+      if (m > 0) charNegMax = m;
+    }
+    for (const p of TABLE) {
+      (p.lv || []).forEach((e, k) => {
+        if (!e) return;
+        const at = p.key + ' Lv' + (k + 1);
+        for (const f of Object.keys(INT_DOM)) {
+          if (e[f] == null) continue;
+          const d = INT_DOM[f];
+          if (!(isInt(e[f]) && e[f] >= d[0] && e[f] <= d[1])) errs.push(f + ' must be int ' + d[0] + '..' + d[1] + ': ' + at);
+        }
+        if (e.negBeastReward != null && e.negBeastReward > charNegMax) errs.push('negBeastReward ' + e.negBeastReward + ' > the largest character negReward ' + charNegMax + ' (seedcap envelope): ' + at);
+        if ((e.interestPm != null) !== (e.interestCap != null)) errs.push('interestPm and interestCap come together: ' + at);
+        if (e.finaleMul != null && !(num(e.finaleMul) && e.finaleMul > 1 && e.finaleMul <= 2)) errs.push('finaleMul must be in (1, 2]: ' + at);
+        if (e.mayorHook != null && !(num(e.mayorHook) && e.mayorHook > 1 && e.mayorHook <= 2)) errs.push('mayorHook must be in (1, 2]: ' + at);
+        if (e.earlyDone != null && e.earlyDone !== true) errs.push('earlyDone must be true: ' + at);
+        if (e.negBeastReward != null && !(e.dualGood >= 1)) errs.push('negBeastReward rides on the dualGood card (antivenom Lv3): ' + at);
+      });
+      if (p.needs != null && !(p.modes && p.modes.coop === true && p.modes.solo === false && p.modes.duel === false)) errs.push('needs (' + p.needs + ') card must be coop-only (modes F/T/F): ' + p.key);
+    }
+    const maxTier = (p, f, dflt) => Math.max.apply(null, p.lv.map(e => (e && e[f] != null) ? +e[f] : dflt));
+    if (_top3Coexist(TABLE.map(p => maxTier(p, 'blastKeep', 0)), 'sum') > 100) errs.push('3-slot blastKeep sum > 100 (a blown-up piece never pays more than catching it)');
+    if (_top3Coexist(TABLE.map(p => maxTier(p, 'shatterPayPct', 0)), 'sum') > 100) errs.push('3-slot shatterPayPct sum > 100 (a shattered rock never pays more than catching it)');
+    if (_top3Coexist(TABLE.map(p => maxTier(p, 'finaleMul', 1)), 'mul') > 2 + 1e-9) errs.push('3-slot finaleMul product > 2');
+    const inRecipe = new Map();
+    for (const p of TABLE) {
+      if (p.fuse == null) continue;
+      const f = p.fuse;
+      if (!Array.isArray(f) || f.length !== 2 || !isInt(f[0]) || !isInt(f[1]) || f[0] === f[1]) { errs.push('fuse must be two distinct ids: ' + p.key); continue; }
+      if (p.rollable !== false) errs.push('fusion card must be rollable false (only rule 12 offers it): ' + p.key);
+      if (!(p.rulesFrom >= 2)) errs.push('fusion card needs rulesFrom >= 2: ' + p.key);
+      if (p.contract || p.lockSlot) errs.push('fusion card must not be a contract / lock: ' + p.key);
+      for (let k = 0; k < 2; k++) if (JSON.stringify(p.lv[k] || {}) !== JSON.stringify(p.lv[k + 1] || {})) errs.push('fusion card has one tier (Lv1 = Lv2 = Lv3): ' + p.key);
+      const a = get(f[0]), b = get(f[1]);
+      if (!a || !b) { errs.push('fuse points at an unknown id: ' + p.key); continue; }
+      for (const q of [a, b]) {
+        if (q.fuse) errs.push('fuse recipe is itself a fusion: ' + p.key + ' <- ' + q.key);
+        if (q.lockSlot) errs.push('fuse recipe is a lock slot (fusing would clear a slot that never changes): ' + p.key + ' <- ' + q.key);
+        if (q.contract) errs.push('fuse recipe is a contract: ' + p.key + ' <- ' + q.key);
+        if (inRecipe.has(q.id | 0)) errs.push('a card sits in two fusion recipes: ' + q.key + ' (' + inRecipe.get(q.id | 0) + ', ' + p.key + ')');
+        inRecipe.set(q.id | 0, p.key);
+        if ((q.rulesFrom | 0) > (p.rulesFrom | 0)) errs.push('fuse recipe needs a later rules version than the fusion: ' + p.key + ' <- ' + q.key);
+      }
+      if (!_coexist(a, b)) errs.push('fuse recipe cards exclude each other (never both held): ' + p.key);
+    }
+    const iconOf = new Map();
+    for (const p of TABLE) {
+      if (iconOf.has(p.icon)) errs.push('perk icons must differ: ' + p.key + ' and ' + iconOf.get(p.icon) + ' both ' + p.icon);
+      else iconOf.set(p.icon, p.key);
+    }
+  }
+  function fusionBlocks(heldIds, id) {
+    for (const h of heldIds) { const q = get(h); if (q && Array.isArray(q.fuse) && q.fuse.indexOf(id | 0) >= 0) return true; }
+    return false;
+  }
+  function isFusion(id) { const p = get(id); return !!(p && Array.isArray(p.fuse)); }
   function isContract(id) { const p = get(id); return !!(p && p.contract); }
   function inSeason(p, seasonId) {
     const s = p && p.seasons;
@@ -680,6 +805,11 @@ window.PERKS = (() => {
     const slots = unpackBuild(build);
     const slot = card.slot | 0;
     if (slot < 0 || slot > 2) return null;
+    if (card.tag === 'fuse') {
+      const nb = _fuseApply(slots, card.id | 0, slot, card.clr == null ? -1 : (card.clr | 0), card.lv | 0);
+      return nb == null ? null : nb;
+    }
+    if (isFusion(card.id)) return null;
     if (card.tag === 'up') { if (!slots[slot] || slots[slot].id !== card.id || slots[slot].lv + 1 !== card.lv) return null; }
     else {
       if (slots.some((s, k) => s && s.id === card.id && k !== slot)) return null; if (card.tag === 'new' && slots[slot]) return null;
@@ -688,14 +818,34 @@ window.PERKS = (() => {
     slots[slot] = { id: card.id, lv: card.lv, slot };
     return packBuild(slots);
   }
-  function pickApply(E, drawIdx, choice, slot, id, lv) {
+  function _fuseApply(slots, id, slot, clr, lv) {
+    const p = get(id);
+    if (!p || !Array.isArray(p.fuse) || lv !== 1) return null;
+    if (slot < 0 || slot > 2 || clr < 0 || clr > 2 || clr === slot) return null;
+    const a = slots[slot], b = slots[clr];
+    if (!a || !b || isLocked(a.id) || isLocked(b.id)) return null;
+    if (slots.some(s => s && s.id === id)) return null;
+    const got = [a.id | 0, b.id | 0].sort((x, y) => x - y), want = p.fuse.map(x => x | 0).sort((x, y) => x - y);
+    if (got[0] !== want[0] || got[1] !== want[1]) return null;
+    const out = slots.slice();
+    out[slot] = { id, lv: 1, slot };
+    out[clr] = null;
+    return packBuild(out);
+  }
+  function pickApply(E, drawIdx, choice, slot, id, lv, clr) {
     if (!E) return false;
     const di = drawIdx | 0, c = choice | 0;
     if (di !== (E.drawIdx | 0) || di < 0 || di >= maxDraws()) return false;
     if (c < 1 || c > 5) return false;
     let nb = E.build >>> 0;
+    const cl = (clr == null) ? -1 : (clr | 0);
     if (c === 5) {
-      if ((slot | 0) !== -1 || (id | 0) !== 0 || (lv | 0) !== 0) return false;
+      if ((slot | 0) !== -1 || (id | 0) !== 0 || (lv | 0) !== 0 || cl !== -1) return false;
+    } else if (cl >= 0 || isFusion(id)) {
+      if (cl < 0) return false;
+      const f = _fuseApply(unpackBuild(nb), id | 0, slot | 0, cl, lv | 0);
+      if (f == null) return false;
+      nb = f;
     } else {
       const s = slot | 0, pid = id | 0, plv = lv | 0;
       if (s < 0 || s > 2) return false;
@@ -771,7 +921,7 @@ window.PERKS = (() => {
   function drawCtxAt(sSeed, picksArr, k, opts) {
     if (rulesVer(opts && opts.channel, opts && opts.seasonId) >= 2) {
       const w = _walkV2(sSeed, picksArr, k, opts, false);
-      return { build: w.build >>> 0, skipBank: w.skipBank | 0, contractsSeen: w.contractsSeen | 0, prevShown: w.prevShown.slice(), rv: 2 };
+      return { build: w.build >>> 0, skipBank: w.skipBank | 0, contractsSeen: w.contractsSeen | 0, prevShown: w.prevShown.slice(), fusedSeen: w.fusedSeen.slice(), rv: 2 };
     }
     const mode = (opts && opts.mode) || 'solo';
     const seasonId = (opts && opts.seasonId != null) ? (opts.seasonId | 0) : 0;
@@ -791,16 +941,17 @@ window.PERKS = (() => {
   }
   function _walkV2(sSeed, picksArr, kStop, opts, strict) {
     const base = { mode: (opts && opts.mode) || 'solo', seasonId: (opts && opts.seasonId != null) ? (opts.seasonId | 0) : 0,
-      channel: opts && opts.channel, runSeed: (opts && opts.runSeed) | 0 };
-    let build = 0, skipBank = 0, seen = 0, prevShown = [];
+      channel: opts && opts.channel, runSeed: (opts && opts.runSeed) | 0, casual: !!(opts && opts.casual) };
+    let build = 0, skipBank = 0, seen = 0, prevShown = [], fusedSeen = [];
     const arr = Array.isArray(picksArr) ? picksArr : emptyPicks();
     const cnt = picksCount(arr);
-    if (cnt < 0) return strict ? { ok: false, why: 'picks-shape' } : { ok: true, build: 0, skipBank: 0, contractsSeen: 0, prevShown: [] };
+    if (cnt < 0) return strict ? { ok: false, why: 'picks-shape' } : { ok: true, build: 0, skipBank: 0, contractsSeen: 0, prevShown: [], fusedSeen: [] };
     const kk = Math.min(kStop | 0, cnt);
     for (let j = 0; j < kk; j++) {
       const choice = arr[j] | 0;
-      const cards = _candidatesV2(sSeed, depthOfDraw(j), build, j, skipBank, Object.assign({}, base, { contractsSeen: seen, prevShown }));
+      const cards = _candidatesV2(sSeed, depthOfDraw(j), build, j, skipBank, Object.assign({}, base, { contractsSeen: seen, prevShown, fusedSeen }));
       if (hasContract(cards)) seen++;
+      for (const c of cards) if (c.tag === 'fuse' && fusedSeen.indexOf(c.id) < 0) fusedSeen = fusedSeen.concat([c.id]);
       if (choice === 5) { prevShown = cards.map(c => c.id); skipBank = 1; continue; }
       if (choice === 4 && !skipBank) { if (strict) return { ok: false, why: 'pick-4-nobank', at: j }; break; }
       const nb = applyPick(build, cards, choice);
@@ -809,14 +960,16 @@ window.PERKS = (() => {
       prevShown = cards.filter(c => c.id !== picked).map(c => c.id);
       build = nb; skipBank = 0;
     }
-    return { ok: true, build: build >>> 0, skipBank, contractsSeen: seen, prevShown };
+    return { ok: true, build: build >>> 0, skipBank, contractsSeen: seen, prevShown, fusedSeen };
   }
   function effOfBuild(build) {
     const e = { valueMul: {}, clearBonusMul: 1, levelTimeAdd: 0, invGrant: { tnt: 0, freeze: 0 }, strengthBonus: 0, shopMul: 1,
       clover: false, hookSpeedMul: 1, pullSpeedMul: 1, emptyPullMul: 1, freezeDurMul: 1, highlight: 0, slots: heldOf(build),
       cursedMul: 1, comboEvery: 0, comboMul: 1, emptyAmt: 0, emptyCap: 0, midasN: 0, midasValue: 0, drillLv: 0, shatterBonus: 0, laser: 0,
-      swingNatMul: 1, hitRadiusMul: 1, mechVeteran: 0, topLit: 0, blind: false, openPullSecs: 0, openPullMul: 1, lightPullW: 0, lightPullMul: 1,
-      bagCashMul: 1, doomLossMul: 1, blastBonus: 0, shopFirstMul: 1, wagerWinMul: 1, levelFee: 0, condMul: [], condBonus: [], lockedSlot: -1 };
+      openPullSecs: 0, openPullMul: 1, lightPullW: 0, lightPullMul: 1,
+      levelFee: 0, condMul: [], condBonus: [], lockedSlot: -1 };
+    for (const f of Object.keys(FIELD_SPEC_T1)) e[f] = (FIELD_SPEC_T1[f] === 'mul') ? 1 : 0;
+    for (const f of Object.keys(FIELD_SPEC)) { const h = FIELD_SPEC[f]; if (h !== 'one') e[f] = (h === 'mul') ? 1 : (h === 'or' ? false : 0); }
     for (const c of VALUE_MUL_KEYS) e.valueMul[c] = 1;
     for (const s of e.slots) {
       const p = get(s.id); if (!p) continue;
@@ -830,11 +983,11 @@ window.PERKS = (() => {
       if (Array.isArray(L.condMul)) for (const c of L.condMul) e.condMul.push(c);
       if (Array.isArray(L.condBonus)) for (const c of L.condBonus) e.condBonus.push(c);
       if (p.lockSlot) e.lockedSlot = s.slot;
-      for (const f of ['swingNatMul', 'hitRadiusMul', 'mechVeteran', 'topLit', 'blind']) {
+      for (const f of ['swingNatMul', 'hitRadiusMul', 'mechVeteran', 'topLit', 'blind', 'earlyDone', 'mayorHook']) {
         if (L[f] == null) continue;
         const how = FIELD_SPEC[f];
         if (how === 'mul') e[f] = e[f] * L[f];
-        else if (how === 'max') e[f] = Math.max(e[f], L[f] | 0);
+        else if (how === 'max') e[f] = Math.max(e[f], +L[f]);
         else if (how === 'or') e[f] = e[f] || !!L[f];
       }
       if (L.openPull) { e.openPullSecs = +L.openPull.secs; e.openPullMul = +L.openPull.mul; }
@@ -1040,7 +1193,7 @@ window.PERKS = (() => {
     const o = (POOL_OVERLAY[overlayKey || V2_DEFAULT_OVERLAY] || {})[p.id | 0] || {};
     const pick = (k, dflt) => (o[k] !== undefined ? o[k] : (p[k] !== undefined ? p[k] : (m[k] !== undefined ? m[k] : dflt)));
     return { id: p.id | 0, axis: p.axis, rarity: pick('rarity', 'common'), rollable: !!pick('rollable', false), modes: pick('modes', {}), tags: pick('tags', []), role: pick('role', 'steady'),
-      contract: !!p.contract, minDepth: p.minDepth | 0, needs: p.needs || null, excl: Array.isArray(p.excl) ? p.excl : [] };
+      contract: !!p.contract, minDepth: p.minDepth | 0, needs: p.needs || null, excl: Array.isArray(p.excl) ? p.excl : [], fuse: Array.isArray(p.fuse) ? p.fuse : null };
   }
   function _poolEntriesV2() {
     return TABLE.filter(p => !(p.rulesFrom > 2)).sort((a, b) => (a.id | 0) - (b.id | 0)).map(p => {
@@ -1051,11 +1204,12 @@ window.PERKS = (() => {
         seasons: p.seasons ? { from: p.seasons.from == null ? null : (p.seasons.from | 0), until: p.seasons.until == null ? null : (p.seasons.until | 0) } : null,
         rulesFrom: p.rulesFrom | 0, tags: (p.tags || m.tags || []).slice(), role: p.role || m.role || 'steady', minDepth: p.minDepth | 0, needs: p.needs || null,
         excl: Array.isArray(p.excl) ? p.excl.slice().sort((a, b) => a - b) : [],
-        noUp: [sameTier(p.id | 0, 1) ? 1 : 0, sameTier(p.id | 0, 2) ? 1 : 0], lock: !!p.lockSlot };
+        noUp: [sameTier(p.id | 0, 1) ? 1 : 0, sameTier(p.id | 0, 2) ? 1 : 0], lock: !!p.lockSlot,
+        fuse: Array.isArray(p.fuse) ? p.fuse.slice().sort((a, b) => a - b) : null };
     });
   }
   function _candConstantsV2(overlayKey) {
-    return { algo: 2, perkSalt: PERK_SALT, seasonSalt: SEASON_SALT, candPickSalt: CAND_PICK_SALT, candN: CAND_N, slots: cfgNum('SLOTS'),
+    return { algo: 3, perkSalt: PERK_SALT, seasonSalt: SEASON_SALT, candPickSalt: CAND_PICK_SALT, candN: CAND_N, slots: cfgNum('SLOTS'),
       drawEvery: drawEvery(), gateEvery: gateEvery(), maxDraws: maxDraws(), pityEvery: cfgNum('PITY_EVERY'),
       contractMax: cfgNum('CONTRACT_MAX'), contractMinDraw: cfgNum('CONTRACT_MIN_DRAW'), contractPMilli: cfgNum('CONTRACT_P_MILLI'),
       v2: V2, tags: TAGS, roles: ROLES, overlay: POOL_OVERLAY[overlayKey] || null };
@@ -1106,13 +1260,14 @@ window.PERKS = (() => {
     const poolAll = TABLE.filter(p => {
       if (p.rulesFrom > row.ver) return false;
       const f = F(p);
-      return f.rollable && f.modes && f.modes[mode] && inSeason(p, sid) && f.minDepth <= d && (!f.needs || (f.needs === 'coop2' && mode === 'coop'));
+      return f.rollable && f.modes && f.modes[mode] && inSeason(p, sid) && f.minDepth <= d &&
+        (!f.needs || (f.needs === 'coop2' && mode === 'coop') || (f.needs === 'casual' && !!(opts && opts.casual) && mode === 'coop'));
     });
     const wNew = (p) => {
       const f = F(p), r = f.rarity;
       return (V2.RW[r] || 0) * ((V2.BAND_MUL[r] || [])[band] || 0) * (gate ? (V2.GATE_MUL[r] || 0) : 1) * (1 + V2.TAG_BIAS * tagShare(f)) * (f.role === 'utility' && band >= 2 ? V2.UTIL_DEEP : 1);
     };
-    let pool = poolAll.filter(p => !F(p).contract && !heldIds.has(p.id) && !exclHit(F(p)) && wNew(p) > 0);
+    let pool = poolAll.filter(p => !F(p).contract && !heldIds.has(p.id) && !exclHit(F(p)) && !fusionBlocks(heldIds, p.id) && wNew(p) > 0);
     const prev = (opts && Array.isArray(opts.prevShown)) ? opts.prevShown : [];
     if (prev.length) { const fresh = pool.filter(p => prev.indexOf(p.id) < 0); if (fresh.length >= V2.MIN_FRESH) pool = fresh; }
     const cPool = poolAll.filter(p => F(p).contract && !heldIds.has(p.id) && !exclHit(F(p)));
@@ -1136,14 +1291,28 @@ window.PERKS = (() => {
       return mk(p);
     };
     const roleOf = (c) => F(get(c.id)).role, axisOf = (c) => get(c.id).axis;
+    const fused = (opts && Array.isArray(opts.fusedSeen)) ? opts.fusedSeen : [];
+    let fuseCard = null;
+    for (const p of TABLE) {
+      if (!Array.isArray(p.fuse) || p.rulesFrom > row.ver || heldIds.has(p.id) || fused.indexOf(p.id) >= 0) continue;
+      const f = F(p);
+      if (!(f.modes && f.modes[mode]) || !inSeason(p, sid) || exclHit(f)) continue;
+      const sa = slots.findIndex(s => s && s.id === p.fuse[0]), sb = slots.findIndex(s => s && s.id === p.fuse[1]);
+      if (sa < 0 || sb < 0 || isLocked(slots[sa].id) || isLocked(slots[sb].id)) continue;
+      fuseCard = { id: p.id, lv: 1, tag: 'fuse', slot: Math.min(sa, sb), clr: Math.max(sa, sb) };
+      break;
+    }
     if (held.length < 3) {
       const free = _firstEmpty(slots);
       const mkNew = (p) => _cardNew(p, free);
-      const contA = left().filter(p => heldAxes.has(p.axis) || tagShare(F(p)) > 0);
-      const aItems = leftUps().map(c => ({ up: c })).concat(contA.map(p => ({ p })));
-      const aPick = _wPick(rA, aItems, (it) => (it.up ? wUp(it.up) : wNew(it.p)));
-      if (aPick) take(aPick.up ? aPick.up : mkNew(aPick.p), 'A');
-      else take(pickNew(rA, left(), mkNew), 'A');
+      if (fuseCard) take(fuseCard, 'A');
+      else {
+        const contA = left().filter(p => heldAxes.has(p.axis) || tagShare(F(p)) > 0);
+        const aItems = leftUps().map(c => ({ up: c })).concat(contA.map(p => ({ p })));
+        const aPick = _wPick(rA, aItems, (it) => (it.up ? wUp(it.up) : wNew(it.p)));
+        if (aPick) take(aPick.up ? aPick.up : mkNew(aPick.p), 'A');
+        else take(pickNew(rA, left(), mkNew), 'A');
+      }
       const aAx = cards.length ? axisOf(cards[0]) : null;
       const bBase = _soft(left(), [floorB ? (p => _RIX[F(p).rarity] >= floorB) : null]);
       const axes = [];
@@ -1183,7 +1352,7 @@ window.PERKS = (() => {
       };
       const sameAxisSlot = (p) => { for (const s of order) if (targeted.indexOf(s) < 0 && get(slots[s].id) && get(slots[s].id).axis === p.axis) return s; return null; };
       const ups = leftUps();
-      const u = _wPick(rA, ups, wUp);
+      const u = fuseCard ? fuseCard : _wPick(rA, ups, wUp);
       if (u) take(u, 'A');
       const bBase = _soft(left(), [floorB ? (p => _RIX[F(p).rarity] >= floorB) : null]);
       const t1 = nextTarget(null);
@@ -1228,6 +1397,7 @@ window.PERKS = (() => {
     CLASS_TOTAL_CAP, CURSED_FLIP_MIN, clsMulOfBuild, allMulOfBuild, classCapOf,
     COND_MUL_KEYS, COND_BONUS_KEYS, COND_B_FAMILY, COND_STATIC, COND_NEW_CLASS, COND_MUL_CAP, COND_DYN_CAP, COND_TOTAL_CAP, FIELD_SPEC_T1, DEEP_Y,
     condTimes, condMulOfBuild, condBonusOfBuild, relayMulOfBuild, splitFirstAmtOfBuild, teamEveryOfBuild, feeCashOf, isLocked, hasCondB,
+    NEEDS, isFusion, fusionBlocks, FIELD_SPEC,
     nameKey, descKey, descParams, iconOf, rarityOf,
     _setTableForTest(list) { TABLE = list || LIST; _index(); _effCache = { build: -1, eff: effOfBuild(0) }; },
   };

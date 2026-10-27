@@ -55,7 +55,12 @@ function isPrefix(prevLo, prevHi, curLo, curHi) {
 //   tests unchanged). v2 also needs the run seed (per-run candidate set, same granularity as the world route) -> f.runSeed (record d[4]).
 //   A caller that forgets ch on the EA job would replay v2 logs with v1 = honest players perk_forge: the three validate lanes and the
 //   two seedcap calls are pinned by test/solo-settle.js + test/channel-perk-rules.js.
-function replayOpts(f, pc, ch) { return { mode: modeOf(pc), seasonId: (f && f.seasonId) | 0, channel: ch, runSeed: (f && f.runSeed) | 0 }; }
+// Casual co-op (client knife 5.10c): rules v2 has cards that only exist in casual co-op (needs: 'casual', the client draws with
+//   casual = !ENDLESS_RUN.comp()). The record tells it apart by the tail flags: a team competitive segment carries SEG_COMP, a casual
+//   co-op session (and a classic one) does not; a solo record never offers co-op cards, so its value does not matter (kept false).
+//   One function for all five callers (three validate lanes + the two seedcap calls go through replayOpts).
+function casualOf(f, pc) { return (pc | 0) >= 2 && !(((f && f.flags) | 0) & require('./attest.js').SEG_COMP); }
+function replayOpts(f, pc, ch) { return { mode: modeOf(pc), seasonId: (f && f.seasonId) | 0, channel: ch, runSeed: (f && f.runSeed) | 0, casual: casualOf(f, pc) }; }
 
 // f: tail fields { build, picksLo, picksHi, seasonId, endDepth, runSeed }; run: chain memory ({ pk: {lo, hi} } or null); pc: seats; ch: channel
 //   -> { ok: true, n, build } | { ok: false, reason: 'perk_forge' | 'perk_chain', why }
@@ -138,4 +143,4 @@ function debtCashOf(f, pc, ch, fromDepth, toDepth) {
 //   CLI's rv= token (the high-roller coin envelope takes the table max of that version)
 function rulesVerOf(f, ch) { const P = load(); return (P.rulesVer(ch, (f && f.seasonId) | 0) | 0) || 1; }
 
-module.exports = { PERKS_CFG, VENDOR_DIR, VENDOR_FILES, load, modeOf, isPrefix, replayOpts, verifyPerkPicks, buildAt, buildsOf, debtCashOf, rulesVerOf };
+module.exports = { PERKS_CFG, VENDOR_DIR, VENDOR_FILES, load, modeOf, isPrefix, casualOf, replayOpts, verifyPerkPicks, buildAt, buildsOf, debtCashOf, rulesVerOf };
