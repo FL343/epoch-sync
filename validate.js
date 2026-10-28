@@ -2159,6 +2159,109 @@ function privateLoneVerdicts(pending, groups, processed, consistentKeys, now, co
   }
   return res;
 }
+// ---- a quick 1V1 whose other player quit and said so (W103 / O507, client knife 5.6b section 9) ----
+// A quick 1V1 (match type 1 exactly: no party or trio bits, two seats) whose other player pressed Esc mid-match: his game
+// wrote its own abandon confession for the key (0xB5, user-quit) and went to the menu; the player who stayed got the end of
+// the match on his screen -- peers-gone as the host (after the 60-second reconnect grace), host-left as the joiner (O41: the
+// lone survivor settles with the scores so far) -- and wrote his result. One writer is no consistent group, so the key never
+// settled: at STARTS_MATURITY_MS the start-orphan verdict voided it and paid the stayer the flat CONSOLATION_XP (50), the
+// same as a match nobody finished, two hours after he played it; the quitter's leave was counted by his confession.
+// Now such a key settles for its one writer, as a normal matchmade settle with one player in it (quitLoneVerdicts, main:
+// after the start pass), once all of this holds:
+//   - one account wrote its results, all from one seat, the same scores, none sanity-flagged, each peers-gone (1) or
+//     host-left (2) -- what the stayer's client writes for this quit; a host-left copy is read as peers-gone (in a 1V1 the
+//     host who left is the only other player: the same end as the host's peers-gone, and not a VOID vote). A finished
+//     result (0 / Q68's 10) is left as before: it says the other player was there at the end -- he came back after his
+//     Esc and his own result, maybe a late resend, settles the key normally (his loss XP, his leave forgiven), which a
+//     settle for the stayer alone would take from him;
+//   - the key's start roster is registered and final (not provisional, not split, no contest note, never split into tables),
+//     two seats, his results name exactly that roster with him at his own seat;
+//   - the other seat wrote his OWN start for the key, no result for it (p.settled), and an abandon confession for it (his
+//     own row, which no other account can write: read this run, or in the confession state from an earlier run, not
+//     refunded); the writer wrote no confession;
+//   - his records report at least one level begun (the client always writes >= 1; a 0 would read as a full match) and the
+//     key is at least that many minutes old on this job's clock (QUIT_LONE.LEVEL_SECONDS: a match level's clock is 60 s; one
+//     writer's word on the progress has no second writer's minimum beside it; an honest stayer's record is never that early:
+//     his k-th level began after k - 1 full levels and their shops, and his end is written after the reconnect grace -- a
+//     floor a minute too high would only hold him one more run), and younger than
+//     STARTS_MATURITY_MS (from there the start-orphan verdict decides it, as before);
+//   - this run read every record shard.
+// The settle (same loop, every gate of a matchmade key: the start age, the absent-seat grace for a late result of the other
+// player, one match at a time per account, the day count) ranks him first of the one writer: his XP (rank bonus, money
+// bonus, the progress discount of the levels his records report, the leaver factor, the level boost), never below the
+// CONSOLATION_XP this replaces; never his daily first win (it stays for his next win: his client's interrupted end never
+// takes it either, so a win later that day shows the same bonus on his screen as here); a career win; his CP; his win
+// streak frozen (an interrupted end, as on his client). No rating moves (one writer: quick never rates against an absent
+// seat, Q210 / Q167 rework 2), no signals beyond the day count, nobody convicted at this settle.
+// The quitter's side is the current leave rule, unchanged: his confession counts one exit (no LP: quick), breaks his streak,
+// and he earns nothing; no career loss (a leaver writes no record and counts nothing in any mode, as on his client); the
+// demo channel's record-only window (W57) applies to it as to every leave.
+// Why this opens nothing (architecture decision 10): every gain rests on the other player's own confession, which only he can
+// write; two colluding accounts could already settle a made-up match between themselves (both write a result: a win, a loss,
+// no exit), and doing it this way costs one of them an exit and pays the other no more than that. Nothing gets lower for
+// anybody: the stayer is paid at least the 50 of today, sooner, and the quitter is charged what he is charged today.
+// Not covered (as today): a quitter who wrote no confession (crash, pulled cable: no word of his own), a party queue, a
+// match of three or more (the normal settle owns them), a ranked 1V1 (Q184), friends' rooms (Q316), bot matches.
+const QUIT_LONE = { MT: 1, PC: 2, LEVEL_SECONDS: 60 };
+// p: the key's starts entry; g: groups[key]; quitSeen: "pid|key" of the abandon confessions read this run (not synthetic).
+//   Returns { m, w, o, seat, prog } or null.
+function quitLoneClaim(p, key, g, pending, processed, confState, confSeen, quitSeen, vecOf) {
+  if (!p || !g || !g.length || processed.has(key) || processed.has(splitMark(key))) return null;
+  if ((g[0].d[2] | 0) !== QUIT_LONE.MT || (p.mt | 0) !== QUIT_LONE.MT || (g[0].d[8] | 0) !== QUIT_LONE.PC) return null;
+  const ro = seatGateRoster(p);
+  if (!ro || p.prov || p.lent) return null;
+  const cn = pending['~' + key];
+  if (cn && (cn.c || cn.lent)) return null;
+  const seats = Object.keys(ro);
+  if (seats.length !== QUIT_LONE.PC || seats.some((s) => (s | 0) !== 0 && (s | 0) !== 1)) return null;
+  const w = String(g[0].steamID), wp = pid(w), seat = g[0].d[5] | 0, v0 = vecOf(g[0]);
+  if ((seat !== 0 && seat !== 1) || ro[seat] !== wp || String(v0).indexOf('BAD') === 0) return null;
+  const op = ro[1 - seat];
+  if (!op || op === wp) return null;
+  for (const r of g) {
+    const dc = r.dispCode | 0;
+    if (String(r.steamID) !== w || (r.d[5] | 0) !== seat || (r.d[8] | 0) !== QUIT_LONE.PC) return null;
+    if (dc !== 1 && dc !== 2) return null;   // peers-gone / host-left only (a finished end: he came back, see above)
+    if (vecOf(r) !== v0 || sanityFlags([r]).length) return null;
+    const rr = r.roster || {};
+    if (Object.keys(rr).length !== seats.length || seats.some((s) => rr[s] == null || pid(String(rr[s])) !== ro[s])) return null;
+  }
+  const prog = matchProgressOf(g);
+  if (prog < 1) return null;   // no level reported (a 0 would read as a full match: honest clients write >= 1)
+  if (!hasOwnStart(p, op) || (p.settled || []).indexOf(op) >= 0) return null;
+  if ((confState && confState[wp + '|' + key]) || (confSeen && confSeen.has(wp + '|' + key))) return null;   // he left too
+  const cs = confState && confState[op + '|' + key];
+  const quit = (quitSeen && quitSeen.has(op + '|' + key)) || !!(cs && !cs.refunded && !cs.cv && !cs.nf && cs.ex);
+  if (!quit) return null;
+  const o = String(g[0].roster[1 - seat]);
+  return { m: key, w, o, seat, prog };
+}
+// Called once per run, after reconcileStarts (p.settled / p.started are cumulative and include this run's records) and the
+// Q316 pass. Returns { due: [{ m, g, void: false, quitLone }], waiting, held } -- g a copy of the key's records with a
+// host-left end read as peers-gone (groups[m] itself is left as read: the confession and start passes read it).
+function quitLoneVerdicts(pending, groups, processed, consistentKeys, now, maturityMs, confState, confSeen, quitSeen, readComplete, vecOf) {
+  const res = { due: [], waiting: 0, held: 0 };
+  for (const m of Object.keys(pending)) {
+    const p = pending[m];
+    if (m.charAt(0) === '~' || !p || typeof p !== 'object' || (p.mt | 0) !== QUIT_LONE.MT || consistentKeys.has(m) || !groups[m]) continue;
+    if (now - (p.t0 || 0) >= maturityMs) continue;   // the start-orphan verdict's (it ran first this run)
+    const c = quitLoneClaim(p, m, groups[m], pending, processed, confState, confSeen, quitSeen, vecOf);
+    if (!c) continue;
+    const needMs = Math.max(SANITY.MIN_START_AGE_MS, c.prog * QUIT_LONE.LEVEL_SECONDS * 1000);
+    if (now - (p.t0 || 0) < needMs) {
+      res.waiting++;
+      console.log('  quit-lone ' + m + ': ' + plog(c.o) + ' quit and confessed, only ' + plog(c.w) + ' wrote a result (' + c.prog + ' level(s)) -- '
+        + Math.round((needMs - (now - (p.t0 || 0))) / 1000) + 's until those levels could have been played (W103)');
+      continue;
+    }
+    if (readComplete === false) { res.held++; console.log('  quit-lone ' + m + ': due, held (incomplete shard read) (W103)'); continue; }
+    const g = groups[m].map((r) => ((r.dispCode | 0) === 2 ? Object.assign({}, r, { dispCode: 1, disp: dispName(1) }) : r));
+    res.due.push({ m, g, void: false, quitLone: { w: c.w, o: c.o, seat: c.seat, prog: c.prog } });
+    console.log('  quit-lone ' + m + ': ' + plog(c.o) + ' quit and confessed, ' + plog(c.w) + ' wrote the only result (' + g.map((r) => r.disp).join(',') + ', ' + c.prog
+      + ' level(s)) -- settles for him as a matchmade win, never below the consolation (W103)');
+  }
+  return res;
+}
 // ===== O156 bot-match XP (match type 11, 2026-09-14; client knives 3.7c / 3.7d) =====
 // Matches against host-driven bots (arcade card / private-room chips / the queue's "warm-up++"
 // form, solo or with a premade party). XP is the ONLY surface (same isolation as private: no
@@ -3693,6 +3796,7 @@ function writeRunSummary() {
       '| win streak events landing before matches already counted (a late settle; its own tier counts what came before it) / stale (older than the fold, ignored) / absences frozen (the first in a week) / absences that broke a streak (O181) | ' + s('streakLate', 0) + ' / ' + s('streakStale', 0) + ' / ' + s('streakAbsFreeze', 0) + ' / ' + s('streakAbsBreak', 0) + ' |',
       '| ranked 1V1s only the winner wrote (Q184): counted on the silent seat / waiting for a second opponent / paid (points written) / not counted, no signals of his own / over the weekly cap | ' + s('lone1v1', '0 / 0 / 0 / 0 / 0') + ' (' + s('lone1v1Paid', 0) + ') |',
       '| friends\' rooms only one player wrote a result for, the other seat(s) started (Q316): due / waiting / held (incomplete read) (settled for him alone) | ' + s('pvLone', '0 / 0 / 0') + ' (' + s('pvLonePaid', 0) + ') |',
+      '| quick 1V1s whose other player quit and confessed, only the stayer wrote a result (W103): due / waiting / held (incomplete read) (settled for him) | ' + s('quitLone', '0 / 0 / 0') + ' (' + s('quitLonePaid', 0) + ') |',
       '| team-gamble host charges / at trust threshold | ' + s('t2lh', '0/0') + ' |',
       '| gamble-frame refusals naming the host (Q61): strikes, only he flagged / of them judged, record only / held for a seat with no record / named, not a strike, left to the flag rules below | ' + s('gtac', '0 / 0 / 0 / 0') + ' |',
       '| reports seen / counted | ' + s('repSeen', 0) + ' / ' + s('repCounted', 0) + ' |',
@@ -5710,7 +5814,10 @@ function computeXpGain(cls, rank0, money, isRanked, firstWinToday, factor, boost
 //   sk (optional, O181) = { t0, nowMs, absentSeats } for the win streak: the match's start (startsPending t0, ms), this run's
 //   clock, and the roster seats with no record at this settle (a teammate gone before a loss freezes the streak). Without it
 //   (a direct caller, the gate off) nothing about the streak moves and the boost is the level + supporter one as before.
-function creditXp(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers, today, progFrac, careerDet, spSet, sk) {
+//   quitLone (optional, W103) = the settle of a quick 1V1 whose other player quit and confessed (quitLoneVerdicts): every
+//   writer's gain is at least CONSOLATION_XP (what the start-orphan verdict paid him for it before), and it never takes his
+//   daily first win (his client's interrupted end never takes it either: it stays for his next win).
+function creditXp(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers, today, progFrac, careerDet, spSet, sk, quitLone) {
   const isRanked = appliesLp(matchType);
   const pf = (progFrac == null ? 1 : progFrac);
   const recBySeat = {};
@@ -5746,9 +5853,10 @@ function creditXp(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers,
     // excluded the rank-2 member of a winning pair while the client grants both winners (results.js
     // team win = team outcome) -- one predicate, three consumers (career wins, first-win, client
     // opts.win) now agree. FFA behavior unchanged (careerWon === rank 1 there).
-    if (cls === 'valid' && careerWon(matchType, rankOf[sid]) && (st.lastWinDay | 0) < today) { firstWin = true; st.lastWinDay = today; }
+    if (cls === 'valid' && careerWon(matchType, rankOf[sid]) && (st.lastWinDay | 0) < today && !quitLone) { firstWin = true; st.lastWinDay = today; }
     const bm = xpBoostMult(xpLevelOf(xp[sid] | 0), !!(spSet && spSet.has(String(sid))), streakPct);   // pre-credit board value -> level -> permanent boost (+ supporter pack, + O181 streak tier)
-    const gain = computeXpGain(cls, rank0, scores[seat] | 0, isRanked, firstWin, factor * pf, bm);
+    const gain0 = computeXpGain(cls, rank0, scores[seat] | 0, isRanked, firstWin, factor * pf, bm);
+    const gain = (quitLone && cls !== 'abandoner') ? Math.max(CONSOLATION_XP, gain0) : gain0;   // W103: never below the consolation it replaces
     if (gain > 0) { xp[sid] = (xp[sid] | 0) + gain; changedXp[sid] = xp[sid]; }
     if (cls === 'valid') st.games += 1;   // denominator = real finishes (innocent/abandoner don't count; mirrors client window)
     // career counters (client recordGame mirror): a leaver writes no record -> counts nothing here,
@@ -5757,7 +5865,7 @@ function creditXp(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers,
     if (cls === 'valid' || cls === 'innocent') st.cg = (st.cg | 0) + 1;
     if (cls === 'valid') { if (careerWon(matchType, rankOf[sid])) st.cw = (st.cw | 0) + 1; else st.cl = (st.cl | 0) + 1; }
     if (careerDet && cls !== 'abandoner') careerDet[sid] = careerBlockOf(st);   // 5.4a: v2 (fillCareerDetails rebuilds it again from the run's final state before the write)
-    console.log('  xp ' + plog(sid) + ' ' + cls + ' rank' + (rank0 + 1) + (firstWin ? ' dailyWin' : '') + ' x' + factor + (factor !== lf ? ' (record-only, would be x' + lf + ')' : '') + (pf !== 1 ? ' prog x' + pf : '') + (bm !== 1 ? ' boost x' + bm : '') + ' +' + gain + ' -> ' + (xp[sid] | 0) + ' career ' + (st.cg | 0) + 'g/' + (st.cw | 0) + 'w/' + (st.cl | 0) + 'l' + skNote);
+    console.log('  xp ' + plog(sid) + ' ' + cls + ' rank' + (rank0 + 1) + (firstWin ? ' dailyWin' : '') + (gain !== gain0 ? ' (floor ' + CONSOLATION_XP + ', was +' + gain0 + ', W103)' : '') + ' x' + factor + (factor !== lf ? ' (record-only, would be x' + lf + ')' : '') + (pf !== 1 ? ' prog x' + pf : '') + (bm !== 1 ? ' boost x' + bm : '') + ' +' + gain + ' -> ' + (xp[sid] | 0) + ' career ' + (st.cg | 0) + 'g/' + (st.cw | 0) + 'w/' + (st.cl | 0) + 'l' + skNote);
   }
 }
 // ===== endless progress XP (match type 7) -- 2026-09-05 =====
@@ -8433,6 +8541,13 @@ async function main() {
   const plRes = privateLoneVerdicts(startsPending, groups, processed, consistentKeys, nowMs, confState, confSeen, shardsComplete, vecOf);
   for (const c of plRes.due) consistentMatches.push(c);
   RUN.pvLone = plRes.due.length + ' / ' + plRes.waiting + ' / ' + plRes.held;
+  // W103 (O507): a quick 1V1 whose other player quit and confessed, only the stayer wrote a result (quitLoneVerdicts) -- joins
+  //   the consistent groups and settles for him as a matchmade win. Same place and reasons as Q316; not a consistent key for
+  //   the confession pass (the quitter wrote no record to be absolved by: his confession counts as today).
+  const quitSeen = new Set(confessions.filter((x) => !x.nf && dispClassOf(x.dispCode) === 'abandoner').map((x) => pid(String(x.steamID)) + '|' + x.m));
+  const qlRes = quitLoneVerdicts(startsPending, groups, processed, consistentKeys, nowMs, STARTS_MATURITY_MS, confState, confSeen, quitSeen, shardsComplete, vecOf);
+  for (const c of qlRes.due) consistentMatches.push(c);
+  RUN.quitLone = qlRes.due.length + ' / ' + qlRes.waiting + ' / ' + qlRes.held;
   // Q184: a ranked 1V1 only its winner wrote (lone1v1Verdicts) -- counted on the silent seat, the winner paid at the gate.
   //   Counted and marked here, ahead of saveEarlyMarks; the payments are written after it (below the consolation).
   const sidByPid = new Map();
@@ -11353,7 +11468,7 @@ async function main() {
     const progFrac = xpProgressFrac(prog);
     if (progFrac !== 1) console.log('  progress ' + c.m + ': ' + prog + '/' + XP_CFG.progressLevels + ' levels -> points x' + progFrac);
     if (xpId) creditXp(g, matchType, scores, rankX, xp, changedXp, xpState, leavers, today, progFrac, careerDet, spSet,
-      { t0: pend.t0 || nowMs, nowMs, absentSeats: new Set(absentNow.map((x) => x.seat | 0)) });   // O181: the streak orders by the match's start
+      { t0: pend.t0 || nowMs, nowMs, absentSeats: new Set(absentNow.map((x) => x.seat | 0)) }, !!c.quitLone);   // O181: the streak orders by the match's start; W103: the quit-lone floor
     if (xpId) creditCareerMatch(g, matchType, rankX, xpState, careerTouched);   // 5.4a career matrix (mode x character; W/L in quick / ranked cells; Q264: rankX, his win as his XP / CP read it)
     // CP (the endless-economy wallet) earns from matchmade records on the same credit classes.
     // Playtest starter wallet first: writers only (a leaver whose first-ever appearance is the
@@ -11366,6 +11481,11 @@ async function main() {
       //   A void writes nobody's row: the receipt rides the player's next points write (the backlog keeps it meanwhile)
       if (lpId && appliesLp(matchType)) for (const sid of groupSids(g)) noteReceipt(sid, g[0].d[3] | 0, 0, RECEIPT_F.VOID, 0);
       console.log('  VOID ' + c.m + ': consensus -> no MMR/points'); processed.add(c.m); voided++; continue;
+    }
+    if (c.quitLone) {   // W103 (quitLoneVerdicts): one writer -- no rating, no signals, nobody convicted here (his confession counted the leave)
+      RUN.quitLonePaid = (RUN.quitLonePaid | 0) + 1;
+      console.log('  quit-lone settle ' + c.m + ': ' + plog(c.quitLone.w) + ' rank 1 of the one writer (' + c.quitLone.prog + ' level(s), XP x' + progFrac + '), '
+        + plog(c.quitLone.o) + ' quit and confessed (his leave counted on its own path) -- no rating moves (W103)');
     }
     if (parts.length < 2) { processed.add(c.m); continue; }
     // B6 collection for a real settle: per-player counters + pairwise co-occurrence.
@@ -12515,6 +12635,7 @@ Object.assign(module.exports, { lpWriteDetails, mhOfKey, groupSids, prunePending
 Object.assign(module.exports, { lpReadStale, lpLastLive, LP_LAST_HOLD_MS });   // O481 the backlog's last write against a lagging read (test/stale-lp-read.js)
 Object.assign(module.exports, { careerBlockOf, fillCareerDetails, careerEnsureWrites, decodeCharBlock, careerSeatCodes, careerModeOfMt, careerSecOf, careerCellAdd, creditCareerMatch, creditCareerEndless, CHAR_MAGIC, CAREER_MATRIX_MAGIC, CAREER_MODES, CAREER_WL_MASK, CAREER_COLS });   // 5.4a S0 / S2 career block + matrix (test/career-refill.js, test/career-matrix.js, mvp ledger-schema-lockstep)
 Object.assign(module.exports, { V54B3_STREAK, streakPlan, streakApply, streakAbsence, streakPardon, streakApplyEarly, minuteOf });   // O181 matchmade win streak (client knife 5.4b3; test/streak.js, test/streak-plan-fixtures.js, mvp ledger-schema-lockstep)
+Object.assign(module.exports, { QUIT_LONE, quitLoneClaim, quitLoneVerdicts });   // W103 / O507 a quick 1V1 whose other player quit and confessed (test/quit-lone-1v1.js)
 Object.assign(module.exports, { PRIVATE_LONE, privateLoneClaim, privateLoneVerdicts });   // cloud audit Q316 a friends' room only one player wrote a result for (test/private-lone-stayer.js)
 Object.assign(module.exports, { START_PROOF_ENFORCE, startProof, proofState, proofTable, proofOwnsId, applyStartProof, screenLateStarts, seenNote, startSeenId, startSig });   // O462 matchmade start proof (test/start-proof-step.js)
 Object.assign(module.exports, { LIKE: likePlan.LIKE, LIKES_FILE, LIKE_BOX_LB, LIKE_COUNT_LB, loadLikes, saveLikes });   // O520 likes lane (client knife 5.4d, W79; test/likes-lane.js)
