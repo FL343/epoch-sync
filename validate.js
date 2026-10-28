@@ -2262,6 +2262,60 @@ function quitLoneVerdicts(pending, groups, processed, consistentKeys, now, matur
   }
   return res;
 }
+// ---- the quitter's own result after a quit-lone settle (W113, follow-up of W103) ----
+// A quitter who came back after his Esc and dropped later (no Esc: his client writes host-left or reconnect-failed) can have
+// his own result land after the quit-lone lane settled the key for the stayer (the lane's absence grace ran out first). The
+// key is then a consistent two-writer group, already processed, and the confession pass forgives his leave on it (his own
+// non-abandoner record in a consistent group) -- but the settle that pays such a group never comes for it: he got 0 where
+// the normal settle of the same records pays him his participation XP (an interrupted end: the base, 100; cloud review of
+// W103, residual 1).
+// The lane stamps the quitter's confession entry (st.ql = { w: the stayer's pid, s: the quitter's seat, t: the match's start,
+// ms}); quitLoneLateDue (main: right after the confession pass) brings the key back into the settle list (c.qlLate) when
+//   - the entry has the stamp, not paid yet (st.qlPaid), its leave forgiven (st.refunded), no conviction (cv) or synthetic
+//     confession (nf);
+//   - the key is processed (the lane settled it) and read this run as a consistent group of the two of them only, each at his
+//     own seat, a quick 1V1 (type 1, two seats), every record of the quitter's non-abandoner, no sanity flag on the group.
+// Its settle (the loop's qlLate branch) pays the quitter what the normal settle of this group pays him, nothing more, once:
+//   - one match at a time for his account (the lane claimed the stayer's slot) and his day count;
+//   - his XP / career / CP as the normal settle credits his record: ranked among both records, the progress of both (the
+//     lower), his streak frozen (an interrupted end), the leaver factor read after the forgiveness above. A finished or
+//     peers-gone result of his is credited as an interrupted end (the base only): the lane gave this match's win to the
+//     stayer, and a second winner of it would be more than the normal settle pays the two of them (an honest late result
+//     of his is never one: he dropped);
+//   - the signals both players' records give a normal settle (per player and the pair, a void consensus as one -- his
+//     reconnect-failed with the joiner's host-left; the lane wrote none);
+//   - a seedcap veto on the key holds it, a seedcap reject window of his keeps his XP only (both as the normal settle).
+// Not moved: the stayer (the lane paid him; his daily first win stays for his next win, W103), the rating (the lane moved
+// none: quick never rates one side alone), the likes lane (an interrupted match). Every step rests on records of the two of
+// them (his own confession, start and result; the stayer's result), and he gets what those records earn on the normal settle.
+function quitLoneLateDue(confState, consistentMatches, processed) {
+  const res = { due: [], skip: 0 };
+  for (const k of Object.keys(confState || {})) {
+    const st = confState[k];
+    if (!st || !st.ql || st.qlPaid || !st.refunded || st.cv || st.nf) continue;
+    const i = k.indexOf('|'), op = k.slice(0, i), m = k.slice(i + 1);
+    if (!processed.has(m)) continue;
+    const c = consistentMatches.find((x) => x.m === m && !x.solo && !x.quitLone && !x.qlLate);
+    if (!c || !c.g || !c.g.length) continue;
+    const q = st.ql, qs = q.s | 0;
+    let o = null, w = null, why = '';
+    for (const r of c.g) {
+      const h = pid(String(r.steamID)), seat = r.d[5] | 0;
+      if ((r.d[2] | 0) !== QUIT_LONE.MT || (r.d[8] | 0) !== QUIT_LONE.PC) { why = 'not a quick 1V1'; break; }
+      if (h === op && seat === qs) {
+        if (dispClassOf(r.dispCode) === 'abandoner') { why = 'a quit end of his'; break; }
+        if (!o) o = String(r.steamID);
+      } else if (h === q.w && seat === 1 - qs) { if (!w) w = String(r.steamID); } else { why = 'another writer or seat'; break; }
+    }
+    if (!why && (!o || !w)) why = 'not both of them';
+    if (!why && sanityFlags(c.g).length) why = 'sanity';
+    if (why) { res.skip++; console.log('  quit-lone late ' + m + ': ' + plog(op) + '\'s own result came in after the settle, not paid (' + why + ', W113)'); continue; }
+    c.qlLate = { k, o, w, t: Number(q.t) || 0 };
+    res.due.push(c);
+    console.log('  quit-lone late ' + m + ': ' + plog(o) + '\'s own result came in after the settle (his leave forgiven) -- settles his share (W113)');
+  }
+  return res;
+}
 // ===== O156 bot-match XP (match type 11, 2026-09-14; client knives 3.7c / 3.7d) =====
 // Matches against host-driven bots (arcade card / private-room chips / the queue's "warm-up++"
 // form, solo or with a premade party). XP is the ONLY surface (same isolation as private: no
@@ -3797,6 +3851,7 @@ function writeRunSummary() {
       '| ranked 1V1s only the winner wrote (Q184): counted on the silent seat / waiting for a second opponent / paid (points written) / not counted, no signals of his own / over the weekly cap | ' + s('lone1v1', '0 / 0 / 0 / 0 / 0') + ' (' + s('lone1v1Paid', 0) + ') |',
       '| friends\' rooms only one player wrote a result for, the other seat(s) started (Q316): due / waiting / held (incomplete read) (settled for him alone) | ' + s('pvLone', '0 / 0 / 0') + ' (' + s('pvLonePaid', 0) + ') |',
       '| quick 1V1s whose other player quit and confessed, only the stayer wrote a result (W103): due / waiting / held (incomplete read) (settled for him) | ' + s('quitLone', '0 / 0 / 0') + ' (' + s('quitLonePaid', 0) + ') |',
+      '| those keys whose quitter\'s own result came in after the settle, his leave forgiven (W113): due / not paid (shape) (his share paid) | ' + s('quitLoneLate', '0 / 0') + ' (' + s('quitLoneLatePaid', 0) + ') |',
       '| team-gamble host charges / at trust threshold | ' + s('t2lh', '0/0') + ' |',
       '| gamble-frame refusals naming the host (Q61): strikes, only he flagged / of them judged, record only / held for a seat with no record / named, not a strike, left to the flag rules below | ' + s('gtac', '0 / 0 / 0 / 0') + ' |',
       '| reports seen / counted | ' + s('repSeen', 0) + ' / ' + s('repCounted', 0) + ' |',
@@ -8768,6 +8823,10 @@ async function main() {
   }
   RUN.confess = confRes.seen + '/' + confRes.penalized + '/' + confRes.refunded;
   RUN.lateForgive = confRes.late | 0; RUN.lateCapped = confRes.lateCapped | 0;   // Q228
+  // W113 (quitLoneLateDue): a quit-lone key (W103) whose quitter's own result was forgiven on above comes back for his share
+  const qllRes = quitLoneLateDue(confState, consistentMatches, processed);
+  RUN.quitLoneLate = qllRes.due.length + ' / ' + qllRes.skip;
+  const qllT = new Map(qllRes.due.map((c) => [c.m, c.qlLate.t]));
   // O181: the streak events of the orphaned-start verdicts, the confessions and the late results forgiven, applied to the XP
   //   state where it is loaded (the settle path below), or straight to its file when this run returns early (no settle group:
   //   the everyone-left case these exist for)
@@ -9800,9 +9859,9 @@ async function main() {
   //   per owner comes back for a writer the lane never processed under it (soloReopenOwners); every other processed key
   //   stays out as before
   const soloState = loadSolo();
-  const fresh = consistentMatches.filter(c => !processed.has(c.m) || (c.solo && soloReopenOwners(soloState, c.m, c.g).length > 0));
+  const fresh = consistentMatches.filter(c => !processed.has(c.m) || (c.solo && soloReopenOwners(soloState, c.m, c.g).length > 0) || !!c.qlLate);   // W113: + the quitter's late share
   for (const c of fresh) {
-    if (!processed.has(c.m)) continue;
+    if (!processed.has(c.m) || c.qlLate) continue;
     RUN.soloReopen = (RUN.soloReopen | 0) + 1;
     console.log('  solo ' + c.m + ': processed, back for ' + soloReopenOwners(soloState, c.m, c.g).map(plog).join(', ') + ' -- the lane never processed his records under it (another account\'s segment closed the key; Q245)');
   }
@@ -10056,7 +10115,7 @@ async function main() {
   }
 
   // non-endless oldest start first, then by key; endless segments predecessor-first (startDepth, then key) -- see freshOrder
-  fresh.sort(freshOrderPaced((m) => (startsPending[m] && startsPending[m].t0) || nowMs));
+  fresh.sort(freshOrderPaced((m) => (startsPending[m] && startsPending[m].t0) || (qllT.get(m)) || nowMs));   // W113: a late share by its match's start (the entry went at the lane's settle)
   // On-demand base values: when a bulk read hit PAGE_CAP the maps are incomplete -- a settling
   // player missing from them may still hold an entry beyond the window, and settling from base 0
   // would silently reset his LP/XP. Fetch exactly the players this run settles (record holders +
@@ -10578,6 +10637,38 @@ async function main() {
   for (const c of fresh) {
     if (scPendingRestore) { scRestore(scPendingRestore); scPendingRestore = null; }
     if (c.solo) { if (await soloSettle(c)) settledSolo++; continue; }
+    if (c.qlLate) {   // W113 (quitLoneLateDue): the quitter's share of a quit-lone key, as the normal settle of these records pays it
+      const L = c.qlLate, qst = confState[L.k], g = c.g;
+      if (!qst || qst.qlPaid) continue;
+      if (SEEDCAP_ENFORCE && seedcap && seedcap.veto && seedcap.veto[c.m]) { console.log('  quit-lone late ' + c.m + ': seedcap over-cap veto -- held (W113)'); continue; }
+      if (writerPaced(c.m, [L.o], L.t, SANITY.MIN_START_AGE_MS)) continue;   // one match at a time for his account
+      if (SEEDCAP_REJECT && seedcap && seedcap.suspects && seedcapRejectActive(seedcap.suspects[pid(L.o)], Math.floor(nowMs / 60000))) {
+        scPendingRestore = { m: c.m, sids: [L.o], snaps: [scSnapshotOf(L.o)], voidMh: null };   // his XP stays (scRestore), as on the normal settle
+        RUN.seedcapReject = (RUN.seedcapReject | 0) + 1;
+        ghWarn('match=' + c.m + ': seedcap suspect ' + plog(L.o) + ' inside reject window -- own settlement discarded except XP (W113)');
+      }
+      { const day = sigDay(signals, nowMs); day.n[pid(L.o)] = (day.n[pid(L.o)] || 0) + 1; sigDirty = true; }
+      const mtL = g[0].d[2] | 0, pcL = g[0].d[8] | 0, scL = g[0].d.slice(10, 10 + pcL);
+      const seatToIdL = {};
+      for (const r of g) if (seatToIdL[r.d[5] | 0] == null) seatToIdL[r.d[5] | 0] = r.steamID;
+      const partsL = [];
+      for (let seat = 0; seat < pcL; seat++) if (seatToIdL[seat] != null) partsL.push({ steamID: seatToIdL[seat], seat, score: scL[seat] | 0 });
+      const rankL = {}, sortedL = [...partsL].sort((a, b) => b.score - a.score);
+      for (let i = 0, rk = 1; i < sortedL.length; i++) { if (i > 0 && sortedL[i].score < sortedL[i - 1].score) rk = i + 1; rankL[sortedL[i].steamID] = rk; }
+      // his records only; a finished / peers-gone one is credited as an interrupted end (no second winner, see quitLoneLateDue)
+      const gQ = g.filter((r) => String(r.steamID) === L.o).map((r) => (dispClassOf(r.dispCode) === 'valid' ? Object.assign({}, r, { dispCode: 2, disp: dispName(2) }) : r));
+      const pfL = xpProgressFrac(matchProgressOf(g));
+      if (xpId) creditXp(gQ, mtL, scL, rankL, xp, changedXp, xpState, leavers, today, pfL, careerDet, spSet, { t0: L.t || nowMs, nowMs, absentSeats: new Set() });
+      if (xpId) creditCareerMatch(gQ, mtL, rankL, xpState, careerTouched);
+      if (PT_MODE && cpId) ptSeedCp(cp, changedCp, [L.o]);
+      if (cpId) creditCp(gQ, mtL, rankL, cp, changedCp);
+      recordMatchSignals(signals, g, partsL, c.void ? null : rankL, mtL, !!c.void, nowMs); sigDirty = true;   // a void consensus as the normal settle records it
+      qst.qlPaid = 1;
+      RUN.quitLoneLatePaid = (RUN.quitLoneLatePaid | 0) + 1;
+      console.log('  quit-lone late settle ' + c.m + ': ' + plog(L.o) + ' paid his share of the two records (XP x' + pfL + '), '
+        + plog(L.w) + ' as the lane paid him -- no rating moves (W113)');
+      continue;
+    }
     if (c.signedPair) console.log('  msig-pair settle ' + c.m + ': the signed table of ' + plog(c.signedPair.a) + ', ' + plog(c.signedPair.o) + ' (' + c.signedPair.why + ') settled at it (MSIG_PAIR=enforce)');
     let g = c.g;
     const matchType = g[0].d[2] | 0;   // 2=ranked; visible LP only moves for ranked (quick = MMR only)
@@ -11484,6 +11575,9 @@ async function main() {
     }
     if (c.quitLone) {   // W103 (quitLoneVerdicts): one writer -- no rating, no signals, nobody convicted here (his confession counted the leave)
       RUN.quitLonePaid = (RUN.quitLonePaid | 0) + 1;
+      // W113: his confession entry remembers this settle, for his own result if it comes in later (quitLoneLateDue)
+      const qcs = confState[pid(String(c.quitLone.o)) + '|' + c.m];
+      if (qcs) qcs.ql = { w: pid(String(c.quitLone.w)), s: 1 - (c.quitLone.seat | 0), t: pend.t0 || nowMs };
       console.log('  quit-lone settle ' + c.m + ': ' + plog(c.quitLone.w) + ' rank 1 of the one writer (' + c.quitLone.prog + ' level(s), XP x' + progFrac + '), '
         + plog(c.quitLone.o) + ' quit and confessed (his leave counted on its own path) -- no rating moves (W103)');
     }
@@ -12636,6 +12730,7 @@ Object.assign(module.exports, { lpReadStale, lpLastLive, LP_LAST_HOLD_MS });   /
 Object.assign(module.exports, { careerBlockOf, fillCareerDetails, careerEnsureWrites, decodeCharBlock, careerSeatCodes, careerModeOfMt, careerSecOf, careerCellAdd, creditCareerMatch, creditCareerEndless, CHAR_MAGIC, CAREER_MATRIX_MAGIC, CAREER_MODES, CAREER_WL_MASK, CAREER_COLS });   // 5.4a S0 / S2 career block + matrix (test/career-refill.js, test/career-matrix.js, mvp ledger-schema-lockstep)
 Object.assign(module.exports, { V54B3_STREAK, streakPlan, streakApply, streakAbsence, streakPardon, streakApplyEarly, minuteOf });   // O181 matchmade win streak (client knife 5.4b3; test/streak.js, test/streak-plan-fixtures.js, mvp ledger-schema-lockstep)
 Object.assign(module.exports, { QUIT_LONE, quitLoneClaim, quitLoneVerdicts });   // W103 / O507 a quick 1V1 whose other player quit and confessed (test/quit-lone-1v1.js)
+Object.assign(module.exports, { quitLoneLateDue });   // W113 the quitter's own result after that settle (test/quit-lone-late.js)
 Object.assign(module.exports, { PRIVATE_LONE, privateLoneClaim, privateLoneVerdicts });   // cloud audit Q316 a friends' room only one player wrote a result for (test/private-lone-stayer.js)
 Object.assign(module.exports, { START_PROOF_ENFORCE, startProof, proofState, proofTable, proofOwnsId, applyStartProof, screenLateStarts, seenNote, startSeenId, startSig });   // O462 matchmade start proof (test/start-proof-step.js)
 Object.assign(module.exports, { LIKE: likePlan.LIKE, LIKES_FILE, LIKE_BOX_LB, LIKE_COUNT_LB, loadLikes, saveLikes });   // O520 likes lane (client knife 5.4d, W79; test/likes-lane.js)

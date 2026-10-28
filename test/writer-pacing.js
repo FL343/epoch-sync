@@ -346,7 +346,7 @@ const FLOOR = v.SANITY.MIN_START_AGE_MS;
   T('[9] team comp lane applies it after its own floor (every writer, a catch-up too)', /-- deferred'\);\s*continue;\s*\}\s*(\/\/[^\n]*\n\s*)*if \(writerPaced\(c\.m, writerSids, pendT\.t0, reqT\)\) continue;/.test(SRC));
   T('[9] co-op lane applies it after its own floor', /-- deferred'\);\s*continue;\s*\}\s*if \(writerPaced\(c\.m, writerSids, pend7\.t0, reqMs\)\) continue;/.test(SRC));
   T('[9] solo lane applies it after its own floor, before the reject-window branch', /-- deferred'\);\s*return false;\s*\}\s*(\/\/[^\n]*\n\s*)*if \(writerPaced\(m, \[sid\], pend\.t0, reqMs\)\) return false;\s*if \(scInWin\) \{/.test(SRC));
-  T('[9] seven lanes call it (matchmade, private, bot, classic, comp, co-op, solo)', (SRC.match(/writerPaced\((c\.)?m, /g) || []).length === 7, String((SRC.match(/writerPaced\((c\.)?m, /g) || []).length));
+  T('[9] eight lanes call it (matchmade, private, bot, classic, comp, co-op, solo, quit-lone late)', (SRC.match(/writerPaced\((c\.)?m, /g) || []).length === 8, String((SRC.match(/writerPaced\((c\.)?m, /g) || []).length));
   T('[9] the summary carries the wait buckets and the stall', /waited past the own floor/.test(SRC) && /cron stall before this run/.test(SRC));
 }
 

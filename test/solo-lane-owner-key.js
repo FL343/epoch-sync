@@ -218,7 +218,7 @@ console.log('=== Q245: one solo segment key, two accounts -- each account\'s own
   pin('the lane judges each owner\'s records on their own', '    for (const g of gs) if (await soloSettleOwner(Object.assign({}, c, { g }))) n++;');
   pin('the done memory is checked per owner', '    if (soloDoneHas(soloState, m, pid(String(c.g[0].steamID)))) {');
   pin('soloDone remembers the owner', '      processed.add(m); soloDoneNote(soloState, m, f.keyName, nowMs, p);\n');
-  pin('a processed solo key comes back for an owner the lane never processed', "  const fresh = consistentMatches.filter(c => !processed.has(c.m) || (c.solo && soloReopenOwners(soloState, c.m, c.g).length > 0));");
+  pin('a processed solo key comes back for an owner the lane never processed', "  const fresh = consistentMatches.filter(c => !processed.has(c.m) || (c.solo && soloReopenOwners(soloState, c.m, c.g).length > 0) || !!c.qlLate);   // W113: + the quitter's late share");
   pin('a reopened owner paces from the key\'s first processing (no missing-start signal)', '    if (!pend && processed.has(m)) { const t0 = soloDoneT0(soloState, m, c.g); if (t0 != null) pend = { t0, reopened: true }; }');
   T('[0] the settle loop line is unchanged', SRC.split('if (c.solo) { if (await soloSettle(c)) settledSolo++; continue; }').length === 2);
 }
@@ -377,8 +377,8 @@ else {
     fs.writeFileSync(path.join(t, 'validate.js'), SRC.replace(from, to));
     return t;
   };
-  const M1 = mut('noreopen', "  const fresh = consistentMatches.filter(c => !processed.has(c.m) || (c.solo && soloReopenOwners(soloState, c.m, c.g).length > 0));",
-    "  const fresh = consistentMatches.filter(c => !processed.has(c.m));");
+  const M1 = mut('noreopen', "  const fresh = consistentMatches.filter(c => !processed.has(c.m) || (c.solo && soloReopenOwners(soloState, c.m, c.g).length > 0) || !!c.qlLate);   // W113: + the quitter's late share",
+    "  const fresh = consistentMatches.filter(c => !processed.has(c.m) || !!c.qlLate);");
   if (M1) {
     const x = caseLater(M1, 1);
     T('[9] mutant without the reopen: [2] fails (the victim\'s segment never settles)', x.rs.length === 4 && sum(x.rs, (r) => settles(r, x.m, x.S)) === 0 && sum(x.rs, (r) => settles(r, x.m, x.O)) === 1);

@@ -108,7 +108,10 @@ function advance(state, ms) {
   const gr = files.GROUPS_FILE;
   if (gr) for (const k of Object.keys(gr)) if (gr[k] && gr[k].at) gr[k].at -= ms;
   const cf = files.CONFESSIONS_FILE;
-  if (cf) for (const k of Object.keys(cf)) if (cf[k] && cf[k].t0) cf[k].t0 -= ms;
+  if (cf) for (const k of Object.keys(cf)) {
+    if (cf[k] && cf[k].t0) cf[k].t0 -= ms;
+    if (cf[k] && cf[k].ql && cf[k].ql.t) cf[k].ql.t -= ms;   // W113: the quit-lone settle's stamp (the match's start)
+  }
   const pw = files.PENDING_WRITES_FILE;   // O480 points-row backlog: queued receipts [mh, change, set, clear, t], a failed write's w.t,
   if (pw) for (const k of Object.keys(pw)) {   //   the last write's l.t (O481)
     if (pw[k] && Array.isArray(pw[k].rc)) for (const x of pw[k].rc) if (Array.isArray(x)) x[4] -= ms;
