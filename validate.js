@@ -3869,6 +3869,7 @@ function writeRunSummary() {
       '| endless seats charged on the others\' word only (in full, A14): seats / CP / over 300 CP / balances clamped to int32 | ' + s('endlessOthersWord', 0) + ' / ' + s('endlessOthersWordCp', 0) + ' / ' + s('endlessOthersWordBig', 0) + ' / ' + s('cpClamped', 0) + ' |',
       '| endless groups held: a writer seated elsewhere than his own record (Q110) | ' + s('endlessSeatDispute', 0) + ' |',
       '| endless seats empty on the agreed roster that carried continues, left off the price ladder (Q201) | ' + s('endlessEmptySeatCont', 0) + ' |',
+      '| endless seats priced by their own continue-rung block / blocks set aside / blocks sharing a rung (Q120) | ' + s('endlessRungPriced', 0) + ' / ' + s('endlessRungBad', 0) + ' / ' + s('endlessRungShared', 0) + ' |',
       '| seedcap veto / reject-window discards | ' + s('seedcapVeto', 0) + ' / ' + s('seedcapReject', 0) + ' |',
       '| perk replay rejects | ' + s('perkRej', 0) + ' |',
       '| endless co-op checks on values every writer copies from the host, nobody flagged (Q314): seat table short of the seat count (held) / reroll bitmap out of reach (rejected) | ' + s('endlessRosterShort', 0) + ' / ' + s('endlessRrRej', 0) + ' |',
@@ -7200,6 +7201,103 @@ function endlessDebits(contPacked) {
   let rung = 1;
   for (let seat = 0; seat < 8; seat++) for (let i = 0, n = endlessNib(contPacked, seat); i < n; i++) out[seat] += endlessContinueCost(rung++);
   return out;
+}
+// Q120 (cloud audit 2026-10): the continue price climbs with the RUN's count (the n-th continue costs round(20 x 1.5^(n-1))
+//   whoever pays), so the rung a seat paid is part of what it paid, and the shared tail carries counts only. A modified host at
+//   seat 0 let an honest member pay the 1st continue (20 CP on his panel), then packed 15 on his own seat: the seat-ascending
+//   replay put the member on rung 16 (8,758 CP). Since Q120 a co-op client appends its OWN seat's rungs to its settle record
+//   as a self-describing block after the 0xD8 character block: [CRUNG_MAGIC | CRUNG_VER << 8 | CRUNG_LEN << 16, mask], bit
+//   r-1 = the r-th continue of the run, from the client's continue book (the price on his panel when he pressed). Written
+//   only when the run had continues and the book knows every rung of his seat (a cold rejoiner on another computer, a rung
+//   past 32: no block). Per writer by design -- like the disposition it stays out of the consistency vector (vecOf and
+//   endlessAbstention read the first 9 tail ints) and a block prices its writer's own seat only.
+//   Architecture decision 10: a block never flags, holds or voids anything. One the run cannot hold (wrong seat, other than
+//   the agreed count, a rung past the run's total, two different blocks for one seat) is set aside and counted: that seat
+//   is priced as if it had none. No block anywhere = an older client: the pre-Q120 replay, unchanged to the CP.
+//   Lockstep: client src/systems/result-reporter.js CRUNG_MAGIC / CRUNG_VER / CRUNG_LEN (persist-version-registry face
+//   endless_cont_rungs; LEDGER_ANTICHEAT section 0a magic list).
+const CRUNG_MAGIC = 0xDF, CRUNG_VER = 1, CRUNG_LEN = 1;
+// the rung mask an endless co-op settle record carries for its writer's seat (uint32), or null (no block / an unknown
+//   version / cut short). Walk as gambleTagOf / match-sig.js find: from the end of the 12-int endless tail, the character
+//   block by its seat count (its byte 2 is pc, not a length), any other block by its length; a word with length 0 is not
+//   a block: stop.
+function contRungsOf(d) {
+  if (!Array.isArray(d) || d.length < 10 || !isEndlessMt(d[2] | 0)) return null;
+  const pc = d[8] | 0;
+  if (pc < 2 || pc > 8) return null;
+  let i = 11 + 3 * pc + 12;
+  while (i < d.length) {
+    const h = d[i] | 0, mg = h & 0xff, ver = (h >>> 8) & 0xff, len = (h >>> 16) & 0xff;
+    if (mg === CHAR_MAGIC && len === pc) { i += 1 + Math.ceil(pc / 4); continue; }   // the character block
+    if (!len) return null;
+    if (mg === CRUNG_MAGIC && ver === CRUNG_VER && len === CRUNG_LEN) return (i + 1 < d.length) ? (d[i + 1] >>> 0) : null;
+    i += 1 + len;
+  }
+  return null;
+}
+const rungPop = (m) => { let n = 0; for (let x = m >>> 0; x; x >>>= 1) n += x & 1; return n; };
+const rungTop = (m) => { let t = 0; for (let b = 0; b < 32; b++) if ((m >>> b) & 1) t = b + 1; return t; };
+// the blocks of one settle group that may price a seat: written by the seat's own player (the agreed roster seats him
+//   there and he is an own seat of the run, Q78 / Q113), on a record that carries the agreed tail (a zero-tail reconnector
+//   abstained, M3), holding exactly the seat's agreed count and no rung past the run's total. Returns
+//   { masks: [seat] -> uint32 | undefined, bad: n } (bad = blocks set aside, counted only).
+function endlessRungClaims(g, roster0, isOwn, contFull) {
+  const masks = [], seen = [], badAt = new Set();
+  let bad = 0, total = 0;
+  for (let s = 0; s < 8; s++) total += endlessNib(contFull, s);
+  for (const r of (g || [])) {
+    if (!r || !r.d || !endlessNzTail(r)) continue;
+    const m = contRungsOf(r.d);
+    if (m == null) continue;
+    const seat = r.d[5] | 0, pc = r.d[8] | 0;
+    const sid = (roster0 && roster0[seat] != null) ? String(roster0[seat]) : null;
+    if (seat < 0 || seat >= pc || sid !== String(r.steamID) || !(isOwn ? isOwn(sid) : true)
+      || rungPop(m) !== endlessNib(contFull, seat) || rungTop(m) > total) { bad++; continue; }
+    if (seen[seat] != null) { if (seen[seat] !== m) badAt.add(seat); continue; }
+    seen[seat] = m;
+  }
+  for (let s = 0; s < 8; s++) {
+    if (seen[s] == null) continue;
+    if (badAt.has(s)) { bad++; continue; }
+    masks[s] = seen[s];
+  }
+  return { masks, bad };
+}
+// per-seat debits with the rung blocks (Q120). contFull = the agreed counts, contOwn = the counts the job charges (Q78 /
+//   Q201 masked the seats it does not); masks from endlessRungClaims. No block = endlessDebits(contOwn), unchanged.
+//   A seat with a block pays its own rungs: the r-th continue of the run is priced at its place on the charged ladder,
+//   eff(r) = r - min(P, rungs below r nobody claimed), where P = the continues of the masked seats (their place in the run
+//   is unknown, so they are put on the cheapest rungs nobody claimed -- never above what the panel showed: eff(r) <= r).
+//   With nothing masked eff(r) = r = the price on his panel when he pressed = what his client deducted.
+//   A seat without a block (an older client, a cold rejoiner, a block set aside) takes the places nobody claimed, lowest
+//   first, seat-ascending, and never pays more than the pre-Q120 replay gave it: the others' blocks can hold the cheap rungs
+//   it really paid and the job cannot tell. A block can lower its own writer's debit only (to the cheapest rungs of his
+//   count at most) -- never raise anybody else's above the panel price (with a block) or the pre-Q120 replay (without).
+//   Two blocks claiming one rung (a modified client: the host resolves one continue per window): each pays his own claim,
+//   the place left over stays unfilled -- only those two can gain. Returns { debits, priced, shared }.
+function endlessRungDebits(contFull, contOwn, masks) {
+  const today = endlessDebits(contOwn);
+  const has = [];
+  for (let s = 0; s < 8; s++) if (masks && masks[s] != null && endlessNib(contOwn, s)) has.push(s);
+  if (!has.length) return { debits: today, priced: 0, shared: 0 };
+  let totalFull = 0, totalOwn = 0;
+  for (let s = 0; s < 8; s++) { totalFull += endlessNib(contFull, s); totalOwn += endlessNib(contOwn, s); }
+  const P = Math.max(0, totalFull - totalOwn);
+  let union = 0, shared = 0;
+  for (const s of has) { if (((union & masks[s]) >>> 0) !== 0) shared++; union = (union | masks[s]) >>> 0; }
+  const effOf = (r) => { let free = 0; for (let k = 1; k < r; k++) if (!((union >>> (k - 1)) & 1)) free++; return r - Math.min(P, free); };
+  const out = [0, 0, 0, 0, 0, 0, 0, 0];
+  const used = new Set();
+  for (const s of has) for (let b = 0; b < 32; b++) if ((masks[s] >>> b) & 1) { const e = effOf(b + 1); used.add(e); out[s] += endlessContinueCost(e); }
+  let pos = 1;
+  for (let s = 0; s < 8; s++) {
+    if (has.indexOf(s) >= 0) continue;
+    const n = endlessNib(contOwn, s);
+    let sum = 0;
+    for (let i = 0; i < n; i++) { while (used.has(pos)) pos++; sum += endlessContinueCost(pos++); }
+    out[s] = Math.min(sum, today[s]);
+  }
+  return { debits: out, priced: has.length, shared };
 }
 // Q110 (cloud audit 2026-10): a seat's continue count is on HIS record only when his own record in the settle group carries
 //   the agreed tail (a consistent group: every non-zero tail is the same vector) and sits at that seat (the settle branch
@@ -11194,6 +11292,24 @@ async function main() {
       //   charged in full (A14: no cap) and counted for the O407 watch item; every balance stays inside int32 (cpClamp).
       const debitsAll = endlessDebits(t.continuesUsed);
       const debits = endlessDebits(contOwn);
+      // Q120: a seat whose own record carries its continue rungs (the 0xDF block) pays those rungs; the others as before, never
+      //   more than the seat order replay above (endlessRungDebits). No block in the group = that replay, untouched. Counted, never flagged.
+      const rungC = endlessRungClaims(g, roster0, isOwnE, t.continuesUsed);
+      const rungD = endlessRungDebits(t.continuesUsed, contOwn, rungC.masks);
+      if (rungC.bad) {
+        RUN.endlessRungBad = (RUN.endlessRungBad | 0) + rungC.bad;
+        console.log('  endless cp ' + c.m + ': ' + rungC.bad + ' continue-rung block' + (rungC.bad > 1 ? 's' : '') + ' the run cannot hold -- set aside, that seat priced as before (Q120)');
+      }
+      if (rungD.priced) {
+        RUN.endlessRungPriced = (RUN.endlessRungPriced | 0) + rungD.priced;
+        const was = debits.slice(0, pc7).join(',');
+        for (let seat = 0; seat < 8; seat++) debits[seat] = rungD.debits[seat];
+        console.log('  endless cp ' + c.m + ': continue rungs from ' + rungD.priced + ' seat block' + (rungD.priced > 1 ? 's' : '') + ' (Q120): ' + debits.slice(0, pc7).join(',') + ' (seat order replay ' + was + ')');
+      }
+      if (rungD.shared) {
+        RUN.endlessRungShared = (RUN.endlessRungShared | 0) + rungD.shared;
+        console.log('  endless cp ' + c.m + ': ' + rungD.shared + ' continue-rung block' + (rungD.shared > 1 ? 's' : '') + ' claim a rung another seat claims -- each pays his own (Q120)');
+      }
       const attestE = endlessAttested(g);
       let othersWordBig = false;
       for (let seat = 0; seat < pc7; seat++) {
@@ -12728,6 +12844,7 @@ Object.assign(module.exports, { BAN_LB, BAN_ACT_MM, banRowFull, fullBanSet, cupS
 Object.assign(module.exports, { lpWriteDetails, mhOfKey, groupSids, prunePendingWrites, PENDING_WRITES_FILE, RECEIPT_HOLD_MS });   // O480 points receipts + backlog (test/receipt-ring.js)
 Object.assign(module.exports, { lpReadStale, lpLastLive, LP_LAST_HOLD_MS });   // O481 the backlog's last write against a lagging read (test/stale-lp-read.js)
 Object.assign(module.exports, { careerBlockOf, fillCareerDetails, careerEnsureWrites, decodeCharBlock, careerSeatCodes, careerModeOfMt, careerSecOf, careerCellAdd, creditCareerMatch, creditCareerEndless, CHAR_MAGIC, CAREER_MATRIX_MAGIC, CAREER_MODES, CAREER_WL_MASK, CAREER_COLS });   // 5.4a S0 / S2 career block + matrix (test/career-refill.js, test/career-matrix.js, mvp ledger-schema-lockstep)
+Object.assign(module.exports, { CRUNG_MAGIC, CRUNG_VER, CRUNG_LEN, contRungsOf, endlessRungClaims, endlessRungDebits });   // cloud audit Q120 continue rungs per seat (test/endless-cont-rungs.js, mvp test/endless-cont-rungs.js)
 Object.assign(module.exports, { V54B3_STREAK, streakPlan, streakApply, streakAbsence, streakPardon, streakApplyEarly, minuteOf });   // O181 matchmade win streak (client knife 5.4b3; test/streak.js, test/streak-plan-fixtures.js, mvp ledger-schema-lockstep)
 Object.assign(module.exports, { QUIT_LONE, quitLoneClaim, quitLoneVerdicts });   // W103 / O507 a quick 1V1 whose other player quit and confessed (test/quit-lone-1v1.js)
 Object.assign(module.exports, { quitLoneLateDue });   // W113 the quitter's own result after that settle (test/quit-lone-late.js)
