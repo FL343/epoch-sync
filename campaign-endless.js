@@ -22,13 +22,24 @@
 // Byte-locked with the companion repo's test/lib/gr-record.js (JS reference encoder) + native gr_record.h (the
 //   only production encoder); its test/gr-record-parity.js cross-checks the guard bytes, its ledger-schema-lockstep
 //   cross-checks this decoder + boundary plan against the reference implementation on shared fixtures.
-// Record int32[] (29): [0] 0xBB|ver<<8 [1] keyId [2] dif [3] passes [4] score [5] elapsedSec [6] sidLo [7] sidHi
+// Record int32[] v1 (29): [0] 0xBB|ver<<8 [1] keyId [2] dif [3] passes [4] score [5] elapsedSec [6] sidLo [7] sidHi
 //   [8] firstAtMin [9] lastAtMin [10] flags=fast|skip<<8|incons<<16|quit<<24 [11] endWorld<<8|endLevel [12] runT0
 //   [13..28] sig (over [0..12] LE)
+// v2 (32; companion knife 5.7c, 2026-10-28 -- save & quit + continue, cross-device): v1 [0..12] + [13] resumes (how many times
+//   this run was resumed from a save) [14] resumeTag (tag of the save row this session resumed from; 0 = a fresh session)
+//   [15] why (0 end / 1 save point / 2 abandon / 3 resend) + [16..31] sig (over [0..15]). Both versions are accepted
+//   (architecture rule 9: this reader ships before any v2 writer). The runT0 of a resumed run is the original open, so the
+//   whole run (across sessions / machines) is one runT0. Fork rule (forkPlan): one (account, dif, runT0, resumeTag) session
+//   ends in at most one record content; a second, different content = a save row written back and replayed -> the later
+//   record is dropped ('fork'), never an offense (architecture rule 10: reject, do not punish).
 // ============================================================
 const crypto = require('crypto');
 
-const GR_MAGIC = 0xBB, GR_VER = 1, BASE_LEN = 13, SIG_INTS = 16, RING = 54;
+const GR_MAGIC = 0xBB, GR_VER = 2, BASE_LEN = 16, SIG_INTS = 16, RING = 54;
+const GR_VER_V1 = 1, BASE_LEN_V1 = 13;   // v1 still accepted (N-1 window; no live v1 writer: the lane only runs in the EA build)
+// signed-base length by header version (null = a version this reader does not know -> pending)
+function baseLenOf(ver) { return ver === GR_VER ? BASE_LEN : (ver === GR_VER_V1 ? BASE_LEN_V1 : null); }
+function verOf(d) { return Array.isArray(d) && d.length ? (((d[0] | 0) >> 8) & 0xff) : -1; }
 const MIN_PASS_SEC = 40, MAX_CREDIT_SEC = 600, MAX_PASSES = 100000;
 const RUN_T0_FLOOR = 1788220800;   // 2026-09-01T00:00Z: no Gold Rush run can predate the feature
 const LOWSCORE_FRAC = 0.2;
@@ -36,7 +47,8 @@ const SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
 // offense ledger row (details[2]) reason codes -- stable numbers for the analysis board
 const REASON_CODE = { 'bad-sig': 1, 'trailing': 3, 'owner-mismatch': 4, 'dev-key-on-prod': 5, 'magic': 6, 'short': 7,
   'fast': 10, 'skip': 11, 'incons': 12, 'pace-fast': 20, 'pace-slow': 21, 'clock': 22,
-  'overcap': 30, 'runt0': 31, 'passes': 32, 'nopass': 33, 'endlevel': 34, 'dif': 35, 'difbox': 36, 'score': 37, 'captable': 38 };
+  'overcap': 30, 'runt0': 31, 'passes': 32, 'nopass': 33, 'endlevel': 34, 'dif': 35, 'difbox': 36, 'score': 37, 'captable': 38,
+  'fork': 40 };   // 'fork' is never written to the offense ledger (dropped record only); the code exists for logs / analysis
 const OFFENSE_MAGIC = 0xC8;   // details: [magic, tMin, dif, reasonCode, passes, score]
 
 function toBytes(d) { const b = Buffer.alloc(d.length * 4); for (let i = 0; i < d.length; i++) b.writeInt32LE(d[i] | 0, i * 4); return b; }
@@ -45,35 +57,41 @@ function ringAt(idx) { const i = ((idx | 0) % RING + RING) % RING; return { worl
 
 // details int32[] -> fields (no verification); wrong shape -> null
 function decodeGr(d) {
-  if (!Array.isArray(d) || d.length < BASE_LEN + SIG_INTS) return null;
+  if (!Array.isArray(d) || d.length < BASE_LEN_V1 + SIG_INTS) return null;
   if (((d[0] | 0) & 0xff) !== GR_MAGIC) return null;
+  const ver = verOf(d), bl = baseLenOf(ver);
+  if (bl != null && d.length < bl + SIG_INTS) return null;
+  const v2 = ver === GR_VER;
   const keyId = d[1] | 0;
   const fl = d[10] >>> 0;
   return {
-    ver: ((d[0] | 0) >> 8) & 0xff, keyId, keyName: keyId === 0 ? 'dev' : String(keyId >>> 0),
+    ver, keyId, keyName: keyId === 0 ? 'dev' : String(keyId >>> 0),
     dif: d[2] | 0, passes: d[3] | 0, score: d[4] | 0, elapsedSec: d[5] | 0,
     steamId: ((BigInt(d[7] >>> 0) << 32n) | BigInt(d[6] >>> 0)).toString(),
     firstAtMin: d[8] | 0, lastAtMin: d[9] | 0,
     fast: fl & 0xff, skip: (fl >>> 8) & 0xff, incons: (fl >>> 16) & 0xff, quit: (fl >>> 24) & 0xff,
     endWorld: ((d[11] >>> 0) >>> 8) & 0xff, endLevel: (d[11] >>> 0) & 0xff, runT0: d[12] | 0,
+    resumes: v2 ? (d[13] | 0) : 0, resumeTag: v2 ? (d[14] >>> 0) : 0, why: v2 ? (d[15] | 0) : 0,
   };
 }
 // signature hex (dedupe key: runT0 is inside the signed bytes, so two runs of one account never share a signature)
-function sigHexOf(d) { return Array.isArray(d) && d.length >= BASE_LEN + SIG_INTS ? toBytes(d.slice(BASE_LEN, BASE_LEN + SIG_INTS)).toString('hex') : ''; }
+function sigHexOf(d) { const bl = baseLenOf(verOf(d)); return bl != null && d.length >= bl + SIG_INTS ? toBytes(d.slice(bl, bl + SIG_INTS)).toString('hex') : ''; }
 
 // -> { ok, reason, pending, fields, sealed }
 function verifyGrRecord(d, pubTable) {
-  if (!Array.isArray(d) || d.length < BASE_LEN + SIG_INTS) return { ok: false, reason: 'short' };
+  if (!Array.isArray(d) || d.length < BASE_LEN_V1 + SIG_INTS) return { ok: false, reason: 'short' };
   if (((d[0] | 0) & 0xff) !== GR_MAGIC) return { ok: false, reason: 'magic' };
+  const bl = baseLenOf(verOf(d));
+  if (bl == null) return { ok: false, reason: 'ver', pending: true, fields: decodeGr(d) };
+  if (d.length < bl + SIG_INTS) return { ok: false, reason: 'short' };
   const f = decodeGr(d);
-  if (f.ver !== GR_VER) return { ok: false, reason: 'ver', pending: true, fields: f };
-  for (let i = BASE_LEN + SIG_INTS; i < d.length; i++) if ((d[i] | 0) !== 0) return { ok: false, reason: 'trailing', fields: f };
+  for (let i = bl + SIG_INTS; i < d.length; i++) if ((d[i] | 0) !== 0) return { ok: false, reason: 'trailing', fields: f };
   const ent = pubTable && pubTable[f.keyName];
   const held = (ent && Array.isArray(ent.held)) ? ent.held : [];   // R1-A5-07: keys the job's key policy holds (attest.applyKeyPolicy)
   if (!ent || !Array.isArray(ent.pubs) || !(ent.pubs.length || held.length)) return { ok: false, reason: 'unknown-key', pending: true, fields: f };
-  const bytes = toBytes(d.slice(0, BASE_LEN));
+  const bytes = toBytes(d.slice(0, bl));
   const sig = Buffer.alloc(64);
-  for (let i = 0; i < SIG_INTS; i++) sig.writeInt32LE(d[BASE_LEN + i] | 0, i * 4);
+  for (let i = 0; i < SIG_INTS; i++) sig.writeInt32LE(d[bl + i] | 0, i * 4);
   let sigOk = false;
   for (const pub of ent.pubs) { try { if (crypto.verify(null, bytes, pubKeyObj(pub), sig)) { sigOk = true; break; } } catch (e) { /* malformed pub: next */ } }
   if (!sigOk) {
@@ -139,8 +157,23 @@ function settlePlan(verdict, opts) {
   return { ok: bp.ok, reason: bp.reason, fields: f, flags: bp.flags, cap: bp.cap };
 }
 
-// ladder row details for a settled run
-function ladderDetails(f) { return [f.passes | 0, Math.floor((f.elapsedSec | 0) / 60), f.keyId | 0, ((f.fast | 0) | ((f.skip | 0) << 8) | ((f.incons | 0) << 16) | ((f.quit | 0) << 24)) | 0, (((f.endWorld | 0) << 8) | (f.endLevel | 0)) | 0, f.runT0 | 0]; }
+// ladder row details for a settled run ([6] resumes: 0 for v1 / a run never resumed; clients read [0] = passes only)
+function ladderDetails(f) { return [f.passes | 0, Math.floor((f.elapsedSec | 0) / 60), f.keyId | 0, ((f.fast | 0) | ((f.skip | 0) << 8) | ((f.incons | 0) << 16) | ((f.quit | 0) << 24)) | 0, (((f.endWorld | 0) << 8) | (f.endLevel | 0)) | 0, f.runT0 | 0, f.resumes | 0]; }
+
+// Fork rule (v2 only; companion knife 5.7c). forks = state map key -> {fp, t}. key = account pseudonym + dif + runT0 + resumeTag;
+//   fp = the record's content (passes / score / elapsed / end level / flags / resumes) -- keyId and signature are left out, so the
+//   same session re-signed by a newer build (a 'resend' after an update) is the same content, not a fork. An honest session ends
+//   in exactly one content (end / save point / abandon), so a second different content can only come from a save row written
+//   back and played again. -> { fork, key, fp, first } (pure; the caller records first sightings and drops forks without an offense)
+function forkKeyOf(pidSid, f) { return f && f.ver === GR_VER ? (String(pidSid) + ':' + (f.dif | 0) + ':' + (f.runT0 | 0) + ':' + (f.resumeTag >>> 0)) : null; }
+function forkFpOf(f) { return [f.passes | 0, f.score | 0, f.elapsedSec | 0, ((f.endWorld | 0) << 8) | (f.endLevel | 0), ((f.fast | 0) | ((f.skip | 0) << 8) | ((f.incons | 0) << 16) | ((f.quit | 0) << 24)) | 0, f.resumes | 0].join(':'); }
+function forkPlan(forks, pidSid, f) {
+  const key = forkKeyOf(pidSid, f);
+  if (!key) return { fork: false, key: null, fp: null, first: false };
+  const fp = forkFpOf(f);
+  const seen = forks && forks[key];
+  return { fork: !!(seen && seen.fp !== fp), key, fp, first: !seen };
+}
 // offense ledger row: score = cumulative count (absolute -> a dropped write self-heals), details = latest offense
 function offenseDetails(tMin, f, reason) { return [OFFENSE_MAGIC, tMin | 0, (f && f.dif) | 0, REASON_CODE[reason] || 99, (f && f.passes) | 0, (f && f.score) | 0]; }
 
@@ -154,5 +187,5 @@ function mailDecision(rejects, nowHour, lastMailHour, minRejects) {
 }
 function pruneRejects(rejects, nowHour) { const out = {}; for (const h of Object.keys(rejects || {})) if ((h | 0) > nowHour - 48) out[h] = rejects[h] | 0; return out; }
 
-module.exports = { GR_MAGIC, GR_VER, BASE_LEN, SIG_INTS, RING, MIN_PASS_SEC, MAX_CREDIT_SEC, MAX_PASSES, RUN_T0_FLOOR, LOWSCORE_FRAC, REASON_CODE, OFFENSE_MAGIC,
-  toBytes, ringAt, decodeGr, sigHexOf, verifyGrRecord, boundaryPlan, settlePlan, ladderDetails, offenseDetails, mailDecision, pruneRejects };
+module.exports = { GR_MAGIC, GR_VER, BASE_LEN, GR_VER_V1, BASE_LEN_V1, SIG_INTS, RING, MIN_PASS_SEC, MAX_CREDIT_SEC, MAX_PASSES, RUN_T0_FLOOR, LOWSCORE_FRAC, REASON_CODE, OFFENSE_MAGIC,
+  toBytes, ringAt, baseLenOf, decodeGr, sigHexOf, verifyGrRecord, boundaryPlan, settlePlan, ladderDetails, forkKeyOf, forkFpOf, forkPlan, offenseDetails, mailDecision, pruneRejects };

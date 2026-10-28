@@ -6787,14 +6787,19 @@ const CAMPAIGN_LB = process.env.CAMPAIGN_LB || 'campaign_box';
 //   and the only place dev-key records may settle. Hourly reject histogram -> mass-anomaly mail (24h window).
 const CAMPAIGN_ENDLESS_BOX_PREFIX = process.env.CAMPAIGN_ENDLESS_BOX_PREFIX || 'campaign_endless_box_d';
 const CAMPAIGN_ENDLESS_LB_PREFIX = process.env.CAMPAIGN_ENDLESS_LB_PREFIX || 'campaign_endless_d';
+// companion knife 5.7c (2026-10-28): per-difficulty save rows (one row per account; the guard writes a signed + encrypted 0xBE row at
+//   a stop between levels, tombstones it before a resume). Client-writable, lifetime, never read or pruned here -- the cron only
+//   find-or-creates them (clients never create boards) and keeps the fork memory for the v2 records that resumed runs end in.
+const CAMPAIGN_ENDLESS_SAVE_PREFIX = process.env.CAMPAIGN_ENDLESS_SAVE_PREFIX || 'campaign_endless_save_box_d';
 const CAMPAIGN_ENDLESS_SUFFIX = process.env.CAMPAIGN_ENDLESS_SUFFIX || '';
 const CAMPAIGN_ENDLESS_OFFENSE_LB = process.env.CAMPAIGN_ENDLESS_OFFENSE_LB || ('campaign_endless_offense' + (process.env.CAMPAIGN_ENDLESS_SUFFIX || ''));
 const CAMPAIGN_ENDLESS_FILE = process.env.CAMPAIGN_ENDLESS_FILE || 'campaign-endless.json';
 const CE_MAIL_MIN = Math.max(1, Number(process.env.CE_MAIL_MIN || 5));
 const CE_SETTLED_TTL_MS = Number(process.env.CE_SETTLED_TTL_MS || 120 * 86400000);   // settled-signature memory (box rows are overwritten by the guard within days)
-function loadCe() { try { const st = JSON.parse(fs.readFileSync(CAMPAIGN_ENDLESS_FILE, 'utf8')) || {}; st.settled = st.settled || {}; st.offenses = st.offenses || {}; st.rejects = st.rejects || {}; return st; } catch (e) { return { settled: {}, offenses: {}, rejects: {}, mailHour: 0 }; } }
+function loadCe() { try { const st = JSON.parse(fs.readFileSync(CAMPAIGN_ENDLESS_FILE, 'utf8')) || {}; st.settled = st.settled || {}; st.offenses = st.offenses || {}; st.rejects = st.rejects || {}; st.forks = st.forks || {}; return st; } catch (e) { return { settled: {}, offenses: {}, rejects: {}, forks: {}, mailHour: 0 }; } }
 function saveCe(st, nowMs) {
   for (const k of Object.keys(st.settled)) if (nowMs - (st.settled[k] | 0) * 60000 > CE_SETTLED_TTL_MS) delete st.settled[k];
+  for (const k of Object.keys(st.forks || {})) if (nowMs - ((st.forks[k] && st.forks[k].t) | 0) * 60000 > CE_SETTLED_TTL_MS) delete st.forks[k];   // knife 5.7c: same horizon as the signatures
   st.rejects = campaignEndless.pruneRejects(st.rejects, Math.floor(nowMs / 3600000));
   try { writeStateFile(CAMPAIGN_ENDLESS_FILE, JSON.stringify(st, null, 0)); } catch (e) { ghWarn('write ' + CAMPAIGN_ENDLESS_FILE + ' failed: ' + (e && e.message)); }
 }
@@ -9180,7 +9185,7 @@ async function main() {
     const allowDevKey = CAMPAIGN_ENDLESS_SUFFIX === '_test';
     const st = loadCe();
     const nowSec = Math.floor(nowMs / 1000), nowMin = Math.floor(nowMs / 60000), nowHour = Math.floor(nowMs / 3600000);
-    let nUp = 0, nSame = 0, nPend = 0, nRej = 0, nDup = 0, nHeld = 0;
+    let nUp = 0, nSame = 0, nPend = 0, nRej = 0, nDup = 0, nHeld = 0, nFork = 0;
     const offenseRows = {};   // sid -> details (latest offense this run; score = cumulative count)
     try {
       let offId = null;
@@ -9189,6 +9194,8 @@ async function main() {
         let boxId = byName(boxName);
         if (!boxId) boxId = await findOrCreateBoard(boxName, false);   // client-writable (the guard writes as the user)
         const lbId = byName(lbName) || await findOrCreateBoard(lbName, true);
+        const saveName = CAMPAIGN_ENDLESS_SAVE_PREFIX + dif + CAMPAIGN_ENDLESS_SUFFIX;   // knife 5.7c: save rows (guard-written; only created here)
+        if (!byName(saveName)) await findOrCreateBoard(saveName, false);
         if (!boxId || !lbId) { console.log('campaign endless d' + dif + ': board absent -- skip'); continue; }
         const box = await readBoardAll(boxId, 'campaign endless box d' + dif);
         if (!box.ents.length) continue;
@@ -9216,6 +9223,11 @@ async function main() {
             continue;
           }
           const f = plan.fields;
+          // knife 5.7c fork rule: a resumed session ends in one record content; a second different content for the same
+          //   (account, dif, runT0, resumeTag) = a save row written back and replayed -> drop it, never an offense (rule 10)
+          const fk = ce.forkPlan(st.forks, pid(sid), f);
+          if (fk.fork) { nFork++; if (sig) st.settled[sig] = nowMin; console.log('  campaign endless d' + dif + ' ' + plog(sid) + ': fork dropped (resume tag ' + (f.resumeTag >>> 0) + ', passes ' + f.passes + ' score ' + f.score + ')'); continue; }
+          if (fk.key && fk.first) st.forks[fk.key] = { fp: fk.fp, t: nowMin };
           if (sig) st.settled[sig] = nowMin;
           if (best[sid] != null && (f.score | 0) <= best[sid]) { nSame++; continue; }
           if (!APPLY_MMR) { console.log('  campaign endless d' + dif + ' ' + plog(sid) + ': dry-run, would write ' + f.score + ' (passes ' + f.passes + ')'); continue; }
@@ -9243,7 +9255,7 @@ async function main() {
       }
     } catch (e) { ghWarn('campaign endless channel failed: ' + (e && e.message)); }
     saveCe(st, nowMs);
-    if (nUp || nSame || nPend || nRej || nDup || nHeld) { RUN.campaignEndless = nUp + 'up/' + nSame + 'same' + (nPend ? '/' + nPend + 'pend' : '') + (nHeld ? '/' + nHeld + 'held' : '') + (nRej ? '/' + nRej + 'rej' : '') + (nDup ? '/' + nDup + 'dup' : ''); console.log('campaign endless: ' + nUp + ' ladder writes, ' + nSame + ' not better, ' + nPend + ' pending, ' + nHeld + ' key-held, ' + nRej + ' rejected, ' + nDup + ' already settled'); }
+    if (nUp || nSame || nPend || nRej || nDup || nHeld || nFork) { RUN.campaignEndless = nUp + 'up/' + nSame + 'same' + (nPend ? '/' + nPend + 'pend' : '') + (nHeld ? '/' + nHeld + 'held' : '') + (nRej ? '/' + nRej + 'rej' : '') + (nDup ? '/' + nDup + 'dup' : '') + (nFork ? '/' + nFork + 'fork' : ''); console.log('campaign endless: ' + nUp + ' ladder writes, ' + nSame + ' not better, ' + nPend + ' pending, ' + nHeld + ' key-held, ' + nRej + ' rejected, ' + nDup + ' already settled, ' + nFork + ' forks dropped'); }
   };
   // Supporter pack (supporters.js header): probe DLC ownership for known players (capped per run, cached in
   //   state), then reconcile the wall board (respecting the client-writable opt-out board), OR the grant bit
@@ -12341,7 +12353,7 @@ module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CLASSIC_OWN
   ENDLESS_COMP_LB_OVERALL, overallScore, overallScoreMean, overallDominant,   // knife 3.5d composite ladder
   ENDLESS_LB_OVERALL, ENDLESS_LB_CLASSIC_OVERALL, V51B_PT,   // O276 casual / classic composites + the knife 5.1b rollout gate
   TEAM_MAGIC, TEAM_VER, teamBlock, ladderDetails,   // O207 team block on team-ladder rows
-  CAMPAIGN_ENDLESS_BOX_PREFIX, CAMPAIGN_ENDLESS_LB_PREFIX, CAMPAIGN_ENDLESS_SUFFIX, CAMPAIGN_ENDLESS_OFFENSE_LB, CAMPAIGN_ENDLESS_FILE, CE_MAIL_MIN, CE_SETTLED_TTL_MS, loadCe, saveCe,   // client knife 3.9b N4 (Gold Rush lane)
+  CAMPAIGN_ENDLESS_BOX_PREFIX, CAMPAIGN_ENDLESS_LB_PREFIX, CAMPAIGN_ENDLESS_SAVE_PREFIX, CAMPAIGN_ENDLESS_SUFFIX, CAMPAIGN_ENDLESS_OFFENSE_LB, CAMPAIGN_ENDLESS_FILE, CE_MAIL_MIN, CE_SETTLED_TTL_MS, loadCe, saveCe,   // client knife 3.9b N4 (Gold Rush lane)
   absentRosterSeats, absenceHold, shardPlan, persistCensus, fmtCensus, soloHoldsChain, transientStatus, ABSENT_GRACE_MS, ABSENT_GRACE_MIN_MS, LEDGER_SHARDS,   // R1-B2-04 / R1-X14 absent-seat hold
   T2LH, hostDissentCount, team2HostOwnsSeat0,   // cloud audit Q57 team-gamble host charges
   PERKS_CFG: perks.PERKS_CFG, verifyPerkPicks: perks.verifyPerkPicks,

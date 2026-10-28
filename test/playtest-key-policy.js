@@ -50,7 +50,7 @@ function campRec(keyId, priv) {
   return signed([(C.CAMP_MAGIC | (C.CAMP_VER << 8)) | 0, keyId | 0, 1, 54, 54, 60, sidLo, sidHi, 29800000, 29800060, 0], priv, C.toBytes);
 }
 function grRec(keyId, priv) {
-  return signed([(CE.GR_MAGIC | (CE.GR_VER << 8)) | 0, keyId | 0, 1, 3, 900, 300, sidLo, sidHi, 29800000, 29800010, 0, (1 << 8) | 4, 1788300000], priv, CE.toBytes);
+  return signed([(CE.GR_MAGIC | (CE.GR_VER << 8)) | 0, keyId | 0, 1, 3, 900, 300, sidLo, sidHi, 29800000, 29800010, 0, (1 << 8) | 4, 1788300000].concat(new Array(CE.BASE_LEN - 13).fill(0)), priv, CE.toBytes);   // current writer layout (v2 since knife 5.7c: + resumes / resumeTag / why)
 }
 
 const NOW = Date.parse('2026-10-20T00:00:00Z');

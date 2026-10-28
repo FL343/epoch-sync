@@ -16,10 +16,14 @@ const assert = (label, cond, extra) => { if (cond) ok(label); else bad(label + (
 const PKCS8_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
 function encodeSid(sid) { const b = BigInt(String(sid)); return [Number(b & 0xFFFFFFFFn) | 0, Number((b >> 32n) & 0xFFFFFFFFn) | 0]; }
 const sat8 = (v) => Math.max(0, Math.min(255, v | 0));
+// m.ver: 2 (default, the current writer: + resumes / resumeTag / why) or 1 (the N-1 layout, still accepted)
 function buildBase(m) {
   const sid = encodeSid(m.steamId);
-  return [(CE.GR_MAGIC | (CE.GR_VER << 8)) | 0, m.keyId | 0, m.dif | 0, m.passes | 0, m.score | 0, m.elapsedSec | 0, sid[0], sid[1], m.firstAtMin | 0, m.lastAtMin | 0,
+  const ver = m.ver === 1 ? 1 : CE.GR_VER;
+  const b = [(CE.GR_MAGIC | (ver << 8)) | 0, m.keyId | 0, m.dif | 0, m.passes | 0, m.score | 0, m.elapsedSec | 0, sid[0], sid[1], m.firstAtMin | 0, m.lastAtMin | 0,
     (sat8(m.fast) | (sat8(m.skip) << 8) | (sat8(m.incons) << 16) | (sat8(m.quit) << 24)) | 0, ((((m.endWorld | 0) & 0xff) << 8) | ((m.endLevel | 0) & 0xff)) | 0, m.runT0 | 0];
+  if (ver === CE.GR_VER) b.push(m.resumes | 0, (m.resumeTag >>> 0) | 0, m.why | 0);
+  return b;
 }
 function buildSigned(m, seedHex) {
   const base = buildBase(m);
@@ -35,7 +39,7 @@ function pubOf(seedHex) {
 }
 
 console.log('=== campaign-endless: constants + cap table ===');
-assert('constants: magic 0xBB / ver 1 / base 13 / sig 16 / ring 54 / 40s floor / 600s cap / 1e5 passes', CE.GR_MAGIC === 0xBB && CE.GR_VER === 1 && CE.BASE_LEN === 13 && CE.SIG_INTS === 16 && CE.RING === 54 && CE.MIN_PASS_SEC === 40 && CE.MAX_CREDIT_SEC === 600 && CE.MAX_PASSES === 100000);
+assert('constants: magic 0xBB / ver 2 (base 16) + v1 still accepted (base 13) / sig 16 / ring 54 / 40s floor / 600s cap / 1e5 passes', CE.GR_MAGIC === 0xBB && CE.GR_VER === 2 && CE.BASE_LEN === 16 && CE.GR_VER_V1 === 1 && CE.BASE_LEN_V1 === 13 && CE.baseLenOf(2) === 16 && CE.baseLenOf(1) === 13 && CE.baseLenOf(3) === null && CE.SIG_INTS === 16 && CE.RING === 54 && CE.MIN_PASS_SEC === 40 && CE.MAX_CREDIT_SEC === 600 && CE.MAX_PASSES === 100000);
 assert('validate exports: box/ladder prefixes + suffix (default prod names) + offense board + state file + mail threshold', V.CAMPAIGN_ENDLESS_BOX_PREFIX === 'campaign_endless_box_d' && V.CAMPAIGN_ENDLESS_LB_PREFIX === 'campaign_endless_d' && V.CAMPAIGN_ENDLESS_SUFFIX === '' && V.CAMPAIGN_ENDLESS_OFFENSE_LB === 'campaign_endless_offense' && V.CAMPAIGN_ENDLESS_FILE === 'campaign-endless.json' && V.CE_MAIL_MIN === 5);
 const caps = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'gr-caps.json'), 'utf8'));
 assert('gr-caps.json: 54-level ring W1L1..W3L18 (no W2 L0) + cap/minLV per difficulty on every level', caps.ring.length === 54 && caps.ring[0] === '1_1' && caps.ring[53] === '3_18' && caps.ring.indexOf('2_0') < 0
@@ -61,7 +65,7 @@ assert('unknown keyId -> pending (key table lag), not rejected', (() => { const 
 assert('tampered score -> bad-sig', (() => { const t = rec.slice(); t[4] = 1; return CE.verifyGrRecord(t, TBL).reason === 'bad-sig'; })());
 assert('zero-padded tail ok / non-zero tail -> trailing / unknown ver -> pending / bad magic -> magic / short -> short',
   CE.verifyGrRecord(rec.concat(new Array(64 - rec.length).fill(0)), TBL).ok === true && CE.verifyGrRecord(rec.concat([0, 7]), TBL).reason === 'trailing'
-  && (() => { const t = rec.slice(); t[0] = (CE.GR_MAGIC | (2 << 8)); return CE.verifyGrRecord(t, TBL).pending === true; })()
+  && (() => { const t = rec.slice(); t[0] = (CE.GR_MAGIC | (3 << 8)); return CE.verifyGrRecord(t, TBL).pending === true && CE.verifyGrRecord(t, TBL).reason === 'ver'; })()
   && CE.verifyGrRecord([0xB1].concat(rec.slice(1)), TBL).reason === 'magic' && CE.verifyGrRecord(rec.slice(0, 20), TBL).reason === 'short');
 const signed = (over) => CE.verifyGrRecord(buildSigned(Object.assign({}, meta, over), seed), TBL);
 assert('B2 sequence: fast / skip / incons > 0 -> reject with that reason', planOf(signed({ fast: 1 })).reason === 'fast' && planOf(signed({ skip: 2 })).reason === 'skip' && planOf(signed({ incons: 1 })).reason === 'incons');
@@ -74,9 +78,34 @@ assert('B5 lower bound: far below the summed minimum values -> lowscore SIGNAL o
 assert('B6 caps: passes 0 -> nopass / passes > 1e5 -> passes / dif 4 -> dif / endLevel 19 -> endlevel / runT0 before 2026-09-01 or after now+1d -> runt0',
   planOf(signed({ passes: 0 })).reason === 'nopass' && planOf(signed({ passes: 100001 })).reason === 'passes' && CE.boundaryPlan(Object.assign({}, v.fields, { dif: 4 }), caps).reason === 'dif'
   && planOf(signed({ endLevel: 19 })).reason === 'endlevel' && planOf(signed({ runT0: 1700000000 })).reason === 'runt0' && planOf(signed({ runT0: runT0 + 100000 })).reason === 'runt0');
-assert('ladderDetails = [passes, elapsedMin, keyId, flags, endWorld<<8|endLevel, runT0]; offenseDetails = [0xC8, tMin, dif, reasonCode, passes, score]',
-  JSON.stringify(CE.ladderDetails(v.fields)) === JSON.stringify([7, 7, 2026090701, 1 << 24, (1 << 8) | 8, runT0]) && JSON.stringify(CE.offenseDetails(12345, v.fields, 'overcap')) === JSON.stringify([0xC8, 12345, 2, 30, 7, 41234]) && CE.REASON_CODE['fast'] === 10 && CE.REASON_CODE['bad-sig'] === 1);
+assert('ladderDetails = [passes, elapsedMin, keyId, flags, endWorld<<8|endLevel, runT0, resumes]; offenseDetails = [0xC8, tMin, dif, reasonCode, passes, score]',
+  JSON.stringify(CE.ladderDetails(v.fields)) === JSON.stringify([7, 7, 2026090701, 1 << 24, (1 << 8) | 8, runT0, 0]) && JSON.stringify(CE.offenseDetails(12345, v.fields, 'overcap')) === JSON.stringify([0xC8, 12345, 2, 30, 7, 41234]) && CE.REASON_CODE['fast'] === 10 && CE.REASON_CODE['bad-sig'] === 1);
 assert('sigHexOf: 64 hex chars from the sig block; differs across two runs of one account (runT0 in the signed bytes)', /^[0-9a-f]{128}$/.test(CE.sigHexOf(rec)) && CE.sigHexOf(rec) !== CE.sigHexOf(buildSigned(Object.assign({}, meta, { runT0: runT0 + 1 }), seed)));
+console.log('=== campaign-endless: v1 / v2 + fork rule (companion knife 5.7c) ===');
+assert('v1 record (the N-1 layout) still verifies + settles; resumes / resumeTag / why decode 0; sig taken from [13..28]', (() => {
+  const r1 = buildSigned(Object.assign({}, meta, { ver: 1 }), seed); const v1 = CE.verifyGrRecord(r1, TBL);
+  return r1.length === 29 && v1.ok && v1.fields.ver === 1 && v1.fields.resumes === 0 && v1.fields.resumeTag === 0 && v1.fields.why === 0 && planOf(v1).ok === true && /^[0-9a-f]{128}$/.test(CE.sigHexOf(r1)) && CE.sigHexOf(r1) !== CE.sigHexOf(rec);
+})());
+assert('v2 record: 32 ints, decodes resumes / resumeTag (uint32) / why, signature over [0..15] (tampered resumeTag -> bad-sig)', (() => {
+  const r2 = buildSigned(Object.assign({}, meta, { resumes: 3, resumeTag: 0xF0E0D0C0, why: 1 }), seed); const v2 = CE.verifyGrRecord(r2, TBL);
+  const t = r2.slice(); t[14] = 5;
+  return rec.length === 32 && r2.length === 32 && v2.ok && v2.fields.ver === 2 && v2.fields.resumes === 3 && v2.fields.resumeTag === 0xF0E0D0C0 && v2.fields.why === 1 && CE.verifyGrRecord(t, TBL).reason === 'bad-sig' && CE.ladderDetails(v2.fields)[6] === 3;
+})());
+assert('v2 header with a v1-length body -> short (not a v1 reading of v2 bytes)', CE.verifyGrRecord(buildSigned(Object.assign({}, meta, { ver: 1 }), seed).map((x, i) => i === 0 ? (CE.GR_MAGIC | (2 << 8)) : x), TBL).reason === 'short');
+assert('fork rule: first sighting -> recorded; same content re-signed by a newer build (keyId differs) -> not a fork; other content for the same tag -> fork; another tag / another runT0 / another account / v1 -> no fork', (() => {
+  const forks = {};
+  const fOf = (over) => CE.verifyGrRecord(buildSigned(Object.assign({}, meta, { resumes: 1, resumeTag: 77, why: 0 }, over), seed), TBL).fields;
+  const a = CE.forkPlan(forks, 'p1', fOf({}));
+  if (!(a.first && !a.fork && a.key === 'p1:2:' + runT0 + ':77')) return false;
+  forks[a.key] = { fp: a.fp, t: 1 };
+  const resend = CE.forkPlan(forks, 'p1', fOf({ keyId: 2026090702, why: 3 }));
+  const fork = CE.forkPlan(forks, 'p1', fOf({ passes: 8, score: 45000 }));
+  const otherTag = CE.forkPlan(forks, 'p1', fOf({ resumeTag: 78, passes: 8 }));
+  const otherRun = CE.forkPlan(forks, 'p1', fOf({ runT0: runT0 + 60, passes: 8 }));
+  const otherAcct = CE.forkPlan(forks, 'p2', fOf({ passes: 8 }));
+  const v1f = CE.verifyGrRecord(buildSigned(Object.assign({}, meta, { ver: 1, passes: 8 }), seed), TBL).fields;
+  return !resend.fork && !resend.first && fork.fork && !otherTag.fork && otherTag.first && !otherRun.fork && !otherAcct.fork && CE.forkPlan(forks, 'p1', v1f).key === null && CE.REASON_CODE.fork === 40;
+})());
 assert('mailDecision: trailing-24h reject sum >= min and no mail in 24h -> send; pruneRejects keeps 48h', (() => {
   const now = 500000; const rej = { [now - 30]: 9, [now - 3]: 3, [now]: 2 };
   const a = CE.mailDecision(rej, now, 0, 5), b = CE.mailDecision(rej, now, now - 10, 5), c = CE.mailDecision({ [now]: 4 }, now, 0, 5);
@@ -93,6 +122,10 @@ assert('best-only ladder write (ForceUpdate with ladderDetails) + same signature
   && /if \(sig && st\.settled\[sig\]\) \{ nDup\+\+; continue; \}/.test(vs) && /scoremethod: 'ForceUpdate', format: 'json' \}, ce\.ladderDetails\(f\)\)/.test(vs) && /if \(sig\) delete st\.settled\[sig\]; continue;/.test(vs));
 assert('rejections -> offense ledger (absolute cumulative score + offenseDetails) + hourly histogram + mail decision (ceSendMail, no seedcap import = no circular require)', /offenseRows\[sid\] = \{ score: of\.n, details: ce\.offenseDetails\(nowMin, plan\.fields, plan\.reason\) \};/.test(vs)
   && /st\.rejects\[nowHour\] = \(st\.rejects\[nowHour\] \| 0\) \+ 1;/.test(vs) && /const md = ce\.mailDecision\(st\.rejects, nowHour, st\.mailHour \| 0, CE_MAIL_MIN\);/.test(vs) && /async function ceSendMail\(subject, text\)/.test(vs) && !/^const seedcap = require/m.test(vs));
+assert('knife 5.7c: save boxes find-or-created as client-writable next to the run boxes (default prefix campaign_endless_save_box_d) + fork drop before settling (no offense row) + fork memory pruned with the signatures', V.CAMPAIGN_ENDLESS_SAVE_PREFIX === 'campaign_endless_save_box_d'
+  && /const saveName = CAMPAIGN_ENDLESS_SAVE_PREFIX \+ dif \+ CAMPAIGN_ENDLESS_SUFFIX;[^\n]*\n\s*if \(!byName\(saveName\)\) await findOrCreateBoard\(saveName, false\);/.test(vs)
+  && /const fk = ce\.forkPlan\(st\.forks, pid\(sid\), f\);\s*if \(fk\.fork\) \{ nFork\+\+; if \(sig\) st\.settled\[sig\] = nowMin;[^\n]*continue; \}/.test(vs)
+  && !/fk\.fork[^\n]*offenseRows/.test(vs) && /st\.forks = st\.forks \|\| \{\};/.test(vs) && /for \(const k of Object\.keys\(st\.forks \|\| \{\}\)\)/.test(vs));
 assert('state file persisted by the workflow', /campaign-endless\.json/.test(fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'validate.yml'), 'utf8')));
 
 console.log(failN ? ('\nFAIL ' + failN) : '\nall green');
