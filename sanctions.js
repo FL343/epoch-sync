@@ -63,7 +63,9 @@ const SN_STATE_FILE = process.env.SN_STATE_FILE || 'sanctions.json';
 //   (pid only -- the state file still names nobody); the reconcile takes them into its trust.json and keeps the last id it took
 //   there (`taken.sanctions`), read back here to prune the queue. The shadow boards stay the storage of everything else.
 const TRUST_FILE = process.env.TRUST_FILE || 'trust.json';   // read-only (the reconcile owns it)
-const BAN_LB = process.env.BAN_LB || 'ban_board';            // lockstep: client eac-gate BOARD_BAN
+const BAN_LB = v.BAN_LB;   // ban gate board (env BAN_LB, default ban_board; lockstep: client eac-gate BOARD_BAN): the name lives in
+                           //   validate.js since cloud audit Q338 -- the reconcile reads the board to keep full bans off the cup podium,
+                           //   the tier cuts and the composite ladders; this job is still its only writer
 const BAN_SHADOW_SUFFIX = '_banned';
 // ---- which boards a full ban exiles (cloud audit R1-X13, 2026-10-09) ----
 // The first cut kept a hand-written default (xp_ladder, endless_board, endless_board_trio, card_box) plus an
@@ -151,6 +153,7 @@ const EXILE_KEEP = Object.freeze({
   ENDLESS_RATING_LB_QUAD: 'endless tier score (the client reads one player\'s row to draw his tier badge; not a ranking list -- the ladder rows the badge sits on are exiled)',
   ENDLESS_TIERCUT_LB: 'tier cut carrier (one ops row, no player rows)',
   ENDLESS_CUP_LB: 'Gold Rush Cup carrier (one ops row, no player rows)',
+  BAN_LB: 'the ban gate board itself (this job writes it; the reconcile only reads it -- Q338)',
 });
 // env: extra display boards (comma list), appended to the derived list. Unset in production.
 const EXILE_BOARDS = String(process.env.EXILE_BOARDS || '').split(',').map(s => s.trim()).filter(Boolean);

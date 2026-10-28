@@ -3701,6 +3701,7 @@ function writeRunSummary() {
       '| trust ledger events taken (seedcap / sanctions / flags) / mirror rows written | ' + s('trustLedger', '0/0/0') + ' / ' + s('trustMirror', 0) + ' |',
       '| endless rating rows written / deleted / tier cuts (O103) | ' + s('ratingW', 0) + ' / ' + s('ratingD', 0) + ' / ' + s('tiercut', '-') + ' |',
       '| Gold Rush Cup (O180): settled / honor rows written / deleted / carrier | ' + s('cup', '-') + ' / ' + s('cupHonorW', 0) + ' / ' + s('cupHonorD', 0) + ' / ' + s('cupCarrier', '-') + ' |',
+      '| fully banned accounts on the ban board (left off the cup podium / tier cuts / composite ladders, Q338) / their composite rows deleted | ' + s('bans', '-') + ' / ' + s('ovBanD', 0) + ' |',
       '| team-gamble lone / team dissent unsettled / settled | ' + s('t2ld', '0/0') + ' |',
       '| team-gamble accusation strikes / judged as leaver | ' + s('t2ac', '0/0') + ' |',
       '| board writes rating/points/xp | ' + s('writes', '0/0 0/0 0/0') + ' |',
@@ -3975,6 +3976,36 @@ const TRUST_LEDGER_LB = process.env.TRUST_LEDGER_LB || 'trust_ledger';   // mirr
 function loadTrustLedger() { let o = null; try { o = JSON.parse(fs.readFileSync(TRUST_FILE, 'utf8')); } catch (e) {} return trustLedger.loadLedger(o); }
 function saveTrustLedger(L) { try { writeStateFile(TRUST_FILE, JSON.stringify(L, null, 0)); } catch (e) { ghWarn('write ' + TRUST_FILE + ' failed: ' + (e && e.message)); } }
 function loadSanctionsState() { try { return JSON.parse(fs.readFileSync(SN_STATE_FILE, 'utf8')) || null; } catch (e) { return null; } }
+// ---- accounts fully banned right now (cloud audit Q338 / R2-B2-52) ----
+// The ban gate board belongs to sanctions.js: it writes a row on a ban and deletes it on an unban or an expiry sweep (the name lives
+//   here so the two read one constant). The reconcile only READS it -- looked up by name in the run's board listing, never created --
+//   to keep fully banned accounts out of three things it computes:
+//   - the Gold Rush Cup podium of a week it settles (the next player takes the place; the edition's entrant count still counts the
+//     banned row, so an edition is never un-held), and the name marks it writes;
+//   - the endless tier cuts (each cut is the lower of the cut over everyone and the cut over the players not banned, so no player's
+//     tier drops because of the change -- ratingCutsSkipBanned);
+//   - the composite ladders (no row is written for a banned account; a stray one is deleted -- the race with the sanctions job).
+// A row means a full ban when its score is above 0, its action is not the matchmaking-only one (an unknown code, or a row written
+//   before the action field, is a full ban -- the client gate reads it the same way) and its expiry is 0 (permanent) or still ahead
+//   (an expired row the sweep has not lifted yet is no ban -- sanctions.js expiredSids, same test). A matchmaking-only restriction
+//   keeps every ranking. Details: [expiry unix minutes, action, ref id x 4] (sanctions.js banDetails).
+// A failed read = not known: every user falls back to what it did before this was added (each says how).
+const BAN_LB = process.env.BAN_LB || 'ban_board';   // lockstep: client eac-gate BOARD_BAN
+const BAN_ACT_MM = 2;                               // lockstep: sanctions.js ACT_MM (matchmaking only)
+function banRowFull(score, det, nowMs) {
+  if (!((score | 0) > 0)) return false;
+  const d = Array.isArray(det) ? det : [];
+  const expMin = d.length ? (d[0] | 0) : 0, act = d.length > 1 ? (d[1] | 0) : 0;
+  if (act === BAN_ACT_MM) return false;
+  if (expMin > 0 && expMin * 60000 <= nowMs) return false;
+  return true;
+}
+// raw board entries -> Set of the steamIDs fully banned at nowMs
+function fullBanSet(ents, nowMs) {
+  const out = new Set();
+  for (const e of (ents || [])) if (e && e.steamID != null && banRowFull(e.score, decodeDetails(String(e.detailData || '')), nowMs)) out.add(String(e.steamID));
+  return out;
+}
 // abandon confessions (see reconcileConfessions): "pid|matchKey" -> {t0, mt, ded, ex, refunded, done}
 // An entry is also the ONLY memory that its 0xB5 record was already applied, and that record stays
 // readable until the writer's own shard rotation overwrites it -- for a player who stops playing,
@@ -5974,6 +6005,21 @@ function ratingCutsOf(scores, prior) {
   for (let i = 4; i >= 0; i--) if (cuts[i] < cuts[i + 1] + 100) cuts[i] = cuts[i + 1] + 100;   // monotone: one depth apart at least
   return { N, w, cuts };
 }
+// the cuts without fully banned players (cloud audit Q338): rows = { sid: score } of one family's rating board, banned = Set | null.
+//   Leaving banned players out can move a cut either way (a banned player above a cut pushes it up; fewer players also change the
+//   rank and the weight on the prior), so each cut is the LOWER of the cut over everyone (what was published before) and the cut over
+//   the players not banned: no player's tier drops because of the change (architecture rule 10), a cut a banned player had pushed up
+//   comes down. The lower of two monotone lists is monotone (one depth apart still holds). N stays the count over everyone: the
+//   client's "top x%" divides the player's own place on the rating board -- where a banned row still sits -- by N. nb = banned left out.
+function ratingCutsSkipBanned(rows, banned, prior) {
+  const sids = Object.keys(rows || {});
+  const all = ratingCutsOf(sids.map((sid) => rows[sid] | 0), prior);
+  if (!banned || !banned.size) return all;
+  const keep = sids.filter((sid) => !banned.has(String(sid)));
+  if (keep.length === sids.length) return all;
+  const hon = ratingCutsOf(keep.map((sid) => rows[sid] | 0), prior);
+  return { N: all.N, w: all.w, cuts: all.cuts.map((c, i) => Math.min(c | 0, hon.cuts[i] | 0)), nb: sids.length - keep.length };
+}
 function ratingTierOf(score, cuts) {
   if (!Array.isArray(cuts) || cuts.length < 6) return null;
   for (let i = 0; i < 6; i++) if ((score | 0) >= (cuts[i] | 0)) return RATING.TIERS7[i][1];
@@ -6016,6 +6062,10 @@ function pruneRatingHist(st, seasonId) {
 //     row moved off the board elsewhere -- a sanction exile -- is not written back). A seedcap conviction of the run that set a
 //     winner's row revokes that winner's mark the next run; the places are NOT re-awarded (architecture rule 10: a player
 //     promoted into a mark could be the next one to lose it).
+//   - full bans (cloud audit Q338): an account on the ban gate board at the settle wins no place (the next player moves up; see
+//     cupSkipBanned for a team) and gets no mark; the honor upkeep also leaves out an account banned later (its row, if any, is
+//     deleted and written again should the ban be lifted while the week is still the latest). The settle waits for a ban board read
+//     up to CUP_BAN_WAIT_MS past the week's end, then settles without one (a lost read must not stall every honest winner).
 //   - carrier (endless_cup, one row on the tier-cut / version_gate carrier account): score = this week; details [magic | ver << 8,
 //     week, thrSolo, thrTeam, podium, entrants x 4 (this week: solo players / duo, trio, quad teams), held x 4 (bit k = the edition
 //     k + 1 weeks back was held), last settled week]; written only when it changes.
@@ -6033,6 +6083,7 @@ const CUP = {
   KEEP_WEEKS: 14,                             // cron-only: settled weeks kept in the chain memory (the client looks back 12)
   CHECK_BACK: 2,                              // cron-only: earlier weekly boards a conviction is looked up on (this week + 2)
 };
+const CUP_BAN_WAIT_MS = 24 * 3600 * 1000;   // Q338: how long past a week's end its settle waits for the ban board to read
 // local end-to-end runs only: a real 40-player edition cannot be staged on the test twins, so CUP_THR_SOLO / CUP_THR_TEAM lower the
 //   thresholds when (and only when) the cup boards are the *_test twins; the production names ignore them
 if (/_test$/.test(ENDLESS_CUP_LB) && /_test$/.test(ENDLESS_CUP_HONOR_LB)) {
@@ -6101,15 +6152,30 @@ function cupPodium(groups, podium, max) {
 }
 // places that win a mark in an edition of n entrants (PODIUM_STEPS off = PODIUM)
 function cupPodiumFor(n, base) { let p = base | 0; for (const [minN, places] of (CUP.PODIUM_STEPS || [])) if ((n | 0) >= (minN | 0) && (places | 0) > p) p = places | 0; return p; }
-// one week's verdict from its four boards' rows ({ pc: rows | undefined }); thresholds from CUP
-function cupVerdict(rowsByPc, thr) {
+// standings without fully banned accounts (cloud audit Q338 / R2-B2-52): a banned member never wins a mark, and a group left with no
+//   member on the board leaves the standings (the groups below move up a place). A team that still has a member who is not banned
+//   keeps its score and its place: dropping it would take the mark from that teammate, and architecture rule 10 puts not hurting an
+//   honest player ahead of a cheater's team keeping a place it would hold today anyway. banned = Set | null (null / empty = as before).
+function cupSkipBanned(groups, banned) {
+  if (!banned || !banned.size) return groups;
+  const out = [];
+  for (const g of (groups || [])) {
+    const sids = g.sids.filter((s) => !banned.has(String(s)));
+    if (sids.length) out.push(sids.length === g.sids.length ? g : Object.assign({}, g, { sids }));
+  }
+  return out;
+}
+// one week's verdict from its four boards' rows ({ pc: rows | undefined }); thresholds from CUP. banned (Q338): Set of fully banned
+//   steamIDs or null -- the podium is built without them (cupSkipBanned); the entrant count n, and so whether the edition is held and
+//   how many places it has, still counts every row (leaving them out could un-hold an edition and take every winner's mark).
+function cupVerdict(rowsByPc, thr, banned) {
   const v = { n: [0, 0, 0, 0], h: [0, 0, 0, 0], pod: {} };
   for (let pc = 1; pc <= 4; pc++) {
     const rows = rowsByPc && rowsByPc[pc];
     if (!rows) continue;
     const st = cupStandings(rows, pc);
     v.n[pc - 1] = st.n;
-    if (st.n >= (pc === 1 ? thr.solo : thr.team)) { v.h[pc - 1] = 1; v.pod[pc] = cupPodium(st.groups, cupPodiumFor(st.n, thr.podium), Math.max(CUP.MAX_ENTRIES, cupPodiumFor(st.n, thr.podium))).map((e) => [e.place, e.score, e.sids]); }
+    if (st.n >= (pc === 1 ? thr.solo : thr.team)) { v.h[pc - 1] = 1; v.pod[pc] = cupPodium(cupSkipBanned(st.groups, banned), cupPodiumFor(st.n, thr.podium), Math.max(CUP.MAX_ENTRIES, cupPodiumFor(st.n, thr.podium))).map((e) => [e.place, e.score, e.sids]); }
   }
   return v;
 }
@@ -8848,12 +8914,27 @@ async function main() {
   //   tier-cut carrier. Every exit path, like trust: a delete after a conviction / season prune and the daily publish must not
   //   wait for a fresh match. EA app id only (the channel twins keep no rating surface). st = the chain memory (`hist` lives
   //   there; the settle-free paths load it read-only), touched = sids whose history moved this run.
+  // cloud audit Q338: the fully banned accounts, read once per run the first time a user asks (the composite writes on the settle path,
+  //   so after this run's per-size reads; the rating / cup upkeep on every exit path). null = could not be read (each user then does
+  //   what it did before). A board not on this run's listing = no ban was ever written on this app = nobody banned.
+  let banSet = undefined;
+  const banSetOnce = async () => {
+    if (banSet !== undefined) return banSet;
+    banSet = null;
+    const list0 = (lr.json && lr.json.response && lr.json.response.leaderboards) || [];
+    const f = list0.find((x) => String(x.name || x.Name) === BAN_LB);
+    const bid = f ? (f.id || f.ID) : null;
+    if (!bid) { banSet = new Set(); RUN.bans = '0 (no board)'; return banSet; }
+    try { const br = await readBoardAll(bid, 'ban board'); banSet = fullBanSet(br.ents, Date.now()); RUN.bans = String(banSet.size); console.log('ban board: ' + banSet.size + ' account(s) fully banned'); }
+    catch (e) { banSet = null; RUN.bans = 'read failed'; ghWarn('ban board read failed (' + (e && e.message) + ') -- cup / tier cuts / composite fall back to not knowing'); }
+    return banSet;
+  };
   const maintainRating = async (st, touched) => {
     if (PT_MODE) return;
     const list0 = (lr.json && lr.json.response && lr.json.response.leaderboards) || [];
     const byName0 = (name) => { const f = list0.find((x) => String(x.name || x.Name) === name); return f ? (f.id || f.ID) : null; };
     const nowR = seasonNowMs();
-    const scoresByFam = {};
+    const rowsByFam = {};   // Q338: each family's rating rows (sid -> { s, det }), for the cuts with and without banned players
     let skipped = 0, wN = 0, dN = 0;
     for (const [fam, base] of RATING_FAMS) {
       const name = seasonBoardName(base, seasonId);
@@ -8866,7 +8947,8 @@ async function main() {
       const plan = ratingPlan(st, seasonId, fam, existing, touched);
       wN += plan.writes.length; dN += plan.deletes.length;
       if (plan.writes.length || plan.deletes.length) console.log('rating ' + fam + ': ' + plan.writes.length + ' writes [' + plan.writes.map((w) => plog(w.sid) + '=' + w.score).join(' ') + '], ' + plan.deletes.length + ' deletes [' + plan.deletes.map(plog).join(' ') + ']');
-      if (!APPLY_MMR) { scoresByFam[fam] = Object.values(existing).map((x) => x.s | 0); continue; }
+      rowsByFam[fam] = existing;   // the map below is updated by the writes / deletes, so the cuts see this run's rows
+      if (!APPLY_MMR) continue;
       for (const w of plan.writes) {
         const r = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: bid, steamid: w.sid, score: w.score, scoremethod: 'ForceUpdate', format: 'json' }, w.details);
         const okW = r.ok && !(r.json && r.json.result && r.json.result.result && r.json.result.result !== 1);
@@ -8877,7 +8959,6 @@ async function main() {
         if (r.ok) delete existing[sid]; else ghWarn('rating ' + fam + ' delete failed ' + plog(sid) + ': HTTP ' + r.status);
       }
       const sc = Object.values(existing).map((x) => x.s | 0).sort((a, b) => b - a);
-      scoresByFam[fam] = sc;
       // calibration summary (numbers only): rated players and the median score / best / mean of the family this run
       const med = (arr) => (arr.length ? arr[Math.floor((arr.length - 1) / 2)] : 0);
       console.log('rating summary ' + JSON.stringify({ fam, rated: sc.length, p50: med(sc), p50best: med(Object.values(existing).map((x) => x.det[0] | 0).sort((a, b) => b - a)), p50avg100: med(Object.values(existing).map((x) => x.det[1] | 0).sort((a, b) => b - a)) }));
@@ -8897,14 +8978,18 @@ async function main() {
     const day = tiercutDay(nowR);
     if (!tiercutDue(published, seasonId, day)) { RUN.tiercut = 'current ' + published.day; return; }
     const byFam = {};
-    for (const [fam] of RATING_FAMS) byFam[fam] = ratingCutsOf(scoresByFam[fam] || [], RATING.PRIOR[fam]);
+    const bans = await banSetOnce();   // Q338: null (not read) = the cuts over everyone, as before
+    for (const [fam] of RATING_FAMS) {
+      const rows = {}; for (const sid of Object.keys(rowsByFam[fam] || {})) rows[sid] = rowsByFam[fam][sid].s | 0;
+      byFam[fam] = ratingCutsSkipBanned(rows, bans, RATING.PRIOR[fam]);
+    }
     let carrier = TIERCUT_CARRIER_SID || carrierOnBoard;
     if (!carrier) {   // the account carrying this app's version_gate row (ops-provisioned, read by every client)
       try { const vg = byName0('version_gate'); if (vg) { const br = await readBoardAll(vg, 'version gate board'); if (br.ents[0]) carrier = String(br.ents[0].steamID); } } catch (e) { carrier = null; }
     }
     if (!carrier) { console.log('tiercut: no carrier account (set TIERCUT_CARRIER_SID or provision version_gate) -- not published'); RUN.tiercut = 'no carrier'; return; }
     const detTc = tiercutEncode(seasonId, byFam);
-    for (const [fam] of RATING_FAMS) console.log('tiercut ' + fam + ': N=' + byFam[fam].N + ' w=' + byFam[fam].w.toFixed(3) + ' cuts=[' + byFam[fam].cuts.join(',') + ']');
+    for (const [fam] of RATING_FAMS) console.log('tiercut ' + fam + ': N=' + byFam[fam].N + ' w=' + byFam[fam].w.toFixed(3) + ' cuts=[' + byFam[fam].cuts.join(',') + ']' + (byFam[fam].nb ? ' (' + byFam[fam].nb + ' banned left out: each cut the lower of with / without them)' : bans ? '' : ' (ban board not read: banned players counted)'));
     if (!APPLY_MMR) { console.log('tiercut: dry-run, carrier untouched'); return; }
     const r = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: tcId, steamid: carrier, score: day, scoremethod: 'ForceUpdate', format: 'json' }, detTc);
     const okTc = r.ok && !(r.json && r.json.result && r.json.result.result && r.json.result.result !== 1);
@@ -8924,10 +9009,17 @@ async function main() {
     cup.w = cup.w || {};
     let dirty = false;
     if (cup.s == null) { cup.s = cupWeekBack(week, 2); dirty = true; }   // first run: the week before this one is settled next
+    const bans = await banSetOnce();   // Q338: fully banned accounts (null = not read), for the settle and the honor upkeep below
     while (cup.s < prev) {
       const wk = cupNextWeek(cup.s);
       let v = { n: [0, 0, 0, 0], h: [0, 0, 0, 0], pod: {} };
       if (cupEdition(wk) >= 1) {
+        // Q338: a settle without the ban board would hand a banned player a place for good; it waits (the next run reads again) up to
+        //   CUP_BAN_WAIT_MS past the week's end, then goes ahead without (as before Q338) so a lost board never holds every winner back
+        if (!bans) {
+          if (seasonNowMs() < cupWeekStart(cupNextWeek(wk)) + CUP_BAN_WAIT_MS) { ghWarn('cup: ban board not read -- week ' + wk + ' settled next run'); break; }
+          ghWarn('cup: ban board still not read ' + (CUP_BAN_WAIT_MS / 3600000) + ' h after week ' + wk + ' ended -- settled with banned accounts counted');
+        }
         const rowsByPc = {};
         try {
           for (const [pc, base] of CUP_FAMS) {
@@ -8937,7 +9029,8 @@ async function main() {
             rowsByPc[pc] = br.ents.map((e) => ({ sid: String(e.steamID), score: e.score | 0, det: decodeDetails(e.detailData) }));
           }
         } catch (e) { ghWarn('cup: week ' + wk + ' read failed (' + (e && e.message) + ') -- settled next run'); break; }
-        v = cupVerdict(rowsByPc, { solo: CUP.THR_SOLO, team: CUP.THR_TEAM, podium: CUP.PODIUM });
+        v = cupVerdict(rowsByPc, { solo: CUP.THR_SOLO, team: CUP.THR_TEAM, podium: CUP.PODIUM }, bans);
+        if (bans && bans.size) { const nb = Object.values(rowsByPc).reduce((a, rows) => a + rows.filter((r) => bans.has(r.sid)).length, 0); if (nb) console.log('cup: week ' + wk + ': ' + nb + ' row(s) of fully banned accounts left off the podium'); }
       }
       cup.w[wk] = v; cup.s = wk; dirty = true;
       RUN.cup = String(wk);
@@ -8955,7 +9048,13 @@ async function main() {
         for (const e of br.ents) existing[String(e.steamID)] = { s: e.score | 0, det: decodeDetails(e.detailData) };
         if (!cup.hw || (cup.hw.w | 0) !== (cup.s | 0)) { cup.hw = { w: cup.s, ok: {} }; dirty = true; }
         const vS = cup.w[cup.s];
-        const plan = cupHonorPlan(existing, vS ? cupMarksOf(vS, vS.rv) : {}, cup.s, cup.hw.ok);
+        const want = vS ? cupMarksOf(vS, vS.rv) : {};
+        // Q338: a winner banned now gets no mark row (a row on the board is deleted below); deleting it here also forgets that it was
+        //   written, so it is written again should the ban be lifted while this week is still the latest (a row the sanctions job moved
+        //   away instead comes back with the unban -- its written flag stays). bans null = not known: the marks as before.
+        const banGone = new Set();
+        if (bans) for (const sid of Object.keys(want)) if (bans.has(sid)) { delete want[sid]; if (existing[sid]) banGone.add(sid); }
+        const plan = cupHonorPlan(existing, want, cup.s, cup.hw.ok);
         for (const sid of plan.keep) if (!cup.hw.ok[sid]) { cup.hw.ok[sid] = 1; dirty = true; }
         if (plan.writes.length || plan.deletes.length) console.log('cup honor: ' + plan.writes.length + ' writes [' + plan.writes.map((w) => plog(w.sid) + '=' + w.details.slice(2).map((x) => (x >> 8) + ':' + (x & 0xff)).join(',')).join(' ') + '], ' + plan.deletes.length + ' deletes [' + plan.deletes.map(plog).join(' ') + ']');
         if (APPLY_MMR) {
@@ -8966,7 +9065,8 @@ async function main() {
           }
           for (const sid of plan.deletes) {
             const r = await postForm('/ISteamLeaderboards/DeleteLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: honorId, steamid: sid, format: 'json' });
-            if (r.ok) RUN.cupHonorD = (RUN.cupHonorD | 0) + 1; else ghWarn('cup honor delete failed ' + plog(sid) + ': HTTP ' + r.status);
+            if (r.ok) { RUN.cupHonorD = (RUN.cupHonorD | 0) + 1; if (banGone.has(sid) && cup.hw.ok[sid]) { delete cup.hw.ok[sid]; dirty = true; } }
+            else ghWarn('cup honor delete failed ' + plog(sid) + ': HTTP ' + r.status);
           }
         }
       } catch (e) { ghWarn('cup: honor board read failed (' + (e && e.message) + ') -- nothing written or deleted this run'); }
@@ -12272,9 +12372,20 @@ async function main() {
     };
     const todo = sids.map(sid => [sid, wantOf(sid)]).filter(([sid, want]) => {
       if (!want || ovGone[pid(sid)]) return false;
+      if (ovBans && ovBans.has(sid)) return false;   // Q338: no composite row for a fully banned account
       const c = cur[sid];
       return !c || c.s !== want[0] || (c.det[1] | 0) !== want[1] || (c.det[2] | 0) !== want[2];
     });
+    // Q338: a composite row of a fully banned account still on the board is deleted. The sanctions job moves his rows away while this
+    //   job runs in its own lane, so a run that read his per-size bests before the move and the composite board after it wrote his row
+    //   back for good; now such a row lives one run. Nothing is lost: the row is derived, and after an unban the restored per-size rows
+    //   bring it back on the next run. bans null (not read) = nothing deleted.
+    const strays = ovBans ? Object.keys(cur).filter((sid) => ovBans.has(sid)) : [];
+    for (const sid of strays) {
+      const r = await postForm('/ISteamLeaderboards/DeleteLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: bid, steamid: sid, format: 'json' });
+      if (r.ok) { RUN.ovBanD = (RUN.ovBanD | 0) + 1; console.log('  ' + label + ' ' + plog(sid) + ': fully banned -> composite row deleted'); }
+      else ghWarn('delete ' + label + ' ' + plog(sid) + ' (banned) failed HTTP ' + r.status);
+    }
     if (!todo.length) { console.log(label + ' writes: 0/' + sids.length + ' (all composite rows current)'); return; }
     const wr = await mapPool(todo, CONCURRENCY, async ([sid, want]) => {
       const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: bid, steamid: sid, score: want[0], scoremethod: 'ForceUpdate', format: 'json' }, want);
@@ -12290,6 +12401,7 @@ async function main() {
     });
     console.log(label + ' writes: ' + wr.filter(x => x.status === 'fulfilled' && x.value).length + '/' + todo.length + ' (of ' + sids.length + ' composite candidates)');
   };
+  const ovBans = await banSetOnce();   // Q338: read after this run's per-size reads (see writeOverall)
   for (const F of OVERALL_FAMS) { await writeOverall(F, false); await writeOverall(F, true); }
   // client knife 5.1a (2026-10-15, user call 10-07 "casual saves no longer expire with the season"): only the COMPETITIVE save boxes are pruned
   //   past their season (the competitive run is bound to the season seed); the casual checkpoint rows (and the classic ones, never on this
@@ -12398,6 +12510,7 @@ Object.assign(module.exports, { RATING, RATING_FAMS, ENDLESS_RATING_LB_SOLO, END
   ratingHistUpsert, ratingHistRemove, ratingScoreOf, ratingPlan, ratingCutsOf, ratingTierOf, tiercutDay, tiercutEncode, tiercutDecode, tiercutDue, pruneRatingHist });
 Object.assign(module.exports, { CUP, CUP_FAMS, ENDLESS_CUP_LB, ENDLESS_CUP_HONOR_LB, cupWeekId, cupWeekStart, cupWeekBack, cupNextWeek, cupEdition, cupWeekBoardName, teamBlockSids,
   cupStandings, cupPodium, cupPodiumFor, cupVerdict, cupMarksOf, cupHonorEncode, cupHonorDecode, cupHonorPlan, cupHeldMasks, cupCarrierEncode, cupCarrierDecode, cupRevoke, pruneCup });   // O180 Gold Rush Cup (client knife 5.1c-1; test/endless-cup.js)   // O103 endless competitive rating (client knife 5.1a; test/endless-rating.js)
+Object.assign(module.exports, { BAN_LB, BAN_ACT_MM, banRowFull, fullBanSet, cupSkipBanned, ratingCutsSkipBanned, CUP_BAN_WAIT_MS });   // cloud audit Q338 full bans kept off the cup podium / tier cuts / composite ladders (test/ban-skip.js; sanctions.js reads BAN_LB from here)
 Object.assign(module.exports, { lpWriteDetails, mhOfKey, groupSids, prunePendingWrites, PENDING_WRITES_FILE, RECEIPT_HOLD_MS });   // O480 points receipts + backlog (test/receipt-ring.js)
 Object.assign(module.exports, { lpReadStale, lpLastLive, LP_LAST_HOLD_MS });   // O481 the backlog's last write against a lagging read (test/stale-lp-read.js)
 Object.assign(module.exports, { careerBlockOf, fillCareerDetails, careerEnsureWrites, decodeCharBlock, careerSeatCodes, careerModeOfMt, careerSecOf, careerCellAdd, creditCareerMatch, creditCareerEndless, CHAR_MAGIC, CAREER_MATRIX_MAGIC, CAREER_MODES, CAREER_WL_MASK, CAREER_COLS });   // 5.4a S0 / S2 career block + matrix (test/career-refill.js, test/career-matrix.js, mvp ledger-schema-lockstep)
