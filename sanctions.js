@@ -22,6 +22,10 @@
 //      from the source. THE SHADOW IS THE STORAGE: restore on unban reads the
 //      shadow row back (score + raw detail bytes preserved). No identity or
 //      score ever needs to live in repo state -- the state file stays a cursor.
+//      Which boards: EXILE_DISPLAY below, derived from validate.js's board-name
+//      constants (+ per-season twins); everything else validate.js knows is on
+//      EXILE_KEEP with its reason. Source boards are only ever looked up, never
+//      created; a shadow board is created when a row first moves onto it.
 //   3. platform game bans (optional; FULL bans only -- a Steam game ban is a
 //      public account mark): ICheatReportingService report+ban per app id listed
 //      in BAN_APPIDS (revoke on unban). Runs only where that env is set (one
@@ -61,10 +65,142 @@ const SN_STATE_FILE = process.env.SN_STATE_FILE || 'sanctions.json';
 const TRUST_FILE = process.env.TRUST_FILE || 'trust.json';   // read-only (the reconcile owns it)
 const BAN_LB = process.env.BAN_LB || 'ban_board';            // lockstep: client eac-gate BOARD_BAN
 const BAN_SHADOW_SUFFIX = '_banned';
-// Display boards to exile. Extra names (season ladders etc.) come in via env --
-// keep repo defaults to the safe common set.
-const EXILE_BOARDS = String(process.env.EXILE_BOARDS || 'xp_ladder,endless_board,endless_board_trio,card_box')
-  .split(',').map(s => s.trim()).filter(Boolean);
+// ---- which boards a full ban exiles (cloud audit R1-X13, 2026-10-09) ----
+// The first cut kept a hand-written default (xp_ladder, endless_board, endless_board_trio, card_box) plus an
+// EXILE_BOARDS secret for "extra names" -- the secret was never set, so every display board added since (solo /
+// four-seat casual, the five competitive ladders, classic, campaign endless, ranked points, the supporter wall, and the
+// per-season twins from 2026-12-01 on) kept a banned account's rows. The list is now DERIVED from validate.js's own
+// board-name constants -- one source of names, none copied here:
+//   EXILE_DISPLAY  every board a player sees as a ranking / roster, by validate.js export key (or, for card_box, the
+//                  literal name validate.js uses -- the tripwire checks it is still there). season: the family
+//                  has per-season twins `<base>_s<N>` (validate.js resolveSeasonBoard) -> _s1.._s<current> are added.
+//                  perDif: campaign endless ladders = prefix + 1..CAMPAIGN_ENDLESS_DIF_MAX + suffix. The names that
+//                  reach validate.js only through secrets (LB_PREFIX / RANKED_LB / LP_LB / XP_LB) are handed to this job
+//                  by sanctions.yml exactly as validate.yml hands them to the reconcile (no board name is written into
+//                  this public repo); a job missing one warns once per run and leaves that board alone.
+//   EXILE_KEEP     every other board validate.js names (constant key, or the literal name for the few literal boards),
+//                  each with the reason it is not exiled.
+// test/sanctions-boards.js scans validate.js and fails when a board constant or literal board name sits in neither
+// table (or in both), or when the season flags disagree with validate.js -- a new board has to be classified.
+// A composite ladder (endless_comp_overall / endless_board_overall / endless_classic_overall) is rebuilt every run from its
+// per-size ladders, so it is exiled only together with every one of them, under the same season flag (the test checks it).
+// Re-issued 2026-10-27 on the 10-27 main (cloud audit Q40 / R2-B2-53): the boards added after 10-09 are classified.
+// EXILE_BOARDS (env) only APPENDS names (a display board outside validate.js); a name on the keep list is refused.
+const EXILE_DISPLAY = Object.freeze([
+  { key: 'ENDLESS_LB', season: true },              // casual endless, two seats (endless_board)
+  { key: 'ENDLESS_LB_SOLO', season: true },
+  { key: 'ENDLESS_LB_TRIO', season: true },
+  { key: 'ENDLESS_LB_QUAD', season: true },
+  { key: 'ENDLESS_COMP_LB', season: true },         // competitive endless, solo (endless_comp_solo)
+  { key: 'ENDLESS_COMP_LB_DUO', season: true },
+  { key: 'ENDLESS_COMP_LB_TRIO', season: true },
+  { key: 'ENDLESS_COMP_LB_QUAD', season: true },
+  { key: 'ENDLESS_COMP_LB_OVERALL', season: true },
+  { key: 'ENDLESS_LB_OVERALL', season: true },      // casual composite (endless_board_overall; inputs = the four casual ladders above)
+  { key: 'ENDLESS_LB_CLASSIC_SOLO' },               // classic (nostalgia) endless: lifetime ladders only
+  { key: 'ENDLESS_LB_CLASSIC_DUO' },
+  { key: 'ENDLESS_LB_CLASSIC_TRIO' },
+  { key: 'ENDLESS_LB_CLASSIC_QUAD' },
+  { key: 'ENDLESS_LB_CLASSIC_OVERALL' },            // classic composite (lifetime only, like its inputs)
+  { key: 'CAMPAIGN_ENDLESS_LB_PREFIX', perDif: true },   // campaign endless ladders campaign_endless_d1..d3
+  { key: 'XP_LB' },                                 // level ladder (name from the XP_LB secret)
+  { key: 'LP_LB', season: true },                   // ranked points (name from the LP_LB secret; never on the playtest/demo apps)
+  { key: 'card_box' },                              // cosmetic claim rows that dress a player's board rows; a literal in
+                                                    //   validate.js ptBoardPlan (the client repo's playtest-gate test pins that text)
+  { key: 'SUPPORTER_WALL_LB' },                     // supporter wall (supporter_wall)
+  { key: 'ENDLESS_CUP_HONOR_LB' },                  // Gold Rush Cup name marks (endless_cup_honor; maintainCup never writes an exiled row back)
+  { key: 'LIKE_COUNT_LB' },                         // lifetime likes shown on profiles and board rows (like_count; the likes lane only
+                                                    //   rewrites rows it reads or players liked this run, so a moved row stays moved)
+]);
+const EXILE_KEEP = Object.freeze({
+  PREFIX: 'match record shards (reconcile input, never shown)',
+  RANKED_LB: 'hidden rating (mu / sigma), never shown as a ranking',
+  PT_MIRROR_LB: 'client progress mirror (disaster backup, never shown)',
+  REPORT_LB: 'player report box (client-written input)',
+  UNMATCHED_LB: 'host self-incrimination box (record-only input)',
+  ACTIVE_MATCH_LB: 'reconnect-record mirror (each client reads its own row only)',
+  TRUST_LB: 'trust tier (matchmaking input, never shown)',
+  SUPPORTER_OPTOUT_LB: 'supporter wall opt-out flags (client-written input)',
+  CHAT_MUTE_LB: 'chat mute list (clients read it to hide chat -- a banned account staying muted is the point)',
+  CHAT_REPORT_LB: 'chat report box (client-written input)',
+  CP_LB: 'wallet balance, not a ranking',
+  REDEEM_LB: 'wallet redemption box',
+  GRANT_LB: 'cosmetic grant box (unlock evidence)',
+  CAMPAIGN_LB: 'campaign clear box (unlock evidence)',
+  CAMPAIGN_ENDLESS_BOX_PREFIX: 'campaign endless run boxes (guard-written input)',
+  CAMPAIGN_ENDLESS_OFFENSE_LB: 'campaign endless offense ledger (ops record)',
+  CAMPAIGN_ENDLESS_SAVE_PREFIX: 'campaign endless save rows per difficulty (campaign_endless_save_box_d1..d3, guard-written; a save, not a ranking)',
+  SAVE_BOX_LB: 'endless save rows (a save, not a ranking)',
+  SAVE_BOX_LB_DUO: 'endless save rows (a save, not a ranking)',
+  SAVE_BOX_LB_TRIO: 'endless save rows (a save, not a ranking)',
+  SAVE_BOX_LB_QUAD: 'endless save rows (a save, not a ranking)',
+  SAVE_BOX_LB_CASUAL: 'endless save rows (a save, not a ranking)',
+  SAVE_BOX_LB_CLASSIC: 'endless save rows (a save, not a ranking)',
+  SAVE_BOX_LB_CLASSIC_DUO: 'endless save rows (a save, not a ranking)',
+  SAVE_BOX_LB_CLASSIC_TRIO: 'endless save rows (a save, not a ranking)',
+  SAVE_BOX_LB_CLASSIC_QUAD: 'endless save rows (a save, not a ranking)',
+  version_gate: 'authoritative version gate (ops-written config)',
+  gate_window: 'queue gate window (ops-written config)',
+  pt_master: 'playtest master switch (ops-written config)',
+  CRON_PULSE_LB: 'reconcile heartbeat row (ops monitor, one carrier row)',
+  TRUST_LEDGER_LB: 'trust ledger mirror (friends-only reads, never shown; a ban must not erase the record)',
+  LIKE_BOX_LB: 'like box (client-written input)',
+  ENDLESS_RATING_LB_SOLO: 'endless tier score (the client reads one player\'s row to draw his tier badge; not a ranking list -- the ladder rows the badge sits on are exiled)',
+  ENDLESS_RATING_LB_DUO: 'endless tier score (the client reads one player\'s row to draw his tier badge; not a ranking list -- the ladder rows the badge sits on are exiled)',
+  ENDLESS_RATING_LB_TRIO: 'endless tier score (the client reads one player\'s row to draw his tier badge; not a ranking list -- the ladder rows the badge sits on are exiled)',
+  ENDLESS_RATING_LB_QUAD: 'endless tier score (the client reads one player\'s row to draw his tier badge; not a ranking list -- the ladder rows the badge sits on are exiled)',
+  ENDLESS_TIERCUT_LB: 'tier cut carrier (one ops row, no player rows)',
+  ENDLESS_CUP_LB: 'Gold Rush Cup carrier (one ops row, no player rows)',
+});
+// env: extra display boards (comma list), appended to the derived list. Unset in production.
+const EXILE_BOARDS = String(process.env.EXILE_BOARDS || '').split(',').map(s => s.trim()).filter(Boolean);
+
+// validate.js board name for a table key ('' when the job is not handed the secret that names it).
+function boardNameOf(key) {
+  if (/^[a-z]/.test(key)) return key;   // a literal board name (validate.js names it as a literal, not a constant)
+  const n = v[key];
+  return n ? String(n) : '';
+}
+// Display keys that name no board on this job (a secret sanctions.yml does not pass): those boards would keep a banned
+//   account's rows. Empty in production; the test pins the workflow so every secret-only name is passed on all three jobs.
+//   (A keep key without a name only loosens the EXILE_BOARDS refusal, and the secret is unset in production.)
+function unnamedKeys() {
+  return EXILE_DISPLAY.map(e => e.key).filter(k => !boardNameOf(k));
+}
+// Exact names + name prefixes that must never be exiled (pure; the env append is checked against it).
+function keepBoardNames() {
+  const names = new Set(), prefixes = [];
+  for (const key of Object.keys(EXILE_KEEP)) {
+    if (/^[a-z]/.test(key)) { names.add(key); continue; }           // literal board name
+    const n = boardNameOf(key);
+    if (!n) continue;                                               // no name on this job (unnamedKeys warns once per run)
+    if (/_PREFIX$|^PREFIX$/.test(key)) prefixes.push(n); else names.add(n);
+  }
+  return { names, prefixes, has: (n) => names.has(n) || prefixes.some(p => String(n).indexOf(p) === 0) };
+}
+// The exile list for the current season (pure): every display board, its season twins _s1.._s<seasonId>, then the
+// env append (deduplicated, keep-list names refused).
+function exileSources(seasonId, extra) {
+  const out = [], seen = new Set();
+  const push = (n) => { if (n && !seen.has(n)) { seen.add(n); out.push(n); } };
+  for (const e of EXILE_DISPLAY) {
+    const base = boardNameOf(e.key);
+    if (!base) continue;
+    const bases = [];
+    if (e.perDif) for (let d = 1; d <= (v.CAMPAIGN_ENDLESS_DIF_MAX | 0); d++) bases.push(base + d + (v.CAMPAIGN_ENDLESS_SUFFIX || ''));
+    else bases.push(base);
+    for (const b of bases) {
+      push(b);
+      if (e.season) for (let sn = 1; sn <= (seasonId | 0); sn++) push(v.seasonBoardName(b, sn));
+    }
+  }
+  const keep = keepBoardNames();
+  for (const n of (extra || [])) {
+    if (keep.has(n)) { v.ghWarn('EXILE_BOARDS lists ' + n + ', which is on the keep list -- ignored'); continue; }
+    push(n);
+  }
+  return out;
+}
 const BAN_APPIDS = String(process.env.BAN_APPIDS || '').split(',').map(s => s.trim()).filter(Boolean);
 const EOS_BASE = process.env.EOS_BASE || 'https://api.epicgames.dev';
 const SN_EVENT_CAP = Math.max(1, Number(process.env.SN_EVENT_CAP || 500));   // safety valve per run
@@ -273,11 +409,13 @@ async function steamUnban(sid, appid) {
 //      re-running a processed event converges to the same end state) ----
 async function restoreRows(boards, sid) {
   let restored = 0;
-  for (const name of EXILE_BOARDS) {
-    const srcId = boards.src[name], shId = boards.shadow[name];
-    if (!srcId || !shId) continue;
+  for (const name of boards.sources) {
+    const shId = await boards.find(name + BAN_SHADOW_SUFFIX);   // look up only: no shadow = nothing was ever exiled here
+    if (!shId) continue;
     const row = await v.readUserEntry(shId, sid, 'restore ' + name);
     if (!row) continue;
+    const srcId = await boards.find(name);
+    if (!srcId) { v.ghWarn('restore: source board ' + name + ' not found (' + plog(sid) + ') -- shadow row kept'); continue; }
     const okW = await setRow(srcId, sid, row.score | 0, String(row.detailData || ''));
     if (!okW) { v.ghWarn('restore write failed ' + name + ' (' + plog(sid) + ') -- shadow row kept'); continue; }
     await delRow(shId, sid);
@@ -302,11 +440,13 @@ async function enactBan(boards, sid, expMin, ev) {
     return { moved: 0, bans: 0 };
   }
   let moved = 0;
-  for (const name of EXILE_BOARDS) {
-    const srcId = boards.src[name], shId = boards.shadow[name];
-    if (!srcId || !shId) continue;
+  for (const name of boards.sources) {
+    const srcId = await boards.find(name);   // look up only: a board this app does not carry is skipped, never created
+    if (!srcId) continue;
     const row = await v.readUserEntry(srcId, sid, 'exile ' + name);
     if (!row) continue;
+    const shId = await boards.findOrCreate(name + BAN_SHADOW_SUFFIX);   // the shadow is created on its first row
+    if (!shId) { v.ghWarn('exile: shadow board for ' + name + ' unavailable (' + plog(sid) + ') -- source row kept'); continue; }
     const okW = await setRow(shId, sid, row.score | 0, String(row.detailData || ''));
     if (!okW) { v.ghWarn('exile write failed ' + name + ' (' + plog(sid) + ') -- source row kept'); continue; }
     await delRow(srcId, sid);
@@ -373,24 +513,82 @@ async function maybeMail(lines) {
   } catch (e) { v.ghWarn('sanctions mail threw: ' + (e && e.message)); }
 }
 
-async function resolveBoards(st) {
-  const boards = { ban: null, src: {}, shadow: {} };
-  const cached = st.boards || (st.boards = {});
-  const get = async (name, trusted) => {
-    if (cached[name]) return cached[name];
-    const id = await v.findOrCreateBoard(name, trusted);
-    if (id) cached[name] = id;
-    return id;
-  };
-  boards.ban = await get(BAN_LB, true);
-  for (const name of EXILE_BOARDS) {
-    // source boards are provisioned elsewhere; find-or-create keeps this robust
-    // against listing lag but a trusted-vs-open mismatch never matters for reads,
-    // and we only ever write rows that already existed on the source.
-    boards.src[name] = await get(name, true);
-    boards.shadow[name] = await get(name + BAN_SHADOW_SUFFIX, true);
+// ---- board resolution (per run, only when an event or a lapsed row needs it) ----
+// find(name): look up only. Order: the run's board listing (GetLeaderboardsForGame), then the shadows this job
+//   created in the last few hours (state `fresh` -- the listing hides a new board for an hour or more), then a
+//   by-name lookup with createifnotfound=0 (same bypass as feedback.js). A board that does not exist resolves to
+//   null and is skipped: the playtest / demo apps carry no ranked points board, and must not (validate.js ptBoardPlan refuses
+//   to run while one exists), so a source board is never created from here.
+// findOrCreate(name): shadow boards only, on the first row that moves onto them; the new id goes into `fresh`.
+// A failed listing throws (the event loop stops before the cursor advances; the sweep warns and retries next tick).
+//   A failed by-name lookup only warns and reads as absent: Steam's answer for an unknown name is not documented,
+//   and a lookup that kept throwing would stall every later event on a channel that lacks one display board.
+//   Restore does not depend on it for its own shadows: they are in the listing or in `fresh`.
+const FRESH_MS = 3 * 3600 * 1000;   // well past the listing lag
+async function lookupBoard(name) {
+  const res = await v.postForm('/ISteamLeaderboards/FindOrCreateLeaderboard/v2/', {
+    key: process.env.STEAM_PUBLISHER_KEY, appid: process.env.APPID, name, createifnotfound: 0, format: 'json',
+  });
+  const lb = (res.json && res.json.result && res.json.result.leaderboard) || (res.json && res.json.leaderboard) || null;
+  const id = (res.ok && lb && (lb.leaderBoardID || lb.leaderboardID || lb.id || lb.ID)) || null;
+  if (!id && !(res.ok && res.json)) v.ghWarn('board lookup ' + name + ' HTTP ' + res.status + ' -- treated as absent this run');
+  return id;
+}
+function boardResolver(fresh, nowMs) {
+  const ids = new Map(), absent = new Set();
+  const fr = fresh || {};
+  let listing = null;
+  async function listed() {
+    if (listing) return listing;
+    const lr = await v.getJson(v.BASE + '/ISteamLeaderboards/GetLeaderboardsForGame/v2/?key=' + process.env.STEAM_PUBLISHER_KEY + '&appid=' + process.env.APPID + '&format=json');
+    if (!lr.ok) throw new Error('board listing HTTP ' + lr.status);
+    listing = new Map();
+    for (const b of ((lr.json && lr.json.response && lr.json.response.leaderboards) || [])) {
+      const id = b.id || b.ID, name = b.name || b.Name;
+      if (id != null && name) listing.set(String(name), id);
+    }
+    return listing;
   }
-  return boards;
+  async function find(name) {
+    if (ids.has(name)) return ids.get(name);
+    if (absent.has(name)) return null;
+    const id = (await listed()).get(name) || (fr[name] && fr[name][0]) || await lookupBoard(name);
+    if (id) ids.set(name, id); else absent.add(name);
+    return id || null;
+  }
+  async function findOrCreate(name) {
+    if (ids.has(name)) return ids.get(name);
+    const id = (await listed()).get(name) || (fr[name] && fr[name][0]) || await v.findOrCreateBoard(name, true);
+    if (id) {
+      ids.set(name, id); absent.delete(name);
+      if (!listing.has(name) && !fr[name]) fr[name] = [id, Math.floor((nowMs || Date.now()) / 60000)];
+    }
+    return id || null;
+  }
+  return { find, findOrCreate, absent };
+}
+
+// State keeps the gate board id (read every run by the sweep) and `fresh` (shadows created in the last FRESH_MS,
+// pruned here). Exile sources are resolved by name per run, so a board created later -- a season twin, a board a
+// channel gains -- is picked up without touching state. The ids the first cut cached for its four boards are dropped.
+async function openBoards(st, nowMs) {
+  const now = nowMs || Date.now();
+  const cached = st.boards || {};
+  const ban = cached[BAN_LB] || await v.findOrCreateBoard(BAN_LB, true);
+  st.boards = ban ? { [BAN_LB]: ban } : {};
+  const fresh = {};
+  for (const [n, e] of Object.entries(st.fresh || {})) if (Array.isArray(e) && e[0] && now - (e[1] | 0) * 60000 < FRESH_MS) fresh[n] = e;
+  st.fresh = fresh;   // the resolver adds to this object; boardStateSig / main drop it when empty
+  const r = boardResolver(fresh, now);
+  const unnamed = unnamedKeys();
+  if (unnamed.length) v.ghWarn('sanctions: no board name on this job for ' + unnamed.join(', ') + ' (secret not passed) -- a ban does not exile those boards');
+  return { ban, sources: exileSources(v.seasonAt(v.seasonNowMs()), EXILE_BOARDS), find: r.find, findOrCreate: r.findOrCreate, absent: r.absent };
+}
+
+// What main() persists from openBoards: the gate id and the live `fresh` entries (an empty `fresh` is not written).
+function boardStateSig(st) {
+  const f = st.fresh && Object.keys(st.fresh).length ? st.fresh : null;
+  return JSON.stringify({ b: st.boards || {}, f });
 }
 
 async function main() {
@@ -405,7 +603,7 @@ async function main() {
   let processed = 0, skipped = 0, unmapped = 0;
   let cursor = String(st.lastLogId || '');
   const cursor0 = cursor;
-  const boards0 = JSON.stringify(st.boards || {});   // persist when the id cache grows (sweep-only runs)
+  const boards0 = boardStateSig(st);   // persist when the board cache changes (sweep-only runs)
   const events0 = JSON.stringify(st.events || null);   // O198 v1: persist when the trust event queue moves
   let boards = null;
   // Documented resume protocol: ask with the cursor, consume the batch IN THE ORDER
@@ -433,7 +631,7 @@ async function main() {
         unmapped++; skipped++;
         continue;
       }
-      if (!boards) boards = await resolveBoards(st);
+      if (!boards) boards = await openBoards(st);
       if (!boards.ban) throw new Error('ban gate board unavailable -- refusing to advance the cursor');
       const nowM = Math.floor(Date.now() / 60000);
       if (verb === 'ban') {
@@ -454,20 +652,22 @@ async function main() {
   // sweep is idempotent -- a failed run just retries next tick.
   let lapsed = 0;
   try {
-    if (!boards) boards = await resolveBoards(st);
+    if (!boards) boards = await openBoards(st);
     if (boards.ban) lapsed = await sweepExpired(boards, mail);
   } catch (e) { v.ghWarn('expiry sweep failed (retries next tick): ' + (e && e.message)); }
   // O198 v1: the queued events the reconcile already took go (its cursor in trust.json; unreadable = keep them all)
   let tl = null; try { tl = JSON.parse(fs.readFileSync(TRUST_FILE, 'utf8')); } catch (e) {}
   const qp = trustLedger.queuePrune(st, tl && tl.taken && tl.taken.sanctions);
   if (qp.fused) v.ghWarn('sanctions: ' + qp.fused + ' trust event(s) dropped by the queue fuse (the reconcile has not taken them)');
-  if (cursor !== cursor0 || JSON.stringify(st.boards || {}) !== boards0 || !fs.existsSync(SN_STATE_FILE) || qp.taken || qp.fused || JSON.stringify(st.events || null) !== events0) {
+  if (st.fresh && !Object.keys(st.fresh).length) delete st.fresh;
+  if (cursor !== cursor0 || boardStateSig(st) !== boards0 || !fs.existsSync(SN_STATE_FILE) || qp.taken || qp.fused || JSON.stringify(st.events || null) !== events0) {
     st.lastLogId = cursor;
     saveState(st);
   }
   await maybeMail(mail);
   console.log('sanctions: processed ' + processed + ', skipped ' + skipped + (unmapped ? ' (unmapped ' + unmapped + ')' : '') +
-    (lapsed ? ', expired ' + lapsed : '') + ', cursor ' + (cursor ? cursor.slice(0, 8) + '...' : '(none)'));
+    (lapsed ? ', expired ' + lapsed : '') + ', cursor ' + (cursor ? cursor.slice(0, 8) + '...' : '(none)') +
+    (boards && boards.absent.size ? ', boards not on this app: ' + [...boards.absent].filter(n => n.slice(-BAN_SHADOW_SUFFIX.length) !== BAN_SHADOW_SUFFIX).length : ''));
 }
 
 if (require.main === module) {
@@ -477,4 +677,6 @@ module.exports = {
   SN_STATE_FILE, BAN_LB, BAN_SHADOW_SUFFIX, EXILE_BOARDS, SN_MAP_BATCH,
   normalizeEvents, sidOfEvent, expiryMinOf, verbOf, loadState, saveState,
   ACT_FULL, ACT_MM, actionCodeOf, refIdInts, refIdFromInts, banDetails, expiredSids,
+  EXILE_DISPLAY, EXILE_KEEP, boardNameOf, unnamedKeys, keepBoardNames, exileSources,   // cloud audit R1-X13 (test/sanctions-boards.js)
+  boardResolver, openBoards, boardStateSig, enactBan, enactUnban, restoreRows, sweepExpired,
 };

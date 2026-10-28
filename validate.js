@@ -6792,6 +6792,7 @@ const CAMPAIGN_ENDLESS_LB_PREFIX = process.env.CAMPAIGN_ENDLESS_LB_PREFIX || 'ca
 //   find-or-creates them (clients never create boards) and keeps the fork memory for the v2 records that resumed runs end in.
 const CAMPAIGN_ENDLESS_SAVE_PREFIX = process.env.CAMPAIGN_ENDLESS_SAVE_PREFIX || 'campaign_endless_save_box_d';
 const CAMPAIGN_ENDLESS_SUFFIX = process.env.CAMPAIGN_ENDLESS_SUFFIX || '';
+const CAMPAIGN_ENDLESS_DIF_MAX = 3;   // difficulties 1..3 (lockstep: client campaign endless d1..d3; sanctions.js expands the ladders from it)
 const CAMPAIGN_ENDLESS_OFFENSE_LB = process.env.CAMPAIGN_ENDLESS_OFFENSE_LB || ('campaign_endless_offense' + (process.env.CAMPAIGN_ENDLESS_SUFFIX || ''));
 const CAMPAIGN_ENDLESS_FILE = process.env.CAMPAIGN_ENDLESS_FILE || 'campaign-endless.json';
 const CE_MAIL_MIN = Math.max(1, Number(process.env.CE_MAIL_MIN || 5));
@@ -9189,7 +9190,7 @@ async function main() {
     const offenseRows = {};   // sid -> details (latest offense this run; score = cumulative count)
     try {
       let offId = null;
-      for (let dif = 1; dif <= 3; dif++) {
+      for (let dif = 1; dif <= CAMPAIGN_ENDLESS_DIF_MAX; dif++) {
         const boxName = CAMPAIGN_ENDLESS_BOX_PREFIX + dif + CAMPAIGN_ENDLESS_SUFFIX, lbName = CAMPAIGN_ENDLESS_LB_PREFIX + dif + CAMPAIGN_ENDLESS_SUFFIX;
         let boxId = byName(boxName);
         if (!boxId) boxId = await findOrCreateBoard(boxName, false);   // client-writable (the guard writes as the user)
@@ -12353,6 +12354,7 @@ module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CLASSIC_OWN
   ENDLESS_COMP_LB_OVERALL, overallScore, overallScoreMean, overallDominant,   // knife 3.5d composite ladder
   ENDLESS_LB_OVERALL, ENDLESS_LB_CLASSIC_OVERALL, V51B_PT,   // O276 casual / classic composites + the knife 5.1b rollout gate
   TEAM_MAGIC, TEAM_VER, teamBlock, ladderDetails,   // O207 team block on team-ladder rows
+  PREFIX, RANKED_LB, LP_LB, XP_LB, UNMATCHED_LB, SUPPORTER_WALL_LB, SUPPORTER_OPTOUT_LB, CAMPAIGN_ENDLESS_DIF_MAX, CRON_PULSE_LB, TRUST_LEDGER_LB,   // cloud audit R1-X13 / Q40: the sanctions exile list is derived from the board names (test/sanctions-boards.js)
   CAMPAIGN_ENDLESS_BOX_PREFIX, CAMPAIGN_ENDLESS_LB_PREFIX, CAMPAIGN_ENDLESS_SAVE_PREFIX, CAMPAIGN_ENDLESS_SUFFIX, CAMPAIGN_ENDLESS_OFFENSE_LB, CAMPAIGN_ENDLESS_FILE, CE_MAIL_MIN, CE_SETTLED_TTL_MS, loadCe, saveCe,   // client knife 3.9b N4 (Gold Rush lane)
   absentRosterSeats, absenceHold, shardPlan, persistCensus, fmtCensus, soloHoldsChain, transientStatus, ABSENT_GRACE_MS, ABSENT_GRACE_MIN_MS, LEDGER_SHARDS,   // R1-B2-04 / R1-X14 absent-seat hold
   T2LH, hostDissentCount, team2HostOwnsSeat0,   // cloud audit Q57 team-gamble host charges

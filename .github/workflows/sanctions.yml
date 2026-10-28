@@ -58,8 +58,13 @@ jobs:
           EOS_DEPLOYMENT_ID: ${{ secrets.EOS_DEPLOYMENT_ID }}
           # optional platform game bans (only set on the MAIN job -> never double-issued)
           BAN_APPIDS: ${{ secrets.BAN_APPIDS }}
-          # optional extra display boards to exile (comma list); repo defaults cover the common set
+          # optional extra display boards to exile (comma list, appended); the list itself is derived from validate.js
           EXILE_BOARDS: ${{ secrets.EXILE_BOARDS }}
+          # board names that live only in secrets, as validate.yml hands them to the reconcile (the exile list needs them)
+          LB_PREFIX: ${{ secrets.LB_PREFIX }}
+          RANKED_LB: ${{ secrets.RANKED_LB }}
+          LP_LB: ${{ secrets.LP_LB }}
+          XP_LB: ${{ secrets.XP_LB }}
           # rare-event mail note (same Resend channel as the feedback digest); unset = off
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           SN_MAIL_TO: ${{ secrets.FB_DIGEST_TO }}
@@ -110,6 +115,10 @@ jobs:
           EOS_TRUSTED_CLIENT_SECRET: ${{ secrets.EOS_TRUSTED_CLIENT_SECRET }}
           EOS_DEPLOYMENT_ID: ${{ secrets.EOS_DEPLOYMENT_ID }}
           EXILE_BOARDS: ${{ secrets.EXILE_BOARDS }}
+          LB_PREFIX: ${{ secrets.LB_PREFIX }}
+          RANKED_LB: ${{ secrets.RANKED_LB }}
+          LP_LB: ${{ secrets.LP_LB }}
+          XP_LB: ${{ secrets.XP_LB }}
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           SN_MAIL_TO: ${{ secrets.FB_DIGEST_TO }}
           SN_STATE_FILE: pt-sanctions.json
@@ -160,6 +169,10 @@ jobs:
           EOS_TRUSTED_CLIENT_SECRET: ${{ secrets.EOS_TRUSTED_CLIENT_SECRET }}
           EOS_DEPLOYMENT_ID: ${{ secrets.EOS_DEPLOYMENT_ID }}
           EXILE_BOARDS: ${{ secrets.EXILE_BOARDS }}
+          LB_PREFIX: ${{ secrets.LB_PREFIX }}
+          RANKED_LB: ${{ secrets.RANKED_LB }}
+          LP_LB: ${{ secrets.LP_LB }}
+          XP_LB: ${{ secrets.XP_LB }}
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           SN_MAIL_TO: ${{ secrets.FB_DIGEST_TO }}
           SN_STATE_FILE: demo-sanctions.json
