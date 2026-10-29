@@ -208,6 +208,35 @@ const BAN_APPIDS = String(process.env.BAN_APPIDS || '').split(',').map(s => s.tr
 const EOS_BASE = process.env.EOS_BASE || 'https://api.epicgames.dev';
 const SN_EVENT_CAP = Math.max(1, Number(process.env.SN_EVENT_CAP || 500));   // safety valve per run
 const SN_MAP_BATCH = 16;   // documented max productUserId values per Connect query
+// ---- run time budget (cloud audit Q117, 2026-10-10) ----
+// Each job has a 10-minute timeout (sanctions.yml). A run the timeout kills never reaches saveState, and the persist
+// step after it does not run either, so the next run fetches the same events from the same cursor. A full ban reads
+// the account's row on every display board (about 35 Steam calls in season 1, about 10 more each season after), so a
+// burst of sanctions could make every run die at the same place: bans, unbans and platform bans would all stall, and
+// each killed run would report the already-handled accounts to Steam again. Writing the state file more often would
+// not help (the persist step is skipped once the job is killed), so the run itself stops in time. Two deadlines,
+// measured from process start (the checkout and test steps before this one take well under a minute):
+//   SN_SOFT_MS (6 min)    no new sync batch, no new event and no expiry sweep is started after it;
+//   SN_HARD_MS (7.5 min)  an event still in flight stops between two board steps.
+// The cursor only ever moves past an event once that event is fully enforced, so a stopped run saves the cursor at the
+// last finished event, exits 0, and the next tick re-runs a stopped event from the top (every step is idempotent: a
+// moved row is no longer on its source board, a restored row is no longer on its shadow).
+const SN_SOFT_MS = Math.max(0, Number(process.env.SN_SOFT_MS || 6 * 60 * 1000));
+const SN_HARD_MS = Math.max(SN_SOFT_MS, Number(process.env.SN_HARD_MS || 7.5 * 60 * 1000));
+class BudgetStop extends Error { constructor(m) { super(m); this.name = 'BudgetStop'; } }
+// now(): ms since process start by default (performance.now() is monotonic and counts from the process time origin);
+// tests pass a simulated clock and their own deadlines.
+function runBudget(now, softMs, hardMs) {
+  const clock = now || (() => performance.now());
+  const soft = softMs == null ? SN_SOFT_MS : softMs;
+  const hard = hardMs == null ? SN_HARD_MS : Math.max(soft, hardMs);
+  return {
+    soft, hard,
+    elapsed: () => clock(),
+    softPassed: () => clock() >= soft,
+    checkHard(what) { if (clock() >= hard) throw new BudgetStop('time budget: ' + what + ' stopped at ' + Math.round(clock() / 1000) + 's'); },
+  };
+}
 
 const pid = (s) => crypto.createHmac('sha256', String(process.env.STATE_SALT || '')).update(String(s)).digest('hex').slice(0, 16);
 const plog = (s) => pid(s).slice(0, 8);
@@ -413,6 +442,7 @@ async function steamUnban(sid, appid) {
 async function restoreRows(boards, sid) {
   let restored = 0;
   for (const name of boards.sources) {
+    if (boards.budget) boards.budget.checkHard('restore');   // Q117: stop between boards; an unban event keeps the cursor, the expiry sweep keeps the gate row
     const shId = await boards.find(name + BAN_SHADOW_SUFFIX);   // look up only: no shadow = nothing was ever exiled here
     if (!shId) continue;
     const row = await v.readUserEntry(shId, sid, 'restore ' + name);
@@ -444,6 +474,7 @@ async function enactBan(boards, sid, expMin, ev) {
   }
   let moved = 0;
   for (const name of boards.sources) {
+    if (boards.budget) boards.budget.checkHard('exile');   // Q117: stop between boards; the caller keeps the cursor
     const srcId = await boards.find(name);   // look up only: a board this app does not carry is skipped, never created
     if (!srcId) continue;
     const row = await v.readUserEntry(srcId, sid, 'exile ' + name);
@@ -464,11 +495,17 @@ async function enactBan(boards, sid, expMin, ev) {
   return { moved, bans };
 }
 
-async function enactUnban(boards, sid) {
-  await delRow(boards.ban, sid);
+// gateLast (review Q117): the expiry sweep has no cursor -- the lapsed gate row IS its work list. Clearing the gate row
+//   first and then stopping between two shadows (time budget, or the job timeout) would strand the rest of the rows
+//   on their shadows for good (the next sweep no longer sees the account). The sweep therefore clears the gate row
+//   only after the rows are back; an unban EVENT keeps the old order (the gate drops at once, the cursor re-runs a
+//   stopped event from the top).
+async function enactUnban(boards, sid, gateLast) {
+  if (!gateLast) await delRow(boards.ban, sid);
   const restored = await restoreRows(boards, sid);
   let unbans = 0;
   for (const app of BAN_APPIDS) if (await steamUnban(sid, app)) unbans++;
+  if (gateLast) await delRow(boards.ban, sid);
   console.log('sanction UNBAN ' + plog(sid) + ': gate row cleared, restored ' + restored + ' board row(s), platform unbans ' + unbans + '/' + BAN_APPIDS.length);
   return { restored, unbans };
 }
@@ -490,11 +527,19 @@ function expiredSids(ents, nowMs) {
 async function sweepExpired(boards, mail) {
   const { ents } = await v.readBoardAll(boards.ban, 'ban sweep');
   const lapsed = expiredSids(ents, Date.now());
+  let done = 0;
   for (const sid of lapsed) {
-    const r = await enactUnban(boards, sid);
+    // Q117: no new unban once the soft deadline has passed; the rows still lapsed stay on the gate board and the
+    // next run picks them up (the client already fail-opens past the deadline on its own)
+    if (boards.budget && boards.budget.softPassed()) {
+      console.log('expiry sweep: ' + (lapsed.length - done) + ' lapsed row(s) left for the next run (time budget)');
+      break;
+    }
+    const r = await enactUnban(boards, sid, true);   // gate row last: a stop mid-restore leaves it for the next sweep
     mail.push('EXPIRE ' + sid + ' restored=' + r.restored + ' platform=' + r.unbans);
+    done++;
   }
-  return lapsed.length;
+  return done;
 }
 
 
@@ -574,7 +619,7 @@ function boardResolver(fresh, nowMs) {
 // State keeps the gate board id (read every run by the sweep) and `fresh` (shadows created in the last FRESH_MS,
 // pruned here). Exile sources are resolved by name per run, so a board created later -- a season twin, a board a
 // channel gains -- is picked up without touching state. The ids the first cut cached for its four boards are dropped.
-async function openBoards(st, nowMs) {
+async function openBoards(st, nowMs, budget) {
   const now = nowMs || Date.now();
   const cached = st.boards || {};
   const ban = cached[BAN_LB] || await v.findOrCreateBoard(BAN_LB, true);
@@ -585,7 +630,7 @@ async function openBoards(st, nowMs) {
   const r = boardResolver(fresh, now);
   const unnamed = unnamedKeys();
   if (unnamed.length) v.ghWarn('sanctions: no board name on this job for ' + unnamed.join(', ') + ' (secret not passed) -- a ban does not exile those boards');
-  return { ban, sources: exileSources(v.seasonAt(v.seasonNowMs()), EXILE_BOARDS), find: r.find, findOrCreate: r.findOrCreate, absent: r.absent };
+  return { ban, sources: exileSources(v.seasonAt(v.seasonNowMs()), EXILE_BOARDS), find: r.find, findOrCreate: r.findOrCreate, absent: r.absent, budget: budget || null };
 }
 
 // What main() persists from openBoards: the gate id and the live `fresh` entries (an empty `fresh` is not written).
@@ -594,12 +639,13 @@ function boardStateSig(st) {
   return JSON.stringify({ b: st.boards || {}, f });
 }
 
-async function main() {
+async function main(opts) {
   const missing = [];
   for (const k of ['APPID', 'STEAM_PUBLISHER_KEY', 'STATE_SALT', 'EOS_TRUSTED_CLIENT_ID', 'EOS_TRUSTED_CLIENT_SECRET', 'EOS_DEPLOYMENT_ID']) {
     if (!process.env[k]) missing.push(k);
   }
   if (missing.length) { console.error('missing env: ' + missing.join(', ')); process.exit(1); }
+  const budget = (opts && opts.budget) || runBudget();   // Q117: see SN_SOFT_MS / SN_HARD_MS
   const st = loadState();
   const token = await eosToken();
   const mail = [];
@@ -609,21 +655,28 @@ async function main() {
   const boards0 = boardStateSig(st);   // persist when the board cache changes (sweep-only runs)
   const events0 = JSON.stringify(st.events || null);   // O198 v1: persist when the trust event queue moves
   let boards = null;
+  let stop = '';   // '' = caught up (or a cap reached); 'soft' = budget reached between events; 'hard' = an event stopped midway
   // Documented resume protocol: ask with the cursor, consume the batch IN THE ORDER
   // RETURNED, then set the cursor to the LAST element's logId. logId is opaque -- it
   // is never sorted or compared, only carried forward. An empty batch = caught up.
+  // Q117: the cursor moves past an event only once that event is done (skipped, or fully enforced), so a run that
+  // stops on the time budget resumes at the first event it did not finish -- any logId the stream handed out is a
+  // resume point of the same kind as a batch's last one.
+  rounds:
   for (let round = 0; round < 20 && processed + skipped < SN_EVENT_CAP; round++) {
+    if (budget.softPassed()) { stop = 'soft'; break; }
     const evs = normalizeEvents(await fetchSyncBatch(token, cursor));
     if (!evs.length) break;
     // One identity lookup per batch (docs cap 16/call; resolveSteamIds pages).
     const need = [...new Set(evs.filter(e => !sidOfEvent(e)).map(e => e.puid))];
     const map = need.length ? await resolveSteamIds(token, need) : {};
     for (const ev of evs) {
-      cursor = ev.logId;                       // advance even when skipped: it is a resume token
+      if (budget.softPassed()) { stop = 'soft'; break rounds; }
       const verb = verbOf(ev);
       if (verb === 'skip') {
         console.log('sanction event ' + plog(ev.puid) + ' type=' + ev.eventType + ' -> skip' + (ev.pending ? ' (pending)' : ''));
         skipped++;
+        cursor = ev.logId;                     // advance even when skipped: it is a resume token
         continue;
       }
       const sid = sidOfEvent(ev) || map[ev.puid] || null;
@@ -632,36 +685,59 @@ async function main() {
         // The client-side gate still applies (the guard queries its own sanctions).
         v.ghWarn('sanction ' + verb + ' for ' + plog(ev.puid) + ' has no linked steam account -- board enforcement skipped');
         unmapped++; skipped++;
+        cursor = ev.logId;
         continue;
       }
-      if (!boards) boards = await openBoards(st);
+      if (!boards) boards = await openBoards(st, undefined, budget);
       if (!boards.ban) throw new Error('ban gate board unavailable -- refusing to advance the cursor');
       const nowM = Math.floor(Date.now() / 60000);
-      if (verb === 'ban') {
-        trustLedger.queuePush(st, { t: nowM, src: 'sa', p: pid(sid), sev: actionCodeOf(ev.action) === ACT_MM ? 2 : 3, ctx: { a: actionCodeOf(ev.action) | 0, x: expiryMinOf(ev.expiresAt) > 0 ? 1 : 0 } });   // O198 v1
-        const r = await enactBan(boards, sid, expiryMinOf(ev.expiresAt), ev);
-        mail.push((actionCodeOf(ev.action) === ACT_MM ? 'MM-RESTRICT ' : 'BAN ') + sid + ' action=' + ev.action + (ev.automated ? ' (automated)' : '') +
-          ' exp=' + (expiryMinOf(ev.expiresAt) || 'permanent') + ' exiled=' + r.moved + ' platform=' + r.bans + ' ref=' + ev.refId);
-      } else {
-        trustLedger.queuePush(st, { t: nowM, src: 'sa', p: pid(sid), sev: 0, ctx: { u: 1 } });   // O198 v1: history only (no count)
-        const r = await enactUnban(boards, sid);
-        mail.push('UNBAN ' + sid + ' restored=' + r.restored + ' platform=' + r.unbans + ' ref=' + ev.refId);
+      try {
+        if (verb === 'ban') {
+          const r = await enactBan(boards, sid, expiryMinOf(ev.expiresAt), ev);
+          mail.push((actionCodeOf(ev.action) === ACT_MM ? 'MM-RESTRICT ' : 'BAN ') + sid + ' action=' + ev.action + (ev.automated ? ' (automated)' : '') +
+            ' exp=' + (expiryMinOf(ev.expiresAt) || 'permanent') + ' exiled=' + r.moved + ' platform=' + r.bans + ' ref=' + ev.refId);
+          // O198 v1, queued only once the event is fully enforced (Q117): a stopped event re-runs from the top next time, so
+          //   queued up front the stopped attempt and the re-run would each leave one (no match key: the reconcile counts both)
+          trustLedger.queuePush(st, { t: nowM, src: 'sa', p: pid(sid), sev: actionCodeOf(ev.action) === ACT_MM ? 2 : 3, ctx: { a: actionCodeOf(ev.action) | 0, x: expiryMinOf(ev.expiresAt) > 0 ? 1 : 0 } });   // O198 v1
+        } else {
+          const r = await enactUnban(boards, sid);
+          mail.push('UNBAN ' + sid + ' restored=' + r.restored + ' platform=' + r.unbans + ' ref=' + ev.refId);
+          trustLedger.queuePush(st, { t: nowM, src: 'sa', p: pid(sid), sev: 0, ctx: { u: 1 } });   // O198 v1: history only (no count); after the unban (Q117)
+        }
+      } catch (e) {
+        if (!(e instanceof BudgetStop)) throw e;
+        console.log('sanction ' + verb + ' ' + plog(sid) + ': ' + e.message + ' -- re-runs from the top next time');
+        stop = 'hard';
+        break rounds;
       }
       processed++;
+      cursor = ev.logId;                       // only now: the event is fully enforced
     }
   }
   // Expiry sweep every run (leg 4): natural lapses never appear in the event
   // stream. Board resolution is cached in state, the gate board is tiny, and the
   // sweep is idempotent -- a failed run just retries next tick.
+  // Q117: not started once the soft deadline has passed (a backlog of events goes first); it also stops between rows.
   let lapsed = 0;
-  try {
-    if (!boards) boards = await openBoards(st);
-    if (boards.ban) lapsed = await sweepExpired(boards, mail);
-  } catch (e) { v.ghWarn('expiry sweep failed (retries next tick): ' + (e && e.message)); }
+  if (stop || budget.softPassed()) {
+    console.log('expiry sweep deferred to the next run (time budget)');
+  } else {
+    try {
+      if (!boards) boards = await openBoards(st, undefined, budget);
+      if (boards.ban) lapsed = await sweepExpired(boards, mail);
+    } catch (e) {
+      if (e instanceof BudgetStop) console.log('expiry sweep: ' + e.message + ' -- the rest waits for the next run');
+      else v.ghWarn('expiry sweep failed (retries next tick): ' + (e && e.message));
+    }
+  }
   // O198 v1: the queued events the reconcile already took go (its cursor in trust.json; unreadable = keep them all)
   let tl = null; try { tl = JSON.parse(fs.readFileSync(TRUST_FILE, 'utf8')); } catch (e) {}
   const qp = trustLedger.queuePrune(st, tl && tl.taken && tl.taken.sanctions);
   if (qp.fused) v.ghWarn('sanctions: ' + qp.fused + ' trust event(s) dropped by the queue fuse (the reconcile has not taken them)');
+  if (stop) {
+    v.ghWarn('sanctions: time budget reached at ' + Math.round(budget.elapsed() / 1000) + 's after ' + processed + ' enforced event(s) this run' +
+      (stop === 'hard' ? ' (one event stopped midway, it re-runs from the top)' : '') + ' -- cursor saved at the last finished event, the next run continues');
+  }
   if (st.fresh && !Object.keys(st.fresh).length) delete st.fresh;
   if (cursor !== cursor0 || boardStateSig(st) !== boards0 || !fs.existsSync(SN_STATE_FILE) || qp.taken || qp.fused || JSON.stringify(st.events || null) !== events0) {
     st.lastLogId = cursor;
@@ -670,7 +746,9 @@ async function main() {
   await maybeMail(mail);
   console.log('sanctions: processed ' + processed + ', skipped ' + skipped + (unmapped ? ' (unmapped ' + unmapped + ')' : '') +
     (lapsed ? ', expired ' + lapsed : '') + ', cursor ' + (cursor ? cursor.slice(0, 8) + '...' : '(none)') +
-    (boards && boards.absent.size ? ', boards not on this app: ' + [...boards.absent].filter(n => n.slice(-BAN_SHADOW_SUFFIX.length) !== BAN_SHADOW_SUFFIX).length : ''));
+    (boards && boards.absent.size ? ', boards not on this app: ' + [...boards.absent].filter(n => n.slice(-BAN_SHADOW_SUFFIX.length) !== BAN_SHADOW_SUFFIX).length : '') +
+    (stop ? ', stopped on the time budget' : ''));
+  return { processed, skipped, unmapped, lapsed, cursor, stop };
 }
 
 if (require.main === module) {
@@ -682,4 +760,5 @@ module.exports = {
   ACT_FULL, ACT_MM, actionCodeOf, refIdInts, refIdFromInts, banDetails, expiredSids,
   EXILE_DISPLAY, EXILE_KEEP, boardNameOf, unnamedKeys, keepBoardNames, exileSources,   // cloud audit R1-X13 (test/sanctions-boards.js)
   boardResolver, openBoards, boardStateSig, enactBan, enactUnban, restoreRows, sweepExpired,
+  SN_SOFT_MS, SN_HARD_MS, BudgetStop, runBudget, main,   // cloud audit Q117 (test/sanctions-budget.js)
 };
