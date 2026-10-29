@@ -3876,6 +3876,7 @@ function writeRunSummary() {
       '| token resumes: replays caught / burnt-run segments / untagged settled / untagged refused | ' + s('resumeReplay', 0) + ' / ' + s('runBurnt', 0) + ' / ' + s('resumeUntagged', 0) + ' / ' + s('resumeUntaggedRej', 0) + ' |',
       '| solo same-key forks (another signed record under a settled segment key) | ' + s('soloKeyFork', 0) + ' |',
       '| signed solo segments whose guard clock went back inside the segment, counted and handled as usual (Q242) | ' + s('soloNegDur', 0) + ' |',
+      '| endless runs idle past 45 days whose chain memory stays because a save can still bring them back / forgotten by the fuse (Q327) | ' + s('soloRunKept', 0) + ' / ' + s('soloRunFuse', 0) + ' |',
       '| unsettled records by layout version (O199: attestation / endless tail ints / ledger header) | ' + s('persistPending', '-') + ' |',
       '| solo segments held for an attestation layout not read yet (att-ver; their runs wait with them) | ' + s('attVerHeld', 0) + ' |',
       '| guard match signature blocks on lone bot records settling this run (knife 5.8a): with a block / usable / verified but not trusted / broken or not verifiable / pending (key, version) -- bot matches credited at x1.0' + (MSIG.BOTS ? '' : ' (MSIG_BOTS off: counted only)') + ' | ' + (RUN.msig ? [RUN.msig.block, RUN.msig.ok, RUN.msig.untrusted, RUN.msig.bad, RUN.msig.pending].join(' / ') + ' -- ' + RUN.msig.bots1 : '0 / 0 / 0 / 0 / 0 -- 0') + ' |',
@@ -5997,7 +5998,8 @@ const COMP = {
   CKPT_EVERY: 5,                                                              // lockstep: ENDLESS.CHECKPOINT_EVERY (guard segment cadence = max span)
   CHAIN_WAIT_MS: Number(process.env.COMP_CHAIN_WAIT_MS || 7 * 86400000),      // unchained segment waits this long for its predecessor, then rejects
   MS_TTL_MS: Number(process.env.COMP_MS_TTL_MS || 120 * 86400000),           // milestone bitmaps (player x season x ladder family) outlive a season
-  RUN_TTL_MS: Number(process.env.COMP_RUN_TTL_MS || 45 * 86400000),           // run chain memory (saves included) pruned after
+  RUN_TTL_MS: Number(process.env.COMP_RUN_TTL_MS || 45 * 86400000),           // run chain memory (saves included) pruned after -- unless a save can still bring the run back (soloRunKept, Q327)
+  RUN_CAP: Number(process.env.COMP_RUN_CAP || 100000),                       // fuse: chain memory entries past it forget the oldest idle past RUN_TTL_MS, never a run inside it (about 15 MB at ~150 bytes each; Q327)
   // composite ladder weights (lockstep: client RANKED_CONFIG.ENDLESS.COMP.OVERALL; provisional -- tuned with season data):
   //   K[n-1] = depth discount per team size (extra hooks make team runs deeper); M[n-1] = mixing weight of the 3.5d mean rule (solo
   //   counts double), still read by the playtest / demo jobs until the knife 5.1b gate flips (V51B), then retired
@@ -6414,11 +6416,65 @@ function pruneCup(cup, week) {
   return n;
 }
 function loadSolo() { try { const st = JSON.parse(fs.readFileSync(SOLO_FILE, 'utf8')) || {}; st.runs = st.runs || {}; st.wait = st.wait || {}; st.ms = st.ms || {}; st.held = st.held || {}; st.hist = st.hist || {}; return st; } catch (e) { return { runs: {}, wait: {}, ms: {}, held: {}, hist: {} }; } }
+// cloud audit Q327 (R2-A3-01): a run's chain memory went 45 days after its last settled segment, saves included -- but a casual or
+//   classic save never expires (client knife 5.1a) and a competitive one lasts its season, so a player back after a longer break
+//   resumed a save whose run the cron no longer knew: the resumed segment waited out its 7 days as chain-gap (casual / classic) or
+//   save-orphan (competitive), was rejected, and so was every later segment of that run. An entry past the 45 days now stays while a
+//   save can still bring its run back:
+//     casual (kind 1): the run proved a checkpoint (max >= CKPT_EVERY; a casual token row resumes at a proven checkpoint)
+//     classic (kind 2): the run proved a depth (max >= 1; a classic token row resumes at any proven depth)
+//     competitive (kind 0, solo and team): the run is not FINAL and has a save point nobody consumed, and its season ended no more
+//       than CHAIN_WAIT_MS + 1 day ago on the season clock (the cron deletes a past-season competitive save row by the same clock;
+//       a late segment still finds its chain)
+//     no kind (an entry last settled before this change): with a save point it is a competitive run (only a competitive segment
+//       records save points: casual / classic carry no suspended flag) and takes the competitive rule above; without one, the run
+//       proved a depth, like classic -- its kind is not recorded (review fix: a legacy competitive save point must not outlive its season)
+//     a run one of whose segments the key policy still holds (st.held): kept, the release must find the chain (R1-A5-07)
+//   What stays is the same memory that was there (head, save points, resume tags, burnt mark): a resume after the break is judged by
+//   the rules it always had -- only a depth the run proved can come back, a used row is still caught. RUN_CAP is a fuse: it only
+//   forgets entries the 45 days used to forget (never a run settled inside them -- review fix), oldest first, and warns.
+function soloRunKind(f) { const fl = f.flags | 0; return (fl & attest.SEG_CLASSIC) ? 2 : (fl & attest.SEG_CASUAL) ? 1 : 0; }
+// the first moment after season `id` (the next season's start; null = the season has no end yet)
+function seasonEndMs(id) { let e = null; for (const s of SEASONS) if (s.id > (id | 0) && (e == null || s.start < e)) e = s.start; return e; }
+// the season in a chain key (soloRunKey / teamRunKey: '...|season|runSeed')
+function soloRunSeason(key) { const a = String(key).split('|'); return a.length >= 3 ? (Number(a[a.length - 2]) | 0) : 0; }
+function soloRunKept(key, run, nowMs, heldKeys, seasonNow) {
+  if (!run) return false;
+  if (nowMs - (run.t || 0) <= COMP.RUN_TTL_MS) return true;
+  if (heldKeys && heldKeys.has(key)) return true;
+  const max = run.max | 0;
+  if (run.k == null && !Object.keys(run.saves || {}).length) return max >= 1;   // no kind, no save point: like classic (a save point = competitive, below)
+  if ((run.k | 0) === 1) return max >= COMP.CKPT_EVERY;
+  if ((run.k | 0) === 2) return max >= 1;
+  if (run.final) return false;
+  const sv = run.saves || {};
+  if (!Object.keys(sv).some((d) => sv[d] && !sv[d].by)) return false;
+  const end = seasonEndMs(soloRunSeason(key));
+  return end == null || (seasonNow == null ? nowMs : seasonNow) - end <= COMP.CHAIN_WAIT_MS + 86400000;
+}
 function pruneSolo(st, nowMs) {
-  for (const k of Object.keys(st.runs)) if (nowMs - (st.runs[k].t || 0) > COMP.RUN_TTL_MS) delete st.runs[k];
   for (const m of Object.keys(st.wait)) if (nowMs - (st.wait[m].t0 || 0) > COMP.CHAIN_WAIT_MS + 86400000) delete st.wait[m];
   for (const k of Object.keys(st.ms || {})) if (nowMs - (st.ms[k].t || 0) > COMP.MS_TTL_MS) delete st.ms[k];
   for (const m of Object.keys(st.held || {})) if (nowMs - (st.held[m].t || 0) > COMP.CHAIN_WAIT_MS + 86400000) delete st.held[m];   // gone from the board
+  const heldKeys = new Set(Object.values(st.held || {}).map((h) => h && h.k).filter(Boolean));
+  const sNow = seasonNowMs();
+  let kept = 0;
+  for (const k of Object.keys(st.runs)) {
+    if (!soloRunKept(k, st.runs[k], nowMs, heldKeys, sNow)) delete st.runs[k];
+    else if (nowMs - (st.runs[k].t || 0) > COMP.RUN_TTL_MS) kept++;
+  }
+  RUN.soloRunKept = kept;
+  const all = Object.keys(st.runs).length;
+  if (all > COMP.RUN_CAP) {
+    // the fuse forgets only what the 45 days used to forget (idle past RUN_TTL_MS), oldest first: a run settled inside the 45 days
+    //   stays whatever the count (as before Q327 -- the file only grows); the warning fires either way
+    const ks = Object.keys(st.runs).filter((k) => nowMs - (st.runs[k].t || 0) > COMP.RUN_TTL_MS);
+    ks.sort((a, b) => (st.runs[a].t || 0) - (st.runs[b].t || 0));
+    const n = Math.min(ks.length, all - COMP.RUN_CAP);
+    for (let i = 0; i < n; i++) delete st.runs[ks[i]];
+    RUN.soloRunFuse = (RUN.soloRunFuse | 0) + n;
+    ghWarn('endless chain memory ' + all + ' runs > cap ' + COMP.RUN_CAP + ' -- oldest ' + n + ' idle past ' + Math.round(COMP.RUN_TTL_MS / 86400000) + ' days forgotten (a save of theirs resumed now waits out its window and is rejected); plan the move to external state storage');
+  }
 }
 // R1-A5-07: a solo segment the key policy holds (soft pending) never advances its run's chain, so the run's later segments --
 //   signed by the live build's key, honest -- would wait out CHAIN_WAIT_MS and reject as chain-gap / save-orphan (processed: lost
@@ -6689,6 +6745,7 @@ function soloMilestones(run, endDepth) {
 function soloAdvance(st, key, f, m, plan, nowMs) {
   const run = st.runs[key] || (st.runs[key] = { max: 0, ms: 0, saves: {}, t: nowMs });
   run.t = nowMs; run.saves = run.saves || {};
+  run.k = Math.max(run.k == null ? 0 : (run.k | 0), soloRunKind(f));   // Q327: the run's save kind (0 competitive, 1 casual, 2 classic) decides how long its memory lives
   if ((f.startDepth | 0) === 0) run.seg0 = 1;
   if (plan.consume) { run.saves[plan.consume] = run.saves[plan.consume] || {}; run.saves[plan.consume].by = m; }
   if ((f.endDepth | 0) > (run.max | 0)) run.max = f.endDepth | 0;
@@ -12783,7 +12840,7 @@ if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
 module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CLASSIC_OWNERS: classicOwners.CLASSIC, CLASSIC_FILE, CHAT_MUTE: chatMute.CHAT_MUTE, CHAT_MUTE_FILE, CHAT_MUTE_LB, CHAT_REPORT_LB, isVoidDisp, voidByConsensus, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, RS_SOLO_VS_TRIO, RS_TRIO_WIN, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, DISPUTE_FLOOR, disputeFloorOf, disputeFloorAdmit, disputeFloorXp, CONSOLE_OWED, owedTag, owedItem, owedItemXp, owedRefund, owedUnsent, consoleOwedTake, consoleOwedPlan, consoleOwedRebase, CONFESS_MAGIC, NOTE_MAGIC, NOTE_DISP, reconcileConfessions, SANITY, sanityFlags, sanitySplit, recordSanityFlags, SANITY_RECORD_SLUGS, SANITY_ROSTER_SLUGS, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, rekeyReports, repKeysReady, REP_KEYS, REP_KEYS_VER, CHAT_KEYS, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, trustIndex, TRUST_T, TRUST_LB, TRUST_REJ_BIT, SHADOW_POOL, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan, postForm, postFormDetails, findOrCreateBoard, isTestBoardName, sandboxOn, ghWarn, ghErr, PT_MODE, PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, ACTIVE_MATCH_LB, ptSeedCp, ptBoardPlan, PRIVATE_XP, isPrivateMt, privateProgressOf, creditXpPrivate, BOT_XP, isBotMt, botTierOf, botTierMult, botSeatSplit, botRanksOf, botRankEffOf, botXpGain, botProgressOf, creditXpBot, DEMO_APPID, ENDLESS_XP, computeXpEndless, creditXpEndless, CAMPAIGN_LB, SEEDCAP_REJECT_LADDER_MIN, seedcapRejectWindowMin, seedcapRejectUntilMin, seedcapRejectActive, seedcapNEff,
-  ENDLESS_COMP_LB, SAVE_BOX_LB, SOLO_FILE, COMP, soloSanity, soloChainPlan, rerollChain, soloMilestones, soloAdvance, soloRunKey, soloStartAttested, loadSolo, saveSolo, segOrderOf, segStartOf, freshOrder, freshOrderPaced, writerReadyAt, writerClaim,
+  ENDLESS_COMP_LB, SAVE_BOX_LB, SOLO_FILE, COMP, soloSanity, soloChainPlan, rerollChain, soloMilestones, soloAdvance, soloRunKey, soloRunKind, soloRunKept, soloRunSeason, seasonEndMs, pruneSolo, soloStartAttested, loadSolo, saveSolo, segOrderOf, segStartOf, freshOrder, freshOrderPaced, writerReadyAt, writerClaim,
   ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, SAVE_BOX_LB_DUO, SAVE_BOX_LB_TRIO, teamRunKey, soloMsSlot, groupRecords, nosumVerdict, DISP_NOSUMMARY, isFinishDisp,
   ENDLESS_COMP_LB_QUAD, SAVE_BOX_LB_QUAD, ENDLESS_LB_QUAD, ENDLESS_MAX_PC, compFamKeyOf,   // client knife 3.7a (O178 four seats)
   ENDLESS_LB_SOLO, SAVE_BOX_LB_CASUAL, CASUAL_LIVES,   // client knife 3.7a (O218 casual solo lane)

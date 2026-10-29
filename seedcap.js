@@ -363,7 +363,10 @@ function coreHashOf(exe, run) { const r = (run || ((lines) => runCli(lines, exe)
 // that predate the audit -- exact from the first fully-audited session onward)
 const chainKey = (pid, pc, runSeed) => pid + ':' + pc + ':' + (runSeed | 0);   // per run (knife 3.5c2a-A); legacy key = pid:pc
 const CHAIN_LEGACY_KEEP_MIN = 7 * 1440;    // legacy pid:pc entries: read-only fallback for 7 days after the first run of this code, then pruned
-const CHAIN_KEEP_MIN = 90 * 1440;          // per-run entries expire after 90 days (a run cannot be resumed past its save row's season anyway)
+const CHAIN_KEEP_MIN = 90 * 1440;          // per-run entries expire after 90 days -- a casual / classic save outlives that (it never expires, Q327):
+                                           //   its resume then reads the static bound below (the endless goal line x SCORE_MULT at that depth: the casual
+                                           //   sanity line; a classic goal line runs at most a few percent above the endless one at some depths -- the
+                                           //   bound still sits far above any real starting bank -> no false veto in practice)
 function chainStartBank(st, rosterPids, pc, startDepth, runSeed) {
   if ((startDepth | 0) <= 0) return 0;
   // (the static bound below is O(1) -- endlessGoalFor is a closed form clamped to the depth domain, R1-B2-02)

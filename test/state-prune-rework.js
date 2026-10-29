@@ -329,6 +329,9 @@ console.log('=== Q144 rework: signed solo segments written back, the remembered-
   const K = (n) => keyOf(D[n]);
   const row = (n, shard) => ({ sid: P, d: D[n], shard });
   const back = () => [row('B', 2), row('C2', 4), row('A', 0), row('C0', 1)];
+  // Q327: a casual run that proved a checkpoint (run 202) keeps its chain memory past the TTL -- its save never expires -- so the
+  //   expired case forgets the runs before the write-back, as the RUN_CAP fuse would
+  const forgetRuns = (f) => { if (f.SOLO_FILE) f.SOLO_FILE.runs = {}; return f; };
   for (const [tag, runTtl] of [['chain memory alive', 0], ['chain memory expired', HOUR]]) {
     let fz = 0;
     const forged = () => Array.from({ length: 50 }, () => ({ sid: Zf, d: seg({ sid: Zf, id: 'rw-forge-' + tag + (++fz), runSeed: 999, sd: 0, ed: 1, forge: true }) }));
@@ -340,10 +343,12 @@ console.log('=== Q144 rework: signed solo segments written back, the remembered-
       [0, [row('A', 0), row('C0', 1)], CAP], [pace, [row('A', 0), row('C0', 1)], CAP],
       [pace, all.slice(0, 4), CAP], [pace, all.slice(0, 4), CAP], [pace, all, CAP], [pace, all, CAP],
       [HOUR, forged(), CAP, null, pad], [HOUR, forged(), CAP, null, pad], [HOUR, forged(), CAP, null, pad], [HOUR, forged(), CAP, null, pad],
-      [runTtl ? 2 * runTtl : HOUR, back(), CAP], [HOUR, back(), CAP], [HOUR, back(), CAP],
+      [runTtl ? 2 * runTtl : HOUR, back(), CAP, null, runTtl ? forgetRuns : null], [HOUR, back(), CAP], [HOUR, back(), CAP],
     ];
     const rs = timeline(steps);
     if (brk(rs, steps.length, '[3] ' + tag)) continue;
+    if (runTtl) T('[3] ' + tag + ': the chain memory is gone when they are written back (and none of them brings it back)', Object.keys((rs[10].state.SOLO_FILE || {}).runs || {}).length === 0,
+      JSON.stringify(Object.keys((rs[10].state.SOLO_FILE || {}).runs || {})));
     const settles = (from, to) => [].concat(...rs.slice(from, to).map((r) => r.out.split('\n').filter((l) => /solo settle /.test(l))));
     const first = settles(0, 6);
     T('[3] ' + tag + ': the owner\'s five segments settle once each', ['A', 'B', 'C0', 'C1', 'C2'].every((n) => first.filter((l) => l.indexOf('solo settle ' + K(n)) >= 0).length === 1), first.length + ' settle lines');
@@ -413,6 +418,9 @@ console.log('=== Q144 rework: signed solo segments written back, the remembered-
     }
     return out;
   }
+  // Q327: a competitive run with an unused save point keeps its chain memory past the TTL inside its season, so the two cases
+  //   below forget the runs before the write-back (as the RUN_CAP fuse, or the season's end, would)
+  const forgetRuns = (f) => { if (f.SOLO_FILE) f.SOLO_FILE.runs = {}; return f; };
   // a second depth-0 segment on a run: chain REJECT (restart); written back after the flood and the run's chain memory
   //   expired, the same segment met no run any more -- it settled as a new run
   {
@@ -424,7 +432,7 @@ console.log('=== Q144 rework: signed solo segments written back, the remembered-
     const steps = [
       [0, [r0], CAP], [5 * MIN, [r0, r0b], CAP],
       [5 * MIN, fl(), CAP, pad], [5 * MIN, fl(), CAP, pad], [HOUR, fl(), CAP, pad], [HOUR, fl(), CAP, pad],
-      [3 * HOUR, [r0b], CAP], [HOUR, [r0b], CAP],
+      [3 * HOUR, [r0b], CAP, forgetRuns], [HOUR, [r0b], CAP],
     ];
     const rs = timelineMut(steps);
     if (!brk(rs, steps.length, '[3b] restart')) {
@@ -449,7 +457,7 @@ console.log('=== Q144 rework: signed solo segments written back, the remembered-
       [0, [r0], CAP, sc(nowMin)],
       [5 * MIN, [r0], CAP, sc(nowMin)],
       [5 * MIN, fl(), CAP, pad], [5 * MIN, fl(), CAP, pad], [HOUR, fl(), CAP, pad], [HOUR, fl(), CAP, pad],
-      [3 * HOUR, [r0], CAP, sc(nowMin - 3 * 1440)], [HOUR, [r0], CAP, sc(nowMin - 3 * 1440)],
+      [3 * HOUR, [r0], CAP, (f) => forgetRuns(sc(nowMin - 3 * 1440)(f))], [HOUR, [r0], CAP, sc(nowMin - 3 * 1440)],
     ];
     const rs0 = timelineMut(steps);
     const rs = rs0.slice(1);   // rs[0] = the run that judges it inside the window (the indexes below as before)
