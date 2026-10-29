@@ -436,9 +436,18 @@ function pendingOfGroup(st, m, g) {
       const vg = g.filter(r => !nos(r.d));
       if (vg.length && vg.length < g.length && g.every(r => (r.d[8] | 0) === pc0) && vg.every(r => vk(r) === vk(vg[0]))) g = vg;
       else {
-        const side = (v.baseMt(mt0) === 1 || v.baseMt(mt0) === 2) ? signedSideOf(g) : null;
-        if (!side) return null;   // forgery-suspect groups are the reconcile's own flag lane
-        g = all = side;
+        // cloud audit Q339: records that differ only by the lifts a host migration left unchecked, every seat they name gone
+        //   from the match -- the reconcile settles on the lowered scores (liftOrphanVerdict), so those are audited here; the
+        //   records written with the summary carry them (rewritten copies: the seats their writers sit on read as written), a
+        //   result written without it is its writer's own judgement and claims nothing (as Q68's). The seats seen agreeing
+        //   are the reconcile's to read: a key it holds for them settles nothing, whatever this audit says.
+        const lo = v.liftOrphanVerdict(g, {});
+        if (lo && lo.kind === 'settle') g = all = lo.g.filter(r => r.nosumOwn == null);
+        else {
+          const side = (v.baseMt(mt0) === 1 || v.baseMt(mt0) === 2) ? signedSideOf(g) : null;
+          if (!side) return null;   // forgery-suspect groups are the reconcile's own flag lane
+          g = all = side;
+        }
       }
     }
     const d0 = g[0].d;

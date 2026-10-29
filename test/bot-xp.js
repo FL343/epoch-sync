@@ -211,7 +211,7 @@ eq('abandoner -> nothing', credit([mk11(A, 0, { disp: 5 })], 6, {}, {}, 20000, t
   }
   eq('branch placed after the private branch and before matchmade XP credit (creditXp)',
     src.indexOf('if (isPrivateMt(matchType)) {') < src.indexOf('if (isBotMt(matchType)) {') && src.indexOf('if (isBotMt(matchType)) {') < src.indexOf('if (xpId) creditXp(g, matchType'), true);
-  eq('groupRecords call site carries no channel lever (lone lane is unconditional for type 11)', /groupRecords\(recs, \{ vecOf, MAX_SEATS \}\)/.test(src), true);
+  eq('groupRecords call site carries no channel lever (lone lane is unconditional for type 11)', /groupRecords\(recs, \{ vecOf, MAX_SEATS(, starts: startsPending)? \}\)/.test(src), true);
   eq('lone lane gated on type 11 AND a sane vector (test lever only)', /writers < 2 && same && opts\.botLoneOk !== false && isBotMt\(g\[0\]\.d\[2\] \| 0\)/.test(src), true);
   eq('no channel-gated lone flag survives (DEMO_LONE_OK / BOT_LONE_OK retired)', !/DEMO_LONE_OK|BOT_LONE_OK/.test(src), true);
   {

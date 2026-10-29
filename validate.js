@@ -3317,6 +3317,8 @@ function pruneSignals(s, now) {
   }
   for (const k of Object.keys(s.gtav || {})) if (!s.flagged[k] || now - ((s.gtav[k] && s.gtav[k].t) || 0) > SIG_PAIR_WINDOW_MS) delete s.gtav[k];
   for (const k of Object.keys(s.gtah || {})) if (now - (Number(s.gtah[k]) || 0) > SIG_PAIR_WINDOW_MS) delete s.gtah[k];
+  // Q339 per-key host-migration lift signals: one entry per key, first sight; the counters on the accounts stay with them
+  for (const k of Object.keys(s.lorph || {})) if (now - ((s.lorph[k] && Number(s.lorph[k].t)) || 0) > SIG_PAIR_WINDOW_MS) delete s.lorph[k];
   for (const k of Object.keys(s.rep || {})) if (now - (s.rep[k].at || 0) > SIG_PAIR_WINDOW_MS) delete s.rep[k];
   for (const k of Object.keys(s.rseen || {})) if (now - (s.rseen[k] || 0) > SIG_PAIR_WINDOW_MS) delete s.rseen[k];
   // Q57 host charges age out of their own window (they only feed the trust tier)
@@ -3837,6 +3839,7 @@ function writeRunSummary() {
       '| consistent / fresh | ' + s('consistent', 0) + ' / ' + s('fresh', 0) + ' |',
       '| flagged inconsistent / sanity | ' + s('flagged', 0) + ' / ' + s('sanity', 0) + ' |',
       '| keys with a result written without the host guard\'s final summary (Q68): settled on the others\' scores / held, one writer got it / nobody got it | ' + s('nosum', '0 / 0 / 0') + ' |',
+      '| keys whose records differ only by lifts a host migration left unchecked (Q339): settled on the lowered scores / held, nobody flagged for it / of the held, a writer flagged alone for his own record\'s duration | ' + s('lorph', '0 / 0') + ' / ' + s('lorphOwn', 0) + ' |',
       '| sanity on one record only: dropped, rest settles / too few writers left (Q109) | ' + s('sanityDrop', 0) + ' / ' + s('sanityDropHeld', 0) + ' |',
       '| sanity whose every reason is the host\'s seat or table, nobody flagged, not settled (Q292) | ' + s('sanityHost', 0) + ' |',
       '| sanity whose every shared reason is the host\'s match header, only a writer breaking his own fields flagged, not settled (Q294) | ' + s('sanityHeader', 0) + ' |',
@@ -7907,6 +7910,202 @@ function nosumVerdict(g, vecOf) {
   return { kind: 'settle', g: out, set: sidsOf(out.filter((r) => r.nosumOwn != null)).filter((s) => agree.indexOf(s) < 0) };
 }
 
+// ===== a seat's lift a host migration left unchecked, named by the survivors (cloud audit Q339, after Q65) =====
+// Q65 (client): when the host leaves mid-match, the new host's score table can carry lifts the old host forwarded and his
+// guard never checked (a shop table, a score snapshot). A survivor compares it with its own table of the same moment, and
+// a seat's amount it cannot find on its own side (an orphan) is taken back out of that seat when it writes its record. An
+// honest table can end there too: the new host and the survivor both missed the same frame of the old host's seat and both
+// took the shop table's word for it (review-q65-honest.js P1). The new host writes the table's scores, the survivor the
+// same scores less the orphan; the key's vectors differ and the inconsistent path flagged every writer of it, the honest
+// ones included, and never settled it.
+// Q339 client: such a survivor appends a self-describing block after the 5.4a char block (and the Q61 / Q120 blocks), before
+// the 5.8a guard signature (a record carrying it is never signed -- B088): [ORPH_MAGIC | ORPH_VER << 8 | len << 16,
+// seat mask (bits 0-5) | old-host mask << 8 (bits 8-13), the amount taken out of each masked seat in seat order], len = 1 +
+// the seats masked. Never on an endless record. The reader walks the tail from the roster as gambleTagOf does and skips a
+// version it does not know (= no block = the old path).
+// Read only when the score vectors differ and a record carries a block: liftOrphanVerdict decides, BEFORE the Q68 pass.
+// The records written with a summary (any disp but 10) are EXPLAINED when each of their vectors, plus the amounts its own
+// block names, gives one vector (the new host's table). Then:
+//   settle -- a matchmade FFA code (bases 1 / 2), at least two accounts among those records, and every seat a block names
+//             DEPARTED: no record from that seat, its roster account (the records' consensus, and the registered start
+//             roster's) wrote none for the key and was never seen agreeing on it (pend.agreed). The match settles on the
+//             table less the largest amount any block names per seat: for a departed seat the lower score is the one no
+//             guard ever disputed, and a departed seat's score moves nobody present (his place, the field, the ratings,
+//             points and XP read the seats that are there). A record whose vector differs from that is set aside the Q68
+//             way: a copy carries the settled scores, liftOrphanOwn = its scores as written. Its writer still answers for
+//             the settled scores (his own seat is the score he wrote, only departed seats are lowered), so a whole-group flag
+//             on them (sanity, the seedcap veto) still counts him; a 10 among them is nosumOwn too (Q68's rule).
+//   hold   -- explained, but a named seat is still there (a modded host's lift for a friend who stayed; an honest old host's
+//             cold rejoin), another match type (a team score moves the present seats; a friends' room or a bot match has
+//             no settle of this kind), or a lowered seat under the score floor: not settled, nobody flagged for the disagreement (a writer whose own record breaks its
+//             own duration bound is flagged alone, as Q289 does; a key of two voices stays with Q289 / Q291's lane, which
+//             flags nobody for it either and counts the dispute). The key ends as any held key of its lane does.
+// Both record one signal per key (signals.lorph[m] = { t, a: 's' | 'h', o: [old-host pids], w: [block writer pids], s: seat
+// mask }; players[pid].low = blocks its own records carried, players[pid].loh = keys naming it as the old host, the
+// latter only on an account that already has signals, as Q161 counts). Record only: no trust input, no points, no XP.
+// Not this pass (the old rules): a broken block, a gamble refusal on the key (T2BY_TAG, Q61's block: the gamble lanes), an
+// endless key, two seat counts, a vector the blocks do not explain (a forgery somewhere else stays a forgery: a block alone
+// never buys a writer out of a flag), or one account alone among the records with a summary (Q68's lane).
+// What a cheat gets: the old host's lift is still taken out on the survivor's side (Q65) -- the settle reads the lower score
+// for every named seat, and a lift for a seat still in the match settles nothing. A forger who writes a block of his own
+// can lower a departed seat's score (moves nobody present) or hold a match he is in (as a differing vector always could:
+// that flagged every writer, him included, or with two voices nobody).
+const ORPH_MAGIC = 0xE6, ORPH_VER = 1;   // client Q339 result-reporter.js ORPH_MAGIC / ORPH_VER (same values)
+const LIFT_ORPHAN = { BASES: [1, 2] };
+// the lift-orphan block of a record: null = none (also: an endless record, a version this job does not read); 'bad' = a
+//   block of this version whose words do not hold together; else { seats: { seat: amount }, mask, host }
+function liftOrphanBlockOf(r) {
+  const d = r.d, pc = d[8] | 0;
+  if (pc < 2 || pc > 6 || isEndlessMt(d[2] | 0)) return null;
+  let i = 11 + 3 * pc;
+  if (d.length > i && ((d[i] | 0) & ~0x3F) === T2BY_TAG) i++;
+  while (i < d.length) {
+    const h = d[i] | 0, mg = h & 0xff, ver = (h >>> 8) & 0xff, len = (h >>> 16) & 0xff;
+    if (mg === CHAR_MAGIC && len === pc) { i += Math.ceil(pc / 4) + 1; continue; }   // the 5.4a char block
+    if (!len) return null;
+    if (mg === ORPH_MAGIC && ver === ORPH_VER) {
+      if ((h >>> 24) || i + len >= d.length) return 'bad';
+      const w = d[i + 1] | 0, mask = w & 0xff, host = (w >>> 8) & 0xff, all = (1 << pc) - 1;
+      if ((w >>> 16) || !mask || (mask & ~all) || !host || (host & ~all)) return 'bad';
+      let n = 0;
+      for (let s = 0; s < pc; s++) if ((mask >> s) & 1) n++;
+      if (len !== 1 + n) return 'bad';
+      const seats = {};
+      let k = i + 2;
+      for (let s = 0; s < pc; s++) {
+        if (!((mask >> s) & 1)) continue;
+        const a = d[k++];
+        if (!Number.isInteger(a) || a <= 0 || a > 0x7fffffff) return 'bad';
+        seats[s] = a;
+      }
+      return { seats, mask, host };
+    }
+    i += 1 + len;
+  }
+  return null;
+}
+// g = one group whose score vectors differ (a record: { d, steamID | w, roster, dispCode? }); opts = { agreed: pids seen
+//   agreeing on the key (pend.agreed), gate: the registered start roster (seat -> pid) or null }. Pure.
+//   null = not this pass's; { kind: 'settle', g, low, high, named, hosts, writers } (g rewritten, canonical record first);
+//   { kind: 'hold', why, high, named, hosts, writers }. writers = the accounts whose own records carry a block.
+function liftOrphanVerdict(g, opts) {
+  opts = opts || {};
+  if (!g || g.length < 2) return null;
+  const mt = g[0].d[2] | 0, pc = g[0].d[8] | 0;
+  if (isEndlessMt(mt) || pc < 3 || pc > 6) return null;   // a survivor that is not the new host needs three seats
+  const blocks = g.map(liftOrphanBlockOf);
+  if (!blocks.some((b) => b && b !== 'bad') || blocks.some((b) => b === 'bad')) return null;
+  for (const r of g) {
+    if ((r.d[8] | 0) !== pc || (r.d[2] | 0) !== mt || r.d.length < 11 + 3 * pc) return null;
+    const i = 11 + 3 * pc;
+    if ((r.d.length > i && ((r.d[i] | 0) & ~0x3F) === T2BY_TAG) || gambleTagOf(r)) return null;
+  }
+  const who = (r) => String(r.steamID != null ? r.steamID : (r.w || ''));
+  const dispOf = (r) => (r.dispCode != null ? r.dispCode : r.d[10 + pc]) | 0;
+  const vec = (r) => r.d.slice(10, 10 + pc).map((x) => x | 0);
+  const R = [], RB = [];
+  g.forEach((r, k) => { if (dispOf(r) !== DISP_NOSUMMARY) { R.push(r); RB.push(blocks[k]); } });
+  if (!RB.some(Boolean) || new Set(R.map(who)).size < 2) return null;
+  let high = null;
+  for (let k = 0; k < R.length; k++) {
+    const v = vec(R[k]), b = RB[k];
+    if (b) for (const s of Object.keys(b.seats)) v[s | 0] = (v[s | 0] + b.seats[s]) | 0;
+    if (!high) high = v;
+    else if (v.join(',') !== high.join(',')) return null;
+  }
+  const named = {};
+  let hostMask = 0;
+  for (const b of RB) if (b) { hostMask |= b.host; for (const s of Object.keys(b.seats)) named[s | 0] = Math.max(named[s | 0] | 0, b.seats[s]); }
+  const hosts = [];
+  for (let s = 0; s < pc; s++) if ((hostMask >> s) & 1) hosts.push(s);
+  const writers = [...new Set(g.filter((r, k) => blocks[k]).map(who))];
+  const base = { high, named, hosts, writers };
+  let why = '';
+  if (LIFT_ORPHAN.BASES.indexOf(baseMt(mt)) < 0) why = 'match type ' + mt;
+  else {
+    const ros = rosterConsensus(g), gate = opts.gate || null, agreed = (opts.agreed || []).map(String);
+    const wrote = new Set(g.map(who)), wrotePid = new Set([...wrote].map(pid));
+    for (const s of Object.keys(named)) {
+      const seat = s | 0, acc = ros[seat], gp = gate ? gate[seat] : null;
+      if (g.some((r) => (r.d[5] | 0) === seat)) why = 'seat ' + seat + ' wrote a record';
+      else if (acc != null && wrote.has(String(acc))) why = 'the account at seat ' + seat + ' wrote a record';
+      else if (gp != null && wrotePid.has(String(gp))) why = 'the start roster\'s account at seat ' + seat + ' wrote a record';
+      else if ((acc != null && agreed.indexOf(pid(String(acc))) >= 0) || (gp != null && agreed.indexOf(String(gp)) >= 0)) why = 'seat ' + seat + ' was seen agreeing';
+      if (why) break;
+    }
+  }
+  const low = high.slice();
+  for (const s of Object.keys(named)) low[s | 0] = (high[s | 0] - named[s]) | 0;
+  // a lowered seat under the score floor would trip the whole-group sanity rule on the settled scores (every writer flagged):
+  //   held instead (no honest lift is that large; a block that says so is not taken on its word)
+  if (!why) for (const s of Object.keys(named)) if (low[s | 0] < SANITY.SCORE_FLOOR) { why = 'seat ' + s + ' would drop below the score floor'; break; }
+  if (why) return Object.assign({ kind: 'hold', why }, base);
+  const lowS = low.join(',');
+  const out = g.map((r) => {
+    const v = vec(r);
+    if (v.join(',') === lowS) return r;
+    const d = r.d.slice();
+    for (let i = 0; i < pc; i++) d[10 + i] = low[i];
+    const x = Object.assign({}, r, { d, liftOrphanOwn: JSON.stringify(v) });
+    if (dispOf(r) === DISP_NOSUMMARY) x.nosumOwn = JSON.stringify(v);
+    return x;
+  });
+  // the canonical record (g[0]: sanity, the settle's reads, the agreed pins): one written with a summary whose own scores
+  //   are the settled ones, else the first written with a summary
+  let ci = out.findIndex((r, k) => dispOf(r) !== DISP_NOSUMMARY && r === g[k]);
+  if (ci < 0) ci = out.findIndex((r) => dispOf(r) !== DISP_NOSUMMARY);
+  if (ci > 0) { const c0 = out[ci]; out.splice(ci, 1); out.unshift(c0); }
+  return Object.assign({ kind: 'settle', g: out, low }, base);
+}
+// the signal of one key (first sight only), for both outcomes -> true when signals changed. s = signals, ent = the
+//   group's entry (consistentMatches / inconsistentGroups) carrying lorph
+function liftOrphanSignal(s, ent, now) {
+  const o = ent && ent.lorph;
+  if (!o) return false;
+  s.lorph = s.lorph || {};
+  if (s.lorph[ent.m]) return false;
+  const ros = rosterConsensus(ent.g);
+  const hostPids = [];
+  for (const seat of o.hosts) if (ros[seat] != null) hostPids.push(pid(String(ros[seat])));
+  let mask = 0;
+  for (const seat of Object.keys(o.named)) mask |= 1 << (seat | 0);
+  s.lorph[ent.m] = { t: now, a: o.kind === 'settle' ? 's' : 'h', o: hostPids, w: o.writers.map((x) => pid(String(x))), s: mask };
+  for (const sid of o.writers) { const p = sigPlayer(s, pid(String(sid)), now); p.low = (p.low | 0) + 1; }
+  for (const h of hostPids) { const p = s.players[h]; if (p) p.loh = (p.loh | 0) + 1; }   // Q161 rule: an account named by others only gets no entry
+  return true;
+}
+// One run's pass, after Q61's and before the flag loop: the signal of every key of both outcomes (first sight), and the holds
+//   leave gr.inconsistentGroups (as a Q61 strike does) -- nobody flagged for the disagreement, a writer whose own record
+//   breaks its own duration bound flagged alone (as Q289); the key is not settled and ends as a held key of its lane does
+//   (a matchmade one voided at the start verdict, its writers consoled). A hold of two voices stays in the list: the Q289 /
+//   Q291 lane below already flags nobody for it (same own-record rule, the dispute counted on both, record only) and keeps
+//   doing so. A settled key (Q114) stays for the loop (nobody is flagged there either). The passes ahead of this one (the
+//   roster contest, the team gamble lanes) still read a held key first. -> { dirty, hold, own, touched: [sids] }
+function applyLiftOrphans(gr, signals, processed, now) {
+  const res = { dirty: false, hold: 0, own: 0, touched: [] };
+  for (const ent of gr.consistentMatches) if (ent.lorph && !processed.has(ent.m) && liftOrphanSignal(signals, ent, now)) res.dirty = true;
+  const ig = gr.inconsistentGroups;
+  for (let i = ig.length - 1; i >= 0; i--) {
+    const ent = ig[i], m = ent.m, g = ent.g;
+    if (!ent.lorph || processed.has(m)) continue;
+    if (liftOrphanSignal(signals, ent, now)) res.dirty = true;
+    res.hold++;
+    if (pairDispute1v1(g)) continue;   // two voices: the Q289 / Q291 lane (nobody flagged for the disagreement there)
+    const base = baseMt(g[0].d[2] | 0), by = new Map(), own = [];
+    for (const r of g) { const s = String(r.steamID); if (!by.has(s)) by.set(s, []); by.get(s).push(r); }
+    for (const [sid, rs] of by) if (rs.some((r) => recordSanityFlags(r, base, r.d[8] | 0).indexOf('duration') >= 0)) own.push({ sid, recs: rs });
+    if (own.length) {
+      res.own++;
+      if (recordFlag(signals, [].concat(...own.map((x) => x.recs)), m, now)) res.dirty = true;
+      for (const x of own) res.touched.push(x.sid);
+    }
+    ig.splice(i, 1);
+    console.log('  lift-orphan ' + m + ': ' + g.length + ' records differ only by the lifts a host migration left unchecked (' + ent.lorph.why + ') -- nobody flagged for the disagreement'
+      + (own.length ? ', ' + own.map((x) => plog(x.sid)).join(', ') + ' (duration on his own record) flagged alone' : '') + ', not settled (Q339)');
+  }
+  return res;
+}
+
 // ===== consensus grouping (audit 2026-09-06 D-F11 / B-F10 / E-G3: extracted from main() so the "N ends agree" rule is testable) =====
 //   - one voice per ACCOUNT: consensus counts distinct writers, not records. The same account writing the same key twice (cold
 //     reconnect double-write; a results record written on a suspended segment's key) used to pass as "2 consistent" = a single
@@ -7917,7 +8116,10 @@ function nosumVerdict(g, vecOf) {
 //     summary); a settle there is a consistent entry with nosum = the set-aside accounts, a held key is in neither list (but
 //     in nosumHeld, for the client knife 5.8b signed lane), a fork stays inconsistent with the records of the writers without
 //     the summary marked nosumAside (never flagged).
-//   Returns { groups, consistentMatches, inconsistentGroups, consistent, flagged, lone, soloN, nosum, nosumHost, nosumHeld }.
+//   - Q339: ahead of that, a group whose blocks name a host migration's orphan lifts (liftOrphanVerdict): a settle is a
+//     consistent entry with lorph = the verdict, a hold an inconsistent one with lorph (applyLiftOrphans takes it out ahead of the flag loop);
+//     opts.starts (startsPending) gives the seats seen agreeing and the registered start roster.
+//   Returns { groups, consistentMatches, inconsistentGroups, consistent, flagged, lone, soloN, nosum, nosumHost, nosumHeld, lorph }.
 function groupRecords(recs, opts) {
   const vecOf = opts.vecOf, MAX_SEATS = opts.MAX_SEATS || 8;
   const groups = {};
@@ -7925,6 +8127,7 @@ function groupRecords(recs, opts) {
   let consistent = 0, flagged = 0, lone = 0, soloN = 0;
   const consistentMatches = [], inconsistentGroups = [];
   const nosum = { settle: 0, pending: 0, host: 0 }, nosumHost = [], nosumHeld = [];   // Q68
+  const lorph = { settle: 0, hold: 0 };   // Q339
   for (const m of Object.keys(groups)) {
     const g = groups[m];
     // O93 solo competitive segment (pc=1 endless, guard-signed): one seat = no consensus lane. It enters
@@ -7973,7 +8176,25 @@ function groupRecords(recs, opts) {
     else {
       const ns = nosumVerdict(g, vecOf);   // Q68
       const own = () => g.map((r, i) => plog(r.steamID) + '@' + r.shard + '=' + vecs[i] + ((r.dispCode | 0) === DISP_NOSUMMARY ? ' (no summary)' : '')).join('  ');
-      if (ns && ns.kind === 'settle') {
+      // Q339: read ahead of the Q68 outcome (it is pure): a group the migration lifts explain takes that verdict, ns is unused
+      const pend0 = opts.starts ? opts.starts[m] : null;
+      const lo = liftOrphanVerdict(g, { agreed: (pend0 && pend0.agreed) || [], gate: seatGateRoster(pend0) });
+      const named = () => lo ? Object.keys(lo.named).map((s) => 'seat ' + s + ' -' + lo.named[s]).join(', ') : '';
+      if (lo && lo.kind === 'settle') {
+        const was = own();
+        g.splice(0, g.length, ...lo.g);   // in place, as Q68's settle
+        consistent++; lorph.settle++;
+        const cons = voidByConsensus(g.map(r => r.dispCode));
+        consistentMatches.push({ m, g, void: cons.isVoid, lorph: lo });
+        console.log('  match=' + m + ': ' + g.length + ' records differ only by the lifts a host migration left unchecked, named by '
+          + lo.writers.length + ' writer(s) (' + named() + '), every named seat left the match -- consistent on the lowered scores, nobody flagged (Q339) disp=['
+          + g.map(r => r.disp).join(',') + ']' + (cons.isVoid ? ' -> consensus VOID, not settled (' + cons.voidVotes + '/' + cons.present + ')' : '') + ' -- as written: ' + was);
+      } else if (lo) {
+        lorph.hold++;
+        inconsistentGroups.push({ m, g, lorph: lo });
+        console.log('  match=' + m + ': ' + g.length + ' records differ only by the lifts a host migration left unchecked (' + named() + '), but ' + lo.why
+          + ' -- not settled, nobody flagged for it (Q339): ' + own());
+      } else if (ns && ns.kind === 'settle') {
         const was = own();
         g.splice(0, g.length, ...ns.g);   // in place: groups[m] is this array (the later passes and the start cross-check read it)
         consistent++; nosum.settle++;
@@ -8001,8 +8222,9 @@ function groupRecords(recs, opts) {
     }
   }
   console.log('reconciled: ' + Object.keys(groups).length + ' (consistent ' + consistent + ' / lone ' + lone + ' / inconsistent ' + flagged + (soloN ? ' / solo ' + soloN : '')
-    + ((nosum.settle || nosum.pending || nosum.host) ? ' / without the final summary: settled ' + nosum.settle + ', held ' + nosum.pending + ', nobody got it ' + nosum.host : '') + ')');
-  return { groups, consistentMatches, inconsistentGroups, consistent, flagged, lone, soloN, nosum, nosumHost, nosumHeld };
+    + ((nosum.settle || nosum.pending || nosum.host) ? ' / without the final summary: settled ' + nosum.settle + ', held ' + nosum.pending + ', nobody got it ' + nosum.host : '')
+    + ((lorph.settle || lorph.hold) ? ' / host migration lifts named: settled ' + lorph.settle + ', held ' + lorph.hold : '') + ')');
+  return { groups, consistentMatches, inconsistentGroups, consistent, flagged, lone, soloN, nosum, nosumHost, nosumHeld, lorph };
 }
 
 async function main() {
@@ -8637,10 +8859,11 @@ async function main() {
   //   nobody flagged
   const tableSplit = applyTableSplit(recs, starts, startsPending, processed, Date.now(), shardsComplete);
   RUN.tableSplit = tableSplit.keys.length; RUN.tableOne = tableSplit.one.length; RUN.tableHeld = tableSplit.held.length;
-  const gr = groupRecords(recs, { vecOf, MAX_SEATS });   // audit 2026-09-06: pure, testable consensus grouping (writer-deduped); O156 lone bot lane (type 11, every channel)
+  const gr = groupRecords(recs, { vecOf, MAX_SEATS, starts: startsPending });   // audit 2026-09-06: pure, testable consensus grouping (writer-deduped); O156 lone bot lane (type 11, every channel)
   const groups = gr.groups, consistentMatches = gr.consistentMatches, inconsistentGroups = gr.inconsistentGroups;
   RUN.flagged = gr.flagged;
   RUN.nosum = gr.nosum.settle + ' / ' + gr.nosum.pending + ' / ' + gr.nosum.host;   // Q68
+  RUN.lorph = gr.lorph.settle + ' / ' + gr.lorph.hold;   // Q339
 
   // start/settle cross-check runs BEFORE the early returns: the very scenario it exists for
   // (a match that started and was never settled by anyone) produces no consistent matches at all,
@@ -9004,6 +9227,14 @@ async function main() {
     const n = streakApplyEarly(xs, streakEarly, nowMs);
     if (n) { saveXp(xs); console.log('streak: ' + n + ' early event(s) written to the XP state (no settle this run)'); }
   };
+  // Q339: inconsistent keys whose records differ only by the lifts a host migration left unchecked, a named seat still in the
+  //   match -- nobody flagged for the disagreement, they leave the list before the flag loop below (no key of
+  //   theirs carries a gamble refusal: the Q61 pass next never sees one); one signal per key of
+  //   both outcomes (settled or held), first sight
+  const lorphRes = applyLiftOrphans(gr, signals, processed, nowMs);
+  if (lorphRes.dirty) sigDirty = true;
+  for (const sid of lorphRes.touched) trustTouched.add(String(sid));
+  RUN.lorphOwn = lorphRes.own;
   // Q61: inconsistent keys whose writers name the host that forwarded a gamble frame they refused -- a strike flags only
   //   him, a key waiting for a seat with no record flags nobody yet; both leave the list before the flag loop below
   const gtacRes = applyGambleAccusations(gr, signals, processed, nowMs, vecOf, { complete: shardsComplete, graceMs: ABSENT_GRACE_MS });
@@ -12920,6 +13151,7 @@ Object.assign(module.exports, { recTable, splitKey, splitMark, applyTableSplit }
 Object.assign(module.exports, { LONE1V1, lone1v1Claim, lone1v1Verdicts, lone1v1Count });   // cloud audit Q184 a ranked 1V1 only its winner wrote
 Object.assign(module.exports, { repUpgrade, sortKeys });   // cloud audit Q209 report state with no key that stays with one reporter
 Object.assign(module.exports, { LONE1V1_LATE_CAP, keepLateOwn });   // cloud audit Q254 a lone 1V1 winner's own start read late with his result
+Object.assign(module.exports, { ORPH_MAGIC, ORPH_VER, LIFT_ORPHAN, liftOrphanBlockOf, liftOrphanVerdict, liftOrphanSignal, applyLiftOrphans });   // cloud audit Q339 (test/lift-orphan.js)
 Object.assign(module.exports, { GT_MAGIC, GT_VER, GT_LEN, GTAC, gambleTagOf, gambleUnitOf, oneRecordPerAccount, gambleAccusation, gtacVerdict, applyGambleAccusations });   // cloud audit Q61 gamble-frame refusals naming the host
 Object.assign(module.exports, { startSig, lateStartSplit, START_CONFIRM_MS, START_CONFIRM_MIN_MS });   // cloud audit Q118 provisional start roster
 Object.assign(module.exports, { testimonyOf, recTestimony, noteTestimony, endlessRosterHold, endlessTestified });   // cloud audit Q113 endless testimony
