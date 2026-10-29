@@ -3289,6 +3289,17 @@ const ffaLowerHalf = (place, pc) => 2 * place > pc + 1;
 //   others rewrote the result, met again the same way by the same player in the window, is rated at the rewritten place
 //   the second time. A seat no player there settled with goes on to the Q263 / Q264 check unchanged (so that check meets
 //   no player paired with one of the stand-ins left: such a one has him rated); quick settles have no stand-ins.
+// Q332 (cloud audit, the Q265 follow-up): Q275 closed that cost for a rewritten result, not for a rewritten roster. The
+//   players left could keep the scores and, in the roster they wrote, swap the honest seat whose record rotated off with one
+//   of theirs that went missing too: no pin of theirs changes (nobody recants, so the Q275 gate stays off), he stood in at
+//   the other seat's place, and the second time in the window Q265 rated him there and the other seat at his (ranked 4P: the
+//   honest 1st of 4 rated 4th, gold -17 where the honest twin gives +38, and their own seat +38 where the twin gives -17).
+//   A seat that would stand in or be rated is put back on his own seat first: the one the registered start roster gives him
+//   (the Q80 seat gate's), else the one seat his Q185 review pin gives with the scores read now; together with every other
+//   such seat, and only when no two of them and no player rated there end up on one seat. So he stands in, or is rated, at
+//   the place he was seen agreeing to, as the honest twin rates him. A seat moved off his own seat that cannot be put back
+//   (another one would be there) is not rated by Q265 (he goes to the Q263 / Q264 check as before Q265). A seat whose own
+//   seat is not known stays where the records put him (the scores themselves rewritten: Q275, and Q300 left).
 const STAND_IN_WINDOW_MS = Number(process.env.STAND_IN_WINDOW_MS || 30 * 86400000);
 const SIG_PAIRS_CAP = Number(process.env.SIG_PAIRS_CAP || 200000);
 function loadSignals() { try { const s = JSON.parse(fs.readFileSync(SIGNALS_FILE, 'utf8')) || {}; s.day = s.day || { d: 0, n: {} }; s.players = s.players || {}; s.pairs = s.pairs || {}; s.flagged = s.flagged || {}; s.rep = s.rep || {}; s.rseen = s.rseen || {}; return s; } catch (e) { return { day: { d: 0, n: {} }, players: {}, pairs: {}, flagged: {}, rep: {}, rseen: {} }; } }
@@ -3893,6 +3904,7 @@ function writeRunSummary() {
       '| of those, left out instead: every player rated at the settle stood in or settled with one of them in the window (Q263 / Q264) | ' + s('agreedStoodHeld', 0) + ' |',
       '| of those, rated instead at the place read now, as a seat put back: a player rated at the settle settled with him standing in in the window (Q265) | ' + s('agreedStoodRated', 0) + ' |',
       '| seats Q265 would rate, passed on to the Q263 / Q264 checks instead: every player rated at the settle first agreed to another result for the match (Q275) | ' + s('agreedStoodRecant', 0) + ' |',
+      '| seats standing in or rated (Q227 / Q265) the records read now name off their own seat: put back on it / left there, not rated by Q265: another seat would be on it (Q332) | ' + s('agreedStoodMoved', 0) + ' / ' + s('agreedStoodMovedOff', 0) + ' |',
       '| players rated at a settle with stand-ins who settled as before Q227 instead: each stood in or settled with one of them in the window (Q264) | ' + s('agreedStoodOwn', 0) + ' |',
       '| matchmade FFA writers at the settle first seen agreeing to another result for the match, counted on the account (Q227, nobody flagged) | ' + s('recanted', 0) + ' |',
       '| team matches with nobody on the losing team, settled without a rating move (Q136) | ' + s('noLoser', 0) + ' |',
@@ -11534,6 +11546,7 @@ async function main() {
     //   here is such a one.
     //   Q265: before that check, a seat that stood in for one of the players rated here in the window is rated instead
     //   (.rated), at the place the scores read now give him, as a seat put back above.
+    //   Q332: before both, such a seat moved off his own seat by the roster the players left wrote is put back on it.
     const recanted = new Set();   // Q275: the writers of this settle first seen agreeing to another result for this match
     const stoodCand = [];   // Q227: the seats that would stand in (see Q263 at the end of this block)
     const stoodOwn = new Set();   // Q264: the players rated here who settle as before Q227 (see STAND_IN_WINDOW_MS)
@@ -11573,6 +11586,32 @@ async function main() {
         back++; RUN.agreedBack = (RUN.agreedBack | 0) + 1;
         console.log('  agreed-back ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' record gone but seen agreeing earlier -- settled at his agreed place ' + (1 + scores.filter((y) => (y | 0) > (scores[x.seat] | 0)).length) + ' of ' + pc + ', as if his record were still there (Q185)');
       }
+      // Q332 (see STAND_IN_WINDOW_MS): a seat that would stand in or be rated below sits where the records read now name him
+      //   (their roster majority, written by the players left). His own seat: the registered start roster's, else the one seat
+      //   his pin gives with the scores read now (-1: not known, he stays). Every such seat is put back on its own when no two
+      //   of them and no player rated here are then on one seat; otherwise a seat moved off is not rated by Q265 (stoodOff)
+      const stoodOff = new Set();
+      if (stoodCand.length) {
+        const ro = seatGateRoster(pend);
+        const ownSeat = (x) => {
+          const h = pid(String(x.steamID)); let s = -1;
+          if (ro) { for (const k of Object.keys(ro)) if (ro[k] === h) { if (s >= 0 || (k | 0) >= pc) return -1; s = k | 0; } return s; }
+          if (pend.agv && pend.agv[h] != null) for (let i = 0; i < pc; i++) if (pend.agv[h] === agreedPin(i)) { if (s >= 0) return -1; s = i; }
+          return s;
+        };
+        const own = stoodCand.map(ownSeat);
+        if (stoodCand.some((x, i) => own[i] >= 0 && own[i] !== x.seat)) {
+          const to = stoodCand.map((x, i) => (own[i] >= 0 ? own[i] : x.seat)), taken = new Set(parts.map((p) => p.seat));
+          const fits = new Set(to).size === to.length && to.every((s) => !taken.has(s));
+          stoodCand.forEach((x, i) => {
+            if (to[i] === x.seat) return;
+            const was = x.seat;
+            if (fits) { x.seat = to[i]; RUN.agreedStoodMoved = (RUN.agreedStoodMoved | 0) + 1; } else { stoodOff.add(x); RUN.agreedStoodMovedOff = (RUN.agreedStoodMovedOff | 0) + 1; }
+            console.log('  agreed-stood-moved ' + c.m + ': seat ' + was + ' = ' + plog(x.steamID) + ' is on seat ' + to[i] + (ro ? ' of the start roster' : ' by the result he was seen agreeing to')
+              + (fits ? ' -- put back on it for the place read now' : ' -- another seat would be there, not rated at the place read now') + ' (Q332)');
+          });
+        }
+      }
       // Q265 (see STAND_IN_WINDOW_MS): a seat that stood in for one of the players rated here (the writers and the seats put
       //   back above) in the window is rated this time instead, at the place read now, as a seat put back (.rated): that player
       //   settles as in the result he wrote, as with a stand-in, and the seat pays what the place costs
@@ -11587,7 +11626,7 @@ async function main() {
         const allRecant = rated0.every((p) => recanted.has(String(p.steamID)));   // Q275
         const stoodFor = (h) => rated0.filter((p) => { const e = signals.players[pid(String(p.steamID))]; return !!(e && (e.sxw || []).some((y) => y[0] === h && nowMs - y[1] < STAND_IN_WINDOW_MS)); });
         for (const x of stoodCand.splice(0)) {
-          const by = stoodFor(pid(String(x.steamID)));
+          const by = stoodOff.has(x) ? [] : stoodFor(pid(String(x.steamID)));   // Q332: a seat moved off that could not be put back
           if (!by.length) { stoodCand.push(x); continue; }
           if (allRecant) {
             stoodCand.push(x); RUN.agreedStoodRecant = (RUN.agreedStoodRecant | 0) + 1;

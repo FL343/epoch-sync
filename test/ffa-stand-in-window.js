@@ -81,6 +81,21 @@
 //       pin the result read now) is rated there -> the two rated (for him); mutant (the writers only read) -> not rated. A
 //       group whose settlers recant on purpose every match (the fixed old account with a new one) -> the points sums
 //       exactly those with the Q265 step off (Q264: the patch gives back no more than that)
+// Q332 (cloud audit 2026-10, the Q265 follow-up): Q275 left the same cost for a rewritten roster. The players left kept the
+//   scores and swapped, in the roster they wrote, the honest seat whose row was overwritten with one of theirs that went
+//   missing too: nobody's pin changes (nobody recants, the Q275 gate stays off), and the second time in the window Q265 rated
+//   the honest 1st at the swapped 4th (gold -17, the honest twin +38) and their own seat at his 1st. A seat that would stand
+//   in or be rated is put back on his own seat first (the start roster's, else the one seat his pin gives with the scores
+//   read now), all of them together and only when no two then share a seat; one moved off that cannot be put back is not
+//   rated by Q265.
+//   [15] the swap twice: the first time X not rated (as before), both put back to stand in; the second time all four exactly
+//       the honest twin; mutant (not put back) -> X down, the swapped seat up. X pinned on another result: the start roster
+//       still puts him back (up); mutant (the roster not read) -> down. No start written (the pins decide): the honest twin;
+//       mutant (no pin read) -> down. The seat swapped onto his pinned on another result (his own seat not known): X not
+//       rated, the left-there line and row; mutant (still rated) -> down; mutant (put back over another seat) -> rated. 5P
+//       with an honest writer next to the two who swap: all five exactly the honest twin.
+//   Not here: the same shape at grandmaster and the Q275 shapes (A1-A3, B1-B2, D1-D5, rings) unchanged are probes in the
+//   Q332 delivery (cloud audit fixes/Q332-stood-moved), not tests.
 // State isolation is structural (every *_FILE var scanned and redirected, cwd = temp dir), like test/ffa-agreed-recant.js.
 const { spawnSync } = require('child_process');
 const fs = require('fs'), path = require('path'), os = require('os');
@@ -957,6 +972,115 @@ function joinedBent(h) {
       && (ob.match(RECANT_LINE_RE(bt.j2.k.key, L14r)) || []).length === 1 && fOf(last(bt.b), H14r) === 0
       && sameFor(bt.a, off.a, four) && sameFor(bt.b, off.b, four), show(bt.b, bt.j2.ros) + ' vs off ' + show(off.b, bt.j2.ros) + ' ' + ob.slice(-600));
   });
+}
+
+// ---- [15] (Q332, the Q265 follow-up) the players left swap two missing seats in the roster they write, scores unchanged ----
+// X15 (honest, 1st at seat 0) and C15c (seat 3) seen agreeing, both rows gone; C15a C15b write the real scores with X15 and
+//   C15c swapped in their roster (nobody's pin changes: nobody recants). `noStart`: no start written (no start roster: the
+//   pins decide); ros5: a 5P match with the honest H15 writing the real roster (the swapped one still the majority)
+const X15 = SID(1101), C15a = SID(1102), C15b = SID(1103), C15c = SID(1104), H15 = SID(1105);
+const X15n = SID(1111), C15an = SID(1112), C15bn = SID(1113), C15cn = SID(1114);
+const X15p = SID(1121), C15ap = SID(1122), C15bp = SID(1123), C15cp = SID(1124);
+const X15f = SID(1131), C15af = SID(1132), C15bf = SID(1133), C15cf = SID(1134);
+ALL.push(X15, C15a, C15b, C15c, H15, X15n, C15an, C15bn, C15cn, X15p, C15ap, C15bp, C15cp, X15f, C15af, C15bf, C15cf);
+const S5 = [6100, 5200, 4800, 4400, 3900];
+// one match: steps (swapped) and the honest twin's; writers: seats writing at the end, gang: those of them writing `sw`
+function swapped(h, ros, sc, sw, writers, gang, noStart) {
+  const k = keyRecs(2, h, ros, sc), pre = noStart ? [] : k.S, all = pre.concat(k.R);
+  const end = pre.concat(writers.map((i) => (gang.indexOf(i) >= 0 ? { sid: ros[i], d: rec(0xB1, 2, h, i, placeIn(sc, i), placeIn(sc, i) === 1, sw, sc) } : k.R[i])));
+  const tail = (x) => [[GRACE, x], [LEAVE, x], [3 * HOUR, x]];
+  return { k, ros, steps: (noStart ? [[0, k.R], [2 * MIN, end]] : [[0, k.S], [2 * MIN, all], [3 * MIN, end]]).concat(tail(end)),
+    twin: [[0, noStart ? k.R : k.S], [2 * MIN, all]].concat(tail(all)) };
+}
+// the second step's state edited (edit(state, key)) before the rest of the steps run
+function editedAt(m, edit, script, from) {
+  const a = timeline(m.steps.slice(0, 2), script, from);
+  if (!allOk(a, 2)) return a;
+  return a.concat(timeline([[0, m.steps[2][1]]].concat(m.steps.slice(3)), script, advance(edit(JSON.parse(JSON.stringify(last(a).state)), m.k.key), m.steps[2][0])));
+}
+const MOVED_RE = /\| seats standing in or rated \(Q227 \/ Q265\) the records read now name off their own seat: put back on it \/ left there, not rated by Q265: another seat would be on it \(Q332\) \| (\d+) \/ (\d+) \|/;
+const movedRow = (rs, i) => rs.reduce((a, r) => { const m = MOVED_RE.exec(r.summary || ''); return m ? a + +m[i] : NaN; }, 0);
+const MOVED_LINE = (key, sid, from, to, roster, fits) => new RegExp('agreed-stood-moved ' + key + ': seat ' + from + ' = ' + v.pid(sid).slice(0, 8) + ' is on seat ' + to
+  + (roster ? ' of the start roster' : ' by the result he was seen agreeing to') + (fits ? ' -- put back on it for the place read now' : ' -- another seat would be there, not rated at the place read now') + ' \\(Q332\\)');
+const MOVE_DECL = '      const stoodOff = new Set();\n';
+const MOVE_RO = '        const ro = seatGateRoster(pend);\n';
+const MOVE_PIN = '          if (pend.agv && pend.agv[h] != null) for (let i = 0; i < pc; i++) if (pend.agv[h] === agreedPin(i)) { if (s >= 0) return -1; s = i; }\n';
+const MOVE_FITS = '          const fits = new Set(to).size === to.length && to.every((s) => !taken.has(s));\n';
+const MOVE_SET = '            if (fits) { x.seat = to[i]; RUN.agreedStoodMoved = (RUN.agreedStoodMoved | 0) + 1; } else { stoodOff.add(x); RUN.agreedStoodMovedOff = (RUN.agreedStoodMovedOff | 0) + 1; }\n';
+const MOVE_BY = '          const by = stoodOff.has(x) ? [] : stoodFor(pid(String(x.steamID)));   // Q332: a seat moved off that could not be put back\n';
+const NOPUT = ['noput', MOVE_SET, MOVE_SET.replace('x.seat = to[i]; ', '')];   // as today: rated where the records name him
+const NOPIN = ['nopin', MOVE_PIN, ''];
+const NORO = ['noro', MOVE_RO, '        const ro = null;\n'];
+const NOOFF = ['nooff', MOVE_BY, '          const by = stoodFor(pid(String(x.steamID)));\n'];
+const NOFIT = ['nofit', MOVE_FITS, '          const fits = true;\n'];
+{
+  const at = (a, from) => SRC.indexOf(a, from || 0);
+  T('[0] Q332: the seats put back right before the Q265 step (after the absent-seat loop and the seats put back there): the start roster first, then the pin; a seat that cannot be put back not rated by Q265',
+    [MOVE_DECL, MOVE_RO, MOVE_PIN, MOVE_FITS, MOVE_SET, MOVE_BY].every((a) => SRC.split(a).length === 2) && at(BACK) < at(MOVE_DECL) && at(MOVE_DECL) < at(MOVE_RO)
+    && at(MOVE_RO) < at(MOVE_PIN) && at(MOVE_PIN) < at(MOVE_FITS) && at(MOVE_FITS) < at(MOVE_SET) && at(MOVE_SET) < at('const rated0 = parts.slice(),')
+    && at('const rated0 = parts.slice(),') - at(MOVE_DECL) < 3600 && at(RATE_LOOP) + RATE_LOOP.length === at(MOVE_BY) && at(MOVE_BY) + MOVE_BY.length === at(RATE_IF),
+    String(at('const rated0 = parts.slice(),') - at(MOVE_DECL)));
+  T('[0] Q332: the summary row right after the Q275 one', /'\| seats standing in or rated \(Q227 \/ Q265\) the records read now name off their own seat: put back on it \/ left there, not rated by Q265: another seat would be on it \(Q332\) \| ' \+ s\('agreedStoodMoved', 0\) \+ ' \/ ' \+ s\('agreedStoodMovedOff', 0\) \+ ' \|',/.test(SRC)
+    && at("s('agreedStoodRecant', 0)") < at("s('agreedStoodMoved', 0)") && at("s('agreedStoodMoved', 0)") < at("s('agreedStoodOwn', 0)"));
+}
+{
+  const sw = [C15c, C15a, C15b, X15], ros = [X15, C15a, C15b, C15c], m1 = swapped(0xC327, ros, S4, sw, [1, 2], [1, 2]), m2 = swapped(0xC328, ros, S4, sw, [1, 2], [1, 2]);
+  const a = timeline(m1.steps), from = () => advance(last(a).state, 3 * HOUR);
+  const b = allOk(a, 6) ? timeline(m2.steps, null, from()) : [], tw = allOk(a, 6) ? timeline(m2.twin, null, from()) : [], o = outOf(b);
+  T('[15] the swap, first time: X15 not rated (as before), both put back on their own seat to stand in',
+    allOk(a, 6) && none(a, X15) && rOf(a, X15).length === 0 && nStood(a) === 2 && MOVED_LINE(m1.k.key, X15, 3, 0, true, true).test(outOf(a))
+    && MOVED_LINE(m1.k.key, C15c, 0, 3, true, true).test(outOf(a)) && movedRow(a, 1) === 2 && movedRow(a, 2) === 0, show(a, ros) + ' ' + outOf(a).slice(-600));
+  T('[15] the swap, second time in the window: all four exactly the honest twin (X15 1st of 4: up, C15c 4th: down); the Q265 step rated both at their own seat',
+    allOk(b, 6) && processedOf(last(b)).has(m2.k.key) && allOk(tw, 5) && sameFor(b, tw, ros) && up(b, X15) && down(b, C15c) && nRated(b) === 2
+    && RATED_LINE(m2.k.key, X15, 1, 4, 'seat 1 = [0-9a-f]{8}, seat 2 = [0-9a-f]{8}').test(o) && RATED_LINE(m2.k.key, C15c, 4, 4, 'seat 1 = [0-9a-f]{8}, seat 2 = [0-9a-f]{8}').test(o)
+    && movedRow(b, 1) === 2, show(b, ros) + ' vs twin ' + show(tw, ros));
+  withMutant(NOPUT[0], NOPUT[1], NOPUT[2], (script) => {
+    const m = allOk(a, 6) ? timeline(m2.steps, script, from()) : [];
+    T('[15] mutant (not put back) -> X15 rated at the swapped 4 of 4 (down), C15c at his 1st (up)', allOk(m, 6) && down(m, X15) && up(m, C15c), show(m, ros));
+  });
+  // the start roster decides before the pin: X15 pinned on another result here (the pin gives no seat), the roster seats him at 0
+  const otherPin = (st, key) => { st.STARTS_FILE[key].agv[v.pid(X15)] = '0123456789abcdef'; return st; };
+  const e = allOk(a, 6) ? editedAt(m2, otherPin, null, from()) : [];
+  T('[15] the start roster read first: X15 with a pin of another result is still put back on seat 0 (the twin\'s place: up)', allOk(e, 6) && up(e, X15) && sameFor(e, tw, [X15])
+    && MOVED_LINE(m2.k.key, X15, 3, 0, true, true).test(outOf(e)), show(e, ros) + ' ' + outOf(e).slice(-500));
+  withMutant(NORO[0], NORO[1], NORO[2], (script) => {
+    const m = allOk(a, 6) ? editedAt(m2, otherPin, script, from()) : [];
+    T('[15] mutant (the start roster not read) -> X15 left at the swapped 4 of 4 and rated there (down)', allOk(m, 6) && down(m, X15), show(m, ros));
+  });
+}
+{   // no start written: the pins decide
+  const sw = [C15cn, C15an, C15bn, X15n], ros = [X15n, C15an, C15bn, C15cn];
+  const m1 = swapped(0xC329, ros, S4, sw, [1, 2], [1, 2], true), m2 = swapped(0xC32A, ros, S4, sw, [1, 2], [1, 2], true);
+  const a = timeline(m1.steps), from = () => advance(last(a).state, 3 * HOUR);
+  const b = allOk(a, 5) ? timeline(m2.steps, null, from()) : [], tw = allOk(a, 5) ? timeline(m2.twin, null, from()) : [];
+  T('[15] no start written (the pins decide), second time: all four exactly the honest twin (X15n up)', allOk(a, 5) && none(a, X15n) && allOk(b, 5) && allOk(tw, 5)
+    && sameFor(b, tw, ros) && up(b, X15n) && MOVED_LINE(m2.k.key, X15n, 3, 0, false, true).test(outOf(b)), show(b, ros) + ' vs twin ' + show(tw, ros));
+  withMutant(NOPIN[0], NOPIN[1], NOPIN[2], (script) => {
+    const m = allOk(a, 5) ? timeline(m2.steps, script, from()) : [];
+    T('[15] mutant (no pin read) -> X15n rated at the swapped 4 of 4 (down)', allOk(m, 5) && down(m, X15n), show(m, ros));
+  });
+  // a seat moved off that cannot be put back: C15cn pinned on another result (his own seat not known) stays on X15n's seat
+  const otherPin = (st, key) => { st.STARTS_FILE[key].agv[v.pid(C15cn)] = '0123456789abcdef'; return st; };
+  const e = allOk(a, 5) ? editedAt(m2, otherPin, null, from()) : [], oe = outOf(e);
+  T('[15] another seat would be on his: X15n not rated by the Q265 step (no points or rating write of his), the left-there line and row',
+    allOk(e, 5) && none(e, X15n) && rOf(e, X15n).length === 0 && MOVED_LINE(m2.k.key, X15n, 3, 0, false, false).test(oe) && movedRow(e, 2) === 1 && movedRow(e, 1) === 0,
+    show(e, ros) + ' ' + oe.slice(-700));
+  withMutant(NOOFF[0], NOOFF[1], NOOFF[2], (script) => {
+    const m = allOk(a, 5) ? editedAt(m2, otherPin, script, from()) : [];
+    T('[15] mutant (a seat left there still rated) -> X15n rated at the swapped 4 of 4 (down)', allOk(m, 5) && down(m, X15n), show(m, ros));
+  });
+  withMutant(NOFIT[0], NOFIT[1], NOFIT[2], (script) => {
+    const m = allOk(a, 5) ? editedAt(m2, otherPin, script, from()) : [];
+    T('[15] mutant (put back over another seat) -> X15n rated', allOk(m, 5) && ptsIn(m, X15n).length === 1, show(m, ros));
+  });
+}
+{   // 5P, the honest H15p writes the real roster (the two who swap still the majority)
+  const ros = [X15p, H15, C15ap, C15bp, C15cp], sw = [C15cp, H15, C15ap, C15bp, X15p];
+  const m1 = swapped(0xC32B, ros, S5, sw, [1, 2, 3], [2, 3]), m2 = swapped(0xC32C, ros, S5, sw, [1, 2, 3], [2, 3]);
+  const a = timeline(m1.steps), from = () => advance(last(a).state, 3 * HOUR);
+  const b = allOk(a, 6) ? timeline(m2.steps, null, from()) : [], tw = allOk(a, 6) ? timeline(m2.twin, null, from()) : [];
+  T('[15] 5P with an honest writer (H15) next to the two who swap, second time: all five exactly the honest twin (X15p 1st of 5: up)',
+    allOk(b, 6) && allOk(tw, 5) && sameFor(b, tw, ros) && up(b, X15p), show(b, ros) + ' vs twin ' + show(tw, ros));
 }
 
 console.log(failN ? '=== FAIL -- ' + failN + ' fail (ffa-stand-in-window) ===' : '=== PASS -- 0 fail (ffa-stand-in-window) ===');
