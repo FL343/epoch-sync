@@ -199,7 +199,7 @@ const BEFORE = {
   // no tag check: an owed write is paid again whatever his row reads
   noTag: ["    if (t === cq.s.h1) out.sent = 'landed';", "    if (false) out.sent = 'landed';"],
   // no re-tag once the settle wrote his XP in the same run
-  noRebase: ["    if (!owedSent.has(sid) || !(wXp[i] && wXp[i].status === 'fulfilled' && wXp[i].value)) return;", '    return;'],
+  noRebase: ['  for (const sid of Object.keys(changedXp)) {\n    if (!owedSent.has(sid)) continue;', '  for (const sid of Object.keys(changedXp)) {\n    continue;'],   // Q334: the re-tag runs ahead of the settle's XP writes
   // a floor given up keeps its day slot
   noRefund: ['  for (const d of days || []) if (d === day && (p.fq | 0) === day && (p.fqn | 0) > 0) { p.fqn--; n++; }\n', ''],
 };
@@ -399,8 +399,12 @@ withMutant(['noTag'], '[5]', (m) => {
   T('[6] main: the sent write tagged on the row read and on the row meant (HMAC, no score stored)', /s: \{ a: plan\.add, h0: owedTag\(h, c\), h1: owedTag\(h, next\), d: plan\.days \}/.test(mb));
   const iBase = SRC.indexOf('  for (const sid of owedSent) owedXpBase[sid] = xp[sid] | 0;\n'), iOnDemand = SRC.indexOf("console.log('on-demand base reads: '"), iChanged = SRC.indexOf('  const changed = {}; const changedLp = {}; const changedXp = {};');
   T('[6] main: the settle\'s base of an owed account taken after the on-demand reads, before any credit', iBase > iOnDemand && iBase < iChanged && iOnDemand > 0);
-  const iWxp = SRC.indexOf('  const wXp = await mapPool(Object.keys(changedXp), '), iRe = SRC.indexOf('consoleOwedRebase(signals.players[h], h, owedXpBase[sid] | 0, changedXp[sid] | 0)'), iWcp = SRC.indexOf('  const wCp = await mapPool(Object.keys(changedCp), ');
-  T('[6] main: re-tagged after the settle\'s XP writes, only for those that landed', iWxp > 0 && iRe > iWxp && iRe < iWcp && SRC.indexOf("if (!owedSent.has(sid) || !(wXp[i] && wXp[i].status === 'fulfilled' && wXp[i].value)) return;") > iWxp);
+  // Q334: the settle's XP write is laid in the backlog before anything goes out (it lands, or waits for the next run with that
+  //   value): the re-tag on the row it leaves runs once, on disk with the processed keys, ahead of the XP writes
+  const iFill = SRC.indexOf('  const careerRefilled = fillCareerDetails(changedXp, careerDet, xpState);'), iRe = SRC.indexOf('consoleOwedRebase(signals.players[h], h, owedXpBase[sid] | 0, changedXp[sid] | 0)'),
+    iLayX = SRC.indexOf("  for (const sid of Object.keys(changedXp)) rowLayAhead('xw', sid, changedXp[sid] | 0);"), iSettle = SRC.indexOf('  saveSettled(true);'), iWxp = SRC.indexOf('  const wXp = await mapPool(Object.keys(changedXp), ');
+  T('[6] main: re-tagged on the row the settle\'s XP write leaves, before the writes and on disk with the processed keys (Q334)', iFill > 0 && iRe > iFill && iLayX > iRe && iSettle > iLayX && iWxp > iSettle
+    && SRC.split('consoleOwedRebase(signals.players[h], h, owedXpBase[sid] | 0, changedXp[sid] | 0)').length === 2 && SRC.indexOf('  for (const sid of Object.keys(changedXp)) {\n    if (!owedSent.has(sid)) continue;') > 0);
   T('[6] the summary row and the RUN counters', /'\| consolation XP writes that failed, owed to a later run /.test(SRC) && /RUN\.owedPaid = ow\.paid; RUN\.owedLanded = ow\.landed; RUN\.owedMoved = ow\.moved; RUN\.owedNew = ow\.owed; RUN\.owedExpired = owedRes\.expired; RUN\.owedWaiting = owedRes\.waiting;/.test(SRC));
   T('[6] the loop still writes the XP board only (no rating / points / CP)', !/LP_LB|lpBoardId|CP_LB|ratingId/.test(mb));
 }

@@ -227,6 +227,8 @@ function course(w, flags, injDeep, injQuiet, o) {
 const BEFORE = {
   // the code before: a failed write waits for nothing
   noQueue: ['    RUN.ebQueued = (RUN.ebQueued | 0) + 1;\n    if (was && (was.v | 0) >= (w.s | 0)) {', '    return;\n    if (was && (was.v | 0) >= (w.s | 0)) {'],
+  // ... nor laid ahead of the write (Q334: with it, a failed write still waits -- the entry laid before it went out)
+  noLayAhead: ['  const ebLayAhead = (name, sid, w) => {\n', '  const ebLayAhead = (name, sid, w) => {\n    return;\n'],
   // the settle's rows are not overlaid: the waiting write is neither laid nor written with this run
   noLay: ['        ebLay(k, d, sid, row);\n', '        void row;\n'],
   // laid without the max: the waiting value stands over a higher row and is written over it
@@ -424,7 +426,7 @@ for (const [tag, flags, bid, ov, out, ref, want] of [
 }
 
 // ---- [8] mutants: the code before / not laid ----
-withMutant(['noQueue'], '[8]', (m) => {
+withMutant(['noQueue', 'noLayAhead'], '[8]', (m) => {
   const w = course(world({ script: m }), 0, inj(EN, A, [FAIL(500)]));
   eq('[8] mutant (nothing waits, the code before): A ends at depth 3 instead of 5', [fine(w), row(w, EN, A)], [true, P3]);
 });
@@ -444,8 +446,13 @@ withMutant(['noLay'], '[8]', (m) => {
   T('[9] every single-board best pool goes through ebAfterPool after its write', missing.length === 0, missing.join(', '));
   T('[9] the family loops (classic, competitive lifetime + season, weekly) account every write, an unresolved board waits', /ebAfterPool\(F\.name, F\.changed, wF\);/.test(SRC) && /ebAfterPool\(lbName, pool, wr\);/.test(SRC) && /ebAfterPool\(lbName, pool, null\); continue; \}/.test(SRC)
     && /ebAfterPool\(name, pool, wr\);/.test(SRC) && /ebAfterPool\(name, pool, null\); continue; \}/.test(SRC));
-  const iLastPool = SRC.indexOf('    ebAfterPool(name, pool, wr);   // Q319'), iSave = SRC.indexOf('  if (backlogDirty) savePendingWrites(lpBacklog, nowMs, true);   // Q319', iLastPool), iProc = SRC.indexOf('  saveProcessed(processed);\n  saveSkill(skill);');
-  T('[9] the backlog is saved after the last best pool, before the processed keys', iLastPool > 0 && iSave > iLastPool && iProc > iSave);
+  // Q334: every best pool is laid in the backlog and saved with the processed keys before the first write goes out; the outcomes
+  //   go to disk again after the last pool
+  const iLayE = SRC.indexOf('  for (const d of ebBoards) for (const sid of Object.keys(d.pool || {})) ebLayAhead(d.name, sid, d.pool[sid]);'), iSettle = SRC.indexOf('  saveSettled(true);'),
+    iFirst = SRC.indexOf('  const wRating = await mapPool(ratingSids, '), iLastPool = SRC.indexOf('    ebAfterPool(name, pool, wr);   // Q319'),
+    iSave = SRC.indexOf('  if (backlogDirty) savePendingWrites(lpBacklog, nowMs, true);   // Q319', iLastPool);
+  T('[9] the best pools laid in the backlog, saved with the processed keys before the first write; saved again after the last pool (Q334)',
+    iLayE > 0 && iSettle > iLayE && iFirst > iSettle && iLastPool > iFirst && iSave > iLastPool);
   T('[9] the quiet exits retry the waiting bests ahead of the points / XP / CP retries', (SRC.match(/await ebRetry\(\); await lpRetry\(\); await rowRetry\(\); persistStartsSide\(\);/g) || []).length === 2);
   T('[9] the seedcap correction asks before it deletes', /if \(dC && ebCancel\(dC, sidC, packedC\)\) \{[^\n]*continue; \}\n          if \(!bidC \|\| !bestMapC/.test(SRC));
   T('[9] the summary row and the RUN counters', /endless best writes that failed, waiting for a later run \/ waiting writes that landed or were found on the board \/ dropped, board no longer written \(Q319\) \| ' \+ s\('ebQueued', 0\)/.test(SRC)

@@ -237,6 +237,8 @@ const merge = (...xs) => { const o = { post: {} }; for (const x of xs) { for (co
 const BEFORE = {
   // the code before: a failed write waits for nothing
   noQueue: ['    if (!ROW_LB[f]) return false;\n    const b = lpBacklog[k] = lpBacklog[k] || {}, was = b[f];', '    return false;\n    const b = lpBacklog[k] = lpBacklog[k] || {}, was = b[f];'],
+  // ... nor laid ahead of the write (Q334: with it, a failed write still waits -- the entry laid before it went out)
+  noLayAhead: ['  const rowLayAhead = (f, sid, score) => {\n    if (!ROW_LB[f]) return;', '  const rowLayAhead = (f, sid, score) => {\n    return;'],
   // the settle's read takes the board, not the waiting value
   noSettleBase: ["    for (const sid of rowPendingSids('xw', Object.keys(xp))) { const w = rowWaiting('xw', sid); if (w) { xp[sid] = w.v | 0; xpRetrySids.push(sid); } }", "    for (const sid of rowPendingSids('xw', Object.keys(xp))) { const w = rowWaiting('xw', sid); if (w) { xpRetrySids.push(sid); } }"],
   // the consolation reads the board, not the waiting value
@@ -244,7 +246,7 @@ const BEFORE = {
   // no run-local row: the settle takes its read even when this run's consolation wrote the row seconds before
   noWrote: ['    for (const sid of Object.keys(rowWrote.xw)) xp[sid] = rowWrote.xw[sid];\n', ''],
   // no re-tag of a failed consolation on a settle XP write that failed
-  noRebaseFail: ["    if (landed || !owedSent.has(sid) || !rowWaiting('xw', sid)) return;", '    return;'],
+  noRebaseFail: ['  for (const sid of Object.keys(changedXp)) {\n    if (!owedSent.has(sid)) continue;', '  for (const sid of Object.keys(changedXp)) {\n    continue;'],   // Q334: one re-tag, ahead of the write (it lands or waits)
   // the redeem reads the board, not the waiting balance
   noRedeemWaiting: ['        else if (cwP) bal = cwP.v | 0;\n', ''],
   // no move of the waiting value ahead of a write of this job on that board
@@ -319,7 +321,7 @@ T('[2] (the reference: a quick 1V1 win pays 450 XP and 20 CP, the loser 135 / 10
     eq('[2] mutant (the settle reads the board): the second 1V1 counts from 0 and writes over the waiting 450', [fine(x), xpOf(x, H)], [true, 315]);
   });
 }
-withMutant(['noQueue'], '[2]', (m) => {
+withMutant(['noQueue', 'noLayAhead'], '[2]', (m) => {
   const w = world(m); honest(w, H, J, [null, merge(inj(XP, H, [FAIL(500)]), inj(CP, H, [FAIL(500)]))]); after(w, 3);
   eq('[2] mutant (nothing waits, the code before): H ends with 0 XP / 0 CP instead of 450 / 20', [fine(w), xpOf(w, H), cpOf(w, H)], [true, 0, 0]);
 });
@@ -373,7 +375,7 @@ withMutant(['noQuietRetry'], '[2]', (m) => {
   const ref = world(); lone(ref, H, J, null, up(ref)); after(ref, 2);
   const VI = inj(XP, H, [FAIL(500, true), FAIL(500, false)]);
   const w = world(); lone(w, H, J, [null, null, null, VI], up(w));
-  const landedNote = /consolation: [0-9a-f]{8} owed write found landed by the settle's read \(Q315, Q318\)/.test(outOf(w));
+  const landedNote = /consolation: [0-9a-f]{8} owed write found landed by the settle's read \(Q315(, Q318)?\)/.test(outOf(w));   // Q334: re-tagged ahead of the write
   after(w, 2);
   eq('[3] a consolation Steam kept although it answered 500, then the same run\'s settle write fails: the 275 that waits holds it, paid once',
     [fine(w), landedNote, xpOf(w, H), xpOf(ref, H), !!((((w.state || {}).SIGNALS_FILE || {}).players || {})[v.pid(H)] || {}).cq], [true, true, 275, 275, false]);
@@ -438,10 +440,16 @@ withMutant(['noQuietRetry'], '[2]', (m) => {
     && /owedSet\(sid, null\); saveSignals\(signals, nowMs\);[^\n]*\n        rowLanded\('xw', sid, next\);/.test(mb));
   T('[7] consolation: a waiting value is the base (no read), its details the career block from the XP state', /e = xwP \? null : await readUserEntry\(xpId0, sid, 'xp'\);\n        c = xwP \? \(xwP\.v \| 0\) :/.test(mb) && /const det = xwP \? careerBlockOf\(/.test(mb));
   T('[7] the quiet exits retry after the points backlog and before the state is saved', (SRC.match(/await lpRetry\(\); await rowRetry\(\); persistStartsSide\(\);/g) || []).length === 2);
-  const iWcp = SRC.indexOf('  const wCp = await mapPool(Object.keys(changedCp), '), iCw = SRC.indexOf("Object.keys(changedCp).forEach((sid, i) => rowAfterWrite('cw', sid, cpClamp(changedCp[sid])"),
-    iSaveB = SRC.indexOf('  if (backlogDirty) savePendingWrites(lpBacklog, nowMs, true);', iCw), iProc = SRC.indexOf('  saveProcessed(processed);\n  saveSkill(skill);');
-  T('[7] settle: the XP / CP outcomes go to the backlog, saved before the processed keys', iWcp > 0 && iCw > iWcp && iSaveB > iCw && iProc > iSaveB);
-  const iRetryX = SRC.indexOf("  for (const sid of xpRetrySids) if (rowWaiting('xw', sid) && changedXp[sid] == null) changedXp[sid] = xp[sid] | 0;"), iFill = SRC.indexOf('  const careerRefilled = fillCareerDetails(changedXp, careerDet, xpState);');
+  // Q334: the XP / CP writes are laid in the backlog and saved with the processed keys before the first write goes out; their
+  //   outcomes go to disk again after the writes
+  const iLayX = SRC.indexOf("  for (const sid of Object.keys(changedXp)) rowLayAhead('xw', sid, changedXp[sid] | 0);"), iLayC = SRC.indexOf("  for (const sid of Object.keys(changedCp)) rowLayAhead('cw', sid, cpClamp(changedCp[sid]));"),
+    iSettle = SRC.indexOf('  saveSettled(true);'), iFirst = SRC.indexOf('  const wRating = await mapPool(ratingSids, '),
+    iWcp = SRC.indexOf('  const wCp = await mapPool(Object.keys(changedCp), '), iCw = SRC.indexOf("Object.keys(changedCp).forEach((sid, i) => rowAfterWrite('cw', sid, cpClamp(changedCp[sid])"),
+    iSaveB = SRC.indexOf('  if (backlogDirty) savePendingWrites(lpBacklog, nowMs, true);', iCw);
+  T('[7] settle: the XP / CP writes laid in the backlog, saved with the processed keys before the first write; their outcomes saved again (Q334)',
+    iLayX > 0 && iLayC > 0 && iSettle > iLayX && iSettle > iLayC && iFirst > iSettle && iWcp > iFirst && iCw > iWcp && iSaveB > iCw
+    && /const saveSettled = \(checkpoint\) => \{\n    if \(backlogDirty \|\| Object\.keys\(lpBacklog\)\.length\) savePendingWrites\(lpBacklog, nowMs, !checkpoint\);[^\n]*\n    saveProcessed\(processed\);/.test(SRC));
+  const iRetryX = SRC.indexOf("  for (const sid of xpRetrySids) { const w = rowWaiting('xw', sid); if (w && changedXp[sid] == null && !pastFuse('xp', sid, w)) changedXp[sid] = xp[sid] | 0; }"), iFill = SRC.indexOf('  const careerRefilled = fillCareerDetails(changedXp, careerDet, xpState);');
   T('[7] settle: the retries join this run\'s writes before the career blocks are filled', iRetryX > 0 && iFill > iRetryX);
   T('[7] redeem: the waiting balance read, the debit moved ahead and superseding', /const cwP = rowWaiting\('cw', w\.sid\);/.test(SRC) && /rowAhead\('cw', w\.sid, plan\.balance\);[^\n]*\n        const dw = await postForm\(/.test(SRC) && /else \{ if \(cpVals\) cpVals\[w\.sid\] = plan\.balance; rowLanded\('cw', w\.sid, plan\.balance\); \}/.test(SRC));
   T('[7] the summary row and the RUN counters', /'\| settle XP \/ CP writes that failed, waiting for a later run \/ waiting writes that landed \(Q318\) \| ' \+ s\('rowQueued', 0\) \+ ' \/ ' \+ s\('rowRetried', 0\)/.test(SRC)

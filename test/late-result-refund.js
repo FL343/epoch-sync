@@ -477,10 +477,10 @@ const U = {};
     const iG = SRC.indexOf('      for (const o of ghostRanked) {'), iC = SRC.indexOf('      const sh = lateSh[x.steamID];');
     return iL > 0 && iS > iL && iG > iS && iC > iG;
   })());
-  T('[11] only writes that landed count (after the points writes, before the state save)', (() => {
-    const iW = SRC.indexOf('  const wPoints = await mapPool(Object.keys(changedLp)'), iU = SRC.indexOf('st.g = gains.reduce((a, y) => a + (lpOk.has(y[0]) ? y[1] : 0), 0);');
-    const iD = SRC.indexOf('      if (!lpOk.has(sid)) st.ded = 0;'), iS = SRC.lastIndexOf('  saveConfessions(confState, nowMs, confLive);');
-    return iW > 0 && iU > iW && iD > iW && iS > iU && iS > iD;
+  T('[11] only writes that land count -- laid in the backlog before anything goes out, they land or wait (Q334); counted before the state save', (() => {
+    const iW = SRC.indexOf('  if (lpBoardId) for (const sid of Object.keys(changedLp)) lpPlanned[sid] = lpLayAhead(sid, changedLp[sid], lpDet[sid], reveal[sid]);'), iU = SRC.indexOf('st.g = gains.reduce((a, y) => a + (lpOk.has(y[0]) ? y[1] : 0), 0);');
+    const iD = SRC.indexOf('      if (!lpOk.has(sid)) st.ded = 0;'), iS = SRC.indexOf('  saveSettled(true);'), iP = SRC.indexOf('  const wPoints = await mapPool(Object.keys(changedLp)');
+    return iW > 0 && iU > iW && iD > iW && iS > iU && iS > iD && iP > iS && /const saveSettled = \(checkpoint\) => \{[\s\S]{0,700}?\n    saveConfessions\(confState, nowMs, confLive\);/.test(SRC);
   })());
   T('[11] the upkeep passes the window, the scores tag and the board; a late result forgiven is saved on the early return too',
     /lateMs: LATE_RESULT_MS, vecTag, lpBoard: lpId0,/.test(SRC)
@@ -522,13 +522,17 @@ const U = {};
       const c = topGame(20 * MIN), rs = timeline(c.steps, c.P, script);   // [13] +103: the stranger's +35 charged to him
       return allOk(rs, 6) && JSON.stringify(pointsOf(rs[5], c.P[2])) === '[2503]';
     }],
-    ['a failed settle points write forfeited again (no retry, O480)', '    const w = await writeLpRow(sid, changedLp[sid], lpDet[sid], rv, [], { retry: true });', '    const w = await writeLpRow(sid, changedLp[sid], lpDet[sid], rv, []);', (script) => {
-      const c = pairGame(20 * MIN), p2 = c.P[2];
-      c.steps[4] = [c.steps[4][0], c.steps[4][1], { STUB_POST_FAIL: JSON.stringify([p2]) }];
-      const rs = timeline(c.steps, c.P, script);   // [14b] the partner's +38 never lands
-      return allOk(rs, 6) && pointsOf(rs[5], p2).length === 0;
+    ['a failed settle points write forfeited again (not laid ahead, no retry; O480, Q334)', '    const w = await writeLpRow(sid, changedLp[sid], lpDet[sid], rv, [], { retry: true, planned: lpPlanned[sid] });', '    const w = await writeLpRow(sid, changedLp[sid], lpDet[sid], rv, []);', (script) => {
+      const tmp = path.join(__dirname, '..', '.mutant-late-result-c-' + process.pid + '.js');
+      try {
+        fs.writeFileSync(tmp, fs.readFileSync(script, 'utf8').replace('  if (lpBoardId) for (const sid of Object.keys(changedLp)) lpPlanned[sid] = lpLayAhead(sid, changedLp[sid], lpDet[sid], reveal[sid]);\n', ''));
+        const c = pairGame(20 * MIN), p2 = c.P[2];
+        c.steps[4] = [c.steps[4][0], c.steps[4][1], { STUB_POST_FAIL: JSON.stringify([p2]) }];
+        const rs = timeline(c.steps, c.P, tmp);   // [14b] the partner's +38 never lands
+        return allOk(rs, 6) && pointsOf(rs[5], p2).length === 0;
+      } finally { try { fs.unlinkSync(tmp); } catch (e) {} }
     }],
-    ['a write waiting for its retry not counted as landing (O480)', '|| lpWaiting(sid)));', '));', (script) => {
+    ['a write laid ahead (it lands, or waits for its retry) not counted as landing (O480, Q334)', '.filter((sid) => lpPlanned[sid] || lpWaiting(sid)));', '.filter((sid) => lpWritten[sid]));', (script) => {
       const c = A(20 * MIN), p2 = c.P[2];
       c.steps[4] = [c.steps[4][0], c.steps[4][1], { STUB_POST_FAIL: JSON.stringify([p2]) }];
       const rs = timeline(c.steps, c.P, script);   // [7] the fine lands on the retry, the forgiven late result gives nothing back (2400)

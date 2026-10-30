@@ -90,6 +90,21 @@ const trustLedger = require('./trust-ledger.js');   // O198 v1 (knife 5.5b-1): t
 //     lands at or above it ends the wait; one that fails waits instead (the higher of the two). A quiet run writes it on its own
 //     (ebRetry). Dropped (warned) past PENDING_W_MAX_MS, and when its board is no longer one this job writes (the season turned,
 //     the week closed: those standings were taken without it).
+//   rw: { b, v, t, n } -- the same for a rating row of the settle (cloud audit Q334): the rating board, the display rating it
+//     carried, the first failure, the tries. Until Q334 a rating write that failed was logged and forfeited (the row kept the
+//     rating before it until his next rated settle). It goes again from the skill state -- the truth this job reads -- never from v.
+//   a: 1 on a w / xw / cw / rw / ew entry -- written ahead (cloud audit Q334): every write the settle is about to make is put here,
+//     as a failed one waits, and saved with the processed list and the rest of the settle's state before the first one goes out
+//     (main: saveSettled); a write that lands takes its entry away, one that fails waits as before (a gone). Until Q334 the
+//     state was saved after the writes: a run killed in between (the step's time limit, a request that hung, a throw after the
+//     writes) left Steam holding the new rows and the next run settled the same matches again on top of them -- the winner's
+//     points twice, the loser's taken twice, XP and the daily first win twice, CP twice, again for every run that died at the
+//     same place. Now such a run leaves the matches processed and the writes waiting: the next run sends the absolute values
+//     again (idempotent, whether or not Steam had taken them) -- a late write, never a second one. An entry with a that this run
+//     did not lay is one of a run that ended before it knew the outcome (logged when it is sent again). The fuse stays the
+//     save's: a settling run does not fold a waiting entry past PENDING_W_MAX_MS into its writes (laid ahead, it would start
+//     afresh and never go), so its save drops it, warned; a write this run settles over it starts afresh, warned too (pastFuse /
+//     fuseRestart).
 const PENDING_WRITES_FILE = process.env.PENDING_WRITES_FILE || 'pending-writes.json';
 const CRON_PULSE_LB = process.env.CRON_PULSE_LB || '';   // O480 cron_pulse board name (unset: cron_pulse, cron_pulse_test in a sandbox run; see writePulse)
 const RECEIPT_HOLD_MS = Math.max(0, Number(process.env.RECEIPT_HOLD_MS || 6 * 3600 * 1000));
@@ -140,12 +155,12 @@ function prunePendingWrites(s, now) {
         delete e.w;
       }
     }
-    for (const f of ['xw', 'cw']) {   // Q318: the settle's XP / CP writes that failed, the same fuse
+    for (const f of ['xw', 'cw', 'rw']) {   // Q318: the settle's XP / CP writes that failed, the same fuse (Q334: its rating rows)
       if (!e || e[f] == null) continue;
       const w = e[f];
       if (!w || typeof w !== 'object' || typeof w.b !== 'string' || !Number.isFinite(Number(w.v)) || now - (Number(w.t) || 0) > PENDING_W_MAX_MS) {
         droppedW++;
-        console.log('::warning::' + (f === 'xw' ? 'xp' : 'cp') + ' write of ' + String(k).slice(0, 8) + ' dropped after ' + ((w && w.n) | 0) + ' failed tries over ' + Math.round(PENDING_W_MAX_MS / 86400000) + ' days (value ' + (w && w.v) + ', Q318)');
+        console.log('::warning::' + ({ xw: 'xp', cw: 'cp', rw: 'rating' })[f] + ' write of ' + String(k).slice(0, 8) + ' dropped after ' + ((w && w.n) | 0) + ' failed tries over ' + Math.round(PENDING_W_MAX_MS / 86400000) + ' days (value ' + (w && w.v) + ', Q318)');
         delete e[f];
       }
     }
@@ -3757,11 +3772,16 @@ function recordMatchSignals(s, g, parts, rankOf, matchType, isVoid, now) {
 // consolation XP write, owed to a later run (Q315, CONSOLE_OWED).
 const transientStatus = (st) => st >= 500 || st === 408 || st === 429;
 const READ_RETRY_MS = Math.max(0, Number(process.env.READ_RETRY_MS || 8000));   // backoff step (env: offline tests only)
+// cloud audit Q334: every request of this job gives up after REQUEST_TIMEOUT_MS (answer and body). Without it a request that
+//   hung held the run until the step's time limit killed it; a read that times out is tried again like one cut off, a write
+//   that times out is a failed write (the settle's writes wait in the backlog: absolute, sent again by the next run).
+const REQUEST_TIMEOUT_MS = Math.max(1000, Number(process.env.REQUEST_TIMEOUT_MS || 30000));
+const reqSignal = () => AbortSignal.timeout(REQUEST_TIMEOUT_MS);
 async function getJson(url) {
   for (let attempt = 0; ; attempt++) {
     let r, t;
     try {
-      r = await fetch(url); t = await r.text();
+      r = await fetch(url, { signal: reqSignal() }); t = await r.text();
     } catch (e) {
       if (attempt >= 2) throw e;
       await new Promise(res => setTimeout(res, READ_RETRY_MS * (attempt + 1))); continue;
@@ -3947,7 +3967,7 @@ async function postForm(path, params) {
   const refused = sandboxRefusal(path, params);
   if (refused) return refused;
   const body = Object.keys(params).map(k => k + '=' + encodeURIComponent(params[k])).join('&');
-  const r = await fetch(BASE + path, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body });
+  const r = await fetch(BASE + path, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body, signal: reqSignal() });
   const t = await r.text(); let j = null; try { j = JSON.parse(t); } catch (e) {}
   if (r.ok) noteCreatedBoard(path, params, j);
   return { status: r.status, ok: r.ok, json: j, text: t };
@@ -3960,7 +3980,7 @@ async function postFormDetails(path, params, detailsArr) {
   if (refused) return refused;
   let body =Object.keys(params).map(k => k + '=' + encodeURIComponent(params[k])).join('&');
   if (detailsArr && detailsArr.length) body += '&details=' + pctBytes(detailsArr);
-  const r = await fetch(BASE + path, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body });
+  const r = await fetch(BASE + path, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body, signal: reqSignal() });
   const t = await r.text(); let j = null; try { j = JSON.parse(t); } catch (e) {}
   return { status: r.status, ok: r.ok, json: j, text: t };
 }
@@ -8321,6 +8341,34 @@ async function main() {
   const receipts = {}, lpWritten = {};
   const lpBacklog = loadPendingWrites();
   let backlogDirty = false;
+  // cloud audit Q334: the writes this run laid ahead (a in PENDING_WRITES_FILE): 'w|' / 'xw|' / 'cw|' / 'rw|' + pid, 'ew|' + pid + '|' + board
+  const aheadNow = new Set();
+  // an entry with a: laid this run ('now') or by a run that ended before it knew the outcome ('gone'); null: none (a failed write)
+  const aheadOf = (key, ent) => (ent && ent.a) ? (aheadNow.has(key) ? 'now' : 'gone') : null;
+  // a write of his landed over his waiting entry: laid this run, nothing to say; laid by a run that ended, logged; else failedBefore()
+  const aheadLanded = (key, ent, msg, failedBefore) => {
+    const a = aheadOf(key, ent);
+    if (a === 'now') return;
+    if (a === 'gone') { RUN.aheadResent = (RUN.aheadResent | 0) + 1; console.log(msg + ' (Q334)'); return; }
+    failedBefore();
+  };
+  const aheadGone = (key, ent, msg) => { if (aheadOf(key, ent) === 'gone') { RUN.aheadResent = (RUN.aheadResent | 0) + 1; console.log(msg + ' (Q334)'); } };
+  // the waiting entry a write laid ahead replaces, if it is still within the fuse (past it, a write this run settles over it starts
+  //   afresh -- its own time, no tries; one that is only the waiting value again is not laid: pastFuse)
+  const aheadLive = (was) => !!(was && typeof was === 'object' && Number(was.t) > 0 && nowMs - Number(was.t) <= PENDING_W_MAX_MS);
+  // a waiting write past that fuse is not folded into this run's writes (true): the save before them drops it, warned, as on main
+  //   (folded back, it was laid ahead afresh -- its own time, no tries -- and a write that never lands never went, nor was warned)
+  const pastFuse = (what, sid, w) => {
+    if (!w || aheadLive(w)) return false;
+    console.log('  ' + what + ' write of ' + plog(sid) + ' waits past the ' + Math.round(PENDING_W_MAX_MS / 86400000) + '-day fuse (' + (w.n | 0) + ' tries, value ' + (w.v | 0) + '): not sent again with this run\'s writes (Q334)');
+    return true;
+  };
+  // a write this run settles laid over a waiting one past the fuse (the waiting value was his base, or a lower best): it starts
+  //   the fuse again, warned the way the save warns a drop
+  const fuseRestart = (what, k, was, v, on) => {
+    if (!was || typeof was !== 'object' || aheadLive(was)) return;
+    console.log('::warning::' + what + ' write of ' + String(k).slice(0, 8) + (on ? ' on ' + on : '') + ' waited past ' + Math.round(PENDING_W_MAX_MS / 86400000) + ' days (' + (was.n | 0) + ' failed tries, value ' + was.v + '): this run\'s settle writes ' + (v | 0) + ' in its place, its fuse starts now (Q334)');
+  };
   const noteReceipt = (sid, mh, change, set, clear) => {
     if (!lpBoardId) return;
     (receipts[String(sid)] = receipts[String(sid)] || []).push({ mh: mh | 0, change: change | 0, set: set | 0, clear: clear | 0 });
@@ -8407,38 +8455,61 @@ async function main() {
   //   match), it takes the kept write away first and saves: a run that dies once Steam took the payment leaves the next run no
   //   kept write to eat that row -- his reads go by the board, as before O481. Saved again once answered (a payment that landed
   //   is his kept write on disk).
+  // the details a points write of his carries (his queued receipts, this run's, then the caller's own) and how many receipts
+  const lpPlan = (sid, prevDet, rv, events) => {
+    const b = lpBacklog[pid(String(sid))];
+    const queued = (b && Array.isArray(b.rc)) ? b.rc.map((x) => ({ mh: x[0] | 0, change: x[1] | 0, set: x[2] | 0, clear: x[3] | 0 })) : [];
+    const all = queued.concat(receipts[String(sid)] || [], events || []);
+    return { det: lpWriteDetails(prevDet, rv, all), n: all.length, queued: queued.length };
+  };
+  // a settle points write that failed (or was cut off: Steam may have taken it) waits for the next run with these details
+  const lpWaitFailed = (sid, score, det) => {
+    const e = lpBacklog[pid(String(sid))] = lpBacklog[pid(String(sid))] || {};
+    e.w = { b: lpCur.name, v: score | 0, d: det, t: (e.w && Number(e.w.t)) || Date.now(), n: ((e.w && e.w.n) | 0) + 1 };
+    delete e.rc; delete receipts[String(sid)];   // they are inside d now
+    backlogDirty = true; RUN.pendingQueued = (RUN.pendingQueued | 0) + 1;
+    console.log('  points write of ' + plog(sid) + ' failed -- ' + score + ' waits for the next run (try ' + e.w.n + ')');
+  };
   const writeLpRow = async (sid, score, prevDet, rv, events, opt) => {
     const k = pid(String(sid)), b = lpBacklog[k];
-    const queued = (b && Array.isArray(b.rc)) ? b.rc.map((x) => ({ mh: x[0] | 0, change: x[1] | 0, set: x[2] | 0, clear: x[3] | 0 })) : [];
-    const mine = receipts[String(sid)] || [];
-    const all = queued.concat(mine, events || []);
-    const det = lpWriteDetails(prevDet, rv, all);
+    // Q334: a settle write laid ahead (lpLayAhead) goes with the details planned then (its receipts are inside them, off the queues)
+    const p = (opt && opt.planned) || lpPlan(sid, prevDet, rv, events);
+    const det = p.det;
     const once = opt && opt.once;
     if (once && lpReadStale({ score, det }, lpLast(sid))) { lpLastDrop(sid, '(one-shot) would leave a row that reads as behind his last write'); once(); }
     let res;
     try { res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: lpBoardId, steamid: String(sid), score, scoremethod: 'ForceUpdate', format: 'json' }, det); }
-    catch (err) { lpLastDrop(sid); throw err; }
+    catch (err) { lpLastDrop(sid); if (opt && opt.retry) lpWaitFailed(sid, score, det); throw err; }   // Q334: cut off, it waits too
     const ok = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
     if (!ok) lpLastDrop(sid);
     if (ok) {
       lpWritten[String(sid)] = { score, det };
       delete receipts[String(sid)];
-      if (b && (queued.length || b.w)) {
-        if (b.w) { RUN.pendingRetried = (RUN.pendingRetried | 0) + 1; console.log('  points write of ' + plog(sid) + ' that failed before (' + ((b.w.n) | 0) + ' tries) landed: ' + score); }
+      if (b && (p.queued || b.w)) {
+        if (b.w) aheadLanded('w|' + k, b.w, '  points write of ' + plog(sid) + ' laid ahead by a run that ended before its outcome was known landed: ' + score,
+          () => { RUN.pendingRetried = (RUN.pendingRetried | 0) + 1; console.log('  points write of ' + plog(sid) + ' that failed before (' + ((b.w.n) | 0) + ' tries) landed: ' + score); });
         delete b.rc; delete b.w; if (!Object.keys(b).length) delete lpBacklog[k]; backlogDirty = true;
       }
       // O481: a run of the next LP_LAST_HOLD_MS that reads his row without this write takes this instead (lpFresh)
       if (LP_LAST_HOLD_MS > 0) { (lpBacklog[k] = lpBacklog[k] || {}).l = { b: lpCur.name, v: score | 0, d: det, t: Date.now() }; backlogDirty = true; }
-      RUN.receipts = (RUN.receipts | 0) + all.length;
-    } else if (opt && opt.retry) {
-      const e = lpBacklog[k] = lpBacklog[k] || {};
-      e.w = { b: lpCur.name, v: score | 0, d: det, t: (e.w && Number(e.w.t)) || Date.now(), n: ((e.w && e.w.n) | 0) + 1 };
-      delete e.rc; delete receipts[String(sid)];   // they are inside d now
-      backlogDirty = true; RUN.pendingQueued = (RUN.pendingQueued | 0) + 1;
-      console.log('  points write of ' + plog(sid) + ' failed -- ' + score + ' waits for the next run (try ' + e.w.n + ')');
-    }
+      RUN.receipts = (RUN.receipts | 0) + p.n;
+    } else if (opt && opt.retry) lpWaitFailed(sid, score, det);
     if (once) once();
-    return { ok, res, det, n: all.length, queued: queued.length };
+    return { ok, res, det, n: p.n, queued: p.queued };
+  };
+  // cloud audit Q334: a points write of the settle, in the backlog before anything goes out (absolute, with the details it will
+  //   carry and so the receipts, off the queues: on disk they ride it, not a later write) -> the plan writeLpRow sends
+  const lpLayAhead = (sid, score, prevDet, rv) => {
+    const p = lpPlan(sid, prevDet, rv, []);
+    const k = pid(String(sid)), e = lpBacklog[k] = lpBacklog[k] || {}, was = e.w;
+    aheadGone('w|' + k, was, '  points write of ' + plog(sid) + ' laid ahead by a run that ended before its outcome was known: goes with this run\'s');
+    const live = aheadLive(was);
+    fuseRestart('points', k, was, score);
+    e.w = { b: lpCur.name, v: score | 0, d: p.det, t: live ? Number(was.t) : Date.now(), n: live ? (was.n | 0) : 0 };
+    if (!live || was.a) e.w.a = 1;   // a failed write it replaces stays one (its log says so when it lands)
+    delete e.rc; delete receipts[String(sid)];
+    aheadNow.add('w|' + k); backlogDirty = true;
+    return p;
   };
   // the receipts no write of this run carried -> the backlog: they ride the player's next points write in a later run, within
   //   RECEIPT_HOLD_MS (see PENDING_WRITES_FILE)
@@ -8470,8 +8541,16 @@ async function main() {
   // ---- Q318: the settle's XP / CP writes that failed (backlog xw / cw, see PENDING_WRITES_FILE; test/settle-write-owed.js) ----
   //   rowWrote: field -> sid -> the score of a write of his on that board that landed this run (a consolation, a retry, a redeem
   //   debit): a read of seconds later may not show it (O481), the settle and the redeems build on it instead
-  const ROW_LB = { xw: XP_LB || null, cw: CP_LB || null }, ROW_NAME = { xw: 'xp', cw: 'cp' };
-  const rowWrote = { xw: {}, cw: {} };
+  const ROW_LB = { xw: XP_LB || null, cw: CP_LB || null, rw: (!PT_MODE && RANKED_LB) || null }, ROW_NAME = { xw: 'xp', cw: 'cp', rw: 'rating' };   // rw: Q334
+  const rowWrote = { xw: {}, cw: {}, rw: {} };
+  // Q334: a player's rating row as the settle writes it, from his skill entry: the display rating + the plan rating in its details
+  //   (O480: his ranked rating, the stored one until he has one); null without a finite rating
+  const ratingRowOf = (sk) => {
+    if (!sk || !Number.isFinite(sk.mu) || !Number.isFinite(sk.sigma)) return null;
+    const disp = ts.displayRating(sk.mu, sk.sigma), rr = rankedRatingOf(sk);
+    const plan = rr ? ts.displayRating(rr.mu, rr.sigma) : disp;
+    return { disp, plan, det: ratingDetails(plan), mu: sk.mu, sigma: sk.sigma };
+  };
   // his write of that board waiting for its retry (meant for the board this job writes), or null
   const rowWaiting = (f, sid) => { const e = lpBacklog[pid(String(sid))], w = e && e[f]; return (w && ROW_LB[f] && w.b === ROW_LB[f]) ? w : null; };
   // the waiting writes this run can name: pid -> sid through the rows given and the records / starts read this run (sidByPid);
@@ -8500,8 +8579,8 @@ async function main() {
     if (landed) {
       rowWrote[f][String(sid)] = score | 0;
       if (!e || !e[f]) return false;
-      RUN.rowRetried = (RUN.rowRetried | 0) + 1;
-      console.log('  ' + ROW_NAME[f] + ' write of ' + plog(sid) + ' that failed before (' + (e[f].n | 0) + ' tries) landed: ' + (score | 0) + ' (Q318)');
+      aheadLanded(f + '|' + k, e[f], '  ' + ROW_NAME[f] + ' write of ' + plog(sid) + ' laid ahead by a run that ended before its outcome was known landed: ' + (score | 0),
+        () => { RUN.rowRetried = (RUN.rowRetried | 0) + 1; console.log('  ' + ROW_NAME[f] + ' write of ' + plog(sid) + ' that failed before (' + (e[f].n | 0) + ' tries) landed: ' + (score | 0) + ' (Q318)'); });
       delete e[f]; if (!Object.keys(e).length) delete lpBacklog[k]; backlogDirty = true;
       return true;
     }
@@ -8513,6 +8592,18 @@ async function main() {
     return true;
   };
   const rowSaveNow = () => { if (APPLY_MMR) savePendingWrites(JSON.parse(JSON.stringify(lpBacklog)), nowMs, true); };   // a pruned copy, quietly
+  // cloud audit Q334: an XP / CP / rating write of the settle, in the backlog before anything goes out (as a failed one waits)
+  const rowLayAhead = (f, sid, score) => {
+    if (!ROW_LB[f]) return;
+    const k = pid(String(sid)), b = lpBacklog[k] = lpBacklog[k] || {}, was = b[f];
+    aheadGone(f + '|' + k, was, '  ' + ROW_NAME[f] + ' write of ' + plog(sid) + ' laid ahead by a run that ended before its outcome was known: goes with this run\'s');
+    const live = aheadLive(was);
+    fuseRestart(ROW_NAME[f], k, was, score);
+    b[f] = { b: ROW_LB[f], v: score | 0, t: live ? Number(was.t) : Date.now(), n: live ? (was.n | 0) : 0 };
+    if (!live || was.a) b[f].a = 1;   // a failed write it replaces stays one
+    aheadNow.add(f + '|' + k); backlogDirty = true;
+  };
+  const rowDrop = (f, sid) => { const k = pid(String(sid)), e = lpBacklog[k]; if (!e || !e[f]) return; delete e[f]; if (!Object.keys(e).length) delete lpBacklog[k]; backlogDirty = true; };
   // a write of his on that board this job is about to make while one of his waits (a consolation, a redeem debit): the waiting
   //   value moves to the row this write will leave, on disk ahead of it. A run that dies once Steam took it leaves the next run
   //   that row; one that dies before it went out, that row too (the write is absolute and carries the waiting value)
@@ -8529,15 +8620,17 @@ async function main() {
     if (!APPLY_MMR) return;
     const list = (lr.json && lr.json.response && lr.json.response.leaderboards) || [];
     const idOf = (nm) => { const x = nm ? list.find((y) => String(y.name || y.Name) === nm) : null; return x ? (x.id || x.ID) : null; };
-    let xs = null;
-    for (const f of ['xw', 'cw']) {
+    let xs = null, sk = null;
+    for (const f of ['xw', 'cw', 'rw']) {
       const bid = idOf(ROW_LB[f]);
       if (!bid) continue;
       for (const sid of rowPendingSids(f, [])) {
         const w = rowWaiting(f, sid);
         if (!w) continue;
-        const score = f === 'cw' ? cpClamp(w.v) : (w.v | 0);
-        const det = f === 'xw' ? careerBlockOf((xs || (xs = loadXp()))[pid(sid)]) : null;   // the career block, as on every XP write
+        const rr = f === 'rw' ? ratingRowOf((sk || (sk = loadSkill()))[pid(sid)]) : null;   // Q334: a rating row, from the skill state
+        if (f === 'rw' && !rr) { console.log('  rating write of ' + plog(sid) + ': no rating in the skill state -- dropped (Q334)'); rowDrop(f, sid); continue; }
+        const score = f === 'cw' ? cpClamp(w.v) : f === 'rw' ? rr.disp : (w.v | 0);
+        const det = f === 'xw' ? careerBlockOf((xs || (xs = loadXp()))[pid(sid)]) : f === 'rw' ? rr.det : null;   // the career block, as on every XP write
         let landed = false;
         try {
           const r = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: bid, steamid: sid, score, scoremethod: 'ForceUpdate', format: 'json' }, (det && det.length) ? det : null);
@@ -8588,29 +8681,45 @@ async function main() {
   };
   // after a write of his on that board (its pool entry): landed at or above the waiting value, the wait ends; failed, the higher of
   //   the two waits for the next run (already waiting: one more try)
+  // his waiting entry on board `name` (the map made when missing) and the one a write-pool entry w becomes there (n tries)
+  const ebMap = (k) => { const b = lpBacklog[k] = lpBacklog[k] || {}; return (b.ew = (b.ew && typeof b.ew === 'object' && !Array.isArray(b.ew)) ? b.ew : {}); };
+  const ebWait = (w, was, n) => {
+    const nw = { v: w.s | 0, ts: w.ts | 0 };
+    if (w.build != null) nw.bd = w.build >>> 0;
+    if (Array.isArray(w.team) && w.team.length) nw.tm = w.team.map((s) => pid(String(s)));
+    nw.t = (was && Number(was.t)) || Date.now(); nw.n = n;
+    return nw;
+  };
   const ebAfter = (name, sid, w, landed) => {
     const k = pid(String(sid)), e = lpBacklog[k], was = e && e.ew && e.ew[name];
     if (landed) {
       if (!was || (w.s | 0) < (was.v | 0)) return;
-      RUN.ebDone = (RUN.ebDone | 0) + 1;
-      console.log('  endless best write of ' + plog(sid) + ' on ' + name + ' that failed before (' + (was.n | 0) + ' tries) landed: ' + (w.s | 0) + ' (Q319)');
+      aheadLanded('ew|' + k + '|' + name, was, '  endless best write of ' + plog(sid) + ' on ' + name + ' laid ahead by a run that ended before its outcome was known landed: ' + (w.s | 0),
+        () => { RUN.ebDone = (RUN.ebDone | 0) + 1; console.log('  endless best write of ' + plog(sid) + ' on ' + name + ' that failed before (' + (was.n | 0) + ' tries) landed: ' + (w.s | 0) + ' (Q319)'); });
       ebDrop(k, name);
       return;
     }
     RUN.ebQueued = (RUN.ebQueued | 0) + 1;
     if (was && (was.v | 0) >= (w.s | 0)) {
-      was.n = (was.n | 0) + 1; backlogDirty = true;
-      console.log('  endless best write of ' + plog(sid) + ' on ' + name + ' failed again -- ' + (was.v | 0) + ' waits for the next run (try ' + was.n + ', Q319)');
+      const first = !!was.a;   // Q334: laid ahead this run (or by one that ended): its first failure
+      delete was.a; was.n = (was.n | 0) + 1; backlogDirty = true;
+      console.log('  endless best write of ' + plog(sid) + ' on ' + name + ' failed' + (first ? '' : ' again') + ' -- ' + (was.v | 0) + ' waits for the next run (try ' + was.n + ', Q319)');
       return;
     }
-    const b = lpBacklog[k] = lpBacklog[k] || {};
-    const m = b.ew = (b.ew && typeof b.ew === 'object' && !Array.isArray(b.ew)) ? b.ew : {};
-    const nw = { v: w.s | 0, ts: w.ts | 0 };
-    if (w.build != null) nw.bd = w.build >>> 0;
-    if (Array.isArray(w.team) && w.team.length) nw.tm = w.team.map((s) => pid(String(s)));
-    nw.t = (was && Number(was.t)) || Date.now(); nw.n = ((was && was.n) | 0) + 1;
-    m[name] = nw; backlogDirty = true;
+    const nw = ebMap(k)[name] = ebWait(w, was, ((was && was.n) | 0) + 1); backlogDirty = true;
     console.log('  endless best write of ' + plog(sid) + ' on ' + name + ' failed -- ' + nw.v + ' waits for the next run (try ' + nw.n + ', Q319)');
+  };
+  // cloud audit Q334: an endless best write of the settle, in the backlog before anything goes out -- the higher of it and the one
+  //   waiting (a pool entry laid over a waiting write is that write, or a better run)
+  const ebLayAhead = (name, sid, w) => {
+    const k = pid(String(sid)), m = ebMap(k), was0 = m[name], was = aheadLive(was0) ? was0 : null, key = 'ew|' + k + '|' + name;
+    aheadGone(key, was0, '  endless best write of ' + plog(sid) + ' on ' + name + ' laid ahead by a run that ended before its outcome was known: goes with this run\'s');
+    aheadNow.add(key);
+    if (was && (was.v | 0) >= (w.s | 0)) return;
+    fuseRestart('endless best', k, was0, w.s, name);
+    m[name] = ebWait(w, was, (was && was.n) | 0);
+    if (!was || was.a) m[name].a = 1;   // a failed write it replaces stays one
+    backlogDirty = true;
   };
   // after a write pool went out: every entry, by the outcome of its write (rs: mapPool's results in key order; null = none went out)
   const ebAfterPool = (name, pool, rs) => Object.keys(pool || {}).forEach((sid, i) => ebAfter(name, sid, pool[sid], !!(rs && rs[i] && rs[i].status === 'fulfilled' && rs[i].value)));
@@ -8620,10 +8729,12 @@ async function main() {
     const was = lpBacklog[k].ew[d.name];
     if (row != null && (row | 0) >= (was.v | 0)) {
       RUN.ebDone = (RUN.ebDone | 0) + 1;
+      aheadGone('ew|' + k + '|' + d.name, was, '  endless best write of ' + plog(sid) + ' on ' + d.name + ' laid ahead by a run that ended before its outcome was known: found on the board');
       console.log('  endless best write of ' + plog(sid) + ' on ' + d.name + ' (' + (was.v | 0) + ', ' + (was.n | 0) + ' tries) found on the board: row ' + (row | 0) + ' (Q319)');
       ebDrop(k, d.name);
       return;
     }
+    if (pastFuse('endless best', sid, was)) return;   // Q334: his row stays this run's base (a better run is written over it)
     ebLaid.set(d.name + '|' + sid, { row: row == null ? null : row | 0, team: d.weekTeam ? d.weekTeam[sid] : undefined });
     d.best[sid] = was.v | 0;
     d.pool[sid] = ebEntry(k, d.name, was);
@@ -8665,7 +8776,7 @@ async function main() {
         let row = null;
         try { const e = await readUserEntry(bid, sid, 'endless best retry'); row = e ? e.score | 0 : null; }
         catch (e) { ghWarn('endless best retry of ' + plog(sid) + ' on ' + name + ': row read failed (' + (e && e.message) + ') -- waits (Q319)'); continue; }
-        if (row != null && row >= (was.v | 0)) { RUN.ebDone = (RUN.ebDone | 0) + 1; console.log('  endless best write of ' + plog(sid) + ' on ' + name + ' found on the board: row ' + row + ' (Q319)'); ebDrop(k, name); continue; }
+        if (row != null && row >= (was.v | 0)) { aheadGone('ew|' + k + '|' + name, was, '  endless best write of ' + plog(sid) + ' on ' + name + ' laid ahead by a run that ended before its outcome was known: found on the board'); RUN.ebDone = (RUN.ebDone | 0) + 1; console.log('  endless best write of ' + plog(sid) + ' on ' + name + ' found on the board: row ' + row + ' (Q319)'); ebDrop(k, name); continue; }
         const w = ebEntry(k, name, was);
         let landed = false;
         try {
@@ -12694,29 +12805,112 @@ async function main() {
     }
     if (signals.seedcapApplied.length > 400) signals.seedcapApplied = signals.seedcapApplied.slice(-400);
   }
+  // ---- cloud audit Q334: write ahead, then write (R2-B2-01; test/settle-write-ahead.js) ----
+  //   The settle's state used to be saved after the board writes below: a run killed in between (the step's time limit, a
+  //   request that hung, a throw after the writes) left Steam holding the new rows, and the next run settled the same matches
+  //   again on top of them (a winner's points twice, a loser's taken twice, XP and the daily first win twice, CP twice; again for
+  //   every run that died at the same place). Now every write of the settle goes into the backlog first (PENDING_WRITES_FILE,
+  //   a: 1 -- the absolute value, the way a failed write waits), and the backlog, the processed list and the rest of the
+  //   settle's state are saved before the first write goes out (saveSettled). A write that lands takes its entry away, one that
+  //   fails waits as before; a run that dies leaves the matches processed and the writes waiting, and the next run sends the
+  //   same absolute values again (whether or not Steam had taken them): a late write, never a second one. What only derives
+  //   from the saved state runs right after the save (the competitive rating rows and the trust board: their touched sets live
+  //   in this run alone) or heals at the next settling run (the composite ladders, recomputed from the per-size rows at every
+  //   settle). The seedcap corrections above delete a row only while it still carries the flagged score: a run that dies after
+  //   them does them again for nothing.
+  const saveSettled = (checkpoint) => {
+    if (backlogDirty || Object.keys(lpBacklog).length) savePendingWrites(lpBacklog, nowMs, !checkpoint);   // dropped receipts: logged once
+    saveProcessed(processed);
+    saveSkill(skill);
+    if (groupsDirty) saveGroups(groupMem, nowMs);
+    saveLeavers(leavers);
+    saveStarts(startsPending);
+    RUN.soloDone = Object.keys(soloState.done || {}).length;   // Q144 rework
+    saveSolo(soloState, nowMs);
+    saveConfessions(confState, nowMs, confLive);
+    if (sigDirty) saveSignals(signals, nowMs);
+    if (xpId) saveXp(xpState);
+  };
+  // O480: the failed points writes of earlier runs go with this run's points writes (cloud audit Q334: not one past the fuse)
+  for (const sid of lpRetrySids) { const pw = lpWaiting(sid); if (pw && changedLp[sid] == null && !pastFuse('points', sid, pw)) changedLp[sid] = pw.v | 0; }
+  // Q318: the waiting XP / CP writes of earlier runs go with this run's writes (a player this run credits carries his inside)
+  for (const sid of xpRetrySids) { const w = rowWaiting('xw', sid); if (w && changedXp[sid] == null && !pastFuse('xp', sid, w)) changedXp[sid] = xp[sid] | 0; }
+  for (const sid of cpRetrySids) { const w = rowWaiting('cw', sid); if (w && changedCp[sid] == null && !pastFuse('cp', sid, w)) changedCp[sid] = cp[sid] | 0; }
+  const careerRewrites = careerEnsureWrites(careerTouched, changedXp, xp);   // 5.4a: cells moved, XP did not (day cap) -> rewrite the row, same score
+  if (careerRewrites) console.log('career: ' + careerRewrites + ' xp row(s) rewritten at the same score to publish new career cells');
+  const careerRefilled = fillCareerDetails(changedXp, careerDet, xpState);   // 5.4a S0: no xp write without the career block
+  if (careerRefilled) console.log('career block rebuilt from state for ' + careerRefilled + ' xp write(s) without a matchmade settle this run');
+  // Q334: the rating rows -- this run's movers, then the rating writes of earlier runs that wait (from the skill state, never the
+  //   value kept); a player's rating row as written: the display rating of the settle's update, the plan rating in its details
+  const ratingWriteOf = (sid) => {
+    const c = changed[sid];
+    if (!c) return ratingRowOf(skill[pid(sid)]);
+    const disp = ts.displayRating(c.mu, c.sigma), rr = rankedRatingOf(skill[pid(sid)]);
+    const plan = rr ? ts.displayRating(rr.mu, rr.sigma) : disp;
+    return { disp, plan, det: ratingDetails(plan), mu: c.mu, sigma: c.sigma };
+  };
+  const ratingSids = Object.keys(changed);
+  for (const sid of rowPendingSids('rw', ratingSids)) {
+    if (changed[sid] || pastFuse('rating', sid, rowWaiting('rw', sid))) continue;
+    if (ratingRowOf(skill[pid(sid)])) ratingSids.push(sid);
+    else { console.log('  rating write of ' + plog(sid) + ': no rating in the skill state -- dropped (Q334)'); rowDrop('rw', sid); }
+  }
+  for (const sid of ratingSids) rowLayAhead('rw', sid, ratingWriteOf(sid).disp);
+  // the points writes, each with the details it will carry (its receipts ride it on disk from here); the rest of the receipts
+  //   (a void, a player with no points write this run) wait for their player's next points write
+  const lpPlanned = {};
+  if (lpBoardId) for (const sid of Object.keys(changedLp)) lpPlanned[sid] = lpLayAhead(sid, changedLp[sid], lpDet[sid], reveal[sid]);
+  queueReceipts();
+  // Q228: a conviction's entry counts only what lands -- no fine when his points write is lost, no gain of a player whose write
+  //   is. A points write of the settle lands or waits for its retry in the backlog (O480: it lands then -- it counts, the fine is
+  //   taken all the same)
+  if (lateCv.length) {
+    const lpOk = new Set(Object.keys(changedLp).filter((sid) => lpPlanned[sid] || lpWaiting(sid)));
+    for (const [k, sid, gains] of lateCv) {
+      const st = confState[k]; if (!st) continue;
+      if (!lpOk.has(sid)) st.ded = 0;
+      st.g = gains.reduce((a, y) => a + (lpOk.has(y[0]) ? y[1] : 0), 0);
+    }
+  }
+  // Q315: a consolation write of this account that failed is re-tagged on the row his settle XP write leaves (it lands, or waits
+  //   for the next run with that value: the next run's base for him either way) -- found there landed (the settle read it back),
+  //   it is dropped; otherwise it is paid on top
+  for (const sid of Object.keys(changedXp)) {
+    if (!owedSent.has(sid)) continue;
+    const h = pid(sid), r = consoleOwedRebase(signals.players[h], h, owedXpBase[sid] | 0, changedXp[sid] | 0);
+    if (r) { sigDirty = true; console.log('  consolation: ' + plog(sid) + (r === 'moved' ? ' owed write re-tagged on the row the settle left' : ' owed write found landed by the settle\'s read') + ' (Q315)'); }
+  }
+  // the XP / CP rows (Q318's xw / cw) and the endless bests (Q319's ew, every best pool of the board list)
+  for (const sid of Object.keys(changedXp)) rowLayAhead('xw', sid, changedXp[sid] | 0);
+  for (const sid of Object.keys(changedCp)) rowLayAhead('cw', sid, cpClamp(changedCp[sid]));
+  for (const d of ebBoards) for (const sid of Object.keys(d.pool || {})) ebLayAhead(d.name, sid, d.pool[sid]);
+  { const nPr = pruneRatingHist(soloState, seasonId); if (nPr) console.log('rating history: ' + nPr + ' entries older than the previous season pruned'); }   // O103: before the chain memory is saved below
+  if (aheadNow.size) console.log('write-ahead: ' + aheadNow.size + ' write(s) of this run on disk before the first one goes out (Q334)');
+  saveSettled(true);
+  await maintainRating(soloState, ratingTouched);   // O103: rating rows + the daily tier-cut carrier (history saved just above)
+  await maintainTrust();
   // O480: the rating row also carries the rating the next ranked settle's points plan reads for the player (his ranked rating, the
   //   stored one until he has one; points-plan.js ratingDetails), so the client can run the same plan over its opponents.
   //   Residual: a losing leaver whose ranked rating moved alone (Q167 rework: stored rating unchanged, no rating write) publishes
   //   the new value at his next rated settle; until then his opponents' clients read the one before (a rare "corrected" result).
-  const wRating = await mapPool(Object.keys(changed), CONCURRENCY, async (sid) => {
-    const mu = changed[sid].mu, sigma = changed[sid].sigma;
-    const disp = ts.displayRating(mu, sigma);
-    const rr = rankedRatingOf(skill[pid(sid)]);
-    const planRating = rr ? ts.displayRating(rr.mu, rr.sigma) : disp;
-    const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: rankedId, steamid: sid, score: disp, scoremethod: 'ForceUpdate', format: 'json' }, ratingDetails(planRating));
+  const wRating = await mapPool(ratingSids, CONCURRENCY, async (sid) => {
+    const rw = ratingWriteOf(sid), mu = rw.mu, sigma = rw.sigma, disp = rw.disp, planRating = rw.plan;
+    const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: rankedId, steamid: sid, score: disp, scoremethod: 'ForceUpdate', format: 'json' }, rw.det);
     const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
     if (!okFlag) ghWarn('write rating ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
     else console.log('  ok rating ' + plog(sid) + ' = ' + disp + ' (mu=' + mu.toFixed(2) + ' sigma=' + sigma.toFixed(2) + ') plan ' + planRating);
     return okFlag;
   });
+  // Q334: a rating write that failed waits for the next run (the backlog's rw: written again from the skill state), one that
+  //   landed ends a waiting one
+  ratingSids.forEach((sid, i) => rowAfterWrite('rw', sid, ratingWriteOf(sid).disp, !!(wRating[i] && wRating[i].status === 'fulfilled' && wRating[i].value)));
   // points writes. O480: each carries the player's receipts (his queued ones, this run's: writeLpRow); a player whose points did
   //   not move this run gets no write (his receipts wait in the backlog for his next one)
   let receiptN = 0;
-  for (const sid of lpRetrySids) { const pw = lpWaiting(sid); if (pw && changedLp[sid] == null) changedLp[sid] = pw.v | 0; }
   const wPoints = await mapPool(Object.keys(changedLp), CONCURRENCY, async (sid) => {
     // reveal details: this run's flagged outcome if any, else preserve an existing unread reveal (don't clobber it with a normal-match LP write).
     const rv = reveal[sid];
-    const w = await writeLpRow(sid, changedLp[sid], lpDet[sid], rv, [], { retry: true });
+    const w = await writeLpRow(sid, changedLp[sid], lpDet[sid], rv, [], { retry: true, planned: lpPlanned[sid] });   // Q334: laid ahead above
     const res = w.res;
     const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
     if (!okFlag) ghWarn('write points ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
@@ -12724,26 +12918,7 @@ async function main() {
     return okFlag;
   });
   if (receiptN) console.log('receipts: ' + receiptN + ' written on ' + Object.keys(changedLp).length + ' points row(s)');
-  queueReceipts();   // the rest (a void, a failed write) wait for their player's next points write
-  if (backlogDirty || Object.keys(lpBacklog).length) savePendingWrites(lpBacklog, nowMs);
-  // Q228: a conviction's entry counts only what landed -- no fine when his points write failed, no gain of a player whose
-  //   write failed
-  if (lateCv.length) {
-    // (O480: a write that failed waits for its retry in the backlog and lands then -- it counts: the fine is taken all the same)
-    const lpSids = Object.keys(changedLp), lpOk = new Set(lpSids.filter((sid, i) => (wPoints[i] && wPoints[i].status === 'fulfilled' && wPoints[i].value) || lpWaiting(sid)));
-    for (const [k, sid, gains] of lateCv) {
-      const st = confState[k]; if (!st) continue;
-      if (!lpOk.has(sid)) st.ded = 0;
-      st.g = gains.reduce((a, y) => a + (lpOk.has(y[0]) ? y[1] : 0), 0);
-    }
-  }
-  // Q318: the waiting XP / CP writes of earlier runs go with this run's writes (a player this run credits carries his inside)
-  for (const sid of xpRetrySids) if (rowWaiting('xw', sid) && changedXp[sid] == null) changedXp[sid] = xp[sid] | 0;
-  for (const sid of cpRetrySids) if (rowWaiting('cw', sid) && changedCp[sid] == null) changedCp[sid] = cp[sid] | 0;
-  const careerRewrites = careerEnsureWrites(careerTouched, changedXp, xp);   // 5.4a: cells moved, XP did not (day cap) -> rewrite the row, same score
-  if (careerRewrites) console.log('career: ' + careerRewrites + ' xp row(s) rewritten at the same score to publish new career cells');
-  const careerRefilled = fillCareerDetails(changedXp, careerDet, xpState);   // 5.4a S0: no xp write without the career block
-  if (careerRefilled) console.log('career block rebuilt from state for ' + careerRefilled + ' xp write(s) without a matchmade settle this run');
+  if (backlogDirty) savePendingWrites(lpBacklog, nowMs, true);   // Q334: the points writes that landed leave the backlog on disk
   const wXp = await mapPool(Object.keys(changedXp), CONCURRENCY, async (sid) => {
     // career details ride every XP write ([CAREER_MAGIC, ver, games, wins, losses] -- the client's
     // authoritative W/L read-back surface). fillCareerDetails above rebuilt the block for every sid
@@ -12754,22 +12929,9 @@ async function main() {
     else console.log('  ok xp ' + plog(sid) + ' = ' + changedXp[sid] + (careerDet[sid] ? (' career ' + careerDet[sid][2] + 'g/' + careerDet[sid][3] + 'w/' + careerDet[sid][4] + 'l') : ''));
     return okFlag;
   });
-  // Q315: a consolation write that failed above, then this account's settle XP write landed -- re-tag it on the new row
-  Object.keys(changedXp).forEach((sid, i) => {
-    if (!owedSent.has(sid) || !(wXp[i] && wXp[i].status === 'fulfilled' && wXp[i].value)) return;
-    const h = pid(sid), r = consoleOwedRebase(signals.players[h], h, owedXpBase[sid] | 0, changedXp[sid] | 0);
-    if (r) { sigDirty = true; console.log('  consolation: ' + plog(sid) + (r === 'moved' ? ' owed write re-tagged on the row the settle left' : ' owed write found landed by the settle\'s read') + ' (Q315)'); }
-  });
-  // Q318: an XP write that failed waits for the next run (the backlog's xw), one that landed supersedes a waiting one. A failed
-  //   consolation write of the account (Q315) is re-tagged on the value that waits -- the next run's base for him -- as on the
-  //   row a landed settle write left: found there landed (the settle read it back), it is dropped; otherwise it is paid on top
-  Object.keys(changedXp).forEach((sid, i) => {
-    const landed = !!(wXp[i] && wXp[i].status === 'fulfilled' && wXp[i].value);
-    rowAfterWrite('xw', sid, changedXp[sid] | 0, landed);
-    if (landed || !owedSent.has(sid) || !rowWaiting('xw', sid)) return;
-    const h = pid(sid), r = consoleOwedRebase(signals.players[h], h, owedXpBase[sid] | 0, changedXp[sid] | 0);
-    if (r) { sigDirty = true; console.log('  consolation: ' + plog(sid) + (r === 'moved' ? ' owed write re-tagged on the XP write that waits for the next run' : ' owed write found landed by the settle\'s read') + ' (Q315, Q318)'); }
-  });
+  // Q318: an XP write that failed waits for the next run (the backlog's xw, laid ahead above), one that landed supersedes a waiting
+  //   one (a failed consolation write of the account, Q315, was re-tagged on its value before it went out)
+  Object.keys(changedXp).forEach((sid, i) => rowAfterWrite('xw', sid, changedXp[sid] | 0, !!(wXp[i] && wXp[i].status === 'fulfilled' && wXp[i].value)));
   const wCp = await mapPool(Object.keys(changedCp), CONCURRENCY, async (sid) => {
     const score = cpClamp(changedCp[sid]);   // Q110: never hand the int32 board an out-of-range score
     if (score !== changedCp[sid]) { RUN.cpClamped = (RUN.cpClamped | 0) + 1; ghWarn('write cp ' + plog(sid) + ': ' + changedCp[sid] + ' outside int32 -> clamped to ' + score + ' (Q110)'); }
@@ -13084,20 +13246,16 @@ async function main() {
     } catch (e) { ghWarn(sbxLabel + ' prune failed: ' + (e && e.message)); }
   }
   }
-  { const nPr = pruneRatingHist(soloState, seasonId); if (nPr) console.log('rating history: ' + nPr + ' entries older than the previous season pruned'); }   // O103: before the chain memory is saved below
-  saveProcessed(processed);
-  saveSkill(skill);
-  if (groupsDirty) saveGroups(groupMem, nowMs);
-  saveLeavers(leavers);
-  saveStarts(startsPending);
-  RUN.soloDone = Object.keys(soloState.done || {}).length;   // Q144 rework
-  saveSolo(soloState, nowMs);
-  saveConfessions(confState, nowMs, confLive);
-  if (sigDirty) saveSignals(signals, nowMs);
-  if (xpId) saveXp(xpState);
-  await maintainRating(soloState, ratingTouched);   // O103: rating rows + the daily tier-cut carrier (history saved above)
+  // Q334: a write laid ahead this run that no write resolved (a write path without its after-write step) goes with the next run
+  let aheadOpen = 0;
+  for (const key of aheadNow) {
+    const [f, k, name] = key.split('|'), e = lpBacklog[k];
+    const w = e && (f === 'ew' ? (e.ew && e.ew[name]) : e[f]);
+    if (w && w.a) aheadOpen++;
+  }
+  if (aheadOpen) ghWarn('write-ahead: ' + aheadOpen + ' write(s) laid ahead this run never went out -- they go with the next run (Q334)');
+  saveSettled(false);   // Q334: again, with what the writes left (the landed writes off the backlog, this week's board ids, ...)
   if (await maintainCup(soloState, cupCounts)) saveSolo(soloState, nowMs);   // O180: cup settle / honor board / carrier (weekly board ids + verdicts saved again)
-  await maintainTrust();
   // redeem channel last: wallet debits base on the in-memory post-settle balances just written
   // above (passing the map avoids re-reading scores that global reads may still serve stale).
   await processRedeems(cp);
