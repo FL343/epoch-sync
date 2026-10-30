@@ -16,7 +16,7 @@
 //       key is corroborated by the moved records (their match hash, not the split key's letter)
 //   [5] the seedcap veto (O124, SEEDCAP_ENFORCE): a veto seedcap.js wrote for the original key -- on an outside
 //       account's over-cap result -- stops and flags nobody on the players' table, two tables or one; control: an honest
-//       room with a veto on its key is still vetoed and flagged
+//       room with a veto on its key is still vetoed, nobody flagged (Q333: the seedcap lane convicts on its own)
 //   [6] the Q121 leave wait: a player of the room who wrote his start and no result does not hold the room's table for
 //       a fresh hour after the split -- its entry keeps the original entry's sighting of his start; only the
 //       absent-seat hold of his seat is left
@@ -443,9 +443,9 @@ scenario('[5b]', 'seedcap vetoed the key on a copy at a player\'s seat, one tabl
 });
 scenario('[5c]', 'control: an honest room whose key seedcap vetoed', VCTL, (s, rs) => {
   T('[5c] every run exits 0', allOk(rs, 4), outOf(rs).slice(-600));
-  T('[5c] still vetoed on its own key: never paid, never processed, both writers flagged once, no table-split line',
+  T('[5c] still vetoed on its own key: never paid, never processed, nobody flagged (Q333), no table-split line',
     new RegExp('match=' + s.key + ': seedcap over-cap veto \\(seats 0,1\\) -- not settled').test(outOf(rs)) && s.honest.every(x => neverPaid(rs, x)) && keyNever(rs, s)
-    && s.honest.every(x => fOf(rs[3], x) === 1) && !ANYSPLIT.test(outOf(rs)), (outOf(rs).match(/[^\n]*seedcap[^\n]*/g) || []).join(' | '));
+    && s.honest.every(x => fOf(rs[3], x) === 0) && !ANYSPLIT.test(outOf(rs)), (outOf(rs).match(/[^\n]*seedcap[^\n]*/g) || []).join(' | '));
 });
 scenario('[6]', 'a player of the room wrote his start and no result', LEAVE, (s, rs) => {
   T('[6] every run exits 0', allOk(rs, 6), outOf(rs).slice(-600));

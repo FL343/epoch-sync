@@ -222,7 +222,7 @@ const SIDA = '76561198000000001', SIDB = '76561198000000002', SIDX = '7656119800
   ok('[7] seedcap.yml persists ONLY its own state files', /git add -- seedcap\.json/.test(yml) && /git add -- pt-seedcap\.json/.test(yml) && /git add -- demo-seedcap\.json/.test(yml) && !/git add -- [^\n]*processed/.test(yml));
   ok('[7] seedcap.yml 3-retry rebase persist (one per job)', (yml.match(/until git pull --rebase/g) || []).length === SC_JOBS);
   const vjs = fs.readFileSync(path.join(__dirname, '..', 'validate.js'), 'utf8');
-  ok('[7] validate consults veto under SEEDCAP_ENFORCE (flag-dont-settle shape)', /SEEDCAP_ENFORCE && seedcap && seedcap\.veto/.test(vjs));
+  ok('[7] validate consults veto under SEEDCAP_ENFORCE (dont-settle shape)', /SEEDCAP_ENFORCE && seedcap && seedcap\.veto/.test(vjs));
   ok('[7] validate suspect refusal under SEEDCAP_REJECT', /SEEDCAP_REJECT && seedcap && seedcap\.suspects/.test(vjs));
   ok('[7] validate applies corrections via DeleteLeaderboardScore + signals.seedcapApplied handshake', /seedcapApplied/.test(vjs) && /seedcap correction/.test(vjs));
   ok('[7] validate never writes the seedcap state (single-writer)', vjs.indexOf('saveSeedcap') < 0 && vjs.indexOf('writeFileSync(SC_STATE_FILE') < 0);

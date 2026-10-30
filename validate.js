@@ -10899,8 +10899,9 @@ async function main() {
       ghWarn('match=' + m + ': solo segment sanity-flagged [' + sane.join(',') + '] ' + plog(sid) + ' -- not settled');
       return false;
     }
+    // O124 seedcap veto: not settled, nobody flagged here (Q333) -- see the main-path veto below
     if (SEEDCAP_ENFORCE && seedcap && seedcap.veto && seedcap.veto[m]) {
-      recordFlag(signals, c.g, m, nowMs); sigDirty = true; RUN.seedcapVeto = (RUN.seedcapVeto | 0) + 1;
+      RUN.seedcapVeto = (RUN.seedcapVeto | 0) + 1;
       ghWarn('match=' + m + ': solo segment seedcap over-cap veto -- not settled');
       return false;
     }
@@ -11204,10 +11205,13 @@ async function main() {
     const pacedSids = dropSeat ? writerSids.concat([...dropSeat.keys()].filter((s) => writerSids.indexOf(s) < 0)) : writerSids;
     // O124 seedcap veto (knife-9): the seed-replay auditor proved the AGREED score vector
     // exceeds this seed's mathematical cap (causal impossibility, every uncertain branch
-    // maxed) -> same flag-don't-settle shape as sanityFlags: not settled, not processed,
-    // self-heals if the auditor ever clears a false positive.
+    // maxed) -> not settled, not processed, self-heals when the veto goes.
+    // Q333: no forgery flag here. seedcap.js convicts on its own lane (suspect ledger, reject window, offense
+    //   board, sc ledger event): only a self-written over-cap seat, never inside a new core's observation window,
+    //   reversed by a replay on a fixed core. A flag on every writer of the group (as sanityFlags does) also hit the
+    //   honest opponents under the cap and every writer of a group a new core vetoed by its own miscount -- 90 days in
+    //   trust_tier and a lifetime fl in the trust ledger, never taken back (architecture decision 10).
     if (SEEDCAP_ENFORCE && seedcap && seedcap.veto && seedcap.veto[c.m]) {
-      recordFlag(signals, g, c.m, nowMs); sigDirty = true;
       RUN.seedcapVeto = (RUN.seedcapVeto | 0) + 1;
       ghWarn('match=' + c.m + ': seedcap over-cap veto (seats ' + ((seedcap.veto[c.m].seats || []).join(',') || '?') + ') -- not settled');
       continue;
