@@ -18,7 +18,9 @@ jobs:
   audit:
     if: github.repository == 'FL343/epoch-sync'
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # 15 for the audit + the real-clock suite (they take 4-6 min), plus 60 for the time-bomb step below: its own limit is 60,
+    # and a job timeout cancels the whole job (continue-on-error does not cover that)
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: audit
@@ -42,3 +44,12 @@ jobs:
           t="tests-$(date +%s%N)"; echo "::stop-commands::$t"
           node tools/run-tests.js --jobs=4 test/*.js || exit 1
           echo "::$t::"
+      # W117 (2026-10-29): run the whole test suite with the clock moved forward (+3 / +14 / +35 days) and list the tests that
+      #   pass today but fail on a later date (a date written into a test, e.g. a pacing table that ends on 12-01).
+      #   Report only: continue-on-error, and time-bomb.js itself exits 0 once it has run. The last line of this step's log,
+      #   "[time-bomb] {json}", is read back by the maintainer's session-start CI check.
+      - name: time-bomb (clock moved forward, report only)
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        timeout-minutes: 60
+        run: node tools/time-bomb.js --suites test --jobs 4 --days 3,14,35 --label epoch-sync --sha "$GITHUB_SHA"
