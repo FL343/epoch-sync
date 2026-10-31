@@ -395,8 +395,12 @@ const e7 = (P) => {
     && /\(rec\.start \? starts : \(rec\.confess \? confessions : \(rec\.note \? notes : recs\)\)\)\.push\(rec\)/.test(main));
   const code = main.replace(/\/\/[^\n]*/g, '');   // line comments out
   const noteLines = code.split('\n').filter(l => /\bnotes\b/.test(l)).map(l => l.trim());
-  T('[11] the notes array is touched on five lines only (declared, routed, logged, seen keys, the noted set) -- never a settle group or a hold',
-    noteLines.length === 5 && noteLines.every(l => !/leaveConfirmHold|groupRecords|absenceHold|recs\.concat\(notes|recs\.push/.test(l)), JSON.stringify(noteLines));
+  // Q346 (2026-10-31): a sixth line, the fresh class order (freshSeqPlan) -- it reads a note's shard to order matches
+  //   (rework: the call goes on with the kept minutes on the next line, so the pinned line ends at LEDGER_SHARDS,)
+  //   first seen together (his own shard rotation); it settles nothing and holds nothing (test/fresh-seq-order.js)
+  T('[11] the notes array is touched on six lines only (declared, routed, logged, seen keys, the noted set, the class order) -- never a settle group or a hold',
+    noteLines.length === 6 && noteLines.every(l => !/leaveConfirmHold|groupRecords|absenceHold|recs\.concat\(notes|recs\.push/.test(l))
+    && noteLines.filter(l => /^const seq = freshSeqPlan\(fresh, freshT0, starts\.map\([^\n]*\)\.concat\(confessions, notes\), LEDGER_SHARDS,$/.test(l)).length === 1, JSON.stringify(noteLines));
   T('[11] notes reach one consumer only: the reconcileStarts call, filtered by NOTE_DISP', (code.match(/\bnoted\b/g) || []).length === 2
     && /const noted = new Set\(notes\.filter\(\(n\) => NOTE_DISP\.has\(n\.dispCode \| 0\)\)\.map\(\(n\) => pid\(String\(n\.steamID\)\) \+ '\|' \+ n\.m\)\);\n\s+const startsRes = reconcileStarts\([^\n]*, seenKeys, noted(?:, heldKeys)?\);/.test(main),   // Q294: + the held keys after it
     String((main.match(/\bnoted\b/g) || []).length));

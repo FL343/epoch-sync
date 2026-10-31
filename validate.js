@@ -3857,6 +3857,7 @@ function writeRunSummary() {
       '|---|---|',
       '| records / start attestations | ' + s('rec', 0) + ' / ' + s('starts', 0) + ' |',
       '| consistent / fresh | ' + s('consistent', 0) + ' / ' + s('fresh', 0) + ' |',
+      '| sets of matches first seen together / groups put in their players\' own shard order / cycles broken at the key order (Q346) | ' + s('seqOrder', '0 / 0 / 0') + ' |',
       '| flagged inconsistent / sanity | ' + s('flagged', 0) + ' / ' + s('sanity', 0) + ' |',
       '| keys with a result written without the host guard\'s final summary (Q68): settled on the others\' scores / held, one writer got it / nobody got it | ' + s('nosum', '0 / 0 / 0') + ' |',
       '| keys whose records differ only by lifts a host migration left unchecked (Q339): settled on the lowered scores / held, nobody flagged for it / of the held, a writer flagged alone for his own record\'s duration | ' + s('lorph', '0 / 0') + ' / ' + s('lorphOwn', 0) + ' |',
@@ -6932,11 +6933,144 @@ function freshOrder(a, b) {
 // freshOrder with the non-endless groups taken oldest start first (t0Of(m) = the group's start sighting, ms):
 //   the one-match-at-a-time rule (writerReadyAt) hands each writer's next slot to whichever group comes first, so an
 //   older honest match must not queue behind a writer's newer groups. Endless order is untouched.
-function freshOrderPaced(t0Of) {
+//   seq (optional, freshSeqPlan): non-endless groups of one class (same t0) take its rank instead of the key order.
+function freshOrderPaced(t0Of, seq) {
   return (a, b) => {
-    if (!segOrderOf(a) && !segOrderOf(b)) { const ta = Number(t0Of(a.m)) || 0, tb = Number(t0Of(b.m)) || 0; if (ta !== tb) return ta - tb; }
+    if (!segOrderOf(a) && !segOrderOf(b)) {
+      const ta = Number(t0Of(a.m)) || 0, tb = Number(t0Of(b.m)) || 0;
+      if (ta !== tb) return ta - tb;
+      if (seq && seq.cls.has(a.m) && seq.cls.get(a.m) === seq.cls.get(b.m)) return seq.rank.get(a.m) - seq.rank.get(b.m);   // Q346
+    }
     return freshOrder(a, b);
   };
+}
+// Q346 (cloud audit 2026-10-31): the players' own order for matches first seen together.
+//   A cron stall (or a schedule that slips past two of one player's matches) shows the job several of one player's matches in
+//   one run: their start sightings (t0) are the same, and freshOrderPaced fell back to the key order -- a hash, unrelated to the
+//   order they were played. Points (the floor at 0, the placement and series matches), the rating (TrueSkill) and the win
+//   streak all depend on the order, so the final values differed from one settle per match (W162 lr03: points 0-18 apart,
+//   rating 41-176, XP 0-18). A client writes its records round the shards in order (the companion repo's result-reporter.js
+//   nextShard: +1 per record mod LEDGER_SHARDS, +3 on a session's first; a retry or a re-upload rewrites the same shard), so
+//   one player's records on shards a and b were written a first when b is less than half the ring ahead of a.
+//   Inside one class of equal t0, every player who wrote a record (start, result, confession or exit note) for two of its
+//   matches orders that pair; the class takes an order that keeps every such pair (Kahn's, key order among the free ones; a
+//   cycle -- records no honest client writes -- is broken at its key-first group, and the pairs it breaks are dropped).
+//   Groups with no player in common commute (a settle only touches its own players), so that is the whole order. A pair at
+//   exactly half the ring, or a player with no record on a numbered shard, orders nothing (the key order, as before).
+//   lag(m) = the longest chain of kept pairs after m: the streak sorts by the match's start minute (streak-plan.js; on a tie
+//   losses first, wins last), so the class's streak events take t0 minus lag minutes (seqStartMs) -- each player's matches
+//   get strictly increasing minutes in his order, never after the sighting (they were played before it) and only a few
+//   minutes before it (k matches in a chain took far longer than k minutes to play).
+//   Endless groups are not in it (they keep their segment order, freshOrder), and a class of one group is not touched.
+//   The minutes are worked out once (Q346 rework, cloud audit review 2026-10-31): a class member this run holds (an exit
+//   wait, an absence grace, an unread shard) settles in a later run, alone or beside matches whose results came later, and
+//   a lag worked out again there put it back at t0 -- after the class's later matches, so its loss broke the wins that
+//   came after it. keptLag(m) = the lag an earlier run stored on the match's start entry (sq, seqKeep); a kept group keeps
+//   it, a new group never sorts before a kept group it follows (at worst the same minute: the old tie), and a class of one
+//   with a kept lag still moves. keep = the lags this run worked out (class of two or more, nothing kept), to store.
+//   groups: the fresh list; t0Of: the sort's t0; extra: [{ steamID, m, shard, start }] the run's starts / confessions / notes.
+function freshSeqPlan(groups, t0Of, extra, nShards, keptLag) {
+  const N = Math.max(2, nShards | 0);
+  const out = { cls: new Map(), rank: new Map(), lag: new Map(), t0: new Map(), keep: new Map(), classes: 0, pairs: 0, moved: 0, cycles: 0, kept: 0 };
+  const keptOf = (m) => { const L = keptLag ? keptLag(m) : null; return (Number.isInteger(L) && L >= 0) ? L : null; };
+  const byT0 = new Map();
+  for (const c of groups || []) {
+    if (!c || segOrderOf(c)) continue;
+    const t = Number(t0Of(c.m)) || 0;
+    if (!byT0.has(t)) byT0.set(t, []);
+    byT0.get(t).push(c);
+  }
+  const shardIdx = (s) => { const x = /^s(\d+)$/.exec(String(s == null ? '' : s)); if (!x) return -1; const i = parseInt(x[1], 10); return i < N ? i : -1; };
+  let ci = 0;
+  for (const [t, list] of byT0) {
+    if (list.length < 2) { const L = list.length ? keptOf(list[0].m) : null; if (L != null) { out.lag.set(list[0].m, L); out.t0.set(list[0].m, t); out.kept++; } continue; }
+    list.sort(freshOrder);
+    const n = list.length, idx = new Map(list.map((c, i) => [c.m, i]));
+    // player -> (group index -> his shard there); a start ranks before a result before a confession / note (any one orders)
+    const posOf = new Map();
+    const note = (sid, m, sh, pr) => {
+      const i = idx.get(m), s = shardIdx(sh);
+      if (i == null || s < 0 || sid == null) return;
+      let mp = posOf.get(String(sid));
+      if (!mp) posOf.set(String(sid), mp = new Map());
+      const cur = mp.get(i);
+      if (!cur || pr < cur.pr) mp.set(i, { s, pr });
+    };
+    for (const c of list) for (const r of c.g || []) note(r.steamID, c.m, r.shard, 1);
+    for (const r of extra || []) if (r) note(r.steamID, r.m, r.shard, r.start ? 0 : 2);
+    const adj = list.map(() => new Set()), indeg = new Array(n).fill(0);
+    for (const mp of posOf.values()) {
+      const e = [...mp.entries()];
+      for (let x = 0; x < e.length; x++) for (let y = x + 1; y < e.length; y++) {
+        const d = ((e[y][1].s - e[x][1].s) % N + N) % N;
+        if (d === 0 || d * 2 === N) continue;
+        const from = d * 2 < N ? e[x][0] : e[y][0], to = d * 2 < N ? e[y][0] : e[x][0];
+        if (!adj[from].has(to)) { adj[from].add(to); indeg[to]++; out.pairs++; }
+      }
+    }
+    const done = new Array(n).fill(false), order = [];
+    while (order.length < n) {
+      let v = -1;
+      for (let i = 0; i < n; i++) if (!done[i] && indeg[i] === 0) { v = i; break; }
+      if (v < 0) { for (let i = 0; i < n; i++) if (!done[i]) { v = i; break; } out.cycles++; }
+      done[v] = true; order.push(v);
+      for (const w of adj[v]) if (!done[w]) indeg[w]--;
+    }
+    const rk = new Array(n), lag = new Array(n).fill(0), fixed = list.map((c) => keptOf(c.m));
+    order.forEach((v, r) => { rk[v] = r; });
+    for (let r = n - 1; r >= 0; r--) { const v = order[r]; if (fixed[v] != null) { lag[v] = fixed[v]; continue; } for (const w of adj[v]) if (rk[w] > r && lag[w] + 1 > lag[v]) lag[v] = lag[w] + 1; }
+    // a new group after a kept one: below the kept minute's ceiling (minus one per step), never under 0 -- no new pair inverted
+    const ceil = new Array(n).fill(Infinity);
+    for (let r = 0; r < n; r++) {
+      const v = order[r];
+      const cv = fixed[v] != null ? fixed[v] : (lag[v] = Math.max(0, Math.min(lag[v], ceil[v])));
+      for (const w of adj[v]) if (rk[w] > r && cv - 1 < ceil[w]) ceil[w] = cv - 1;
+    }
+    for (let i = 0; i < n; i++) {
+      const m = list[i].m;
+      out.cls.set(m, ci); out.rank.set(m, rk[i]); out.lag.set(m, lag[i]); out.t0.set(m, t);
+      if (fixed[i] != null) out.kept++; else out.keep.set(m, lag[i]);
+      if (rk[i] !== i) out.moved++;
+    }
+    ci++;
+  }
+  out.classes = ci;
+  return out;
+}
+// a match's start for the streak (ms): its class's t0 minus its lag in minutes (see freshSeqPlan); t is the start the caller
+//   would pass -- only that exact t0 moves, anything else (another key, a stamp of its own) passes through
+function seqStartMs(seq, m, t) {
+  const L = seq ? (seq.lag.get(m) | 0) : 0;
+  return (L > 0 && Number(seq.t0.get(m)) === Number(t)) ? Number(t) - L * 60000 : t;
+}
+// Q346 rework: a class's minutes kept on its matches' start entries (starts.json, optional field sq = lag in minutes).
+//   Written once, by the first run that plans the class (held matches too), never rewritten; read back by later runs only
+//   while the entry's t0 is still the one planned on. No sq (an older state, an entry written by an older cron) = worked
+//   out as before; an older cron reading the field ignores it. A value out of range reads as none.
+const SEQ_KEPT_MAX = 1440;
+function seqKeptLag(pending, m, t0) {
+  const e = pending && Object.prototype.hasOwnProperty.call(pending, m) ? pending[m] : null;
+  if (!e || typeof e !== 'object' || !e.t0 || Number(e.t0) !== Number(t0)) return null;
+  return (Number.isInteger(e.sq) && e.sq >= 0 && e.sq <= SEQ_KEPT_MAX) ? e.sq : null;
+}
+function seqKeep(pending, seq) {
+  let n = 0;
+  for (const [m, L] of seq.keep) {
+    const e = Object.prototype.hasOwnProperty.call(pending, m) ? pending[m] : null;
+    if (e && typeof e === 'object' && e.t0 && Number(e.t0) === Number(seq.t0.get(m)) && e.sq == null) { e.sq = L; n++; }
+  }
+  return n;
+}
+// a kept match not settling this run (still waiting, no fresh group) still gets its minute for an early streak event (its
+//   absence, its break) -- the same minute its class's settles used
+function seqAddKept(pending, seq) {
+  let n = 0;
+  for (const m of Object.keys(pending || {})) {
+    if (seq.lag.has(m)) continue;
+    const e = pending[m], L = e && typeof e === 'object' ? seqKeptLag(pending, m, e.t0) : null;
+    if (L) { seq.lag.set(m, L); seq.t0.set(m, e.t0); n++; }
+  }
+  return n;
 }
 // ===== O140 private friend-room XP credit (match type 10) =====
 // Levels-played reader for private groups (domain 1..15 -- rooms run 3/6/9 levels, wider than
@@ -10458,6 +10592,18 @@ async function main() {
   }
   RUN.fresh = fresh.length;
   console.log(consistentMatches.length + ' consistent, ' + fresh.length + ' fresh (settled ' + (consistentMatches.length - fresh.length) + ')');
+  // Q346: matches first seen together settle (and count for the streak) in their players' own order -- see freshSeqPlan
+  const freshT0 = (m) => (startsPending[m] && startsPending[m].t0) || (qllT.get(m)) || nowMs;   // W113: a late share by its match's start (the entry went at the lane's settle)
+  const seq = freshSeqPlan(fresh, freshT0, starts.map((s) => ({ steamID: s.steamID, m: s.d[3] + '_' + s.d[4] + '_' + s.d[2], shard: s.shard, start: true })).concat(confessions, notes), LEDGER_SHARDS,
+    (m) => seqKeptLag(startsPending, m, freshT0(m)));   // Q346 rework: an earlier run's minutes for this class, kept
+  const seqStored = seqKeep(startsPending, seq), seqLate = seqAddKept(startsPending, seq);   // (stored once; saved with starts.json)
+  RUN.seqOrder = seq.classes + ' / ' + seq.moved + ' / ' + seq.cycles;
+  if (seq.pairs || seq.kept || seqLate) console.log('order: ' + seq.classes + ' set(s) of matches first seen together, ' + seq.moved + ' group(s) moved to their players\' own shard order' + (seq.cycles ? ', ' + seq.cycles + ' cycle(s) broken at the key order' : '') + '; minutes stored ' + seqStored + ', read back ' + (seq.kept + seqLate) + ' (Q346)');
+  if (V54B3_STREAK) {
+    const byMh = new Map();
+    for (const [m, L] of seq.lag) if (L > 0) byMh.set(mhOfKey(m), m);
+    for (const ev of streakEarly) { const m = byMh.get(ev.mh | 0); if (m != null) ev.t0 = seqStartMs(seq, m, ev.t0); }
+  }
   if (fresh.length === 0) { console.log('no fresh matches, skip'); await ebRetry(); await lpRetry(); await rowRetry(); persistStartsSide(); await maintainTrust(); { const st0 = loadSolo(); await maintainRating(st0, new Set()); if (await maintainCup(st0, null) && APPLY_MMR) saveSolo(st0, nowMs); } await processRedeems(null); await processCampaignGrants(); await processCampaignEndless(); await processLikes([], null); await processChatMute(); await writePulse(); await processSupporters(null, []); await processClassicOwners(null, []); writeRunSummary(); return; }
 
   // playtest channel: no rating board exists (and must not -- lock layer 3); the TrueSkill
@@ -10725,7 +10871,7 @@ async function main() {
   }
 
   // non-endless oldest start first, then by key; endless segments predecessor-first (startDepth, then key) -- see freshOrder
-  fresh.sort(freshOrderPaced((m) => (startsPending[m] && startsPending[m].t0) || (qllT.get(m)) || nowMs));   // W113: a late share by its match's start (the entry went at the lane's settle)
+  fresh.sort(freshOrderPaced(freshT0, seq));   // Q346: a class first seen together in its players' own order (freshSeqPlan)
   // On-demand base values: when a bulk read hit PAGE_CAP the maps are incomplete -- a settling
   // player missing from them may still hold an entry beyond the window, and settling from base 0
   // would silently reset his LP/XP. Fetch exactly the players this run settles (record holders +
@@ -11326,7 +11472,7 @@ async function main() {
       // his records only; a finished / peers-gone one is credited as an interrupted end (no second winner, see quitLoneLateDue)
       const gQ = g.filter((r) => String(r.steamID) === L.o).map((r) => (dispClassOf(r.dispCode) === 'valid' ? Object.assign({}, r, { dispCode: 2, disp: dispName(2) }) : r));
       const pfL = xpProgressFrac(matchProgressOf(g));
-      if (xpId) creditXp(gQ, mtL, scL, rankL, xp, changedXp, xpState, leavers, today, pfL, careerDet, spSet, { t0: L.t || nowMs, nowMs, absentSeats: new Set() });
+      if (xpId) creditXp(gQ, mtL, scL, rankL, xp, changedXp, xpState, leavers, today, pfL, careerDet, spSet, { t0: seqStartMs(seq, c.m, L.t || nowMs), nowMs, absentSeats: new Set() });   // Q346: a class first seen together in his own order
       if (xpId) creditCareerMatch(gQ, mtL, rankL, xpState, careerTouched);
       if (PT_MODE && cpId) ptSeedCp(cp, changedCp, [L.o]);
       if (cpId) creditCp(gQ, mtL, rankL, cp, changedCp);
@@ -12275,7 +12421,7 @@ async function main() {
     const progFrac = xpProgressFrac(prog);
     if (progFrac !== 1) console.log('  progress ' + c.m + ': ' + prog + '/' + XP_CFG.progressLevels + ' levels -> points x' + progFrac);
     if (xpId) creditXp(g, matchType, scores, rankX, xp, changedXp, xpState, leavers, today, progFrac, careerDet, spSet,
-      { t0: pend.t0 || nowMs, nowMs, absentSeats: new Set(absentNow.map((x) => x.seat | 0)) }, !!c.quitLone);   // O181: the streak orders by the match's start; W103: the quit-lone floor
+      { t0: seqStartMs(seq, c.m, pend.t0 || nowMs), nowMs, absentSeats: new Set(absentNow.map((x) => x.seat | 0)) }, !!c.quitLone);   // O181: the streak orders by the match's start (Q346: a class first seen together in its players' own order); W103: the quit-lone floor
     if (xpId) creditCareerMatch(g, matchType, rankX, xpState, careerTouched);   // 5.4a career matrix (mode x character; W/L in quick / ranked cells; Q264: rankX, his win as his XP / CP read it)
     // CP (the endless-economy wallet) earns from matchmade records on the same credit classes.
     // Playtest starter wallet first: writers only (a leaver whose first-ever appearance is the
@@ -12847,7 +12993,7 @@ async function main() {
       console.log('  leaver ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' (in roster, no record; total ' + leavers[pid(x.steamID)].leaves + ')');
       // O181: a convicted absence -- the week's first freezes the streak, later ones break it; his row is rewritten this run
       //   (same score, fresh tail) so the streak others are shown for him drops now, not at his next settle
-      if (xpId && streakAbsence(xpState, pid(x.steamID), pend.t0 || nowMs, g[0].d[3] | 0, nowMs) && careerBlockOf(xpState[pid(x.steamID)])) careerTouched.add(String(x.steamID));   // (no block = never rewrite: a write without details empties the row's)
+      if (xpId && streakAbsence(xpState, pid(x.steamID), seqStartMs(seq, c.m, pend.t0 || nowMs), g[0].d[3] | 0, nowMs) && careerBlockOf(xpState[pid(x.steamID)])) careerTouched.add(String(x.steamID));   // (no block = never rewrite: a write without details empties the row's)
       // Q228: kept, so his own result for these scores coming in late forgives this conviction (LATE_RESULT_MS)
       const cvKey = pid(x.steamID) + '|' + c.m;
       confState[cvKey] = { t0: nowMs, mt: matchType, ded: 0, ex: 1, cv: 1, s: x.seat | 0, v: vecTag(g[0]) };
@@ -12988,6 +13134,7 @@ async function main() {
     saveSkill(skill);
     if (groupsDirty) saveGroups(groupMem, nowMs);
     saveLeavers(leavers);
+    seqKeep(startsPending, seq);   // Q346 rework: an entry the settle made (no start record) keeps its class minutes too
     saveStarts(startsPending);
     RUN.soloDone = Object.keys(soloState.done || {}).length;   // Q144 rework
     saveSolo(soloState, nowMs);
@@ -13437,7 +13584,7 @@ if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
 module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CLASSIC_OWNERS: classicOwners.CLASSIC, CLASSIC_FILE, CHAT_MUTE: chatMute.CHAT_MUTE, CHAT_MUTE_FILE, CHAT_MUTE_LB, CHAT_REPORT_LB, isVoidDisp, voidByConsensus, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, RS_SOLO_VS_TRIO, RS_TRIO_WIN, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, DISPUTE_FLOOR, disputeFloorOf, disputeFloorAdmit, disputeFloorXp, CONSOLE_OWED, owedTag, owedItem, owedItemXp, owedRefund, owedUnsent, consoleOwedTake, consoleOwedPlan, consoleOwedRebase, CONFESS_MAGIC, NOTE_MAGIC, NOTE_DISP, reconcileConfessions, SANITY, sanityFlags, sanitySplit, recordSanityFlags, SANITY_RECORD_SLUGS, SANITY_ROSTER_SLUGS, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, rekeyReports, repKeysReady, REP_KEYS, REP_KEYS_VER, CHAT_KEYS, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, trustIndex, TRUST_T, TRUST_LB, TRUST_REJ_BIT, SHADOW_POOL, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan, postForm, postFormDetails, findOrCreateBoard, isTestBoardName, sandboxOn, ghWarn, ghErr, PT_MODE, PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, ACTIVE_MATCH_LB, ptSeedCp, ptBoardPlan, PRIVATE_XP, isPrivateMt, privateProgressOf, creditXpPrivate, BOT_XP, isBotMt, botTierOf, botTierMult, botSeatSplit, botRanksOf, botRankEffOf, botXpGain, botProgressOf, creditXpBot, DEMO_APPID, ENDLESS_XP, computeXpEndless, creditXpEndless, CAMPAIGN_LB, SEEDCAP_REJECT_LADDER_MIN, seedcapRejectWindowMin, seedcapRejectUntilMin, seedcapRejectActive, seedcapNEff,
-  ENDLESS_COMP_LB, SAVE_BOX_LB, SOLO_FILE, COMP, soloSanity, soloChainPlan, rerollChain, soloMilestones, soloAdvance, soloRunKey, soloRunKind, soloRunKept, soloRunSeason, seasonEndMs, pruneSolo, soloStartAttested, loadSolo, saveSolo, segOrderOf, segStartOf, freshOrder, freshOrderPaced, writerReadyAt, writerClaim,
+  ENDLESS_COMP_LB, SAVE_BOX_LB, SOLO_FILE, COMP, soloSanity, soloChainPlan, rerollChain, soloMilestones, soloAdvance, soloRunKey, soloRunKind, soloRunKept, soloRunSeason, seasonEndMs, pruneSolo, soloStartAttested, loadSolo, saveSolo, segOrderOf, segStartOf, freshOrder, freshOrderPaced, freshSeqPlan, seqStartMs, seqKeptLag, seqKeep, seqAddKept, SEQ_KEPT_MAX, writerReadyAt, writerClaim,
   ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, SAVE_BOX_LB_DUO, SAVE_BOX_LB_TRIO, teamRunKey, soloMsSlot, groupRecords, nosumVerdict, DISP_NOSUMMARY, isFinishDisp,
   ENDLESS_COMP_LB_QUAD, SAVE_BOX_LB_QUAD, ENDLESS_LB_QUAD, ENDLESS_MAX_PC, compFamKeyOf,   // client knife 3.7a (O178 four seats)
   ENDLESS_LB_SOLO, SAVE_BOX_LB_CASUAL, CASUAL_LIVES,   // client knife 3.7a (O218 casual solo lane)
