@@ -48,7 +48,7 @@ const BASE_LEN = 30, SIG_INTS = 16;
 const LAYOUTS = { 3: { baseLen: 25 }, 4: { baseLen: 28 }, 5: { baseLen: 30 } };
 const BASE_LEN_V3 = 25;
 // endless tail `flags` bits (6th tail int; co-op client records write 0, guard-built solo segments set them)
-const SEG_COMP = 8;        // team competitive segment (client-written, consensus lane; the guard never sets it -- solo sanity keeps it illegal)
+const SEG_COMP = 8;        // team competitive segment (client-written, consensus lane; solo sanity keeps it illegal) -- the guard sets it only on a couch segment (SEG_COUCH, A3)
 const SEG_SUSPENDED = 1;   // written by "save & quit" -> the ONE segment a later run may resume from (once)
 const SEG_FINAL = 2;       // run over / user quit (terminal segment of the run)
 const SEG_RESUMED = 4;     // this segment started from a consumed save row
@@ -238,6 +238,127 @@ function soloSettleGate(verdict, opts) {
   if (!verdict.sealed && !(opts && opts.allowDevKey)) return { settle: false, reason: 'dev-key-on-prod' };
   if (opts && opts.owner != null && String(opts.owner) !== String(verdict.fields && verdict.fields.rosterSid))
     return { settle: false, reason: 'owner-mismatch' };
+  return { settle: true };
+}
+
+// ============================================================
+// A3) couch competitive segment (client knife 5c, O606, 2026-10-31)
+// ============================================================
+// Two local seats on ONE machine and ONE Steam account (P1): the guard judges the run itself (SOLO tracker, pc = 2) and builds +
+//   signs the segment record, so there is no second writer to agree with -- the signature is the gate, exactly as for a solo
+//   segment. The record keeps the client TEAM shape (the 12-int endless tail every team reader knows, at 11 + 3N) so the seed-cap
+//   audit, the perk replay and the career read it like a duo competitive segment; the attestation rides a self-describing block
+//   at the end (5.4a rule: every tail added to a result record is a magic + length block):
+//     [0] 0xB1 [1] LEDGER_VER [2] 7 [3] hash32(segment matchId) [4] runSeed [5] 0 (writer seat) [6] 1 [7] 0 [8] N [9] duration s
+//     [10 .. 10+N)       per-seat banks (the guard core's seatScore(i))
+//     [10+N]             dispCode (0 finished / 5 user quit)
+//     [11+N .. 11+3N)    roster: N (lo, hi) pairs, EVERY seat = the owner's steamID (the correction path deletes rows by seat sid)
+//     [11+3N .. 23+3N)   endless tail (12 ints, client team order): start / end depth, continues 0, tokensCp 0, seasonId,
+//                        flags = SEG_COMP | SEG_COUCH [| SUSPENDED | FINAL | RESUMED], build, picksLo, picksHi, rerollLo, rerollHi, resumeTag
+//     then blocks:       0xD8 character block (optional; [0xD8 | ver << 8 | N << 16, codes]) -- skipped by its seat count
+//                        0xE8 couch attestation block, ALWAYS LAST: [0xE8 | ver << 8 | 21 << 16, keyId, attVer | jwtPresent << 8,
+//                        jwtHashLo, opHashLo, opHashHi, Ed25519 signature 16] -- the signature covers every int before it
+//     zeros after the block (the Steam details buffer pads with zeros; anything else = an unsigned region -> 'trailing').
+//   Mirrors mvp/test/lib/couch-record.js (the JS reference encoder the guard's C++ is parity-tested against). A layout change =
+//   a new COUCH_ATT_VER with both versions accepted for >= 7 days (architecture decision 9); an unknown one = pending (O199).
+const SEG_COUCH = 64;      // couch segment: guard-written, one account on every seat (client knife 5c O606; always with SEG_COMP in v1)
+const COUCH_MAGIC = 0xE8, COUCH_BLK_VER = 1, COUCH_BLK_LEN = 21, COUCH_ATT_VER = 1;
+const COUCH_LAYOUTS = { 1: {} };   // attVer -> layout (v1: the block above); a new attVer joins here when the reader learns it
+const COUCH_PC_MIN = 2, COUCH_PC_MAX = 4;   // the layout holds up to the registry's ENDLESS_MAX_PC; the settle lane takes N = 2 only (O606)
+const COUCH_TAIL_INTS = 12, CHAR_BLK_MAGIC = 0xD8;
+// position of the couch attestation block: walk the blocks after the tail (the character block by its seat count, any other by
+//   its length byte). -> { at } | { why }
+function couchBlockAt(d, n) {
+  let t = 11 + 3 * n + COUCH_TAIL_INTS;
+  for (let k = 0; k < 8 && t < d.length; k++) {
+    const h = d[t] | 0, m = h & 0xff;
+    if (m === COUCH_MAGIC) return { at: t };
+    if (m === 0) return { why: 'no-block' };
+    if (m === CHAR_BLK_MAGIC) { const pcH = (h >>> 16) & 0xff; if (pcH < 1 || pcH > 8) return { why: 'block' }; t += 1 + Math.ceil(pcH / 4); continue; }
+    const len = (h >>> 16) & 0xff;
+    if (len < 1) return { why: 'block' };
+    t += 1 + len;
+  }
+  return { why: 'no-block' };
+}
+// the couch fields of a couch-shaped record (no signature check): null when the ints are not one
+function couchFieldsOf(d) {
+  if (!Array.isArray(d) || d.length < 11) return null;
+  const n = d[8] | 0, at = 11 + 3 * n;
+  if (n < COUCH_PC_MIN || n > COUCH_PC_MAX || d.length < at + COUCH_TAIL_INTS) return null;
+  const seats = [];
+  let score = 0;
+  for (let i = 0; i < n; i++) { seats.push(d[10 + i] | 0); score += d[10 + i] | 0; }
+  const rosterSids = [];
+  for (let i = 0; i < n; i++) rosterSids.push(((BigInt(d[12 + n + 2 * i] >>> 0) << 32n) | BigInt(d[11 + n + 2 * i] >>> 0)).toString());
+  const pk = (BigInt(d[at + 8] >>> 0) << 32n) | BigInt(d[at + 7] >>> 0);
+  const rr = (BigInt(d[at + 10] >>> 0) << 32n) | BigInt(d[at + 9] >>> 0);
+  return {
+    N: n, seats, score, rosterSids, rosterSid: rosterSids[0],
+    matchHash: d[3] >>> 0, runSeed: d[4] | 0, durationSec: d[9] | 0, dispCode: d[10 + n] | 0,
+    startDepth: d[at] | 0, endDepth: d[at + 1] | 0, continuesUsed: d[at + 2] | 0, tokensCp: d[at + 3] | 0, seasonId: d[at + 4] | 0, flags: d[at + 5] | 0,
+    build: d[at + 6] >>> 0, picksLo: d[at + 7] | 0, picksHi: d[at + 8] | 0, picks: pk.toString(),
+    rerollLo: d[at + 9] | 0, rerollHi: d[at + 10] | 0, rerolls: rr.toString(), resumeTag: (d[at + 11] >>> 0) & RESUME_TAG_MASK,
+  };
+}
+// details int32[] + pubTable -> { ok, reason, pending, fields, sealed } (verifySoloRecord's verdict shape and field names, plus
+//   N / seats / rosterSids; score = the team bank)
+function verifyCouchRecord(d, pubTable) {
+  if (!Array.isArray(d) || d.length < 11) return { ok: false, reason: 'short' };
+  if ((d[0] & 0xff) !== LEDGER_MAGIC) return { ok: false, reason: 'magic' };
+  if (d[1] !== LEDGER_VER) return { ok: false, reason: 'ledger-ver', pending: true, ver: d[1] | 0 };   // O199: a layout this job cannot read yet
+  if (d[2] !== MT_ENDLESS) return { ok: false, reason: 'mt' };
+  const n = d[8] | 0;
+  if (n < COUCH_PC_MIN || n > COUCH_PC_MAX || (d[5] | 0) !== 0) return { ok: false, reason: 'pc' };
+  const fields = couchFieldsOf(d);
+  if (!fields) return { ok: false, reason: 'short' };
+  const loc = couchBlockAt(d, n);
+  if (loc.why) return { ok: false, reason: loc.why, fields };
+  const at = loc.at, h = d[at] | 0;
+  const blkVer = (h >>> 8) & 0xff;
+  if (blkVer !== COUCH_BLK_VER) return { ok: false, reason: 'couch-ver', pending: true, fields };   // a block version this job does not read yet
+  if (((h >>> 16) & 0xff) !== COUCH_BLK_LEN) return { ok: false, reason: 'len', fields };
+  if (d.length < at + 1 + COUCH_BLK_LEN) return { ok: false, reason: 'short', fields };
+  const keyId = d[at + 1] | 0, attVer = d[at + 2] & 0xff;
+  Object.assign(fields, { keyId, keyName: keyId === 0 ? 'dev' : String(keyId >>> 0), attVer, jwtPresent: !!((d[at + 2] >> 8) & 1), jwtHashLo: d[at + 3] >>> 0,
+    opHash: ((BigInt(d[at + 5] >>> 0) << 32n) | BigInt(d[at + 4] >>> 0)).toString(16) });
+  if (!COUCH_LAYOUTS[attVer]) return { ok: false, reason: 'att-ver', pending: true, fields };
+  const sigAt = at + 6;
+  for (let i = sigAt + SIG_INTS; i < d.length; i++) if ((d[i] | 0) !== 0) return { ok: false, reason: 'trailing', fields };
+  const ent = pubTable && pubTable[fields.keyName];
+  const held = (ent && Array.isArray(ent.held)) ? ent.held : [];
+  if (!ent || !Array.isArray(ent.pubs) || !(ent.pubs.length || held.length)) return { ok: false, reason: 'unknown-key', pending: true, fields };
+  const sig = Buffer.alloc(64);
+  for (let i = 0; i < SIG_INTS; i++) sig.writeInt32LE(d[sigAt + i] | 0, i * 4);
+  const bytes = toBytes(d.slice(0, sigAt));
+  for (const pub of ent.pubs) {
+    try { if (crypto.verify(null, bytes, pubKeyObj(pub), sig)) return { ok: true, fields, sealed: !!ent.sealed }; }
+    catch (e) { /* malformed pub entry: try the next */ }
+  }
+  for (const hk of held) {
+    try { if (crypto.verify(null, bytes, pubKeyObj(hk.pub), sig)) return { ok: false, reason: 'key-' + hk.reason, pending: true, fields }; }
+    catch (e) { /* malformed pub entry: try the next */ }
+  }
+  return { ok: false, reason: 'bad-sig', fields };
+}
+// a couch record's endless tail + the signing package (keyId) for the seed-cap audit (exact core); null when not couch-shaped
+function couchTail(d) {
+  const f = couchFieldsOf(d);
+  if (!f || (d[0] & 0xff) !== LEDGER_MAGIC || d[1] !== LEDGER_VER || d[2] !== MT_ENDLESS || !((f.flags | 0) & SEG_COUCH)) return null;
+  const loc = couchBlockAt(d, f.N);
+  return { startDepth: f.startDepth, endDepth: f.endDepth, continuesUsed: f.continuesUsed, tokensCp: f.tokensCp, seasonId: f.seasonId, flags: f.flags,
+    build: f.build, picksLo: f.picksLo, picksHi: f.picksHi, rerollLo: f.rerollLo, rerollHi: f.rerollHi, resumeTag: f.resumeTag,
+    keyId: loc.at != null && d.length > loc.at + 1 ? (d[loc.at + 1] | 0) : 0 };
+}
+// production gate: a sealed build key (the dev key only where opts.allowDevKey: the test shards) and EVERY roster seat = the
+//   leaderboard row owner (a couch run is one account; a stranger named on any seat = not this account's run)
+function couchSettleGate(verdict, opts) {
+  if (!verdict || !verdict.ok) return { settle: false, reason: verdict ? verdict.reason : 'none', pending: !!(verdict && verdict.pending) };
+  if (!verdict.sealed && !(opts && opts.allowDevKey)) return { settle: false, reason: 'dev-key-on-prod' };
+  if (opts && opts.owner != null) {
+    const sids = (verdict.fields && verdict.fields.rosterSids) || [];
+    if (!sids.length || sids.some((s) => String(s) !== String(opts.owner))) return { settle: false, reason: 'owner-mismatch' };
+  }
   return { settle: true };
 }
 
@@ -440,6 +561,9 @@ module.exports = {
   SB_MAGIC, SB_VER, SB_CONSUMED, saveBoxHead,
   SEG_SUSPENDED, SEG_FINAL, SEG_RESUMED, SEG_COMP, SEG_CASUAL, SEG_CLASSIC, DISP_FINISHED, DISP_USER_QUIT,
   verifySoloRecord, soloSettleGate, soloTail, toBytes, loadPubTable,
+  // A3
+  SEG_COUCH, COUCH_MAGIC, COUCH_BLK_VER, COUCH_BLK_LEN, COUCH_ATT_VER, COUCH_LAYOUTS, COUCH_PC_MIN, COUCH_PC_MAX, COUCH_TAIL_INTS,
+  verifyCouchRecord, couchSettleGate, couchTail, couchFieldsOf,
   // A2
   verifyMatchSig, matchSigGate,
   KEY_CHANNELS, KEY_RETIRE_GRACE_MS, keyHoldReason, applyKeyPolicy,

@@ -71,8 +71,9 @@ console.log('=== Q327: an endless run a save can still bring back keeps its chai
     kinds.length === 2 && /casualResume/.test(kinds.join()) && /classicResume/.test(kinds.join()) && SRC.split("return waitOr('save-orphan')").length === 2, kinds.join(' | '));
   // tripwire: the segment flags soloRunKind sorts by -- a new run-kind flag decides how long its chain memory lives
   const segs = (ASRC.match(/^const SEG_[A-Z_]+ = /gm) || []).map((l) => l.slice(6, -3)).sort();
-  T('[0] attest segment flags are the six soloRunKind knows (a new kind flag: decide its keep rule in soloRunKept, Q327)',
-    JSON.stringify(segs) === JSON.stringify(['SEG_CASUAL', 'SEG_CLASSIC', 'SEG_COMP', 'SEG_FINAL', 'SEG_RESUMED', 'SEG_SUSPENDED']), segs.join(','));
+  // O606 (client knife 5c): SEG_COUCH rides with SEG_COMP (a couch competitive run: competitive save points, kind 0 -- [1] pins it)
+  T('[0] attest segment flags are the seven soloRunKind knows (a new kind flag: decide its keep rule in soloRunKept, Q327)',
+    JSON.stringify(segs) === JSON.stringify(['SEG_CASUAL', 'SEG_CLASSIC', 'SEG_COMP', 'SEG_COUCH', 'SEG_FINAL', 'SEG_RESUMED', 'SEG_SUSPENDED']), segs.join(','));
 }
 
 // ---- [1] pure ----
@@ -83,7 +84,8 @@ const SK = (season) => v.soloRunKey('p0', season, 4242);
 const TK = (season) => 'T|a+b+c|' + season + '|4242';
 {
   T('[1] soloRunKind: classic 2, casual 1, solo / team competitive 0', v.soloRunKind({ flags: A.SEG_CLASSIC }) === 2 && v.soloRunKind({ flags: A.SEG_CASUAL | A.SEG_RESUMED }) === 1 &&
-    v.soloRunKind({ flags: A.SEG_SUSPENDED }) === 0 && v.soloRunKind({ flags: A.SEG_COMP | A.SEG_FINAL }) === 0 && v.soloRunKind({ flags: A.SEG_CLASSIC | A.SEG_SUSPENDED }) === 2);
+    v.soloRunKind({ flags: A.SEG_SUSPENDED }) === 0 && v.soloRunKind({ flags: A.SEG_COMP | A.SEG_FINAL }) === 0 && v.soloRunKind({ flags: A.SEG_CLASSIC | A.SEG_SUSPENDED }) === 2
+    && v.soloRunKind({ flags: A.SEG_COMP | A.SEG_COUCH | A.SEG_SUSPENDED }) === 0);   // O606: a couch competitive run keeps competitive save points
   T('[1] soloRunSeason: solo and team keys', v.soloRunSeason(SK(1)) === 1 && v.soloRunSeason(SK(0)) === 0 && v.soloRunSeason(TK(2)) === 2 && v.soloRunSeason('T|a+b|0|-77') === 0);
   T('[1] seasonEndMs: each season ends at the next one\'s start, the last one never', v.SEASONS.every((s, i) => i + 1 < v.SEASONS.length ? v.seasonEndMs(s.id) === v.SEASONS[i + 1].start : v.seasonEndMs(s.id) === null) &&
     v.seasonEndMs(0) === v.SEASONS[0].start);

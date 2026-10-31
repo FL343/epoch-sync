@@ -19,7 +19,7 @@
 const fs = require('fs');
 const { readBoardAll, pid, decodeDetails, getJson, BASE, TRUST_LB, REPORT_LB, START_MAGIC, REPORT_MAGIC, CP_LB, ENDLESS_LB, REDEEM_LB, GRANT_LB,
   ENDLESS_LB_SOLO, ENDLESS_LB_TRIO, ENDLESS_LB_QUAD, ENDLESS_LB_OVERALL, ENDLESS_COMP_LB, ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, ENDLESS_COMP_LB_QUAD, ENDLESS_COMP_LB_OVERALL,
-  ENDLESS_LB_CLASSIC_SOLO, ENDLESS_LB_CLASSIC_DUO, ENDLESS_LB_CLASSIC_TRIO, ENDLESS_LB_CLASSIC_QUAD, ENDLESS_LB_CLASSIC_OVERALL, ENDLESS_CUP_HONOR_LB,
+  ENDLESS_LB_CLASSIC_SOLO, ENDLESS_LB_CLASSIC_DUO, ENDLESS_LB_CLASSIC_TRIO, ENDLESS_LB_CLASSIC_QUAD, ENDLESS_LB_CLASSIC_OVERALL, ENDLESS_CUP_HONOR_LB, ENDLESS_COMP_LB_COUCH,
   LIKE_BOX_LB, LIKE_COUNT_LB } = require('./validate.js');
 const v = require('./validate.js');   // O348 (3): shardPlan / LEDGER_SHARDS / sandboxOn
 // O520 likes lane (client knife 5.4d, W79): the like box (client-writable, friends-reads) is inventory only, like the report
@@ -32,11 +32,11 @@ const LIKE_TRUSTED = [[LIKE_COUNT_LB, 'like count']];
 //   one of them enters the state the closure reads (recordEndlessSignals for every own-record seat, xp for every endless settle).
 const ENDLESS_TRUSTED = [ENDLESS_LB_SOLO, ENDLESS_LB_TRIO, ENDLESS_LB_QUAD, ENDLESS_LB_OVERALL, ENDLESS_COMP_LB, ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, ENDLESS_COMP_LB_QUAD,
   ENDLESS_COMP_LB_OVERALL, ENDLESS_LB_CLASSIC_SOLO, ENDLESS_LB_CLASSIC_DUO, ENDLESS_LB_CLASSIC_TRIO, ENDLESS_LB_CLASSIC_QUAD, ENDLESS_LB_CLASSIC_OVERALL,
-  ENDLESS_CUP_HONOR_LB];   // O180 (client knife 5.1c-1): the cup honor board -- a winner is an own-record competitive writer of that week (in signals); a
+  ENDLESS_CUP_HONOR_LB, ENDLESS_COMP_LB_COUCH];   // O606 (client knife 5c): the couch competitive ladder (its writer = the account of a couch segment, in signals + xp). O180 (client knife 5.1c-1): the cup honor board -- a winner is an own-record competitive writer of that week (in signals); a
 //   foreign row here = its trusted-writes flag regressed = a self-written name mark. The weekly boards (<comp ladder>_w<YYYYWW>) rotate and are
 //   not in the closure (seasonTwinOf takes _s<N> only); the carrier row sits on the ops carrier account (not a player) and is left out too.
 // season twins (`<base>_s<N>`) of the base board and the season-twinned families (classic ladders are lifetime only)
-const ENDLESS_SEASONED = [ENDLESS_LB, ENDLESS_LB_SOLO, ENDLESS_LB_TRIO, ENDLESS_LB_QUAD, ENDLESS_LB_OVERALL, ENDLESS_COMP_LB, ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, ENDLESS_COMP_LB_QUAD, ENDLESS_COMP_LB_OVERALL];
+const ENDLESS_SEASONED = [ENDLESS_LB, ENDLESS_LB_SOLO, ENDLESS_LB_TRIO, ENDLESS_LB_QUAD, ENDLESS_LB_OVERALL, ENDLESS_COMP_LB, ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, ENDLESS_COMP_LB_QUAD, ENDLESS_COMP_LB_OVERALL, ENDLESS_COMP_LB_COUCH];
 function seasonTwinOf(name) {
   const m = /^(.+)_s(\d+)$/.exec(String(name));
   return m && ENDLESS_SEASONED.indexOf(m[1]) >= 0 ? { base: m[1], season: m[2] | 0 } : null;

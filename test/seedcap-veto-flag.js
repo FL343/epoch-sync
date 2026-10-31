@@ -94,7 +94,7 @@ console.log('=== Q333: a seedcap veto stops the settlement and flags nobody ==='
   const late = branch('if (SEEDCAP_ENFORCE && seedcap && seedcap.veto && seedcap.veto[c.m]) { console.log(\'  quit-lone late ', 'continue; }');
   const solo = branch('if (SEEDCAP_ENFORCE && seedcap && seedcap.veto && seedcap.veto[m]) {', '      return false;\n');
   T('[0] the main-path veto branch: counted and warned, no recordFlag', !!main && !/recordFlag\(/.test(main) && /RUN\.seedcapVeto = \(RUN\.seedcapVeto \| 0\) \+ 1;/.test(main) && /seedcap over-cap veto/.test(main), main);
-  T('[0] the solo veto branch: counted and warned, no recordFlag', !!solo && !/recordFlag\(/.test(solo) && /RUN\.seedcapVeto = \(RUN\.seedcapVeto \| 0\) \+ 1;/.test(solo) && /solo segment seedcap over-cap veto/.test(solo), solo);
+  T('[0] the solo veto branch: counted and warned, no recordFlag', !!solo && !/recordFlag\(/.test(solo) && /RUN\.seedcapVeto = \(RUN\.seedcapVeto \| 0\) \+ 1;/.test(solo) && /' \+ laneTag \+ ' segment seedcap over-cap veto/.test(solo), solo);   // O606: laneTag = solo / couch
   T('[0] the quit-lone late veto hold (W113): no recordFlag', !!late && !/recordFlag\(/.test(late), late);
   T('[0] each branch exactly once', SRC.split('seedcap.veto && seedcap.veto[c.m]').length === 3 && SRC.split('seedcap.veto && seedcap.veto[m]').length === 2);
 }

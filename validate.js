@@ -6023,6 +6023,21 @@ const SAVE_BOX_LB_DUO = process.env.SAVE_BOX_LB_DUO || 'endless_save_box_duo';
 const SAVE_BOX_LB_TRIO = process.env.SAVE_BOX_LB_TRIO || 'endless_save_box_trio';
 const SAVE_BOX_LB_QUAD = process.env.SAVE_BOX_LB_QUAD || 'endless_save_box_quad';
 const SAVE_BOX_LB_CASUAL = process.env.SAVE_BOX_LB_CASUAL || 'endless_save_box_casual';   // client knife 3.7a (O218): casual solo checkpoint rows (guard-signed, casual bit); cron only prunes past seasons
+// O606 couch competitive (client knife 5c, 2026-10-31; KNIFE_5C_COUCH_COMP_PLAN in the client repo): two local seats, ONE account,
+//   the guard judges and signs (attest.js A3). Settled in the solo lane (one writer, the signature is the gate) and MERGED into the
+//   duo competitive family by default: the duo ladder + season twin + the composite + the duo rating (its history under 'duoc', read
+//   together with 'duo'). No milestone CP, no cup (user 10-31: boards / tier / XP yes, rewards not yet). COUCH_DUO=split (one line in
+//   the workflow) sends LATER couch runs to the couch ladder only and the duo rating stops reading 'duoc' -- forward-only: a couch row
+//   already on the duo ladder stays (the online best it covered has no copy to restore; architecture decision 10). The couch ladder
+//   is written from day one (dual write), so a split needs no migration. The couch save box holds the guard's couch save rows (a duo
+//   box row stays the online team's).
+const ENDLESS_COMP_LB_COUCH = process.env.ENDLESS_COMP_LB_COUCH || 'endless_comp_couch';
+const SAVE_BOX_LB_COUCH = process.env.SAVE_BOX_LB_COUCH || 'endless_save_box_couch';
+const COUCH_DUO_SPLIT = process.env.COUCH_DUO === 'split';
+// a couch segment whose signature or bounds check fails is held + warned once, NOT flagged into the trust ledger until a season
+//   showed the three-way byte lock (JS reference / guard C++ / this reader) holds in the field: one slip would flag every honest
+//   couch run. COUCH_SIG_FLAG=1 = judged like a solo segment (flag, key stays open).
+const COUCH_SIG_FLAG = process.env.COUCH_SIG_FLAG === '1';
 const CASUAL_LIVES = 3;   // lockstep: client RANKED_CONFIG.ENDLESS.LIVES == guard ENDLESS_LIVES (reroll-ahead slack: a casual run's depth may run ahead of its passed count by its failed levels)
 // competitive ladder family by seat count (mirrors the client's ENDLESS_LEVELS.compFamily: 2 DUO / 3 TRIO / 4 QUAD)
 function compFamKeyOf(pc) { return pc >= 4 ? 'QUAD' : pc >= 3 ? 'TRIO' : 'DUO'; }
@@ -6179,12 +6194,26 @@ function ratingScoreOf(h) {
   return { score: Math.round(RATING.W_BEST * best + RATING.W_AVG * avg), best, avg100, n: h.runs.length, details: [best, avg100, h.runs.length, 0] };
 }
 const sameInts = (a, b) => Array.isArray(a) && Array.isArray(b) && a.length >= b.length && b.every((x, i) => (a[i] | 0) === (x | 0));
+// O606 (knife 5c): the history a family's rating reads. Couch competitive runs sit under 'duoc'; while merged (COUCH_DUO != split) the
+//   duo rating reads both: the runs of the two in first-seen order, the last WINDOW of them, best = the deeper best. A split reads
+//   'duo' only (the couch runs stay under 'duoc', so merging back is the same one line). Pure.
+function ratingHistView(st, p, fam, seasonId, split) {
+  const h = st && st.hist ? st.hist[ratingHistKey(p, fam, seasonId)] : null;
+  if (fam !== 'duo' || split) return h;
+  const hc = st && st.hist ? st.hist[ratingHistKey(p, 'duoc', seasonId)] : null;
+  if (!hc) return h;
+  if (!h) return hc;
+  const runs = (h.runs || []).concat(hc.runs || []).sort((a, b) => (a[2] - b[2]) || ((a[0] >>> 0) - (b[0] >>> 0))).slice(-RATING.WINDOW);
+  const b1 = Array.isArray(h.best) ? h.best : [0, 0], b2 = Array.isArray(hc.best) ? hc.best : [0, 0];
+  return { best: (b2[1] | 0) > (b1[1] | 0) ? b2 : b1, runs, old: [], t: Math.max(h.t || 0, hc.t || 0) };
+}
 // writes / deletes for one family board: existing = { sid: { s, det } } rows on the board, touched = sids settled this run
-function ratingPlan(st, seasonId, fam, existing, touched) {
+function ratingPlan(st, seasonId, fam, existing, touched, opts) {
   const writes = [], deletes = [];
+  const split = (opts && opts.split != null) ? !!opts.split : COUCH_DUO_SPLIT;
   const all = new Set([...Object.keys(existing || {}), ...(touched || [])]);
   for (const sid of all) {
-    const want = ratingScoreOf(st && st.hist ? st.hist[ratingHistKey(pid(sid), fam, seasonId)] : null);
+    const want = ratingScoreOf(ratingHistView(st, pid(sid), fam, seasonId, split));
     const cur = (existing || {})[sid];
     if (want) { if (!cur || (cur.s | 0) !== want.score || !sameInts(cur.det, want.details)) writes.push({ sid, score: want.score, details: want.details }); }
     else if (cur) deletes.push(sid);
@@ -6670,6 +6699,37 @@ function soloSanity(f) {
   //   non-negative duration anyway, so a negative one buys nothing. A new consumer (a rate bound, a pacing input, a reward)
   //   must decide what a negative value means first -- test/solo-neg-duration.js keeps every other read of the field red.
   // durationSec: counted by the caller (soloClockBack), never a reason to reject -- see the note above (Q242)
+  return out;
+}
+// a couch-shaped endless record (O606): 2..4 seats with SEG_COUCH in the team-shaped tail's flags (the settle lane verifies the rest)
+function isCouchRec(r) {
+  const d = r && r.d;
+  if (!d || !isEndlessMt(d[2] | 0)) return false;
+  const pc = d[8] | 0;
+  if (pc < attest.COUCH_PC_MIN || pc > attest.COUCH_PC_MAX) return false;
+  const t = endlessTail(d);
+  return !!(t && ((t.flags | 0) & attest.SEG_COUCH));
+}
+// structural bounds on a VERIFIED couch segment (O606, knife 5c; flag-don't-settle like soloSanity). v1 = competitive, two seats:
+//   COUCH and COMP both set, nothing but SUSPENDED / FINAL / RESUMED beside them; no continues / tokens (one life); the per-seat
+//   cap is the two-seat line (each seat <= endlessGoalFor(end, 2) x SCORE_MULT, the team-lane bound). durationSec is not a bound (Q242).
+function couchSanity(f) {
+  const out = [];
+  const fl = f.flags | 0;
+  if ((f.N | 0) !== 2) out.push('pc');
+  if (!(fl & attest.SEG_COUCH) || !(fl & attest.SEG_COMP)) out.push('flags');
+  if ((fl & ~(attest.SEG_COUCH | attest.SEG_COMP | attest.SEG_SUSPENDED | attest.SEG_FINAL | attest.SEG_RESUMED)) !== 0 || ((fl & attest.SEG_SUSPENDED) && (fl & attest.SEG_FINAL))) out.push('flags');
+  if ((f.startDepth | 0) < 0 || (f.endDepth | 0) < (f.startDepth | 0) || (f.endDepth | 0) > ENDLESS.DEPTH_CAP) out.push('depth');
+  if ((f.endDepth | 0) - (f.startDepth | 0) > COMP.CKPT_EVERY) out.push('span');
+  if ((f.continuesUsed | 0) !== 0) out.push('cont');
+  if ((f.tokensCp | 0) !== 0) out.push('tokens');
+  if ((f.seasonId | 0) < 0 || (f.seasonId | 0) > 4095) out.push('season');
+  if ((f.dispCode | 0) !== attest.DISP_FINISHED && (f.dispCode | 0) !== attest.DISP_USER_QUIT) out.push('disp');
+  if (!(fl & attest.SEG_FINAL) && (f.dispCode | 0) !== attest.DISP_FINISHED) out.push('disp');   // B-F7 (team lane): only the run's last segment may be a quit
+  if (out.indexOf('depth') < 0 && out.indexOf('pc') < 0) {
+    const cap = endlessGoalFor(Math.max(1, f.endDepth | 0), 2) * ENDLESS.SCORE_MULT;
+    for (const s of (f.seats || [])) if ((s | 0) > cap || (s | 0) < SANITY.SCORE_FLOOR) { out.push('score'); break; }
+  }
   return out;
 }
 // the guard's wall clock went back inside this verified segment (Q242): counted on the run summary, settled like any other segment
@@ -7428,16 +7488,19 @@ function packEndlessScore(depth, teamScore) {
 //   keeps a heuristic for the rows written before the block (architecture rule 9: magic + version; this repo writes, the client reads).
 //   Lockstep: client src/util/lb-team-group.js TEAM_MAGIC / TEAM_VER / BLOCK_AT (ledger-schema-lockstep section 33). Behind the
 //   knife 5.1b rollout gate (V51B) like the composites.
-const TEAM_MAGIC = 0xD4, TEAM_VER = 1;
-function teamBlock(rosterSids) {
+//   O606 (knife 5c): head bit 24 = a couch row (every seat the same account; the client draws one member + a local guest). Readers
+//   mask the byte they read, so the bit needs no version step; a shipped client rejects a block naming one account twice and falls
+//   back to its old-row heuristic (one frame for the row) -- harmless.
+const TEAM_MAGIC = 0xD4, TEAM_VER = 1, TEAM_F_COUCH = 1 << 24;
+function teamBlock(rosterSids, couch) {
   const sids = (rosterSids || []).map(String);
   if (sids.length < 2 || sids.length > 4) return [];
-  const out = [TEAM_MAGIC | (TEAM_VER << 8) | (sids.length << 16)];
+  const out = [TEAM_MAGIC | (TEAM_VER << 8) | (sids.length << 16) | (couch ? TEAM_F_COUCH : 0)];
   for (const sid of sids) { const b = BigInt(sid); out.push(Number(b & 0xFFFFFFFFn) | 0, Number((b >> 32n) & 0xFFFFFFFFn) | 0); }
   return out;
 }
-// details of an endless ladder row from its write-pool entry { s, ts, build?, team? } (every endless ladder write goes through here)
-function ladderDetails(w) { return [w.ts | 0, w.build | 0].concat(w.team && V51B ? teamBlock(w.team) : []); }
+// details of an endless ladder row from its write-pool entry { s, ts, build?, team?, cc? } (every endless ladder write goes through here)
+function ladderDetails(w) { return [w.ts | 0, w.build | 0].concat(w.team && V51B ? teamBlock(w.team, w.cc) : []); }
 function unpackEndlessScore(score) { const s = score | 0; return { depth: Math.floor(s / ENDLESS.BOARD_SCALE), tiebreak: s % ENDLESS.BOARD_SCALE }; }
 // Depth-scaled pacing: the minimum REAL time (this job's own clock, anchored at the first
 // sighting of the match's start attestation -- or of the settle itself when no attestation was
@@ -8159,6 +8222,17 @@ function groupRecords(recs, opts) {
       console.log('  match=' + m + ': solo segment ' + plog(solos[0].steamID) + (g.length > solos.length ? ' (+' + (g.length - solos.length) + ' foreign non-solo record(s) ignored)' : '') + ' (attested; verified at settle)');
       continue;
     }
+    // O606 (client knife 5c): a couch segment (2..4 local seats, one account, guard-signed: SEG_COUCH on the team-shaped tail) is a
+    //   single-writer entry of the solo lane too (solo: true keeps every solo-only exclusion working; the lane switches on couch).
+    //   An honest couch key is the guard's own session hash -- no online record shares it; a foreign same-key record is ignored the
+    //   way the solo entry above ignores one (the whole-group shape is a known 5.6 item for both).
+    const couches = isEndlessMt(g[0].d[2] | 0) ? g.filter(isCouchRec) : [];
+    if (couches.length) {
+      soloN++;
+      consistentMatches.push({ m, g: couches, void: false, solo: true, couch: true });
+      console.log('  match=' + m + ': couch segment ' + plog(couches[0].steamID) + (g.length > couches.length ? ' (+' + (g.length - couches.length) + ' foreign record(s) ignored)' : '') + ' (attested; verified at settle)');
+      continue;
+    }
     const writers = new Set(g.map(r => String(r.steamID))).size;
     const vecs = g.map(vecOf);
     let same = vecs.every(v => v === vecs[0] && v.indexOf('BAD') !== 0);
@@ -8310,6 +8384,13 @@ async function main() {
       const id0 = await findOrCreateBoard(nm, trusted);
       if (id0) console.log('solo boards: provisioned ' + nm + (trusted ? ' (trusted)' : ' (client-writable)'));
       else ghWarn('solo boards: provision failed for ' + nm + ' (solo saves refuse until it exists)');
+    }
+    // O606 (client knife 5c): the couch competitive ladder (trusted) + the couch save box (client-writable: the guard writes the rows)
+    for (const [nm, trusted] of [[ENDLESS_COMP_LB_COUCH, true], [SAVE_BOX_LB_COUCH, false]]) {
+      if (names0.indexOf(nm) >= 0) continue;
+      const id0 = await findOrCreateBoard(nm, trusted);
+      if (id0) console.log('couch boards: provisioned ' + nm + (trusted ? ' (trusted)' : ' (client-writable)'));
+      else ghWarn('couch boards: provision failed for ' + nm + ' (couch saves refuse until it exists)');
     }
     // O520 likes lane (W79): the like box must exist before the first client write (a missing board = the client's like
     //   is never read); the count board is cron-only. A failure here is only a warning: processLikes tries again every run.
@@ -8652,6 +8733,7 @@ async function main() {
     const out = new Set([ENDLESS_LB, ENDLESS_LB_TRIO, ENDLESS_LB_QUAD, ENDLESS_LB_SOLO, ENDLESS_COMP_LB, ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, ENDLESS_COMP_LB_QUAD,
       ENDLESS_LB_CLASSIC_SOLO, ENDLESS_LB_CLASSIC_DUO, ENDLESS_LB_CLASSIC_TRIO, ENDLESS_LB_CLASSIC_QUAD]);
     if (seasonId >= 1) for (const b of [ENDLESS_LB, ENDLESS_LB_TRIO, ENDLESS_LB_QUAD, ENDLESS_LB_SOLO, ENDLESS_COMP_LB, ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, ENDLESS_COMP_LB_QUAD]) out.add(seasonBoardName(b, seasonId));
+    if (!PT_MODE) { out.add(ENDLESS_COMP_LB_COUCH); if (seasonId >= 1) out.add(seasonBoardName(ENDLESS_COMP_LB_COUCH, seasonId)); }   // O606 (EA only)
     if (!PT_MODE && cupEdition(week) >= 1) for (const b of [ENDLESS_COMP_LB, ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, ENDLESS_COMP_LB_QUAD]) out.add(cupWeekBoardName(b, week));
     return out;
   };
@@ -8674,7 +8756,7 @@ async function main() {
     if (was.bd != null) w.build = was.bd >>> 0;
     if (Array.isArray(was.tm) && was.tm.length) {
       const team = was.tm.map((h) => ebSid(String(h)));
-      if (team.every(Boolean)) w.team = team.map(String);
+      if (team.every(Boolean)) { w.team = team.map(String); if (was.cc) w.cc = 1; }   // O606: the couch bit rides the wait
       else console.log('  endless best write of ' + String(k).slice(0, 8) + ' on ' + name + ': a seat of its team cannot be named this run -- written without the team block (Q319)');
     }
     return w;
@@ -8686,7 +8768,7 @@ async function main() {
   const ebWait = (w, was, n) => {
     const nw = { v: w.s | 0, ts: w.ts | 0 };
     if (w.build != null) nw.bd = w.build >>> 0;
-    if (Array.isArray(w.team) && w.team.length) nw.tm = w.team.map((s) => pid(String(s)));
+    if (Array.isArray(w.team) && w.team.length) { nw.tm = w.team.map((s) => pid(String(s))); if (w.cc) nw.cc = 1; }   // O606: a couch row keeps its couch bit when written later
     nw.t = (was && Number(was.t)) || Date.now(); nw.n = n;
     return nw;
   };
@@ -10604,6 +10686,25 @@ async function main() {
     if (!sbId) ghWarn('save box board not found (' + sbName + ', client-writable) -> guard team saves fail until it exists');
     compFam[fam] = { fam, low, name: lbName, id, seasonId: season.id, best, seasonBest, det, seasonDet, complete, seasonComplete, saveBoxId: sbId, changed: null, seasonChanged: null, pc: fam === 'QUAD' ? 4 : fam === 'TRIO' ? 3 : 2 };
   }
+  // O606 (client knife 5c): the couch competitive ladder pair + the couch save box, the family record's shape -- kept OUT of compFam
+  //   (every compFam walk means "an online seat count": the cup boards, the composite sizes, the team lane's family by pc)
+  const couchComp = await (async () => {
+    // the trial jobs never settle a couch segment (EA only) -> no board read, none created
+    if (PT_MODE) return { fam: 'COUCH', low: 'couch', name: ENDLESS_COMP_LB_COUCH, id: null, seasonId: null, best: {}, seasonBest: {}, det: {}, seasonDet: {}, complete: true, seasonComplete: true, saveBoxId: null, changed: null, seasonChanged: null, pc: 2 };
+    let id = byNameLb(ENDLESS_COMP_LB_COUCH);
+    if (!id) id = await findOrCreateBoard(ENDLESS_COMP_LB_COUCH, true);
+    if (!id) { strictBoard('couch comp board not found'); ghWarn('couch comp board not found (' + ENDLESS_COMP_LB_COUCH + ') -> couch segments left pending'); }
+    const best = {}, seasonBest = {}, det = {}, seasonDet = {};
+    let complete = true, seasonComplete = true;
+    if (id) { const br = await readBoardAll(id, 'couch comp board'); complete = br.complete; for (const e of br.ents) { best[e.steamID] = e.score | 0; det[e.steamID] = e.detailData; } }
+    const season = (seasonId >= 1 && id) ? await resolveSeasonBoard(lr, ENDLESS_COMP_LB_COUCH, seasonId) : { name: null, id: null };
+    if (seasonId >= 1 && id && !season.id) { strictBoard('seasonal couch comp board not found'); ghWarn('seasonal couch comp board unresolved -> couch segments left pending'); }
+    if (season.id) { const br = await readBoardAll(season.id, 'seasonal couch comp board'); seasonComplete = br.complete; for (const e of br.ents) { seasonBest[e.steamID] = e.score | 0; seasonDet[e.steamID] = e.detailData; } }
+    let sbId = byNameLb(SAVE_BOX_LB_COUCH);
+    if (!sbId) sbId = await findOrCreateBoard(SAVE_BOX_LB_COUCH, false);
+    if (!sbId) ghWarn('save box board not found (' + SAVE_BOX_LB_COUCH + ', client-writable) -> guard couch saves fail until it exists');
+    return { fam: 'COUCH', low: 'couch', name: ENDLESS_COMP_LB_COUCH, id, seasonId: season.id, best, seasonBest, det, seasonDet, complete, seasonComplete, saveBoxId: sbId, changed: null, seasonChanged: null, pc: 2 };
+  })();
   // composite ("overall") competitive ladder (knife 3.5d): lifetime + season twin, trusted, cron-only; rows recomputed below for every
   //   player whose solo / duo / trio best moved this tick (no records of its own, nothing to settle -> a missing board only skips the rows)
   let overallId = byNameLb(ENDLESS_COMP_LB_OVERALL);
@@ -10630,7 +10731,7 @@ async function main() {
   // would silently reset his LP/XP. Fetch exactly the players this run settles (record holders +
   // roster members: leaver LP penalty targets roster sids that wrote no record). A missing entry
   // after the targeted read is a genuine new player (base 0 correct).
-  const compFamIncomplete = Object.values(compFam).some(f => (f.id && !f.complete) || (f.seasonId && !f.seasonComplete)) || (compId && !compComplete) || (compSeasonId && !compSeasonComplete);   // audit B-F4: solo ladder joins the family rule
+  const compFamIncomplete = Object.values(compFam).concat([couchComp]).some(f => (f.id && !f.complete) || (f.seasonId && !f.seasonComplete)) || (compId && !compComplete) || (compSeasonId && !compSeasonComplete);   // audit B-F4: solo ladder joins the family rule (O606: + the couch pair)
   if ((lpId && !lpComplete) || (xpId && !xpComplete) || (cpId && !cpComplete) || (enId && !enComplete) || (enSeasonId && !enSeasonComplete) || (enTrioId && !enTrioComplete) || (enTrioSeasonId && !enTrioSeasonComplete)
       || (enQuadId && !enQuadComplete) || (enQuadSeasonId && !enQuadSeasonComplete) || (enSoloId && !enSoloComplete) || (enSoloSeasonId && !enSoloSeasonComplete) || compFamIncomplete) {
     const need = new Set();
@@ -10684,7 +10785,7 @@ async function main() {
         const e = await readUserEntry(enSoloSeasonId, sid, 'seasonal solo casual endless');
         if (e) endlessSoloSeasonBest[sid] = e.score | 0;
       }
-      for (const fam of Object.values(compFam)) {   // team competitive ladders (duo / trio, lifetime + season)
+      for (const fam of Object.values(compFam).concat([couchComp])) {   // team competitive ladders (duo / trio / quad, lifetime + season; O606 + the couch pair)
         if (fam.id && !fam.complete && fam.best[sid] == null) { const e = await readUserEntry(fam.id, sid, fam.low + ' comp'); if (e) fam.best[sid] = e.score | 0; }
         if (fam.seasonId && !fam.seasonComplete && fam.seasonBest[sid] == null) { const e = await readUserEntry(fam.seasonId, sid, 'seasonal ' + fam.low + ' comp'); if (e) fam.seasonBest[sid] = e.score | 0; }
       }
@@ -10717,6 +10818,9 @@ async function main() {
   compFam.DUO.changed = changedCompDuo; compFam.DUO.seasonChanged = changedCompDuoSeason;
   compFam.TRIO.changed = changedCompTrio; compFam.TRIO.seasonChanged = changedCompTrioSeason;
   compFam.QUAD.changed = changedCompQuad; compFam.QUAD.seasonChanged = changedCompQuadSeason;
+  const changedCompCouch = {};       // O606 couch competitive ladder write pools (lifetime + season; the dual write)
+  const changedCompCouchSeason = {};
+  couchComp.changed = changedCompCouch; couchComp.seasonChanged = changedCompCouchSeason;
   // O180 Gold Rush Cup (client knife 5.1c-1): this week's competitive boards (third twin, EA app id only). The write pools live here
   //   so the reject-window snapshot covers them; the best maps are filled once the chain memory (it holds the week's board ids) loads.
   const compWeekBest = {};   // solo: sid -> packed best of this week (team families: f.weekBest + f.weekTeam = sid -> roster of that row)
@@ -10765,6 +10869,7 @@ async function main() {
       compDuoBest: compFam.DUO.best[sid], compDuoSeasonBest: compFam.DUO.seasonBest[sid], changedCompDuo: changedCompDuo[sid], changedCompDuoSeason: changedCompDuoSeason[sid],   // team ladder pools
       compTrioBest: compFam.TRIO.best[sid], compTrioSeasonBest: compFam.TRIO.seasonBest[sid], changedCompTrio: changedCompTrio[sid], changedCompTrioSeason: changedCompTrioSeason[sid],
       compQuadBest: compFam.QUAD.best[sid], compQuadSeasonBest: compFam.QUAD.seasonBest[sid], changedCompQuad: changedCompQuad[sid], changedCompQuadSeason: changedCompQuadSeason[sid],
+      compCouchBest: couchComp.best[sid], compCouchSeasonBest: couchComp.seasonBest[sid], changedCompCouch: changedCompCouch[sid], changedCompCouchSeason: changedCompCouchSeason[sid],   // O606 couch pair
       compWeekBest: compWeekBest[sid], changedCompWeek: changedCompWeek[sid],   // O180 weekly boards (cup)
       compDuoWeekBest: compFam.DUO.weekBest[sid], compDuoWeekTeam: scCloneOf(compFam.DUO.weekTeam[sid]), changedCompDuoWeek: changedCompDuoWeek[sid],
       compTrioWeekBest: compFam.TRIO.weekBest[sid], compTrioWeekTeam: scCloneOf(compFam.TRIO.weekTeam[sid]), changedCompTrioWeek: changedCompTrioWeek[sid],
@@ -10804,6 +10909,7 @@ async function main() {
       scPut(compFam.DUO.best, sn.sid, sn.compDuoBest); scPut(compFam.DUO.seasonBest, sn.sid, sn.compDuoSeasonBest); scPut(changedCompDuo, sn.sid, sn.changedCompDuo); scPut(changedCompDuoSeason, sn.sid, sn.changedCompDuoSeason);
       scPut(compFam.TRIO.best, sn.sid, sn.compTrioBest); scPut(compFam.TRIO.seasonBest, sn.sid, sn.compTrioSeasonBest); scPut(changedCompTrio, sn.sid, sn.changedCompTrio); scPut(changedCompTrioSeason, sn.sid, sn.changedCompTrioSeason);
       scPut(compFam.QUAD.best, sn.sid, sn.compQuadBest); scPut(compFam.QUAD.seasonBest, sn.sid, sn.compQuadSeasonBest); scPut(changedCompQuad, sn.sid, sn.changedCompQuad); scPut(changedCompQuadSeason, sn.sid, sn.changedCompQuadSeason);
+      scPut(couchComp.best, sn.sid, sn.compCouchBest); scPut(couchComp.seasonBest, sn.sid, sn.compCouchSeasonBest); scPut(changedCompCouch, sn.sid, sn.changedCompCouch); scPut(changedCompCouchSeason, sn.sid, sn.changedCompCouchSeason);   // O606
       scPut(compWeekBest, sn.sid, sn.compWeekBest); scPut(changedCompWeek, sn.sid, sn.changedCompWeek);   // O180 weekly boards (cup)
       scPut(compFam.DUO.weekBest, sn.sid, sn.compDuoWeekBest); scPut(compFam.DUO.weekTeam, sn.sid, sn.compDuoWeekTeam); scPut(changedCompDuoWeek, sn.sid, sn.changedCompDuoWeek);
       scPut(compFam.TRIO.weekBest, sn.sid, sn.compTrioWeekBest); scPut(compFam.TRIO.weekTeam, sn.sid, sn.compTrioWeekTeam); scPut(changedCompTrioWeek, sn.sid, sn.changedCompTrioWeek);
@@ -10873,7 +10979,9 @@ async function main() {
     ebAdd(ENDLESS_LB_CLASSIC_SOLO, enClassicSoloId, endlessClassicSoloBest, changedEndlessClassicSolo, enClassicSoloComplete, enClassicSoloId);
     for (const F of Object.values(classicFam)) ebAdd(F.name, F.id, F.best, F.changed, F.complete, F.id);
     for (const f of Object.values(compFam)) ebAdd(f.name, f.id, f.best, f.changed, f.complete, f.id);
+    if (!PT_MODE) ebAdd(couchComp.name, couchComp.id, couchComp.best, couchComp.changed, couchComp.complete, couchComp.id);   // O606
     if (seasonId >= 1) {
+      if (!PT_MODE) ebAdd(seasonBoardName(ENDLESS_COMP_LB_COUCH, seasonId), couchComp.seasonId, couchComp.seasonBest, couchComp.seasonChanged, couchComp.seasonComplete, couchComp.seasonId);
       ebAdd(seasonBoardName(ENDLESS_LB, seasonId), enSeasonId, endlessSeasonBest, changedEndlessSeason, enSeasonComplete, enSeasonId);
       ebAdd(seasonBoardName(ENDLESS_LB_TRIO, seasonId), enTrioSeasonId, endlessTrioSeasonBest, changedEndlessTrioSeason, enTrioSeasonComplete, enTrioSeasonId);
       ebAdd(seasonBoardName(ENDLESS_LB_QUAD, seasonId), enQuadSeasonId, endlessQuadSeasonBest, changedEndlessQuadSeason, enQuadSeasonComplete, enQuadSeasonId);
@@ -10928,6 +11036,24 @@ async function main() {
   // cloud audit Q245: judged once per account under the key (soloSettle below hands each account its own records); c.g = his records
   const soloSettleOwner = async (c) => {
     const m = c.m;
+    // O606 (client knife 5c): a couch segment rides this lane (one writer, the guard's signature is the gate) with its own verifier,
+    //   gate, sanity and chain key (teamRunKey of the one-account roster), and the duo competitive outputs below. The playtest / demo
+    //   jobs never settle one (the guard writes couch records on the EA app only); a couch kind this reader does not take yet (another
+    //   seat count, a casual / classic couch run of a later knife) waits -- never flagged, never processed (architecture decision 9).
+    const cc = !!c.couch;
+    if (cc) {
+      const t0c = endlessTail(c.g[0].d);
+      if (PT_MODE) { RUN.couchPt = (RUN.couchPt | 0) + 1; console.log('  couch ' + m + ': ' + plog(String(c.g[0].steamID)) + ' couch segment on the trial channel -- not settled (EA only)'); return false; }
+      if ((c.g[0].d[8] | 0) !== 2 || !t0c || !((t0c.flags | 0) & attest.SEG_COMP)) {
+        RUN.couchKindHeld = (RUN.couchKindHeld | 0) + 1;
+        console.log('  couch ' + m + ': ' + plog(String(c.g[0].steamID)) + ' couch kind this job does not settle yet (pc ' + (c.g[0].d[8] | 0) + ', flags ' + (t0c ? t0c.flags | 0 : '?') + ') -- waits');
+        return false;
+      }
+    }
+    const laneVerify = (d, pub) => (cc ? attest.verifyCouchRecord(d, pub) : attest.verifySoloRecord(d, pub));
+    const laneGate = cc ? attest.couchSettleGate : attest.soloSettleGate;
+    const laneKeyOf = (ff, p0) => (cc ? teamRunKey(ff.rosterSids || [], ff.seasonId, ff.runSeed) : soloRunKey(p0, ff.seasonId, ff.runSeed));
+    const laneTag = cc ? 'couch' : 'solo';
     // Q144 rework: a signed segment this lane processed before, its key since dropped from the processed list (pruneProcessed)
     //   and the segment written back -- back in the list, nothing else (no signal, no flag: its owner wrote his own record).
     //   Q245: the memory is per account -- a key reopened for another account (still in the processed list) only skips this one.
@@ -10941,10 +11067,20 @@ async function main() {
     //   guard-signed segment) -- settle the first candidate whose signature + owner binding verifies; judge the rest as before
     let r = c.g[0], sid = String(r.steamID), p = pid(sid), v = null, gate = null;
     for (const cand of c.g) {
-      const cv = attest.verifySoloRecord(cand.d, cand.recovered ? soloPubRec : soloPub);
-      const cg = attest.soloSettleGate(cv, { owner: String(cand.steamID), allowDevKey: soloAllowDev });
+      const cv = laneVerify(cand.d, cand.recovered ? soloPubRec : soloPub);
+      const cg = laneGate(cv, { owner: String(cand.steamID), allowDevKey: soloAllowDev });
       if (!v || cg.settle || cg.pending) { r = cand; sid = String(cand.steamID); p = pid(sid); v = cv; gate = cg; }
       if (cg.settle) break;
+    }
+    // O606: a couch segment whose check failed is HELD like a key hold (the run's later segments wait with it), warned once, never
+    //   flagged while COUCH_SIG_FLAG is off -- a byte slip between the client reference, the guard and this reader would otherwise
+    //   flag every honest couch run; pushing the corrected reader settles the records still on the shards
+    if (cc && !gate.settle && !gate.pending && !COUCH_SIG_FLAG && v && v.fields) {
+      RUN.couchSigHeld = (RUN.couchSigHeld | 0) + 1;
+      if (soloKeyHeld(soloState, laneKeyOf(v.fields, p), m, v.fields.keyName, 'couch-' + gate.reason, nowMs))
+        ghWarn('match=' + m + ': couch segment ' + plog(sid) + ' failed its check (' + gate.reason + ') -- held, not flagged (COUCH_SIG_FLAG off); the run\'s later segments wait with it');
+      else console.log('  couch ' + m + ': ' + plog(sid) + ' still fails its check (' + gate.reason + ') -- held');
+      return false;
     }
     if (!gate.settle) {
       if (gate.pending && soloHoldsChain(gate.reason) && v && v.fields) {
@@ -10953,7 +11089,7 @@ async function main() {
         // O199 (S6): or an attestation layout this job does not read yet (att-ver) -- same hold, its own counter and warning
         const attVerHold = gate.reason === 'att-ver';
         if (attVerHold) RUN.attVerHeld = (RUN.attVerHeld | 0) + 1; else RUN.keyHeld = (RUN.keyHeld | 0) + 1;
-        if (soloKeyHeld(soloState, soloRunKey(p, v.fields.seasonId, v.fields.runSeed), m, v.fields.keyName, gate.reason, nowMs)) {
+        if (soloKeyHeld(soloState, laneKeyOf(v.fields, p), m, v.fields.keyName, gate.reason, nowMs)) {
           if (attVerHold) ghWarn('match=' + m + ': solo segment ' + plog(sid) + ' carries attestation layout v' + v.fields.attVer + ', which this job does not read yet -- ' +
             'it waits, and the run\'s later segments wait with it (push the reader first: architecture decision 9)');
           else {
@@ -10995,28 +11131,34 @@ async function main() {
       const rb = r.d.join(',');
       for (const cand of c.g) {
         if (cand === r || cand.d.join(',') === rb) continue;
-        if (attest.soloSettleGate(attest.verifySoloRecord(cand.d, soloPub), { owner: String(cand.steamID), allowDevKey: soloAllowDev }).settle) {
+        if (laneGate(laneVerify(cand.d, soloPub), { owner: String(cand.steamID), allowDevKey: soloAllowDev }).settle) {
           RUN.soloKeyFork = (RUN.soloKeyFork | 0) + 1;
           console.log('  solo ' + m + ': ' + plog(sid) + ' another signed record under the same segment key differs (the first settles; counted)');
           break;
         }
       }
     }
-    const casual = !!((f.flags | 0) & attest.SEG_CASUAL);   // O218: guard-written casual solo run -> own ladder pair, continue-ladder debits, no milestones, no resume debit
-    const classic = !!((f.flags | 0) & attest.SEG_CLASSIC);   // O216: classic (nostalgia) run -> lifetime ladder, XP x0.5, no CP, 60s pacing
-    const sane = soloSanity(f);
+    const casual = !cc && !!((f.flags | 0) & attest.SEG_CASUAL);   // O218: guard-written casual solo run -> own ladder pair, continue-ladder debits, no milestones, no resume debit
+    const classic = !cc && !!((f.flags | 0) & attest.SEG_CLASSIC);   // O216: classic (nostalgia) run -> lifetime ladder, XP x0.5, no CP, 60s pacing
+    const sane = cc ? couchSanity(f) : soloSanity(f);
+    if (sane.length && cc && !COUCH_SIG_FLAG) {   // O606: same lever as a failed signature -- a new writer's slip holds, never flags
+      RUN.couchSigHeld = (RUN.couchSigHeld | 0) + 1;
+      if (soloKeyHeld(soloState, laneKeyOf(f, p), m, f.keyName, 'couch-sanity', nowMs))
+        ghWarn('match=' + m + ': couch segment out of bounds [' + sane.join(',') + '] ' + plog(sid) + ' -- held, not flagged (COUCH_SIG_FLAG off)');
+      return false;
+    }
     if (sane.length) {
       recordFlag(signals, c.g, m, nowMs); sigDirty = true; trustTouched.add(sid); RUN.sanity = (RUN.sanity | 0) + 1;
-      ghWarn('match=' + m + ': solo segment sanity-flagged [' + sane.join(',') + '] ' + plog(sid) + ' -- not settled');
+      ghWarn('match=' + m + ': ' + laneTag + ' segment sanity-flagged [' + sane.join(',') + '] ' + plog(sid) + ' -- not settled');
       return false;
     }
     // O124 seedcap veto: not settled, nobody flagged here (Q333) -- see the main-path veto below
     if (SEEDCAP_ENFORCE && seedcap && seedcap.veto && seedcap.veto[m]) {
       RUN.seedcapVeto = (RUN.seedcapVeto | 0) + 1;
-      ghWarn('match=' + m + ': solo segment seedcap over-cap veto -- not settled');
+      ghWarn('match=' + m + ': ' + laneTag + ' segment seedcap over-cap veto -- not settled');
       return false;
     }
-    const key = soloRunKey(p, f.seasonId, f.runSeed);
+    const key = laneKeyOf(f, p);
     const plan = soloChainPlan(soloState, key, f, m, nowMs, { recovered: !!r.recovered });
     if (plan.ok === null) { console.log('  solo ' + m + ': ' + plog(sid) + ' depth ' + f.startDepth + '->' + f.endDepth + ' waiting for its chain (' + plan.reason + ')'); return false; }
     if (plan.ok === false) {
@@ -11037,7 +11179,7 @@ async function main() {
     }
     // perk replay (2026-09-07): the pick log must reproduce the build (perk_forge) and extend the run's previous log (perk_chain).
     //   A causal contradiction, not a statistical one -> reject + processed, like a chain reject.
-    const pv = perks.verifyPerkPicks(f, soloState.runs[key], 1, PERK_CH);   // f = attest fields (carries runSeed)
+    const pv = perks.verifyPerkPicks(f, soloState.runs[key], cc ? 2 : 1, PERK_CH);   // f = attest fields (carries runSeed); O606: a couch run draws from the co-op pool with the competitive rules (SEG_COMP)
     if (!pv.ok) {
       recordFlag(signals, c.g, m, nowMs); sigDirty = true; trustTouched.add(sid); RUN.perkRej = (RUN.perkRej | 0) + 1;
       ghWarn('match=' + m + ': solo segment ' + plog(sid) + ' perk REJECT (' + pv.reason + ': ' + pv.why + ') build ' + (f.build >>> 0) + ' depth ' + f.startDepth + '->' + f.endDepth);
@@ -11052,7 +11194,9 @@ async function main() {
     //   (user ruling 0-3: the experience counts, no board does).
     const scInWin = !!(SEEDCAP_REJECT && seedcap && seedcap.suspects && seedcapRejectActive(seedcap.suspects[p], Math.floor(nowMs / 60000)));
     const cas = casual ? casualLadderOf(1) : null;   // O218: the casual solo ladder pair (endless_board_solo + season twin)
-    if (!cpId || (classic ? !enClassicSoloId : casual ? (!cas.id || (seasonId >= 1 && !cas.seasonId)) : (!compId || (seasonId >= 1 && !compSeasonId)))) { console.log('  solo ' + m + ': cp/' + (classic ? 'classic-solo' : casual ? 'casual-solo' : 'comp') + '/seasonal board unresolved -- left pending'); return false; }
+    // O606: a couch run writes the duo pair (merged) and the couch pair (always: the dual write a split relies on)
+    const couchBoardsOk = () => [compFam.DUO, couchComp].every((F) => F.id && !(seasonId >= 1 && !F.seasonId));
+    if (!cpId || (cc ? !couchBoardsOk() : classic ? !enClassicSoloId : casual ? (!cas.id || (seasonId >= 1 && !cas.seasonId)) : (!compId || (seasonId >= 1 && !compSeasonId)))) { console.log('  ' + laneTag + ' ' + m + ': cp/' + (cc ? 'duo+couch comp' : classic ? 'classic-solo' : casual ? 'casual-solo' : 'comp') + '/seasonal board unresolved -- left pending'); return false; }
     // pacing: the segment's own start attestation (single guard attester) or its first sighting
     let pend = startsPending[m];
     // Q245: a key reopened for this account -- its start row went when the other account's segment closed the key; pace from
@@ -11090,7 +11234,20 @@ async function main() {
       cp[sid] = (cp[sid] == null ? 0 : cp[sid]) - COMP.RESUME_CP; changedCp[sid] = cp[sid];
       console.log('  solo cp ' + m + ': ' + plog(sid) + ' -' + COMP.RESUME_CP + ' resume (save@' + plan.consume + ') -> ' + cp[sid]);
     }
-    if (classic) {
+    if (cc) {
+      // O606 couch competitive: the duo family for the one account (merged; COUCH_DUO=split = the couch pair only) + the couch pair
+      //   (dual write), one row each (KeepBest against his online duo best: the better run stands); the team block names the account
+      //   on both seats with the couch bit. No milestones, no cup (user 10-31). Rating history 'duoc' (read with 'duo' while merged).
+      if ((f.endDepth | 0) > 0) {
+        const packed = packEndlessScore(f.endDepth, f.score);
+        const w = () => ({ s: packed, ts: f.score | 0, build: f.build >>> 0, team: [sid, sid], cc: 1 });
+        for (const F of (COUCH_DUO_SPLIT ? [couchComp] : [compFam.DUO, couchComp])) {
+          if (F.best[sid] == null || packed > F.best[sid]) { F.best[sid] = packed; F.changed[sid] = w(); console.log('  couch best (' + F.low + ') ' + m + ': ' + plog(sid) + ' depth ' + f.endDepth + ' team ' + f.score + ' -> board ' + packed); }
+          if (F.seasonId && (f.seasonId | 0) === (seasonId | 0) && (F.seasonBest[sid] == null || packed > F.seasonBest[sid])) { F.seasonBest[sid] = packed; F.seasonChanged[sid] = w(); console.log('  couch season best (' + F.low + ') ' + m + ': ' + plog(sid) + ' -> board ' + packed); }
+        }
+      }
+      if (!PT_MODE) { ratingHistUpsert(soloState, p, 'duoc', f.seasonId, ratingRunId(key), f.endDepth, nowMs); ratingTouched.add(sid); }
+    } else if (classic) {
       // O216 classic (client knife 3.9b N2): lifetime ladder only (depth-major, bank / 1e5 tiebreak; details [bank, 0] = the exact bank),
       //   no CP (no milestones, no continue ladder, no resume debit), XP x0.5 below. The chain memory / save points work like casual.
       if ((f.endDepth | 0) > 0) {
@@ -11127,8 +11284,9 @@ async function main() {
     }
     if (xpId) creditXpEndless(c.g, { startDepth: Math.max(f.startDepth | 0, plan.proven | 0), endDepth: f.endDepth }, xp, changedXp, spSet, classic ? CLASSIC.XP_MUL : 1);   // audit B-F2: overlap credits new depth only; O216 classic x0.5
     // 5.4a career: solo endless = the default miner (forced); one game per session end; an overlap segment with no new depth adds nothing
-    if (xpId && (plan.overlap == null || (f.endDepth | 0) > (plan.proven | 0))) creditCareerEndless(c.g, { startDepth: Math.max(f.startDepth | 0, plan.proven | 0), endDepth: f.endDepth | 0, flags: f.flags | 0 }, xpState, careerTouched, { segmented: true, forced: true });
-    console.log('  solo settle ' + m + ': ' + plog(sid) + (classic ? ' classic' : (casual ? ' casual' : '')) + ' depth ' + f.startDepth + '->' + f.endDepth + ' bank ' + f.score + ' flags ' + f.flags + ((f.dispCode | 0) === attest.DISP_USER_QUIT ? ' (quit)' : '') + ' key=' + f.keyName + (v.sealed ? '' : ' [dev]') + (plan.overlap != null ? ' (overlap from ' + plan.overlap + ', proven ' + plan.proven + ')' : '') + (plan.truncated ? ' (recovered pool segment: truncated chain, head ' + plan.proven + ')' : '') + (plan.revive ? (classic ? ' (revived by a classic token resume)' : ' (revived by a casual token resume)') : ''));
+    //   O606: a couch run's character block (the guard writes each seat's character) -> P1's own seat (forced: false)
+    if (xpId && (plan.overlap == null || (f.endDepth | 0) > (plan.proven | 0))) creditCareerEndless(c.g, { startDepth: Math.max(f.startDepth | 0, plan.proven | 0), endDepth: f.endDepth | 0, flags: f.flags | 0 }, xpState, careerTouched, { segmented: true, forced: !cc });
+    console.log('  ' + laneTag + ' settle ' + m + ': ' + plog(sid) + (cc ? ' couch pc ' + f.N : classic ? ' classic' : (casual ? ' casual' : '')) + ' depth ' + f.startDepth + '->' + f.endDepth + ' bank ' + f.score + ' flags ' + f.flags + ((f.dispCode | 0) === attest.DISP_USER_QUIT ? ' (quit)' : '') + ' key=' + f.keyName + (v.sealed ? '' : ' [dev]') + (plan.overlap != null ? ' (overlap from ' + plan.overlap + ', proven ' + plan.proven + ')' : '') + (plan.truncated ? ' (recovered pool segment: truncated chain, head ' + plan.proven + ')' : '') + (plan.revive ? (classic ? ' (revived by a classic token resume)' : ' (revived by a casual token resume)') : ''));
     soloDone();
     return true;
   };
@@ -12752,9 +12910,15 @@ async function main() {
       const rosterC = rosterConsensus(cg);
       const casC = casualLadderOf(pcC);   // 2 base / 3 trio / 4 quad
       const famC = ((tC.flags | 0) & attest.SEG_COMP) ? compFam[compFamKeyOf(pcC)] : null;   // team competitive segment: its family pair
+      // O606: a couch segment (only reached once SC_COUCH_CONVICT lets the auditor queue one): the duo pair (it may sit there while
+      //   merged; a row is deleted only when it still carries exactly this run's value) + the couch pair; its rating history is 'duoc'
+      const couchCor = pcC >= 2 && !!((tC.flags | 0) & attest.SEG_COUCH);
       const targets = clsC ? (pcC === 1 ? [[enClassicSoloId, endlessClassicSoloBest, 'solo-classic']] : [[classicLadderOf(pcC).id, classicLadderOf(pcC).best, classicLadderOf(pcC).low + '-classic']])
       : pcC === 1 ? [   // O93 solo competitive segment: its ladder pair
         [compId, compBest, 'solo-comp'], [compSeasonId, compSeasonBest, 'solo-comp-season'], [compWeekId, compWeekBest, 'solo-comp-week'],
+      ] : couchCor ? [
+        [compFam.DUO.id, compFam.DUO.best, 'duo-comp'], [compFam.DUO.seasonId, compFam.DUO.seasonBest, 'duo-comp-season'],
+        [couchComp.id, couchComp.best, 'couch-comp'], [couchComp.seasonId, couchComp.seasonBest, 'couch-comp-season'],
       ] : famC ? [
         [famC.id, famC.best, famC.low + '-comp'], [famC.seasonId, famC.seasonBest, famC.low + '-comp-season'], [famC.weekId, famC.weekBest, famC.low + '-comp-week'],
       ] : [
@@ -12762,7 +12926,7 @@ async function main() {
         [casC.seasonId, casC.seasonBest, 'endless-season'],
       ];
       // O103 rating history (client knife 5.1a): the convicted run leaves the flagged seats' competitive history (best recomputed), their row is redone below
-      const famR = clsC ? null : (pcC === 1 ? 'solo' : (famC ? famC.low : null));
+      const famR = clsC ? null : (pcC === 1 ? 'solo' : couchCor ? 'duoc' : (famC ? famC.low : null));
       const keyR = !famR ? null : (pcC === 1 ? null : teamRunKey(Object.values(rosterC).map(String), tC.seasonId, cg[0].d[4] | 0));
       for (const seat of (cor.seats || [])) {
         const sidC = rosterC[seat] != null ? String(rosterC[seat]) : null;
@@ -12783,7 +12947,7 @@ async function main() {
       }
       // O180 (client knife 5.1c-1): a competitive run's row on an EARLIER weekly board (it settled in a week since closed) leaves it
       //   too, and a cup mark that run won is revoked (the place is not re-awarded: architecture rule 10)
-      if (!PT_MODE && famR) {
+      if (!PT_MODE && famR && !couchCor) {   // (O606: a couch run never wrote a cup row)
         const sidsC = (cor.seats || []).map((seat) => (rosterC[seat] != null ? String(rosterC[seat]) : null)).filter(Boolean);
         const baseC = pcC === 1 ? ENDLESS_COMP_LB : famC.name;
         for (let k = 1; k <= CUP.CHECK_BACK; k++) {
@@ -13088,7 +13252,8 @@ async function main() {
   ebAfterPool(ENDLESS_COMP_LB, changedComp, wComp); ebAfterPool(seasonBoardName(ENDLESS_COMP_LB, seasonId), changedCompSeason, wCompSeason);   // Q319
   if (Object.keys(changedComp).length || Object.keys(changedCompSeason).length) console.log('solo comp writes: ' + cmOk + '/' + Object.keys(changedComp).length + ' lifetime, ' + cmsOk + '/' + Object.keys(changedCompSeason).length + ' season');
   // team competitive ladder writes (duo / trio, lifetime + season) -- same row shape as the solo ladder (details = exact team bank)
-  for (const fam of Object.values(compFam)) {
+  //   O606: + the couch pair (its pools stay empty on the trial jobs)
+  for (const fam of Object.values(compFam).concat([couchComp])) {
     for (const [pool, bid, label] of [[fam.changed, fam.id, fam.low + ' comp'], [fam.seasonChanged, fam.seasonId, fam.low + ' comp season']]) {
       const lbName = pool === fam.changed ? fam.name : seasonBoardName(fam.name, seasonId);   // Q319: the board a waiting write names
       const sids = Object.keys(pool || {});
@@ -13229,7 +13394,7 @@ async function main() {
   // client knife 5.1a (2026-10-15, user call 10-07 "casual saves no longer expire with the season"): only the COMPETITIVE save boxes are pruned
   //   past their season (the competitive run is bound to the season seed); the casual checkpoint rows (and the classic ones, never on this
   //   list) stay until the run is resumed or replaced -- the client stopped refusing a past-season casual save the same day.
-  for (const [sbxId, sbxLabel] of [[saveBoxId, 'save box'], [compFam.DUO.saveBoxId, 'duo save box'], [compFam.TRIO.saveBoxId, 'trio save box'], [compFam.QUAD.saveBoxId, 'quad save box']]) {
+  for (const [sbxId, sbxLabel] of [[saveBoxId, 'save box'], [compFam.DUO.saveBoxId, 'duo save box'], [compFam.TRIO.saveBoxId, 'trio save box'], [compFam.QUAD.saveBoxId, 'quad save box'], [couchComp.saveBoxId, 'couch save box']]) {   // O606: + the couch competitive box
   if (sbxId && seasonId >= 1) {
     try {
       const sb = await readBoardAll(sbxId, sbxLabel);
@@ -13284,7 +13449,8 @@ module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CLASSIC_OWN
   ENDLESS_LB_CLASSIC_DUO, ENDLESS_LB_CLASSIC_TRIO, ENDLESS_LB_CLASSIC_QUAD, SAVE_BOX_LB_CLASSIC_DUO, SAVE_BOX_LB_CLASSIC_TRIO, SAVE_BOX_LB_CLASSIC_QUAD,   // client knife 3.9b N3 (team classic lane)
   ENDLESS_COMP_LB_OVERALL, overallScore, overallScoreMean, overallDominant,   // knife 3.5d composite ladder
   ENDLESS_LB_OVERALL, ENDLESS_LB_CLASSIC_OVERALL, V51B_PT,   // O276 casual / classic composites + the knife 5.1b rollout gate
-  TEAM_MAGIC, TEAM_VER, teamBlock, ladderDetails,   // O207 team block on team-ladder rows
+  TEAM_MAGIC, TEAM_VER, TEAM_F_COUCH, teamBlock, ladderDetails,   // O207 team block on team-ladder rows (O606: + the couch bit)
+  ENDLESS_COMP_LB_COUCH, SAVE_BOX_LB_COUCH, COUCH_DUO_SPLIT, COUCH_SIG_FLAG, couchSanity, isCouchRec, ratingHistView,   // O606 couch competitive (client knife 5c)
   PREFIX, RANKED_LB, LP_LB, XP_LB, UNMATCHED_LB, SUPPORTER_WALL_LB, SUPPORTER_OPTOUT_LB, CAMPAIGN_ENDLESS_DIF_MAX, CRON_PULSE_LB, TRUST_LEDGER_LB,   // cloud audit R1-X13 / Q40: the sanctions exile list is derived from the board names (test/sanctions-boards.js)
   CAMPAIGN_ENDLESS_BOX_PREFIX, CAMPAIGN_ENDLESS_LB_PREFIX, CAMPAIGN_ENDLESS_SAVE_PREFIX, CAMPAIGN_ENDLESS_SUFFIX, CAMPAIGN_ENDLESS_OFFENSE_LB, CAMPAIGN_ENDLESS_FILE, CE_MAIL_MIN, CE_SETTLED_TTL_MS, loadCe, saveCe,   // client knife 3.9b N4 (Gold Rush lane)
   absentRosterSeats, absenceHold, shardPlan, persistCensus, fmtCensus, soloHoldsChain, transientStatus, ABSENT_GRACE_MS, ABSENT_GRACE_MIN_MS, LEDGER_SHARDS,   // R1-B2-04 / R1-X14 absent-seat hold

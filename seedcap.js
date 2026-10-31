@@ -134,6 +134,13 @@ const CONVICTION_KEEP = 8;   // su.cv / su.fpm: the latest convictions [m, t] an
 //   record (sev 0) and the mail goes out at once (once per core per day). Past it the core enforces with no ops action.
 const SC_OBS_H = Math.max(0, Number(process.env.SC_OBS_H != null ? process.env.SC_OBS_H : 72));
 const SC_OBS_N = Math.max(0, Number(process.env.SC_OBS_N != null ? process.env.SC_OBS_N : 200));
+// O606 (client knife 5c, 2026-10-31): a couch segment (SEG_COUCH: two local seats on one account, guard-signed) is audited like any
+//   endless record (the duo world, its own core by the signing package) but judged like an observed core: an over-cap group is
+//   VETOED, nobody convicted, no correction queued, a sev-0 observation record kept. The couch tracker / record are new, and
+//   the offense board ignores every switch -- a slip between the guard and a cap core must not land an honest player there
+//   (architecture decision 10). The audited chain still extends (self stays set). SC_COUCH_CONVICT=1 after a season with no
+//   over-cap couch audit on a re-audit = judged like every other record.
+const SC_COUCH_CONVICT = process.env.SC_COUCH_CONVICT === '1';
 
 const nowMin = () => Math.floor(Date.now() / 60000);
 
@@ -383,6 +390,7 @@ function chainStartBank(st, rosterPids, pc, startDepth, runSeed) {
 function tailOf(d) {
   let t = null;
   if ((d[8] | 0) === 1) t = attest.soloTail(d);
+  else if ((d[8] | 0) >= 2) t = attest.couchTail(d);   // O606: a couch record's team-shaped tail + its signing package (exact core); null = not couch
   if (!t) t = v.endlessTail(d);
   if (t && t.runSeed == null) t.runSeed = d[4] | 0;   // knife 5.10a: rules v2 candidate set needs the run seed (d[4] in every layout)
   return t;
@@ -481,7 +489,8 @@ function pendingOfGroup(st, m, g) {
     //   judged the seats differently never did, so it is not a seat the verdict may convict (every other group: all of g, as before)
     const claimed = all.filter(r => vecOf(r.d) === vecOf(d0));
     return { m, mt, pc, scores, p, tail, roster, self: selfSeatsOf(claimed, roster), runSeed, keyId: (p.entry === 'endless' && p.keyId > 0) ? (p.keyId | 0) : 0,
-      w: new Set(all.map(r => String((r && (r.w || r.steamID)) || ''))).size };
+      w: new Set(all.map(r => String((r && (r.w || r.steamID)) || ''))).size,
+      couch: !!(tail && pc >= 2 && ((tail.flags | 0) & attest.SEG_COUCH)) };   // O606: judged like an observed core (SC_COUCH_CONVICT)
   }
 }
 function pickAuditable(st, groups) {
@@ -628,13 +637,15 @@ function applyAudit(st, pending, cliMap, processed, t, opt) {
       const selfSet = new Set(x.self || []);
       const selfOver = overSeats.filter(s2 => selfSet.has(s2) && x.roster[s2]);
       // O285 (1): a core inside its observation window convicts nobody (the veto above stands)
-      const obs = !!(opt && opt.obsOf && opt.obsOf(k));
+      const obsCore = !!(opt && opt.obsOf && opt.obsOf(k));
+      const couchHold = !!x.couch && !(opt && opt.couchConvict != null ? opt.couchConvict : SC_COUCH_CONVICT);   // O606
+      const obs = obsCore || couchHold;
       const blamed = obs ? [] : selfOver;
       const unblamed = overSeats.filter(s2 => selfOver.indexOf(s2) < 0);
       const nOf = {};
       if (obs) for (const seat of selfOver) {
         const sc0 = x.scores[seat] | 0;
-        trustLedger.queuePush(st, { t, src: 'sc', p: v.pid(x.roster[seat]), sev: 0, m: x.m, ctx: { k, obs: 1, cap: capEff | 0, s: sc0, over: sc0 - (capEff | 0), mt: x.mt | 0, pc: x.pc | 0, w: x.w | 0 } });
+        trustLedger.queuePush(st, { t, src: 'sc', p: v.pid(x.roster[seat]), sev: 0, m: x.m, ctx: Object.assign({ k, obs: 1, cap: capEff | 0, s: sc0, over: sc0 - (capEff | 0), mt: x.mt | 0, pc: x.pc | 0, w: x.w | 0 }, couchHold ? { couch: 1 } : {}) });
       }
       for (const seat of blamed) {
         const sid = x.roster[seat];
@@ -657,12 +668,13 @@ function applyAudit(st, pending, cliMap, processed, t, opt) {
         st.corrections.push({ id: 'sc-' + x.m, m: x.m, seats: overSeats, t });
       }
       flags.push({
-        m: x.m, t, runSeed: x.runSeed | 0, mt: x.mt | 0, cap: capEff | 0, k, obs,
+        m: x.m, t, runSeed: x.runSeed | 0, mt: x.mt | 0, cap: capEff | 0, k, obs, couch: couchHold ? 1 : 0,   // O606: a couch over-cap mails as an observation of its core
         observed: obs ? selfOver.map(s2 => ({ seat: s2, score: x.scores[s2] | 0 })) : [],
         offenders: blamed.map(s2 => ({ seat: s2, sid: String(x.roster[s2]), score: x.scores[s2] | 0, n: nOf[s2] | 0, ne: v.seedcapNEff(st.suspects[v.pid(x.roster[s2])]) })),
         unattributed: unblamed.map(s2 => ({ seat: s2, score: x.scores[s2] | 0 })),
       });
-      if (obs) console.log('seedcap: core ' + k + ' is inside its observation window (first ' + SC_OBS_H + ' h / ' + SC_OBS_N + ' honest audits) -- m=' + x.m + ' vetoed, nobody convicted (' + selfOver.length + ' self-written seat(s) recorded only)');
+      if (obsCore) console.log('seedcap: core ' + k + ' is inside its observation window (first ' + SC_OBS_H + ' h / ' + SC_OBS_N + ' honest audits) -- m=' + x.m + ' vetoed, nobody convicted (' + selfOver.length + ' self-written seat(s) recorded only)');
+      else if (couchHold) console.log('seedcap: couch segment m=' + x.m + ' vetoed, nobody convicted, no correction (couch audits observe only until SC_COUCH_CONVICT; ' + selfOver.length + ' self-written seat(s) recorded only)');
       // pids only in logs -- never sids (public run logs)
       console.log('::warning::seedcap OVER-CAP m=' + x.m + ' cap=' + capEff + ' scores=' + x.scores.join(',') +
         ' seats=' + overSeats.join(',') + ' pids=' + blamed.map(s2 => v.pid(x.roster[s2]).slice(0, 8)).join(',') +

@@ -114,6 +114,10 @@ jobs:
           # client knife 5.8b: disputed two-voice 1V1 keys with one usable signed side -- record = counted and logged only (what the
           #   signature would settle); enforce = settled by it (turned on remotely once the data hold, the companion plan section 2.6)
           MSIG_PAIR: record
+          # client knife 5c (O606): couch competitive segments (two local seats, one account, guard-signed) settle into the duo
+          #   competitive family -- merge = the duo ladder + composite + duo rating (default); split = later couch runs go to the
+          #   couch ladder only (forward-only: couch rows already on the duo ladder stay). One line to flip, no client build.
+          COUCH_DUO: merge
           # O198 v1 trust ledger (knife 5.5b-1): this job writes trust.json; the sanctions twin's file is a read-only
           # consult (its event queue), like seedcap.json above
           TRUST_FILE: trust.json

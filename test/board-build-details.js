@@ -34,7 +34,7 @@ const withBuild = writes.filter(l => /\}, ladderDetails\(w\)\);/.test(l));
 // (+ the quiet run's retry of an endless best write that failed, cloud audit Q319: ebRetry writes it through the same writer)
 assert('15 endless ladder writes send ladderDetails(w) (11 [ts, build] + 2 classic + 1 weekly cup board [O180] + 1 retry of a waiting best [Q319]; found ' + withBuild.length + ' of ' + writes.length + ' SetLeaderboardScore details writes)', withBuild.length === 15);
 assert('no endless ladder write builds its details inline any more (one writer: ladderDetails)', !writes.some(l => /\}, \[w\.ts \| 0, (w\.build \| 0|0)\]\);/.test(l)));
-assert('ladderDetails = [w.ts | 0, w.build | 0] + the team block when the entry has a roster and the rollout gate is open', /function ladderDetails\(w\) \{ return \[w\.ts \| 0, w\.build \| 0\]\.concat\(w\.team && V51B \? teamBlock\(w\.team\) : \[\]\); \}/.test(src));
+assert('ladderDetails = [w.ts | 0, w.build | 0] + the team block when the entry has a roster and the rollout gate is open', /function ladderDetails\(w\) \{ return \[w\.ts \| 0, w\.build \| 0\]\.concat\(w\.team && V51B \? teamBlock\(w\.team, w\.cc\) : \[\]\); \}/.test(src));   // O606: w.cc = the couch bit on a couch row
 assert('no endless ladder write still sends the 1-int details [w.ts | 0]', !/\}, \[w\.ts \| 0\]\);/.test(src));
 // the build word is a real number even for pre-perk writers: the tail parser defaults absent ints to 0 and the pools use >>> 0
 assert('pools coerce with >>> 0 (absent tail build -> 0, never undefined/NaN in details)', !/build: (f|t)\.build \}/.test(src));

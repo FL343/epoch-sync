@@ -313,7 +313,9 @@ console.log('-- wiring pins --');
   assert('main app provisions the solo ladder + save box up-front (before the fresh-match early returns)',
     /for \(const \[nm, trusted\] of \[\[ENDLESS_COMP_LB, true\], \[SAVE_BOX_LB, false\], \[ENDLESS_COMP_LB_DUO, true\], \[SAVE_BOX_LB_DUO, false\], \[ENDLESS_COMP_LB_TRIO, true\], \[SAVE_BOX_LB_TRIO, false\], \[ENDLESS_COMP_LB_QUAD, true\], \[SAVE_BOX_LB_QUAD, false\], \[ENDLESS_COMP_LB_OVERALL, true\], \[ENDLESS_LB_SOLO, true\], \[SAVE_BOX_LB_CASUAL, false\],/.test(src) && src.indexOf('solo boards: provisioned') < src.indexOf('no consistent matches'));   // + overall ladder (knife 3.5d) + quad family (client knife 3.7a) + classic surface continues the list (client knife 3.9b N3)
   assert('solo segments enter the settle loop as their own consistent entries (every pc=1 record of the group; audit B-F10)', /consistentMatches\.push\(\{ m, g: solos, void: false, solo: true \}\)/.test(src) && /if \(c\.solo\) \{ if \(await soloSettle\(c\)\) settledSolo\+\+; continue; \}/.test(src));
-  assert('solo settle verifies the signature and binds the row owner (first verifying candidate wins)', /attest\.soloSettleGate\(cv, \{ owner: String\(cand\.steamID\), allowDevKey: soloAllowDev \}\)/.test(src) && /if \(!v \|\| cg\.settle \|\| cg\.pending\) \{ r = cand;/.test(src));
+  // O606 (client knife 5c): the lane picks its verifier / gate by c.couch (solo: verifySoloRecord / soloSettleGate as before)
+  assert('solo settle verifies the signature and binds the row owner (first verifying candidate wins)', /laneGate\(cv, \{ owner: String\(cand\.steamID\), allowDevKey: soloAllowDev \}\)/.test(src) && /if \(!v \|\| cg\.settle \|\| cg\.pending\) \{ r = cand;/.test(src)
+    && /const laneVerify = \(d, pub\) => \(cc \? attest\.verifyCouchRecord\(d, pub\) : attest\.verifySoloRecord\(d, pub\)\);/.test(src) && /const laneGate = cc \? attest\.couchSettleGate : attest\.soloSettleGate;/.test(src));
   assert('audit B-F9: inside the seedcap reject window the chain still advances, only the outputs are discarded', /inside seedcap reject window -- own settlement discarded except XP \(chain advanced to/.test(src) && (src.match(/soloAdvance\(soloState, key, f, m, plan, nowMs\);/g) || []).length >= 2);
   assert('audit B-F4: solo ladder paging joins the on-demand base-read rule', /compComplete = br\.complete !== false/.test(src) && /readUserEntry\(compId, sid, 'solo comp'\)/.test(src) && /\|\| \(compId && !compComplete\) \|\| \(compSeasonId && !compSeasonComplete\)/.test(src));
   assert('a save point is consumed once and the resume debit rides the consume', /if \(plan\.consume\) \{[\s\S]{0,120}COMP\.RESUME_CP/.test(src));
@@ -321,7 +323,7 @@ console.log('-- wiring pins --');
   //   run's chain memory, casual co-op without), rejects are processed like chain rejects, and the memory keeps the log
   assert('perk replay wired into the solo lane (chain memory) + team comp lane + casual lane; rejects processed',
     // knife 5.10a: every lane passes the job channel (rules v2 on EA, v1 on playtest / demo) and the run seed (team lanes fill it from d[4])
-    /perks\.verifyPerkPicks\(f, soloState\.runs\[key\], 1, PERK_CH\)/.test(src) && /perks\.verifyPerkPicks\(f, soloState\.runs\[key\], pc7, PERK_CH\)/.test(src)
+    /perks\.verifyPerkPicks\(f, soloState\.runs\[key\], cc \? 2 : 1, PERK_CH\)/.test(src) && /perks\.verifyPerkPicks\(f, soloState\.runs\[key\], pc7, PERK_CH\)/.test(src)   // O606: a couch run = 2 seats (co-op pool)
     && /perks\.verifyPerkPicks\(\{ build: t\.build >>> 0, picksLo: t\.picksLo \| 0, picksHi: t\.picksHi \| 0, seasonId: t\.seasonId \| 0, endDepth: t\.endDepth \| 0, runSeed: g\[0\]\.d\[4\] \| 0 \}, null, pc7, PERK_CH\)/.test(src)
     && /rerollLo: t\.rerollLo >>> 0, rerollHi: t\.rerollHi >>> 0, runSeed: g\[0\]\.d\[4\] \| 0 \};/.test(src)
     && /const PERK_CH = KEY_CHANNEL \|\| \(PT_MODE \? 'playtest' : 'ea'\);/.test(src)

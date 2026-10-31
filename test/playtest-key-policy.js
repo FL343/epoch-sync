@@ -181,7 +181,7 @@ console.log('== D) wiring ==');
   assert('validate.js: recovery / campaign / campaign endless / solo lanes all load through loadJobPubTable', uses >= 5, 'uses=' + uses);
   assert('validate.js: the recovery keys stay readable for the recovery pick and RECOVERED solo segments only (exempt = recCfg.keys)',
     /recoverPick\(rows, recCfg, loadJobPubTable\(Date\.now\(\), recCfg\.keys\)/.test(v) && /const soloPub = loadJobPubTable\(nowMs\) \|\| \{\};/.test(v) &&
-    /const soloPubRec = recCfg \? \(loadJobPubTable\(nowMs, recCfg\.keys\)/.test(v) && /verifySoloRecord\(cand\.d, cand\.recovered \? soloPubRec : soloPub\)/.test(v));
+    /const soloPubRec = recCfg \? \(loadJobPubTable\(nowMs, recCfg\.keys\)/.test(v) && /laneVerify\(cand\.d, cand\.recovered \? soloPubRec : soloPub\)/.test(v));   // O606: laneVerify = the solo / couch verifier
   const sc = s.match(/attest\.loadPubTable\([^;]*;/g) || [];
   assert('seedcap.js: every key table read passes the job policy (channel: SEEDCAP_CHANNEL)', sc.length >= 1 && sc.every(x => /channel: SEEDCAP_CHANNEL/.test(x)), sc.join(' | '));
   assert('held solo segments are counted (RUN.keyHeld / keyHeldNew) and shown in the step summary', /RUN\.keyHeld = \(RUN\.keyHeld \| 0\) \+ 1/.test(v) && /s\('keyHeld', 0\)/.test(v) && /s\('keyHeldNew', 0\)/.test(v));

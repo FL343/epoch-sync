@@ -429,12 +429,12 @@ function literalSecretNames(srcs) {
 {
   const l0 = s.exileSources(0), l1 = s.exileSources(1), l2 = s.exileSources(2);
   ok('preseason: no season twins', l0.every(n => !/_s\d+$/.test(n)));
-  ok('season 1: _s1 twins of the eleven seasonal display families, nothing else gains a twin',
+  ok('season 1: _s1 twins of the twelve seasonal display families (O606: + endless_comp_couch), nothing else gains a twin',
     l1.filter(n => /_s1$/.test(n)).sort().join(',') === ['endless_board', 'endless_board_solo', 'endless_board_trio', 'endless_board_quad', 'endless_board_overall',
-      'endless_comp_solo', 'endless_comp_duo', 'endless_comp_trio', 'endless_comp_quad', 'endless_comp_overall', 'lp_ladder'].map(n => n + '_s1').sort().join(','));
+      'endless_comp_solo', 'endless_comp_duo', 'endless_comp_trio', 'endless_comp_quad', 'endless_comp_couch', 'endless_comp_overall', 'lp_ladder'].map(n => n + '_s1').sort().join(','));
   ok('season 2: keeps the season 1 twins (an archived season board is still shown) and adds _s2',
-    l2.includes('lp_ladder_s1') && l2.includes('lp_ladder_s2') && l2.includes('endless_comp_overall_s2') && l2.includes('endless_board_overall_s2') && l2.length === l0.length + 22);
-  ok('preseason list: 24 display boards (campaign endless counted per difficulty)', l0.length === 24);
+    l2.includes('lp_ladder_s1') && l2.includes('lp_ladder_s2') && l2.includes('endless_comp_overall_s2') && l2.includes('endless_board_overall_s2') && l2.length === l0.length + 24);
+  ok('preseason list: 25 display boards (campaign endless counted per difficulty; O606: + endless_comp_couch)', l0.length === 25);
   ok('twin names come from validate.js seasonBoardName (the name the reconcile writes)', l1.includes(v.seasonBoardName(v.ENDLESS_COMP_LB_DUO, 1)));
   ok('campaign endless ladders expanded over difficulties 1..CAMPAIGN_ENDLESS_DIF_MAX',
     v.CAMPAIGN_ENDLESS_DIF_MAX === 3 && ['campaign_endless_d1', 'campaign_endless_d2', 'campaign_endless_d3'].every(n => l0.includes(n)) && !l0.includes('campaign_endless_d4'));

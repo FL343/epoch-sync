@@ -238,7 +238,7 @@ const BEFORE = {
   // a seedcap correction of the waiting run goes on as before
   noCancel: ['          if (dC && ebCancel(dC, sidC, packedC)) {', '          if (false) {'],
   // the team is not kept with the waiting write
-  noTeam: ["    if (Array.isArray(w.team) && w.team.length) nw.tm = w.team.map((s) => pid(String(s)));\n", ''],
+  noTeam: ["    if (Array.isArray(w.team) && w.team.length) { nw.tm = w.team.map((s) => pid(String(s))); if (w.cc) nw.cc = 1; }   // O606: a couch row keeps its couch bit when written later\n", ''],
 };
 let mutN = 0;
 function mutant(keys, tag) {
