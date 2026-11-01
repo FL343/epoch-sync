@@ -47,6 +47,10 @@ console.log('=== O606 couch segments in the seed-cap audit ===');
   const team = couchRec(SID, 9102, 5, [600, 400], A.SEG_COMP | A.SEG_FINAL);
   const pt = sc.pendingOfGroup({ audited: {}, chain: {} }, 'k2', [{ d: team, w: SID, steamID: SID, roster: v.decodeRoster(team) }]);
   ok('[1] a record without the couch bit is not marked couch', pt && pt.couch === false);
+  // knife C3a (O278): a casual couch segment (COUCH + CASUAL, no COMP) is a couch record too -> the same block-only path until SC_COUCH_CONVICT
+  const cas = couchRec(SID, 9103, 5, [600, 400], A.SEG_CASUAL | A.SEG_COUCH | A.SEG_FINAL);
+  const pc = sc.pendingOfGroup({ audited: {}, chain: {} }, 'k3', [{ d: cas, w: SID, steamID: SID, roster: v.decodeRoster(cas) }]);
+  ok('[1] knife C3a: a casual couch record is marked couch (block, never convict)', pc && pc.couch === true && pc.keyId === 2099103199, pc ? JSON.stringify({ couch: pc.couch, keyId: pc.keyId }) : 'null');
 }
 
 const entry = (m, scores, couch, runSeed) => ({ m, mt: 7, pc: 2, scores, p: { entry: 'endless' }, tail: { startDepth: 0, endDepth: 5, flags: A.SEG_COMP | (couch ? A.SEG_COUCH : 0) },

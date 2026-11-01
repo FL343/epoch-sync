@@ -97,7 +97,8 @@ const EXILE_DISPLAY = Object.freeze([
   { key: 'ENDLESS_COMP_LB_DUO', season: true },
   { key: 'ENDLESS_COMP_LB_TRIO', season: true },
   { key: 'ENDLESS_COMP_LB_QUAD', season: true },
-  { key: 'ENDLESS_COMP_LB_COUCH', season: true },   // O606 couch competitive (endless_comp_couch: the dual write; merged rows also sit on the duo ladder)
+  { key: 'ENDLESS_COMP_LB_COUCH', season: true },
+  { key: 'ENDLESS_LB_COUCH', season: true },   // knife C3a casual couch ladder (endless_board_couch + season twins)   // O606 couch competitive (endless_comp_couch: the dual write; merged rows also sit on the duo ladder)
   { key: 'ENDLESS_COMP_LB_OVERALL', season: true },
   { key: 'ENDLESS_LB_OVERALL', season: true },      // casual composite (endless_board_overall; inputs = the four casual ladders above)
   { key: 'ENDLESS_LB_CLASSIC_SOLO' },               // classic (nostalgia) endless: lifetime ladders only
@@ -146,6 +147,7 @@ const EXILE_KEEP = Object.freeze({
   SAVE_BOX_LB_QUAD: 'endless save rows (a save, not a ranking)',
   SAVE_BOX_LB_CASUAL: 'endless save rows (a save, not a ranking)',
   SAVE_BOX_LB_COUCH: 'endless save rows (a save, not a ranking)',
+  SAVE_BOX_LB_CASUAL_COUCH: 'endless save rows (a save, not a ranking)',   // knife C3a
   SAVE_BOX_LB_CLASSIC: 'endless save rows (a save, not a ranking)',
   SAVE_BOX_LB_CLASSIC_DUO: 'endless save rows (a save, not a ranking)',
   SAVE_BOX_LB_CLASSIC_TRIO: 'endless save rows (a save, not a ranking)',

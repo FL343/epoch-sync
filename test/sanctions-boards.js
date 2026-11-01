@@ -429,12 +429,12 @@ function literalSecretNames(srcs) {
 {
   const l0 = s.exileSources(0), l1 = s.exileSources(1), l2 = s.exileSources(2);
   ok('preseason: no season twins', l0.every(n => !/_s\d+$/.test(n)));
-  ok('season 1: _s1 twins of the twelve seasonal display families (O606: + endless_comp_couch), nothing else gains a twin',
+  ok('season 1: _s1 twins of the thirteen seasonal display families (O606: + endless_comp_couch; knife C3a: + endless_board_couch), nothing else gains a twin',
     l1.filter(n => /_s1$/.test(n)).sort().join(',') === ['endless_board', 'endless_board_solo', 'endless_board_trio', 'endless_board_quad', 'endless_board_overall',
-      'endless_comp_solo', 'endless_comp_duo', 'endless_comp_trio', 'endless_comp_quad', 'endless_comp_couch', 'endless_comp_overall', 'lp_ladder'].map(n => n + '_s1').sort().join(','));
+      'endless_comp_solo', 'endless_comp_duo', 'endless_comp_trio', 'endless_comp_quad', 'endless_comp_couch', 'endless_comp_overall', 'endless_board_couch', 'lp_ladder'].map(n => n + '_s1').sort().join(','));
   ok('season 2: keeps the season 1 twins (an archived season board is still shown) and adds _s2',
-    l2.includes('lp_ladder_s1') && l2.includes('lp_ladder_s2') && l2.includes('endless_comp_overall_s2') && l2.includes('endless_board_overall_s2') && l2.length === l0.length + 24);
-  ok('preseason list: 29 display boards (campaign endless + campaign story counted per difficulty; O606: + endless_comp_couch; knife 5d: + campaign_story_d1..d3; knife D3: + rfduo)', l0.length === 29);
+    l2.includes('lp_ladder_s1') && l2.includes('lp_ladder_s2') && l2.includes('endless_comp_overall_s2') && l2.includes('endless_board_overall_s2') && l2.length === l0.length + 26);
+  ok('preseason list: 30 display boards (campaign endless + campaign story counted per difficulty; O606: + endless_comp_couch; knife 5d: + campaign_story_d1..d3; knife D3: + rfduo; knife C3a: + endless_board_couch)', l0.length === 30);
   ok('knife D3: the couch classic duo ladder is exiled (lifetime, no season twin); its run box and save rows stay up',
     l0.includes('rfduo') && !l1.includes('rfduo_s1') && !l0.includes('rfduo_box') && !l0.includes('rfduo_save'));
   ok('twin names come from validate.js seasonBoardName (the name the reconcile writes)', l1.includes(v.seasonBoardName(v.ENDLESS_COMP_LB_DUO, 1)));

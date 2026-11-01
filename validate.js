@@ -6038,6 +6038,13 @@ const SAVE_BOX_LB_CASUAL = process.env.SAVE_BOX_LB_CASUAL || 'endless_save_box_c
 const ENDLESS_COMP_LB_COUCH = process.env.ENDLESS_COMP_LB_COUCH || 'endless_comp_couch';
 const SAVE_BOX_LB_COUCH = process.env.SAVE_BOX_LB_COUCH || 'endless_save_box_couch';
 const COUCH_DUO_SPLIT = process.env.COUCH_DUO === 'split';
+// knife C3a (O278, client 2026-11-01): couch CASUAL endless, 2..4 local seats on one account -- the guard judges (casual line goalBase(d) x N,
+//   3 lives, continues from seat 0 only = P1 pays) and signs the same 0xE8 couch record with SEG_CASUAL instead of SEG_COMP. Settled in the solo
+//   lane onto its OWN ladder (lifetime + season twin), never the online casual boards nor the composite (user 11-01: a separate couch board,
+//   'experimental'); no milestones / cup / rating. Its save box holds the guard's casual couch checkpoint rows (not season-pruned: casual saves
+//   never expire, knife 5.1a). Casual family naming: the test base carries _test in the middle (endless_board_test_couch).
+const ENDLESS_LB_COUCH = process.env.ENDLESS_LB_COUCH || 'endless_board_couch';
+const SAVE_BOX_LB_CASUAL_COUCH = process.env.SAVE_BOX_LB_CASUAL_COUCH || 'endless_save_box_casual_couch';
 // a couch segment whose signature or bounds check fails is held + warned once, NOT flagged into the trust ledger until a season
 //   showed the three-way byte lock (JS reference / guard C++ / this reader) holds in the field: one slip would flag every honest
 //   couch run. COUCH_SIG_FLAG=1 = judged like a solo segment (flag, key stays open).
@@ -6717,9 +6724,11 @@ function isCouchRec(r) {
 // structural bounds on a VERIFIED couch segment (O606, knife 5c; flag-don't-settle like soloSanity). v1 = competitive, two seats:
 //   COUCH and COMP both set, nothing but SUSPENDED / FINAL / RESUMED beside them; no continues / tokens (one life); the per-seat
 //   cap is the two-seat line (each seat <= endlessGoalFor(end, 2) x SCORE_MULT, the team-lane bound). durationSec is not a bound (Q242).
+//   knife C3a (O278, client 2026-11-01): a CASUAL couch segment (2..4 seats, COUCH + CASUAL, never COMP) takes couchCasualSanity below.
 function couchSanity(f) {
   const out = [];
   const fl = f.flags | 0;
+  if ((fl & attest.SEG_CASUAL) && !(fl & attest.SEG_COMP)) return couchCasualSanity(f);
   if ((f.N | 0) !== 2) out.push('pc');
   if (!(fl & attest.SEG_COUCH) || !(fl & attest.SEG_COMP)) out.push('flags');
   if ((fl & ~(attest.SEG_COUCH | attest.SEG_COMP | attest.SEG_SUSPENDED | attest.SEG_FINAL | attest.SEG_RESUMED)) !== 0 || ((fl & attest.SEG_SUSPENDED) && (fl & attest.SEG_FINAL))) out.push('flags');
@@ -6732,6 +6741,29 @@ function couchSanity(f) {
   if (!(fl & attest.SEG_FINAL) && (f.dispCode | 0) !== attest.DISP_FINISHED) out.push('disp');   // B-F7 (team lane): only the run's last segment may be a quit
   if (out.indexOf('depth') < 0 && out.indexOf('pc') < 0) {
     const cap = endlessGoalFor(Math.max(1, f.endDepth | 0), 2) * ENDLESS.SCORE_MULT;
+    for (const s of (f.seats || [])) if ((s | 0) > cap || (s | 0) < SANITY.SCORE_FLOOR) { out.push('score'); break; }
+  }
+  return out;
+}
+// knife C3a (O278): structural bounds on a VERIFIED casual couch segment -- 2..4 local seats on one account (guard couch:N rules=casual).
+//   Must carry COUCH + CASUAL, never COMP / CLASSIC, and never SUSPENDED (a casual save is a checkpoint ROW, the run continues; soloSanity same);
+//   continues = the seat-0 nibble only (the guard counts every continue on seat 0, P1 pays); no tokens; the per-seat cap is the N-seat line
+//   (each seat <= endlessGoalFor(end, N) x SCORE_MULT = the team casual bound). durationSec is not a bound (Q242).
+function couchCasualSanity(f) {
+  const out = [];
+  const fl = f.flags | 0, n = f.N | 0;
+  if (n < attest.COUCH_PC_MIN || n > attest.COUCH_PC_MAX) out.push('pc');
+  if (!(fl & attest.SEG_COUCH) || !(fl & attest.SEG_CASUAL) || (fl & (attest.SEG_COMP | attest.SEG_CLASSIC))) out.push('flags');
+  if ((fl & ~(attest.SEG_COUCH | attest.SEG_CASUAL | attest.SEG_FINAL | attest.SEG_RESUMED)) !== 0) out.push('flags');
+  if ((f.startDepth | 0) < 0 || (f.endDepth | 0) < (f.startDepth | 0) || (f.endDepth | 0) > ENDLESS.DEPTH_CAP) out.push('depth');
+  if ((f.endDepth | 0) - (f.startDepth | 0) > COMP.CKPT_EVERY) out.push('span');
+  if (((f.continuesUsed | 0) & ~0xF) !== 0) out.push('cont');
+  if ((f.tokensCp | 0) !== 0) out.push('tokens');
+  if ((f.seasonId | 0) < 0 || (f.seasonId | 0) > 4095) out.push('season');
+  if ((f.dispCode | 0) !== attest.DISP_FINISHED && (f.dispCode | 0) !== attest.DISP_USER_QUIT) out.push('disp');
+  if (!(fl & attest.SEG_FINAL) && (f.dispCode | 0) !== attest.DISP_FINISHED) out.push('disp');
+  if (out.indexOf('depth') < 0 && out.indexOf('pc') < 0) {
+    const cap = endlessGoalFor(Math.max(1, f.endDepth | 0), n) * ENDLESS.SCORE_MULT;
     for (const s of (f.seats || [])) if ((s | 0) > cap || (s | 0) < SANITY.SCORE_FLOOR) { out.push('score'); break; }
   }
   return out;
@@ -8588,7 +8620,7 @@ async function main() {
       else ghWarn('solo boards: provision failed for ' + nm + ' (solo saves refuse until it exists)');
     }
     // O606 (client knife 5c): the couch competitive ladder (trusted) + the couch save box (client-writable: the guard writes the rows)
-    for (const [nm, trusted] of [[ENDLESS_COMP_LB_COUCH, true], [SAVE_BOX_LB_COUCH, false]]) {
+    for (const [nm, trusted] of [[ENDLESS_COMP_LB_COUCH, true], [SAVE_BOX_LB_COUCH, false], [ENDLESS_LB_COUCH, true], [SAVE_BOX_LB_CASUAL_COUCH, false]]) {   // + knife C3a casual couch ladder / save box
       if (names0.indexOf(nm) >= 0) continue;
       const id0 = await findOrCreateBoard(nm, trusted);
       if (id0) console.log('couch boards: provisioned ' + nm + (trusted ? ' (trusted)' : ' (client-writable)'));
@@ -8948,6 +8980,7 @@ async function main() {
       ENDLESS_LB_CLASSIC_SOLO, ENDLESS_LB_CLASSIC_DUO, ENDLESS_LB_CLASSIC_TRIO, ENDLESS_LB_CLASSIC_QUAD]);
     if (seasonId >= 1) for (const b of [ENDLESS_LB, ENDLESS_LB_TRIO, ENDLESS_LB_QUAD, ENDLESS_LB_SOLO, ENDLESS_COMP_LB, ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, ENDLESS_COMP_LB_QUAD]) out.add(seasonBoardName(b, seasonId));
     if (!PT_MODE) { out.add(ENDLESS_COMP_LB_COUCH); if (seasonId >= 1) out.add(seasonBoardName(ENDLESS_COMP_LB_COUCH, seasonId)); }   // O606 (EA only)
+    if (!PT_MODE) { out.add(ENDLESS_LB_COUCH); if (seasonId >= 1) out.add(seasonBoardName(ENDLESS_LB_COUCH, seasonId)); }   // knife C3a casual couch (EA only)
     if (!PT_MODE && cupEdition(week) >= 1) for (const b of [ENDLESS_COMP_LB, ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, ENDLESS_COMP_LB_QUAD]) out.add(cupWeekBoardName(b, week));
     return out;
   };
@@ -11134,6 +11167,24 @@ async function main() {
     if (!sbId) ghWarn('save box board not found (' + SAVE_BOX_LB_COUCH + ', client-writable) -> guard couch saves fail until it exists');
     return { fam: 'COUCH', low: 'couch', name: ENDLESS_COMP_LB_COUCH, id, seasonId: season.id, best, seasonBest, det, seasonDet, complete, seasonComplete, saveBoxId: sbId, changed: null, seasonChanged: null, pc: 2 };
   })();
+  // knife C3a (O278): the couch CASUAL ladder pair + its save box, the same record shape -- kept out of compFam / casualLadderOf / the
+  //   composite (a separate couch board, user 11-01). lbl = the write-loop label (the shared loop below says "<low> comp" for the others).
+  const couchCas = await (async () => {
+    if (PT_MODE) return { fam: 'COUCHCAS', low: 'couch casual', lbl: 'couch casual', name: ENDLESS_LB_COUCH, id: null, seasonId: null, best: {}, seasonBest: {}, det: {}, seasonDet: {}, complete: true, seasonComplete: true, saveBoxId: null, changed: null, seasonChanged: null, pc: null };
+    let id = byNameLb(ENDLESS_LB_COUCH);
+    if (!id) id = await findOrCreateBoard(ENDLESS_LB_COUCH, true);
+    if (!id) { strictBoard('couch casual board not found'); ghWarn('couch casual board not found (' + ENDLESS_LB_COUCH + ') -> casual couch segments left pending'); }
+    const best = {}, seasonBest = {}, det = {}, seasonDet = {};
+    let complete = true, seasonComplete = true;
+    if (id) { const br = await readBoardAll(id, 'couch casual board'); complete = br.complete; for (const e of br.ents) { best[e.steamID] = e.score | 0; det[e.steamID] = e.detailData; } }
+    const season = (seasonId >= 1 && id) ? await resolveSeasonBoard(lr, ENDLESS_LB_COUCH, seasonId) : { name: null, id: null };
+    if (seasonId >= 1 && id && !season.id) { strictBoard('seasonal couch casual board not found'); ghWarn('seasonal couch casual board unresolved -> casual couch segments left pending'); }
+    if (season.id) { const br = await readBoardAll(season.id, 'seasonal couch casual board'); seasonComplete = br.complete; for (const e of br.ents) { seasonBest[e.steamID] = e.score | 0; seasonDet[e.steamID] = e.detailData; } }
+    let sbId = byNameLb(SAVE_BOX_LB_CASUAL_COUCH);
+    if (!sbId) sbId = await findOrCreateBoard(SAVE_BOX_LB_CASUAL_COUCH, false);
+    if (!sbId) ghWarn('save box board not found (' + SAVE_BOX_LB_CASUAL_COUCH + ', client-writable) -> guard casual couch saves fail until it exists');
+    return { fam: 'COUCHCAS', low: 'couch casual', lbl: 'couch casual', name: ENDLESS_LB_COUCH, id, seasonId: season.id, best, seasonBest, det, seasonDet, complete, seasonComplete, saveBoxId: sbId, changed: null, seasonChanged: null, pc: null };
+  })();
   // composite ("overall") competitive ladder (knife 3.5d): lifetime + season twin, trusted, cron-only; rows recomputed below for every
   //   player whose solo / duo / trio best moved this tick (no records of its own, nothing to settle -> a missing board only skips the rows)
   let overallId = byNameLb(ENDLESS_COMP_LB_OVERALL);
@@ -11160,7 +11211,7 @@ async function main() {
   // would silently reset his LP/XP. Fetch exactly the players this run settles (record holders +
   // roster members: leaver LP penalty targets roster sids that wrote no record). A missing entry
   // after the targeted read is a genuine new player (base 0 correct).
-  const compFamIncomplete = Object.values(compFam).concat([couchComp]).some(f => (f.id && !f.complete) || (f.seasonId && !f.seasonComplete)) || (compId && !compComplete) || (compSeasonId && !compSeasonComplete);   // audit B-F4: solo ladder joins the family rule (O606: + the couch pair)
+  const compFamIncomplete = Object.values(compFam).concat([couchComp, couchCas]).some(f => (f.id && !f.complete) || (f.seasonId && !f.seasonComplete)) || (compId && !compComplete) || (compSeasonId && !compSeasonComplete);   // audit B-F4: solo ladder joins the family rule (O606: + the couch pair)
   if ((lpId && !lpComplete) || (xpId && !xpComplete) || (cpId && !cpComplete) || (enId && !enComplete) || (enSeasonId && !enSeasonComplete) || (enTrioId && !enTrioComplete) || (enTrioSeasonId && !enTrioSeasonComplete)
       || (enQuadId && !enQuadComplete) || (enQuadSeasonId && !enQuadSeasonComplete) || (enSoloId && !enSoloComplete) || (enSoloSeasonId && !enSoloSeasonComplete) || compFamIncomplete) {
     const need = new Set();
@@ -11214,7 +11265,7 @@ async function main() {
         const e = await readUserEntry(enSoloSeasonId, sid, 'seasonal solo casual endless');
         if (e) endlessSoloSeasonBest[sid] = e.score | 0;
       }
-      for (const fam of Object.values(compFam).concat([couchComp])) {   // team competitive ladders (duo / trio / quad, lifetime + season; O606 + the couch pair)
+      for (const fam of Object.values(compFam).concat([couchComp, couchCas])) {   // team competitive ladders (duo / trio / quad, lifetime + season; O606 + the couch pair; knife C3a + the casual couch pair)
         if (fam.id && !fam.complete && fam.best[sid] == null) { const e = await readUserEntry(fam.id, sid, fam.low + ' comp'); if (e) fam.best[sid] = e.score | 0; }
         if (fam.seasonId && !fam.seasonComplete && fam.seasonBest[sid] == null) { const e = await readUserEntry(fam.seasonId, sid, 'seasonal ' + fam.low + ' comp'); if (e) fam.seasonBest[sid] = e.score | 0; }
       }
@@ -11250,6 +11301,9 @@ async function main() {
   const changedCompCouch = {};       // O606 couch competitive ladder write pools (lifetime + season; the dual write)
   const changedCompCouchSeason = {};
   couchComp.changed = changedCompCouch; couchComp.seasonChanged = changedCompCouchSeason;
+  const changedEndlessCouch = {};    // knife C3a casual couch ladder write pools (lifetime + season)
+  const changedEndlessCouchSeason = {};
+  couchCas.changed = changedEndlessCouch; couchCas.seasonChanged = changedEndlessCouchSeason;
   // O180 Gold Rush Cup (client knife 5.1c-1): this week's competitive boards (third twin, EA app id only). The write pools live here
   //   so the reject-window snapshot covers them; the best maps are filled once the chain memory (it holds the week's board ids) loads.
   const compWeekBest = {};   // solo: sid -> packed best of this week (team families: f.weekBest + f.weekTeam = sid -> roster of that row)
@@ -11299,6 +11353,7 @@ async function main() {
       compTrioBest: compFam.TRIO.best[sid], compTrioSeasonBest: compFam.TRIO.seasonBest[sid], changedCompTrio: changedCompTrio[sid], changedCompTrioSeason: changedCompTrioSeason[sid],
       compQuadBest: compFam.QUAD.best[sid], compQuadSeasonBest: compFam.QUAD.seasonBest[sid], changedCompQuad: changedCompQuad[sid], changedCompQuadSeason: changedCompQuadSeason[sid],
       compCouchBest: couchComp.best[sid], compCouchSeasonBest: couchComp.seasonBest[sid], changedCompCouch: changedCompCouch[sid], changedCompCouchSeason: changedCompCouchSeason[sid],   // O606 couch pair
+      endlessCouchBest: couchCas.best[sid], endlessCouchSeasonBest: couchCas.seasonBest[sid], changedEndlessCouch: changedEndlessCouch[sid], changedEndlessCouchSeason: changedEndlessCouchSeason[sid],   // knife C3a casual couch pair
       compWeekBest: compWeekBest[sid], changedCompWeek: changedCompWeek[sid],   // O180 weekly boards (cup)
       compDuoWeekBest: compFam.DUO.weekBest[sid], compDuoWeekTeam: scCloneOf(compFam.DUO.weekTeam[sid]), changedCompDuoWeek: changedCompDuoWeek[sid],
       compTrioWeekBest: compFam.TRIO.weekBest[sid], compTrioWeekTeam: scCloneOf(compFam.TRIO.weekTeam[sid]), changedCompTrioWeek: changedCompTrioWeek[sid],
@@ -11339,6 +11394,7 @@ async function main() {
       scPut(compFam.TRIO.best, sn.sid, sn.compTrioBest); scPut(compFam.TRIO.seasonBest, sn.sid, sn.compTrioSeasonBest); scPut(changedCompTrio, sn.sid, sn.changedCompTrio); scPut(changedCompTrioSeason, sn.sid, sn.changedCompTrioSeason);
       scPut(compFam.QUAD.best, sn.sid, sn.compQuadBest); scPut(compFam.QUAD.seasonBest, sn.sid, sn.compQuadSeasonBest); scPut(changedCompQuad, sn.sid, sn.changedCompQuad); scPut(changedCompQuadSeason, sn.sid, sn.changedCompQuadSeason);
       scPut(couchComp.best, sn.sid, sn.compCouchBest); scPut(couchComp.seasonBest, sn.sid, sn.compCouchSeasonBest); scPut(changedCompCouch, sn.sid, sn.changedCompCouch); scPut(changedCompCouchSeason, sn.sid, sn.changedCompCouchSeason);   // O606
+      scPut(couchCas.best, sn.sid, sn.endlessCouchBest); scPut(couchCas.seasonBest, sn.sid, sn.endlessCouchSeasonBest); scPut(changedEndlessCouch, sn.sid, sn.changedEndlessCouch); scPut(changedEndlessCouchSeason, sn.sid, sn.changedEndlessCouchSeason);   // knife C3a
       scPut(compWeekBest, sn.sid, sn.compWeekBest); scPut(changedCompWeek, sn.sid, sn.changedCompWeek);   // O180 weekly boards (cup)
       scPut(compFam.DUO.weekBest, sn.sid, sn.compDuoWeekBest); scPut(compFam.DUO.weekTeam, sn.sid, sn.compDuoWeekTeam); scPut(changedCompDuoWeek, sn.sid, sn.changedCompDuoWeek);
       scPut(compFam.TRIO.weekBest, sn.sid, sn.compTrioWeekBest); scPut(compFam.TRIO.weekTeam, sn.sid, sn.compTrioWeekTeam); scPut(changedCompTrioWeek, sn.sid, sn.changedCompTrioWeek);
@@ -11409,8 +11465,10 @@ async function main() {
     for (const F of Object.values(classicFam)) ebAdd(F.name, F.id, F.best, F.changed, F.complete, F.id);
     for (const f of Object.values(compFam)) ebAdd(f.name, f.id, f.best, f.changed, f.complete, f.id);
     if (!PT_MODE) ebAdd(couchComp.name, couchComp.id, couchComp.best, couchComp.changed, couchComp.complete, couchComp.id);   // O606
+    if (!PT_MODE) ebAdd(ENDLESS_LB_COUCH, couchCas.id, couchCas.best, couchCas.changed, couchCas.complete, couchCas.id);   // knife C3a
     if (seasonId >= 1) {
       if (!PT_MODE) ebAdd(seasonBoardName(ENDLESS_COMP_LB_COUCH, seasonId), couchComp.seasonId, couchComp.seasonBest, couchComp.seasonChanged, couchComp.seasonComplete, couchComp.seasonId);
+      if (!PT_MODE) ebAdd(seasonBoardName(ENDLESS_LB_COUCH, seasonId), couchCas.seasonId, couchCas.seasonBest, couchCas.seasonChanged, couchCas.seasonComplete, couchCas.seasonId);   // knife C3a
       ebAdd(seasonBoardName(ENDLESS_LB, seasonId), enSeasonId, endlessSeasonBest, changedEndlessSeason, enSeasonComplete, enSeasonId);
       ebAdd(seasonBoardName(ENDLESS_LB_TRIO, seasonId), enTrioSeasonId, endlessTrioSeasonBest, changedEndlessTrioSeason, enTrioSeasonComplete, enTrioSeasonId);
       ebAdd(seasonBoardName(ENDLESS_LB_QUAD, seasonId), enQuadSeasonId, endlessQuadSeasonBest, changedEndlessQuadSeason, enQuadSeasonComplete, enQuadSeasonId);
@@ -11469,11 +11527,15 @@ async function main() {
     //   gate, sanity and chain key (teamRunKey of the one-account roster), and the duo competitive outputs below. The playtest / demo
     //   jobs never settle one (the guard writes couch records on the EA app only); a couch kind this reader does not take yet (another
     //   seat count, a casual / classic couch run of a later knife) waits -- never flagged, never processed (architecture decision 9).
+    //   knife C3a (O278): + the casual couch run (2..4 seats, SEG_CASUAL, never COMP / CLASSIC) -> its own ladder pair below; a classic couch
+    //   run / a 3-4 seat competitive run still waits.
     const cc = !!c.couch;
     if (cc) {
       const t0c = endlessTail(c.g[0].d);
       if (PT_MODE) { RUN.couchPt = (RUN.couchPt | 0) + 1; console.log('  couch ' + m + ': ' + plog(String(c.g[0].steamID)) + ' couch segment on the trial channel -- not settled (EA only)'); return false; }
-      if ((c.g[0].d[8] | 0) !== 2 || !t0c || !((t0c.flags | 0) & attest.SEG_COMP)) {
+      const fl0 = t0c ? (t0c.flags | 0) : 0, n0 = c.g[0].d[8] | 0;
+      const casKind = n0 >= attest.COUCH_PC_MIN && n0 <= attest.COUCH_PC_MAX && !!(fl0 & attest.SEG_CASUAL) && !(fl0 & (attest.SEG_COMP | attest.SEG_CLASSIC));
+      if (!t0c || !((n0 === 2 && (fl0 & attest.SEG_COMP)) || casKind)) {
         RUN.couchKindHeld = (RUN.couchKindHeld | 0) + 1;
         console.log('  couch ' + m + ': ' + plog(String(c.g[0].steamID)) + ' couch kind this job does not settle yet (pc ' + (c.g[0].d[8] | 0) + ', flags ' + (t0c ? t0c.flags | 0 : '?') + ') -- waits');
         return false;
@@ -11568,6 +11630,7 @@ async function main() {
       }
     }
     const casual = !cc && !!((f.flags | 0) & attest.SEG_CASUAL);   // O218: guard-written casual solo run -> own ladder pair, continue-ladder debits, no milestones, no resume debit
+    const ccCas = cc && !!((f.flags | 0) & attest.SEG_CASUAL);   // knife C3a: casual couch run -> the couch casual pair, P1's continue-ladder debits, no milestones / cup / rating
     const classic = !cc && !!((f.flags | 0) & attest.SEG_CLASSIC);   // O216: classic (nostalgia) run -> lifetime ladder, XP x0.5, no CP, 60s pacing
     const sane = cc ? couchSanity(f) : soloSanity(f);
     if (sane.length && cc && !COUCH_SIG_FLAG) {   // O606: same lever as a failed signature -- a new writer's slip holds, never flags
@@ -11592,14 +11655,14 @@ async function main() {
     if (plan.ok === null) { console.log('  solo ' + m + ': ' + plog(sid) + ' depth ' + f.startDepth + '->' + f.endDepth + ' waiting for its chain (' + plan.reason + ')'); return false; }
     if (plan.ok === false) {
       RUN.soloRej = (RUN.soloRej | 0) + 1;
-      noteResumeRule(plan.reason, casual || classic, sid);
+      noteResumeRule(plan.reason, casual || classic || ccCas, sid);
       ghWarn('match=' + m + ': solo segment ' + plog(sid) + ' chain REJECT (' + plan.reason + ') depth ' + f.startDepth + '->' + f.endDepth);
       soloDone();
       return false;
     }
     // reroll chain (2026-09-11): bitmap bits only at askable target depths + monotone across the run's segments (causal, like the perk chain)
-    const rc = rerollChain(f, soloState.runs[key], casual ? CASUAL_LIVES : 0,   // O218: casual depth may run ahead of passed by its failed levels
-      (casual && ((f.flags | 0) & attest.SEG_RESUMED)) ? (f.startDepth | 0) : null);   // casual token resume: bits beyond the checkpoint depth may be lost
+    const rc = rerollChain(f, soloState.runs[key], (casual || ccCas) ? CASUAL_LIVES : 0,   // O218: casual depth may run ahead of passed by its failed levels (knife C3a: casual couch too)
+      ((casual || ccCas) && ((f.flags | 0) & attest.SEG_RESUMED)) ? (f.startDepth | 0) : null);   // casual token resume: bits beyond the checkpoint depth may be lost
     if (rc) {
       RUN.soloRej = (RUN.soloRej | 0) + 1;
       ghWarn('match=' + m + ': solo segment ' + plog(sid) + ' reroll chain REJECT (' + rc + ') depth ' + f.startDepth + '->' + f.endDepth + ' rr=' + (f.rerollHi >>> 0).toString(16) + ':' + (f.rerollLo >>> 0).toString(16));
@@ -11625,7 +11688,8 @@ async function main() {
     const cas = casual ? casualLadderOf(1) : null;   // O218: the casual solo ladder pair (endless_board_solo + season twin)
     // O606: a couch run writes the duo pair (merged) and the couch pair (always: the dual write a split relies on)
     const couchBoardsOk = () => [compFam.DUO, couchComp].every((F) => F.id && !(seasonId >= 1 && !F.seasonId));
-    if (!cpId || (cc ? !couchBoardsOk() : classic ? !enClassicSoloId : casual ? (!cas.id || (seasonId >= 1 && !cas.seasonId)) : (!compId || (seasonId >= 1 && !compSeasonId)))) { console.log('  ' + laneTag + ' ' + m + ': cp/' + (cc ? 'duo+couch comp' : classic ? 'classic-solo' : casual ? 'casual-solo' : 'comp') + '/seasonal board unresolved -- left pending'); return false; }
+    const couchCasOk = () => !!couchCas.id && !(seasonId >= 1 && !couchCas.seasonId);   // knife C3a: the casual couch pair only
+    if (!cpId || (cc ? (ccCas ? !couchCasOk() : !couchBoardsOk()) : classic ? !enClassicSoloId : casual ? (!cas.id || (seasonId >= 1 && !cas.seasonId)) : (!compId || (seasonId >= 1 && !compSeasonId)))) { console.log('  ' + laneTag + ' ' + m + ': cp/' + (cc ? (ccCas ? 'couch casual' : 'duo+couch comp') : classic ? 'classic-solo' : casual ? 'casual-solo' : 'comp') + '/seasonal board unresolved -- left pending'); return false; }
     // pacing: the segment's own start attestation (single guard attester) or its first sighting
     let pend = startsPending[m];
     // Q245: a key reopened for this account -- its start row went when the other account's segment closed the key; pace from
@@ -11663,7 +11727,23 @@ async function main() {
       cp[sid] = (cp[sid] == null ? 0 : cp[sid]) - COMP.RESUME_CP; changedCp[sid] = cp[sid];
       console.log('  solo cp ' + m + ': ' + plog(sid) + ' -' + COMP.RESUME_CP + ' resume (save@' + plan.consume + ') -> ' + cp[sid]);
     }
-    if (cc) {
+    if (ccCas) {
+      // knife C3a (O278) casual couch: P1's continue ladder (the guard counts every continue on seat 0, cumulative over the guard session;
+      //   a resumed session restarts it: soloAdvance resets run.contN on RESUMED) -- the solo casual debit, P1 pays. Then the couch casual
+      //   pair only (never the online casual boards nor the composite: user 11-01, a separate board), one row (KeepBest; season twin only
+      //   for the current season like solo casual); the team block names the account on every seat with the couch bit (rows show the seat
+      //   count). No milestones, no cup, no rating history.
+      const n = endlessNib(f.continuesUsed, 0), prev = run.contN | 0;
+      let debit = 0; for (let k = prev + 1; k <= n; k++) debit += endlessContinueCost(k);
+      if (debit > 0) { cp[sid] = (cp[sid] == null ? 0 : cp[sid]) - debit; changedCp[sid] = cp[sid]; console.log('  couch cp ' + m + ': ' + plog(sid) + ' -' + debit + ' casual continues (rung ' + (prev + 1) + '..' + n + ') -> ' + cp[sid]); }
+      if (n > prev) run.contN = n;
+      if ((f.endDepth | 0) > 0) {
+        const packed = packEndlessScore(f.endDepth, f.score);
+        const w = () => ({ s: packed, ts: f.score | 0, build: f.build >>> 0, team: Array(f.N | 0).fill(sid), cc: 1 });
+        if (couchCas.best[sid] == null || packed > couchCas.best[sid]) { couchCas.best[sid] = packed; couchCas.changed[sid] = w(); console.log('  couch casual best ' + m + ': ' + plog(sid) + ' pc ' + f.N + ' depth ' + f.endDepth + ' team ' + f.score + ' -> board ' + packed); }
+        if (couchCas.seasonId && (f.seasonId | 0) === (seasonId | 0) && (couchCas.seasonBest[sid] == null || packed > couchCas.seasonBest[sid])) { couchCas.seasonBest[sid] = packed; couchCas.seasonChanged[sid] = w(); console.log('  couch casual season best ' + m + ': ' + plog(sid) + ' -> board ' + packed); }
+      }
+    } else if (cc) {
       // O606 couch competitive: the duo family for the one account (merged; COUCH_DUO=split = the couch pair only) + the couch pair
       //   (dual write), one row each (KeepBest against his online duo best: the better run stands); the team block names the account
       //   on both seats with the couch bit. No milestones, no cup (user 10-31). Rating history 'duoc' (read with 'duo' while merged).
@@ -11715,7 +11795,7 @@ async function main() {
     // 5.4a career: solo endless = the default miner (forced); one game per session end; an overlap segment with no new depth adds nothing
     //   O606: a couch run's character block (the guard writes each seat's character) -> P1's own seat (forced: false)
     if (xpId && (plan.overlap == null || (f.endDepth | 0) > (plan.proven | 0))) creditCareerEndless(c.g, { startDepth: Math.max(f.startDepth | 0, plan.proven | 0), endDepth: f.endDepth | 0, flags: f.flags | 0 }, xpState, careerTouched, { segmented: true, forced: !cc });
-    console.log('  ' + laneTag + ' settle ' + m + ': ' + plog(sid) + (cc ? ' couch pc ' + f.N : classic ? ' classic' : (casual ? ' casual' : '')) + ' depth ' + f.startDepth + '->' + f.endDepth + ' bank ' + f.score + ' flags ' + f.flags + ((f.dispCode | 0) === attest.DISP_USER_QUIT ? ' (quit)' : '') + ' key=' + f.keyName + (v.sealed ? '' : ' [dev]') + (plan.overlap != null ? ' (overlap from ' + plan.overlap + ', proven ' + plan.proven + ')' : '') + (plan.truncated ? ' (recovered pool segment: truncated chain, head ' + plan.proven + ')' : '') + (plan.revive ? (classic ? ' (revived by a classic token resume)' : ' (revived by a casual token resume)') : ''));
+    console.log('  ' + laneTag + ' settle ' + m + ': ' + plog(sid) + (cc ? ' couch pc ' + f.N + (ccCas ? ' casual' : '') : classic ? ' classic' : (casual ? ' casual' : '')) + ' depth ' + f.startDepth + '->' + f.endDepth + ' bank ' + f.score + ' flags ' + f.flags + ((f.dispCode | 0) === attest.DISP_USER_QUIT ? ' (quit)' : '') + ' key=' + f.keyName + (v.sealed ? '' : ' [dev]') + (plan.overlap != null ? ' (overlap from ' + plan.overlap + ', proven ' + plan.proven + ')' : '') + (plan.truncated ? ' (recovered pool segment: truncated chain, head ' + plan.proven + ')' : '') + (plan.revive ? (classic ? ' (revived by a classic token resume)' : ' (revived by a casual token resume)') : ''));
     soloDone();
     return true;
   };
@@ -13342,9 +13422,12 @@ async function main() {
       // O606: a couch segment (only reached once SC_COUCH_CONVICT lets the auditor queue one): the duo pair (it may sit there while
       //   merged; a row is deleted only when it still carries exactly this run's value) + the couch pair; its rating history is 'duoc'
       const couchCor = pcC >= 2 && !!((tC.flags | 0) & attest.SEG_COUCH);
+      const couchCasCor = couchCor && !!((tC.flags | 0) & attest.SEG_CASUAL);   // knife C3a: a casual couch run -> its own pair, no rating history
       const targets = clsC ? (pcC === 1 ? [[enClassicSoloId, endlessClassicSoloBest, 'solo-classic']] : [[classicLadderOf(pcC).id, classicLadderOf(pcC).best, classicLadderOf(pcC).low + '-classic']])
       : pcC === 1 ? [   // O93 solo competitive segment: its ladder pair
         [compId, compBest, 'solo-comp'], [compSeasonId, compSeasonBest, 'solo-comp-season'], [compWeekId, compWeekBest, 'solo-comp-week'],
+      ] : couchCasCor ? [
+        [couchCas.id, couchCas.best, 'couch-casual'], [couchCas.seasonId, couchCas.seasonBest, 'couch-casual-season'],
       ] : couchCor ? [
         [compFam.DUO.id, compFam.DUO.best, 'duo-comp'], [compFam.DUO.seasonId, compFam.DUO.seasonBest, 'duo-comp-season'],
         [couchComp.id, couchComp.best, 'couch-comp'], [couchComp.seasonId, couchComp.seasonBest, 'couch-comp-season'],
@@ -13355,7 +13438,7 @@ async function main() {
         [casC.seasonId, casC.seasonBest, 'endless-season'],
       ];
       // O103 rating history (client knife 5.1a): the convicted run leaves the flagged seats' competitive history (best recomputed), their row is redone below
-      const famR = clsC ? null : (pcC === 1 ? 'solo' : couchCor ? 'duoc' : (famC ? famC.low : null));
+      const famR = (clsC || couchCasCor) ? null : (pcC === 1 ? 'solo' : couchCor ? 'duoc' : (famC ? famC.low : null));
       const keyR = !famR ? null : (pcC === 1 ? null : teamRunKey(Object.values(rosterC).map(String), tC.seasonId, cg[0].d[4] | 0));
       for (const seat of (cor.seats || [])) {
         const sidC = rosterC[seat] != null ? String(rosterC[seat]) : null;
@@ -13689,9 +13772,10 @@ async function main() {
   ebAfterPool(ENDLESS_COMP_LB, changedComp, wComp); ebAfterPool(seasonBoardName(ENDLESS_COMP_LB, seasonId), changedCompSeason, wCompSeason);   // Q319
   if (Object.keys(changedComp).length || Object.keys(changedCompSeason).length) console.log('solo comp writes: ' + cmOk + '/' + Object.keys(changedComp).length + ' lifetime, ' + cmsOk + '/' + Object.keys(changedCompSeason).length + ' season');
   // team competitive ladder writes (duo / trio, lifetime + season) -- same row shape as the solo ladder (details = exact team bank)
-  //   O606: + the couch pair (its pools stay empty on the trial jobs)
-  for (const fam of Object.values(compFam).concat([couchComp])) {
-    for (const [pool, bid, label] of [[fam.changed, fam.id, fam.low + ' comp'], [fam.seasonChanged, fam.seasonId, fam.low + ' comp season']]) {
+  //   O606: + the couch pair (its pools stay empty on the trial jobs); knife C3a: + the casual couch pair (same row shape: details = team bank, build, team block)
+  for (const fam of Object.values(compFam).concat([couchComp, couchCas])) {
+    const lbl = fam.lbl || (fam.low + ' comp');
+    for (const [pool, bid, label] of [[fam.changed, fam.id, lbl], [fam.seasonChanged, fam.seasonId, lbl + ' season']]) {
       const lbName = pool === fam.changed ? fam.name : seasonBoardName(fam.name, seasonId);   // Q319: the board a waiting write names
       const sids = Object.keys(pool || {});
       if (!sids.length) continue;
@@ -13889,6 +13973,7 @@ module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CLASSIC_OWN
   ENDLESS_LB_OVERALL, ENDLESS_LB_CLASSIC_OVERALL, V51B_PT,   // O276 casual / classic composites + the knife 5.1b rollout gate
   TEAM_MAGIC, TEAM_VER, TEAM_F_COUCH, teamBlock, ladderDetails,   // O207 team block on team-ladder rows (O606: + the couch bit)
   ENDLESS_COMP_LB_COUCH, SAVE_BOX_LB_COUCH, COUCH_DUO_SPLIT, COUCH_SIG_FLAG, couchSanity, isCouchRec, ratingHistView,   // O606 couch competitive (client knife 5c)
+  ENDLESS_LB_COUCH, SAVE_BOX_LB_CASUAL_COUCH, couchCasualSanity,   // knife C3a casual couch
   PREFIX, RANKED_LB, LP_LB, XP_LB, UNMATCHED_LB, SUPPORTER_WALL_LB, SUPPORTER_OPTOUT_LB, CAMPAIGN_ENDLESS_DIF_MAX, CRON_PULSE_LB, TRUST_LEDGER_LB,   // cloud audit R1-X13 / Q40: the sanctions exile list is derived from the board names (test/sanctions-boards.js)
   CAMPAIGN_ENDLESS_BOX_PREFIX, CAMPAIGN_ENDLESS_LB_PREFIX, CAMPAIGN_ENDLESS_SAVE_PREFIX, CAMPAIGN_ENDLESS_SUFFIX, CAMPAIGN_ENDLESS_OFFENSE_LB, CAMPAIGN_ENDLESS_FILE, CE_MAIL_MIN, CE_SETTLED_TTL_MS, loadCe, saveCe,
   CAMPAIGN_STORY_BOX_PREFIX, CAMPAIGN_STORY_LB_PREFIX, CAMPAIGN_STORY_SAVE_LB, CAMPAIGN_STORY_OFFENSE_LB, storyStateOf,   // companion knife 5d (story lane)

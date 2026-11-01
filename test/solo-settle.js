@@ -289,7 +289,7 @@ console.log('-- cloud audit R1-A3-02: one save row (resume tag) starts ONE resum
   assert('the solo settle plans on the verified fields (resumeTag comes from attest.verifySoloRecord)', /const f = v\.fields;/.test(src) && /resumeTag: \(d\[21\] >>> RESUME_TAG_SHIFT\) & RESUME_TAG_MASK/.test(require('fs').readFileSync(path.join(__dirname, '..', 'attest.js'), 'utf8')));
   assert('soloAdvance records the tags of a settled resume (run.revs)', /run\.revs\[t\] = m/.test(src));
   assert('lever reads its own env, default off', /const RESUME_TAG_REQUIRED = process\.env\.RESUME_TAG_REQUIRED === '1';/.test(src) && /: RESUME_TAG_REQUIRED;/.test(src));
-  assert('both rejects feed the counter + row-owner signal (solo: the account; team classic: seat 0)', /noteResumeRule\(plan\.reason, casual \|\| classic, sid\);/.test(src) && /noteResumeRule\(plan\.reason, true, rosterSids\[0\]\);/.test(src));
+  assert('both rejects feed the counter + row-owner signal (solo: the account; team classic: seat 0)', /noteResumeRule\(plan\.reason, casual \|\| classic \|\| ccCas, sid\);/.test(src) && /noteResumeRule\(plan\.reason, true, rosterSids\[0\]\);/.test(src));
   const nrr = /const noteResumeRule = [\s\S]*?\n  \};/.exec(src);
   assert('the signal is record-only (rv on the owner, never recordFlag / the trust flag counter)', !!nrr && /sp\.rv = \(sp\.rv \| 0\) \+ 1/.test(nrr[0]) && !/recordFlag|\.f \+=/.test(nrr[0]));
   assert('settled untagged resumes counted on both lanes (the lever\'s flip signal)', (src.match(/if \(untaggedResume\(f\)\) RUN\.resumeUntagged = /g) || []).length === 2);

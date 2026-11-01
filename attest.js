@@ -261,10 +261,10 @@ function soloSettleGate(verdict, opts) {
 //     zeros after the block (the Steam details buffer pads with zeros; anything else = an unsigned region -> 'trailing').
 //   Mirrors mvp/test/lib/couch-record.js (the JS reference encoder the guard's C++ is parity-tested against). A layout change =
 //   a new COUCH_ATT_VER with both versions accepted for >= 7 days (architecture decision 9); an unknown one = pending (O199).
-const SEG_COUCH = 64;      // couch segment: guard-written, one account on every seat (client knife 5c O606; always with SEG_COMP in v1)
+const SEG_COUCH = 64;      // couch segment: guard-written, one account on every seat (client knife 5c O606: with SEG_COMP; knife C3a O278: casual = with SEG_CASUAL, tail continues = the seat-0 nibble)
 const COUCH_MAGIC = 0xE8, COUCH_BLK_VER = 1, COUCH_BLK_LEN = 21, COUCH_ATT_VER = 1;
 const COUCH_LAYOUTS = { 1: {} };   // attVer -> layout (v1: the block above); a new attVer joins here when the reader learns it
-const COUCH_PC_MIN = 2, COUCH_PC_MAX = 4;   // the layout holds up to the registry's ENDLESS_MAX_PC; the settle lane takes N = 2 only (O606)
+const COUCH_PC_MIN = 2, COUCH_PC_MAX = 4;   // the layout holds up to the registry's ENDLESS_MAX_PC; the settle lane takes competitive N = 2 (O606) and casual N = 2..4 (knife C3a)
 const COUCH_TAIL_INTS = 12, CHAR_BLK_MAGIC = 0xD8;
 // position of the couch attestation block: walk the blocks after the tail (the character block by its seat count, any other by
 //   its length byte). -> { at } | { why }
