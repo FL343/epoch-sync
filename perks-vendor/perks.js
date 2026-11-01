@@ -14,6 +14,7 @@ window.PERKS = (() => {
   const CLASS_TOTAL_CAP = { gold: 2, rock: 6, bone: 40, gem: 3 };
   const CURSED_FLIP_MIN = -1;
   const ITEM_CLS = {
+    diamondFake: 'other', goldFake: 'other', pearlFake: 'other', opalFake: 'other',
     goldSmall: 'gold', goldMid: 'gold', goldLarge: 'gold', goldHuge: 'gold',
     rockSmall: 'rock', rockLarge: 'rock',
     bone: 'bone', skull: 'bone', boneAncient: 'relic', skullAncient: 'relic',
@@ -37,7 +38,7 @@ window.PERKS = (() => {
   const FLAG_KEYS = ['clover'];
   const SUB_KEYS = { combo: ['every', 'mul'], emptyReturn: ['amt', 'cap'], midas: ['n', 'value'], drill: ['lv'], openPull: ['secs', 'mul'], lightPull: ['wMax', 'mul'],
     levelFee: ['cash', 'fee'] };
-  const COND_MUL_KEYS = ['heavy', 'light', 'deep', 'shallow', 'first', 'afterBag', 'afterFreeze', 'mech', 'debuffAffix', 'grabWithin', 'grabAfter', 'relay'];
+  const COND_MUL_KEYS = ['heavy', 'light', 'deep', 'shallow', 'first', 'afterBag', 'afterFreeze', 'mech', 'debuffAffix', 'grabWithin', 'grabAfter', 'relay', 'beatPerfect', 'beatMiss'];
   const COND_BONUS_KEYS = ['newClass', 'newGemColor', 'catchFrom', 'splitFirst', 'teamEvery'];
   const COND_B_FAMILY = ['relay', 'splitFirst', 'teamEvery'];
   const COND_STATIC = ['heavy', 'light', 'deep', 'shallow', 'mech', 'debuffAffix'];
@@ -191,6 +192,9 @@ window.PERKS = (() => {
     { id: 63, key: 'rockCrusher', axis: 'speed', rarity: 'epic', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: false, rulesFrom: 2, tags: ['heavy', 'class'], role: 'swing', fuse: [12, 3], icon: '⚒',
       lv: [{ drill: { lv: 3 }, valueMul: { rock: 5, gold: 0.9 }, shatterPayPct: 75 }, { drill: { lv: 3 }, valueMul: { rock: 5, gold: 0.9 }, shatterPayPct: 75 }, { drill: { lv: 3 }, valueMul: { rock: 5, gold: 0.9 }, shatterPayPct: 75 }],
       p: [{ a: 5, b: 10 }, { a: 5, b: 10 }, { a: 5, b: 10 }] },
+    { id: 64, key: 'beatPact', axis: 'value', rarity: 'epic', scope: 'self', modes: { solo: true, coop: true, duel: true }, rollable: true, contract: true, rulesFrom: 2, tags: ['rhythm', 'heavy'], role: 'swing', icon: '🥁',
+      lv: [{ condMul: [{ when: 'beatPerfect', mul: 1.5 }, { when: 'beatMiss', mul: 0.7 }] }, { condMul: [{ when: 'beatPerfect', mul: 1.75 }, { when: 'beatMiss', mul: 0.7 }] },
+        { condMul: [{ when: 'beatPerfect', mul: 2 }, { when: 'beatMiss', mul: 0.7 }] }], p: [{ a: 1.5, b: 0.7 }, { a: 1.75, b: 0.7 }, { a: 2, b: 0.7 }] },
   ];
   let TABLE = LIST;
   const BY_ID = new Map();
@@ -348,7 +352,7 @@ window.PERKS = (() => {
     const isInt = (v) => num(v) && v === (v | 0);
     const N_DOM = { heavy: [1, 20], light: [1, 20], debuffAffix: [1, 3], grabWithin: [1, 120], grabAfter: [1, 120] };
     const NB_DOM = { catchFrom: [1, 40], teamEvery: [2, 60] };
-    const DYN = ['first', 'afterBag', 'afterFreeze', 'grabWithin', 'relay'];
+    const DYN = ['first', 'afterBag', 'afterFreeze', 'grabWithin', 'relay', 'beatPerfect', 'beatMiss'];
     for (const p of TABLE) {
       let usesB = false;
       (p.lv || []).forEach((e, k) => {
@@ -1064,6 +1068,8 @@ window.PERKS = (() => {
       case 'debuffAffix': return Math.max(0, Math.min(c.debuffN | 0, e.n | 0));
       case 'grabWithin': return (g >= 0 && g < (e.n | 0) * 1000) ? 1 : 0;
       case 'grabAfter': return (g >= 0 && g >= (e.n | 0) * 1000) ? 1 : 0;
+      case 'beatPerfect': return (c.beat === 1) ? 1 : 0;
+      case 'beatMiss': return (c.beat === 0) ? 1 : 0;
       default: return 0;
     }
   }
