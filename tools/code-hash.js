@@ -19,7 +19,7 @@
 const fs = require('fs'), path = require('path'), cp = require('child_process'), crypto = require('crypto');
 
 const ROOT = path.join(__dirname, '..');
-const CONFIG_JSON = ['attest-keys.json', 'feedback-mod.json', 'feedback-wordlist.json', 'gr-caps.json', 'recover-shards.json'];
+const CONFIG_JSON = ['attest-keys.json', 'feedback-mod.json', 'feedback-wordlist.json', 'gr-caps.json', 'recover-shards.json', 'rfduo-caps.json'];
 
 // root-level files any workflow writes back (persist loops + literal git add)
 function stateFiles(root) {

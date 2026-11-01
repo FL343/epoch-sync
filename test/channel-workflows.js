@@ -90,6 +90,7 @@ console.log('-- reconcile twins --');
     //   unless its lane is hard-off under PT_MODE (pinned: the lane returns before it touches the file)
     const PT_OFF_LANES = {
       CAMPAIGN_ENDLESS_FILE: /const processCampaignEndless = async \(\) => \{\s*if \(PT_MODE\) return;/,   // Gold Rush: the campaign never ships on these channels
+      RFDUO_FILE: /const processRfduo = async \(\) => \{\s*if \(PT_MODE\) return;/,   // couch classic duo ladder: main app only (companion knife D3)
       CLASSIC_FILE: /const processClassicOwners = async \(xpMap, writers\) => \{\s*if \(PT_MODE\) return;/,   // classic loyalty crate: main app only
     };
     const vjs = fs.readFileSync(path.join(__dirname, '..', 'validate.js'), 'utf8');

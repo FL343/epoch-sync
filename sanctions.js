@@ -107,6 +107,7 @@ const EXILE_DISPLAY = Object.freeze([
   { key: 'ENDLESS_LB_CLASSIC_OVERALL' },            // classic composite (lifetime only, like its inputs)
   { key: 'CAMPAIGN_ENDLESS_LB_PREFIX', perDif: true },   // campaign endless ladders campaign_endless_d1..d3
   { key: 'CAMPAIGN_STORY_LB_PREFIX', perDif: true },     // companion knife 5d: campaign story ladders campaign_story_d1..d3
+  { key: 'RFDUO_LB' },                              // companion knife D3: couch classic duo experimental ladder (rfduo; lifetime, no season twins)
   { key: 'XP_LB' },                                 // level ladder (name from the XP_LB secret)
   { key: 'LP_LB', season: true },                   // ranked points (name from the LP_LB secret; never on the playtest/demo apps)
   { key: 'card_box' },                              // cosmetic claim rows that dress a player's board rows; a literal in
@@ -137,6 +138,8 @@ const EXILE_KEEP = Object.freeze({
   CAMPAIGN_STORY_BOX_PREFIX: 'campaign story clear boxes (guard-written input)',
   CAMPAIGN_STORY_OFFENSE_LB: 'campaign story offense ledger (ops record)',
   CAMPAIGN_STORY_SAVE_LB: 'campaign story checkpoint rows (campaign_story_save_box, guard-written; a save, not a ranking)',
+  RFDUO_BOX_LB: 'couch classic duo run box (rfduo_box, guard-written input)',
+  RFDUO_SAVE_LB: 'couch classic duo save rows (rfduo_save, guard-written; a save, not a ranking)',
   SAVE_BOX_LB: 'endless save rows (a save, not a ranking)',
   SAVE_BOX_LB_DUO: 'endless save rows (a save, not a ranking)',
   SAVE_BOX_LB_TRIO: 'endless save rows (a save, not a ranking)',

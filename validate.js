@@ -8,6 +8,7 @@ const perks = require('./perks.js');     // endless perk build replay (record ta
 const campaign = require('./campaign.js');   // O159 knife-7d: Vegas campaign clear attestation -> exclusive cosmetic grants
 const campaignEndless = require('./campaign-endless.js');   // knife 3.9b N4: Vegas Gold Rush run attestation -> per-difficulty best-only ladders + offense ledger
 const campaignStory = require('./campaign-story.js');   // companion knife 5d (O603): Vegas campaign story clear attestation -> per-difficulty best-only ladders
+const rfduo = require('./rfduo.js');   // companion knife D3 (O310): couch classic duo run attestation -> best-only experimental ladder (observation-only rejects)
 const supporters = require('./supporters.js');   // supporter pack: DLC ownership probe -> wall board / grant bit / points bonus
 const classicOwners = require('./classic.js');   // classic loyalty crate: older-game ownership probe -> revocable grant bit (word 1)
 const chatMute = require('./chat-mute.js');     // chat moderation lane: report snapshots -> automatic mutes + expiry sweep + private mail digest
@@ -3953,7 +3954,7 @@ function writeRunSummary() {
       "| friends' room records whose writer is not on his own roster seat, not counted (Q123) | " + s('seatless', 0) + ' |',
       '| bot match records whose writer is not on his own roster seat, not counted (Q148) | ' + s('seatlessBot', 0) + ' |',
       "| friends' room / bot match keys held past maturity by results on two tables: two tables or more, each on a key of its own / one table, on a key of its own, the others' results left out / no writer on one table, still held (Q214, Q220) | " + s('tableSplit', 0) + ' / ' + s('tableOne', 0) + ' / ' + s('tableHeld', 0) + ' |',
-      '| campaign grants / campaign endless / campaign story | ' + s('campaign', '-') + ' / ' + s('campaignEndless', '-') + ' / ' + s('campaignStory', '-') + ' |',
+      '| campaign grants / campaign endless / campaign story / couch classic duo (rfduo) | ' + s('campaign', '-') + ' / ' + s('campaignEndless', '-') + ' / ' + s('campaignStory', '-') + ' / ' + s('rfduo', '-') + ' |',
       '| page-cap hits | ' + RUN.cap + ' |',
       '| points receipts written / queued for a later write; cron pulse (O480) | ' + s('receipts', 0) + ' / ' + s('receiptsQueued', 0) + '; ' + s('pulse', '-') + ' |',
       '| points rows read without the last write of this job, that write taken instead ([stale-read], O481) | ' + s('staleRead', 0) + ' |',
@@ -7379,6 +7380,28 @@ async function ceSendMail(subject, text) {
     return true;
   } catch (e) { ghWarn('campaign endless mail threw: ' + (e && e.message)); return false; }
 }
+// Companion knife D3 (O310, 2026-11-01): couch classic duo experimental ladder (rfduo.js header). The guard writes one signed
+//   run record per account to the client-writable box `rfduo_box`; the cron verifies + boundary-checks and settles best-only
+//   onto the trusted lifetime ladder `rfduo`. Rejections are observation-only in v1 (counted per reason and per hour in
+//   rfduo.json; the shared mass-anomaly mail threshold), never an offense board. Skips (0 passes / final money <= 0 / a late
+//   reel receipt) are not ranked and not counted as rejections. The save rows `rfduo_save` (one per account, guard-written,
+//   0xC3, read back only by the guard) are only find-or-created here, never read. Suffix '_test' = dev / e2e guards and the
+//   only boards dev-key records may settle on. Main app only (PT_MODE hard-off).
+const RFDUO_SUFFIX = process.env.RFDUO_SUFFIX || '';
+const RFDUO_BOX_LB = process.env.RFDUO_BOX_LB || ('rfduo_box' + RFDUO_SUFFIX);
+const RFDUO_LB = process.env.RFDUO_LB || ('rfduo' + RFDUO_SUFFIX);
+const RFDUO_SAVE_LB = process.env.RFDUO_SAVE_LB || ('rfduo_save' + RFDUO_SUFFIX);
+const RFDUO_FILE = process.env.RFDUO_FILE || 'rfduo.json';
+// state: settled {sigHex: tMin} + forks {key: {fp, t}} (120 days, like the campaign lanes) / rejects {hour: n} (48h, the mail
+//   window) / reasons {reason: n} + skips {reason: n} (cumulative counts, the observation record; a bounded reason set) / mailHour
+function rfduoStateOf(st) { const s0 = (st && typeof st === 'object') ? st : {}; s0.settled = s0.settled || {}; s0.rejects = s0.rejects || {}; s0.reasons = s0.reasons || {}; s0.skips = s0.skips || {}; s0.forks = s0.forks || {}; s0.mailHour = s0.mailHour | 0; return s0; }
+function loadRfduo() { try { return rfduoStateOf(JSON.parse(fs.readFileSync(RFDUO_FILE, 'utf8'))); } catch (e) { return rfduoStateOf({}); } }
+function saveRfduo(st, nowMs) {
+  for (const k of Object.keys(st.settled)) if (nowMs - (st.settled[k] | 0) * 60000 > CE_SETTLED_TTL_MS) delete st.settled[k];
+  for (const k of Object.keys(st.forks)) if (nowMs - ((st.forks[k] && st.forks[k].t) | 0) * 60000 > CE_SETTLED_TTL_MS) delete st.forks[k];
+  st.rejects = rfduo.pruneRejects(st.rejects, Math.floor(nowMs / 3600000));
+  try { writeStateFile(RFDUO_FILE, JSON.stringify(st, null, 0)); } catch (e) { ghWarn('write ' + RFDUO_FILE + ' failed: ' + (e && e.message)); }
+}
 const REDEEM_MAGIC = 0xCE, GRANT_MAGIC = 0xCF, GRANT_VER = 1;
 const GRANT_WORDS = 2;
 const REDEEM_CATALOG = {
@@ -10432,6 +10455,79 @@ async function main() {
     saveCe(stAll, nowMs);
     if (nUp || nSame || nPend || nRej || nDup || nHeld || nRun) { RUN.campaignStory = nUp + 'up/' + nSame + 'same' + (nPend ? '/' + nPend + 'pend' : '') + (nHeld ? '/' + nHeld + 'held' : '') + (nRej ? '/' + nRej + 'rej' : '') + (nDup ? '/' + nDup + 'dup' : '') + (nRun ? '/' + nRun + 'run' : ''); console.log('campaign story: ' + nUp + ' ladder writes, ' + nSame + ' not better, ' + nPend + ' pending, ' + nHeld + ' key-held, ' + nRej + ' rejected, ' + nDup + ' already settled, ' + nRun + ' second clears dropped'); }
   };
+  // Couch classic duo lane (companion knife D3, O310; rfduo.js header): rfduo_box -> verify + boundary plan (rfduo.js) -> best-only
+  //   lifetime ladder rfduo. Rejections are observation-only in v1: counted per reason / per hour in rfduo.json (+ the shared
+  //   mass-anomaly mail), never an offense board. Skips (0 passes / final money <= 0 / a late reel receipt) are settled without a
+  //   count toward the mail. A second content of one (account, runT0, resumes) segment is dropped as a fork (no count either).
+  //   A row with no readable signature is remembered by a hash of its raw details, so one junk row is counted once, not every run.
+  //   Same exit paths as the campaign lanes; the playtest / demo apps never write a ranked couch classic duo -> hard-disabled there.
+  const processRfduo = async () => {
+    if (PT_MODE) return;
+    const list = (lr.json && lr.json.response && lr.json.response.leaderboards) || [];
+    const byName = (name) => { const f = list.find(x => String(x.name || x.Name) === name); return f ? (f.id || f.ID) : null; };
+    const rf = rfduo;
+    let caps = null;
+    try { caps = JSON.parse(fs.readFileSync(require('path').join(__dirname, 'rfduo-caps.json'), 'utf8')); } catch (e) { ghWarn('rfduo: rfduo-caps.json unreadable -- lane skipped'); return; }
+    if (!caps || !Array.isArray(caps.capL) || !Array.isArray(caps.coinsL) || !(caps.total > 0) || caps.capL.length !== caps.total) { ghWarn('rfduo: rfduo-caps.json has no level caps -- lane skipped'); return; }
+    const pubTable = loadJobPubTable(nowMs) || {};
+    const allowDevKey = RFDUO_SUFFIX === '_test';
+    const st = loadRfduo();
+    const nowSec = Math.floor(nowMs / 1000), nowMin = Math.floor(nowMs / 60000), nowHour = Math.floor(nowMs / 3600000);
+    let nUp = 0, nSame = 0, nPend = 0, nRej = 0, nSkip = 0, nDup = 0, nHeld = 0, nFork = 0;
+    try {
+      const boxId = byName(RFDUO_BOX_LB) || await findOrCreateBoard(RFDUO_BOX_LB, false);   // client-writable (the guard writes as the user)
+      const lbId = byName(RFDUO_LB) || await findOrCreateBoard(RFDUO_LB, true);
+      if (!byName(RFDUO_SAVE_LB)) await findOrCreateBoard(RFDUO_SAVE_LB, false);   // save rows (guard-written; only created here, never read)
+      if (!boxId || !lbId) console.log('rfduo: board absent -- skip');
+      else {
+        const box = await readBoardAll(boxId, 'rfduo box');
+        const lb = box.ents.length ? await readBoardAll(lbId, 'rfduo ladder') : { ents: [] };
+        const best = {};
+        for (const e of lb.ents) best[String(e.steamID)] = e.score | 0;
+        for (const e of box.ents) {
+          const sid = String(e.steamID);
+          const d = decodeDetails(e.detailData);
+          const sig = rf.sigHexOf(d) || ('raw:' + crypto.createHash('sha256').update(String(e.detailData || '')).digest('hex').slice(0, 32));
+          if (st.settled[sig]) { nDup++; continue; }
+          const v = rf.verifyRfduoRecord(d, pubTable);
+          const plan = rf.settlePlan(v, { owner: sid, allowDevKey, caps, nowSec });
+          if (!plan.ok) {
+            if (plan.pending) { if (keyHeld(plan.reason)) nHeld++; else nPend++; continue; }
+            if (plan.skip) {
+              nSkip++; st.skips[plan.reason] = (st.skips[plan.reason] | 0) + 1; st.settled[sig] = nowMin;
+              console.log('  rfduo ' + plog(sid) + ': not ranked (' + plan.reason + ')' + (plan.fields ? ' passes=' + plan.fields.passes + ' score=' + plan.fields.score + ' unwit=' + plan.fields.unwit : ''));
+              continue;
+            }
+            nRej++;
+            st.reasons[plan.reason] = (st.reasons[plan.reason] | 0) + 1;
+            st.rejects[nowHour] = (st.rejects[nowHour] | 0) + 1;
+            st.settled[sig] = nowMin;
+            console.log('  rfduo ' + plog(sid) + ': rejected (' + plan.reason + ', observation only)' + (plan.fields ? ' passes=' + plan.fields.passes + ' score=' + plan.fields.score + ' hard=' + (plan.fields.hardBits >>> 0).toString(16) : ''));
+            continue;
+          }
+          const f = plan.fields;
+          const fk = rf.forkPlan(st.forks, pid(sid), f);
+          if (fk.fork) { nFork++; st.settled[sig] = nowMin; console.log('  rfduo ' + plog(sid) + ': fork dropped (resumes ' + f.resumes + ', passes ' + f.passes + ' score ' + f.score + ')'); continue; }
+          if (fk.key && fk.first) st.forks[fk.key] = { fp: fk.fp, t: nowMin };
+          st.settled[sig] = nowMin;
+          if (best[sid] != null && (f.score | 0) <= best[sid]) { nSame++; continue; }
+          if (!APPLY_MMR) { console.log('  rfduo ' + plog(sid) + ': dry-run, would write ' + f.score + ' (passes ' + f.passes + ')'); continue; }
+          const w = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: lbId, steamid: sid, score: f.score | 0, scoremethod: 'ForceUpdate', format: 'json' }, rf.ladderDetails(f));
+          const wOk = w.ok && !(w.json && w.json.result && w.json.result.result && w.json.result.result !== 1);
+          if (!wOk) { ghWarn('rfduo ladder write failed ' + plog(sid) + ': HTTP ' + w.status + ' (deferred)'); delete st.settled[sig]; continue; }
+          best[sid] = f.score | 0; nUp++;
+          console.log('  rfduo ' + plog(sid) + ': best ' + f.score + ' (passes ' + f.passes + ', key ' + f.keyName + ', end ' + f.endWhy + ')');
+        }
+      }
+      const md = rf.mailDecision(st.rejects, nowHour, st.mailHour | 0, CE_MAIL_MIN);
+      if (md.send) {
+        const sent = await ceSendMail('rfduo ALERT: ' + md.n + ' rejected couch classic duo records in 24h', 'rfduo (couch classic duo) lane rejected ' + md.n + ' run records in the trailing 24h (threshold ' + CE_MAIL_MIN + ').' + '\n' + 'Observation only: nothing was written to an offense board; per-reason counts are in ' + RFDUO_FILE + ' (reasons).' + '\n' + 'A wave usually means a false-positive storm (cap table / key table lag / a witness rule) before it means cheating -- check the reasons first.' + '\n');
+        if (sent) st.mailHour = nowHour;
+      }
+    } catch (e) { ghWarn('rfduo channel failed: ' + (e && e.message)); }
+    saveRfduo(st, nowMs);
+    if (nUp || nSame || nPend || nRej || nSkip || nDup || nHeld || nFork) { RUN.rfduo = nUp + 'up/' + nSame + 'same' + (nPend ? '/' + nPend + 'pend' : '') + (nHeld ? '/' + nHeld + 'held' : '') + (nRej ? '/' + nRej + 'rej' : '') + (nSkip ? '/' + nSkip + 'skip' : '') + (nDup ? '/' + nDup + 'dup' : '') + (nFork ? '/' + nFork + 'fork' : ''); console.log('rfduo: ' + nUp + ' ladder writes, ' + nSame + ' not better, ' + nPend + ' pending, ' + nHeld + ' key-held, ' + nRej + ' rejected (observation only), ' + nSkip + ' not ranked, ' + nDup + ' already settled, ' + nFork + ' forks dropped'); }
+  };
   // Supporter pack (supporters.js header): probe DLC ownership for known players (capped per run, cached in
   //   state), then reconcile the wall board (respecting the client-writable opt-out board), OR the grant bit
   //   and return the set of owner sids for this run's points credit. Every write is idempotent; failures are
@@ -10754,7 +10850,7 @@ async function main() {
   };
 
   RUN.consistent = consistentMatches.length;
-  if (consistentMatches.length === 0) { console.log('no consistent matches'); await ebRetry(); await lpRetry(); await rowRetry(); persistStartsSide(); await classicRepackQuiet(); await maintainTrust(); { const st0 = loadSolo(); await maintainRating(st0, new Set()); if (await maintainCup(st0, null) && APPLY_MMR) saveSolo(st0, nowMs); } await processRedeems(null); await processCampaignGrants(); await processCampaignEndless(); await processCampaignStory(); await processLikes([], null); await processChatMute(); await writePulse(); await processSupporters(null, []); await processClassicOwners(null, []); writeRunSummary(); return; }
+  if (consistentMatches.length === 0) { console.log('no consistent matches'); await ebRetry(); await lpRetry(); await rowRetry(); persistStartsSide(); await classicRepackQuiet(); await maintainTrust(); { const st0 = loadSolo(); await maintainRating(st0, new Set()); if (await maintainCup(st0, null) && APPLY_MMR) saveSolo(st0, nowMs); } await processRedeems(null); await processCampaignGrants(); await processCampaignEndless(); await processCampaignStory(); await processRfduo(); await processLikes([], null); await processChatMute(); await writePulse(); await processSupporters(null, []); await processClassicOwners(null, []); writeRunSummary(); return; }
   // cloud audit Q245: the solo chain memory is read before the fresh list -- a processed solo key the done memory remembers
   //   per owner comes back for a writer the lane never processed under it (soloReopenOwners); every other processed key
   //   stays out as before
@@ -10779,7 +10875,7 @@ async function main() {
     for (const [m, L] of seq.lag) if (L > 0) byMh.set(mhOfKey(m), m);
     for (const ev of streakEarly) { const m = byMh.get(ev.mh | 0); if (m != null) ev.t0 = seqStartMs(seq, m, ev.t0); }
   }
-  if (fresh.length === 0) { console.log('no fresh matches, skip'); await ebRetry(); await lpRetry(); await rowRetry(); persistStartsSide(); await classicRepackQuiet(); await maintainTrust(); { const st0 = loadSolo(); await maintainRating(st0, new Set()); if (await maintainCup(st0, null) && APPLY_MMR) saveSolo(st0, nowMs); } await processRedeems(null); await processCampaignGrants(); await processCampaignEndless(); await processCampaignStory(); await processLikes([], null); await processChatMute(); await writePulse(); await processSupporters(null, []); await processClassicOwners(null, []); writeRunSummary(); return; }
+  if (fresh.length === 0) { console.log('no fresh matches, skip'); await ebRetry(); await lpRetry(); await rowRetry(); persistStartsSide(); await classicRepackQuiet(); await maintainTrust(); { const st0 = loadSolo(); await maintainRating(st0, new Set()); if (await maintainCup(st0, null) && APPLY_MMR) saveSolo(st0, nowMs); } await processRedeems(null); await processCampaignGrants(); await processCampaignEndless(); await processCampaignStory(); await processRfduo(); await processLikes([], null); await processChatMute(); await writePulse(); await processSupporters(null, []); await processClassicOwners(null, []); writeRunSummary(); return; }
 
   // playtest channel: no rating board exists (and must not -- lock layer 3); the TrueSkill
   // update block below is skipped wholesale, so the id is never consulted.
@@ -13765,7 +13861,7 @@ async function main() {
   // redeem channel last: wallet debits base on the in-memory post-settle balances just written
   // above (passing the map avoids re-reading scores that global reads may still serve stale).
   await processRedeems(cp);
-  await processCampaignGrants(); await processCampaignEndless(); await processCampaignStory();
+  await processCampaignGrants(); await processCampaignEndless(); await processCampaignStory(); await processRfduo();
   await processClassicOwners(xp, spSids);   // last grant-box writer of the run (classic.js header)
   console.log('written: rating ' + rOk + '/' + wRating.length + ', points ' + pOk + '/' + wPoints.length + ', xp ' + xOk + '/' + wXp.length + ', cp ' + cOk + '/' + wCp.length + ', endless ' + eOk + '/' + wEndless.length + (wEndlessSeason.length ? (' (+season ' + esOk + '/' + wEndlessSeason.length + ')') : '') + (wEndlessTrio.length ? (' (+trio ' + etOk + '/' + wEndlessTrio.length + ')') : '') + (wEndlessTrioSeason.length ? (' (+trio-season ' + etsOk + '/' + wEndlessTrioSeason.length + ')') : '') + (wEndlessQuad.length ? (' (+quad ' + eqOk + '/' + wEndlessQuad.length + ')') : '') + (wEndlessQuadSeason.length ? (' (+quad-season ' + eqsOk + '/' + wEndlessQuadSeason.length + ')') : '') + (wEndlessSolo.length ? (' (+solo ' + esoOk + '/' + wEndlessSolo.length + ')') : '') + (wEndlessSoloSeason.length ? (' (+solo-season ' + esosOk + '/' + wEndlessSoloSeason.length + ')') : '') + ', state updated (idempotent)');
   RUN.writes = rOk + '/' + wRating.length + ' ' + pOk + '/' + wPoints.length + ' ' + xOk + '/' + wXp.length;
@@ -13796,6 +13892,7 @@ module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CLASSIC_OWN
   PREFIX, RANKED_LB, LP_LB, XP_LB, UNMATCHED_LB, SUPPORTER_WALL_LB, SUPPORTER_OPTOUT_LB, CAMPAIGN_ENDLESS_DIF_MAX, CRON_PULSE_LB, TRUST_LEDGER_LB,   // cloud audit R1-X13 / Q40: the sanctions exile list is derived from the board names (test/sanctions-boards.js)
   CAMPAIGN_ENDLESS_BOX_PREFIX, CAMPAIGN_ENDLESS_LB_PREFIX, CAMPAIGN_ENDLESS_SAVE_PREFIX, CAMPAIGN_ENDLESS_SUFFIX, CAMPAIGN_ENDLESS_OFFENSE_LB, CAMPAIGN_ENDLESS_FILE, CE_MAIL_MIN, CE_SETTLED_TTL_MS, loadCe, saveCe,
   CAMPAIGN_STORY_BOX_PREFIX, CAMPAIGN_STORY_LB_PREFIX, CAMPAIGN_STORY_SAVE_LB, CAMPAIGN_STORY_OFFENSE_LB, storyStateOf,   // companion knife 5d (story lane)
+  RFDUO_SUFFIX, RFDUO_BOX_LB, RFDUO_LB, RFDUO_SAVE_LB, RFDUO_FILE, rfduoStateOf, loadRfduo, saveRfduo,   // companion knife D3 (couch classic duo lane)
     // client knife 3.9b N4 (Gold Rush lane)
   absentRosterSeats, absenceHold, shardPlan, persistCensus, fmtCensus, soloHoldsChain, transientStatus, ABSENT_GRACE_MS, ABSENT_GRACE_MIN_MS, LEDGER_SHARDS,   // R1-B2-04 / R1-X14 absent-seat hold
   T2LH, hostDissentCount, team2HostOwnsSeat0,   // cloud audit Q57 team-gamble host charges

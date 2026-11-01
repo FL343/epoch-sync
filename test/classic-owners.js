@@ -193,7 +193,7 @@ console.log('=== classic-owners [6] wiring pins ===');
   const vjs = fs.readFileSync(path.join(ROOT, 'validate.js'), 'utf8');
   const wf = fs.readFileSync(path.join(ROOT, '.github', 'workflows', 'validate.yml'), 'utf8');
   T('both early exits run the lane after the supporter lane', (vjs.match(/await processSupporters\(null, \[\]\); await processClassicOwners\(null, \[\]\); writeRunSummary\(\); return; \}/g) || []).length === 2);
-  T('main path: the lane runs after the redeem / campaign grant lanes (last grant-box writer)', /await processRedeems\(cp\);\s*await processCampaignGrants\(\); await processCampaignEndless\(\); await processCampaignStory\(\);\s*await processClassicOwners\(xp, spSids\);/.test(vjs));
+  T('main path: the lane runs after the redeem / campaign grant lanes (last grant-box writer)', /await processRedeems\(cp\);\s*await processCampaignGrants\(\); await processCampaignEndless\(\); await processCampaignStory\(\); await processRfduo\(\);\s*await processClassicOwners\(xp, spSids\);/.test(vjs));
   T('every other grant-box lane records its writes in grantSeen (the classic lane ORs word 0 from it)', (vjs.match(/grantSeen\[[^\]]+\] = newMask/g) || []).length === 4);
   T('validate.yml passes the secret CLASSIC_APPID and persists classic.json', /CLASSIC_APPID: \$\{\{ secrets\.CLASSIC_APPID \}\}/.test(wf) && /for f in [^\n]*\bclassic\.json\b/.test(wf));
 }

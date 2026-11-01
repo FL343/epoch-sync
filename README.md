@@ -229,6 +229,17 @@ absent, so a run is unaffected before it is provisioned.
   a trusted per-difficulty ladder. Rejections are counted into a permanent offense board and
   a trailing-24h histogram; a burst of rejections mails the ops inbox (`campaign-endless.json`
   keeps the settled signatures + reject histogram + last mail hour).
+- `rfduo.js` — the couch classic duo experimental lane (companion knife D3, 2026-11-01;
+  `test/rfduo-settle.js`): the guard judges every event of a two-player classic run, rolls the
+  slot reels itself, and signs one run record (magic 0xC1, 64 ints) into the client-writable box
+  `rfduo_box`; the reconcile verifies it (same flow as the Gold Rush lane, dev keys only on the
+  `_test` boards), binds it to the writer's account, runs the boundary checks (hard flags / pace
+  against the frame-model floor / wall clock / per-level caps with the classic wrap / coins / slot
+  bounds, cap table `rfduo-caps.json`) and promotes the best run per account to the trusted
+  lifetime ladder `rfduo` (details = passes, s1, s2, runT0). Observation only in v1: rejections are
+  counted per reason and per hour in `rfduo.json` (shared mass-anomaly mail), never written to an
+  offense board; 0 passes / final money <= 0 / a late reel receipt are skipped, not rejected. The
+  save rows `rfduo_save` are only find-or-created. Main app only.
 - Endless competitive rating (client knife 5.1a, 2026-10-15; `test/endless-rating.js`): every settled
   competitive endless segment (solo lane, team lane) enters or raises its run in a per-(player, family,
   season) history kept in `endless-solo.json` (`hist`, pid-keyed: deepest run + the last 10 runs); players
