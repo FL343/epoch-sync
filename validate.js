@@ -3958,6 +3958,7 @@ function writeRunSummary() {
       '| points rows read without the last write of this job, that write taken instead ([stale-read], O481) | ' + s('staleRead', 0) + ' |',
       '| settle XP / CP writes that failed, waiting for a later run / waiting writes that landed (Q318) | ' + s('rowQueued', 0) + ' / ' + s('rowRetried', 0) + ' |',
       '| endless best writes that failed, waiting for a later run / waiting writes that landed or were found on the board / dropped, board no longer written (Q319) | ' + s('ebQueued', 0) + ' / ' + s('ebDone', 0) + ' / ' + s('ebDropped', 0) + ' |',
+      '| classic ladder rows in the old key rewritten / planned this run / still in the old key after it (O569) | ' + (Array.isArray(RUN.classicRepack) ? RUN.classicRepack.join(' / ') : '-') + ' |',
       '| solo segments held by the key policy (other channel / retired key; new this run) | ' + s('keyHeld', 0) + ' (' + s('keyHeldNew', 0) + ') |',
       '| duration | ' + ((Date.now() - (RUN.t0 || Date.now())) / 1000).toFixed(1) + 's |',
       '',
@@ -7229,7 +7230,7 @@ const SAVE_BOX_LB_CLASSIC_DUO = process.env.SAVE_BOX_LB_CLASSIC_DUO || 'endless_
 const SAVE_BOX_LB_CLASSIC_TRIO = process.env.SAVE_BOX_LB_CLASSIC_TRIO || 'endless_save_box_classic_trio';
 const SAVE_BOX_LB_CLASSIC_QUAD = process.env.SAVE_BOX_LB_CLASSIC_QUAD || 'endless_save_box_classic_quad';
 const CLASSIC = {
-  LIVES: 1, LEVEL_S_SOLO: 60, LEVEL_S_TEAM: 40, XP_MUL: 0.5, TIEBREAK_DIV: 100000,                      // lockstep: client RANKED_CONFIG.ENDLESS.CLASSIC
+  LIVES: 1, LEVEL_S_SOLO: 60, LEVEL_S_TEAM: 40, XP_MUL: 0.5, TIE_PER_GOAL: 2000,                       // lockstep: client RANKED_CONFIG.ENDLESS.CLASSIC (TIE_PER_GOAL = BOARD.TIE_PER_GOAL)
   GOAL: { start: 375, addonStart: 275, grow: 270, earlyLevels: 9 },                                     // lockstep: src/data/classic-rules.js GOAL (goalAt)
   SCALE_BASE_PC: 2,
 };
@@ -7249,10 +7250,38 @@ function classicGoalFor(depth, pc) {
   if (n <= 1) return g;
   return Math.floor((g * n + Math.floor(CLASSIC.SCALE_BASE_PC / 2)) / CLASSIC.SCALE_BASE_PC);   // client classicScaleGoal round-half-up twin
 }
+// classic ladder key (O569, the user's 10-27 ruling: same depth ranks by money, equal money by time): depth x BOARD_SCALE + a money
+//   tail in steps of 1/TIE_PER_GOAL of the one-player goal line at that depth, capped at BOARD_SCALE-1 (= 5x the line). The tail
+//   used to be bank / 1e5: below $100,000 every run of a depth tied (the demo's depth-20 cap goal is $42,325 -> its top rows all
+//   read 200000 and ranked by arrival). Following the goal line keeps one step at 0.05% of it at every depth ($21 at depth 20,
+//   $129 at depth 100) and the cap far above a real run (a level full-cleared gives at most ~2x the line's growth). The one-player
+//   line on every family board: a board holds one seat count, so the order is the same; the seats share one field, so a team's
+//   bank does not grow with them. Exact integers (n < 2^53): client ENDLESS_LEVELS.classicBoardPack, value-pinned by the
+//   companion's ledger-schema-lockstep 14f. The depth half is unchanged: overallScore / every depth reader is untouched.
 function packClassicScore(depth, score) {
-  const tb = Math.max(0, Math.min(ENDLESS.BOARD_SCALE - 1, Math.floor(Math.max(0, score | 0) / CLASSIC.TIEBREAK_DIV)));
-  return (depth | 0) * ENDLESS.BOARD_SCALE + tb;
+  const d = depth | 0, g = classicGoalAt(Math.max(1, d)), n = Math.max(0, score | 0) * CLASSIC.TIE_PER_GOAL;
+  return d * ENDLESS.BOARD_SCALE + Math.min(ENDLESS.BOARD_SCALE - 1, (n - n % g) / g);
 }
+// O569: a classic ladder row as this job reads it -- its exact bank (details[0], every row this job writes carries it) repacked at
+//   its depth, so a row written before O569 (bank / 1e5 tail) compares with this run's keys in one packing; a row without details
+//   is taken as it stands. Idempotent (depth + bank only): a row already in the new packing reads back unchanged.
+function classicRowScore(score, det) {
+  const s = score | 0;
+  if (s < 0 || !Array.isArray(det) || !det.length || (det[0] | 0) < 0) return s;
+  return packClassicScore(Math.floor(s / ENDLESS.BOARD_SCALE), det[0] | 0);
+}
+// O569: the rows to rewrite in the new packing (read score != classicRowScore), highest first, at most cap; skip(row) = a row this
+//   run writes anyway (a new best of his / a waiting write laid over it) or no longer holds (a seedcap correction took it off)
+function classicRepackPlan(rows, cap, skip) {
+  return (rows || []).filter((r) => r && r.s !== r.was && !(skip && skip(r)))
+    .sort((a, b) => (b.s - a.s) || (String(a.sid) < String(b.sid) ? -1 : 1)).slice(0, Math.max(0, cap | 0));
+}
+const CLASSIC_REPACK_CAP = Math.max(0, Number(process.env.CLASSIC_REPACK_CAP || 300));   // O569: ladder rewrites a run (env 0 = off)
+const CLASSIC_REPACK_EVERY = Math.max(1, Number(process.env.CLASSIC_REPACK_EVERY || 12) | 0);   // O569: a quiet run repacks in one five-minute slot of this many (12 = hourly)
+// O569: the four classic lifetime ladders (the only boards packed by packClassicScore)
+const isClassicLadder = (name) => [ENDLESS_LB_CLASSIC_SOLO, ENDLESS_LB_CLASSIC_DUO, ENDLESS_LB_CLASSIC_TRIO, ENDLESS_LB_CLASSIC_QUAD].indexOf(String(name)) >= 0;
+// O569: a board entry's score as the best maps hold it (classic ladders repacked; any other board as read); null = no entry
+const ladderRowScore = (name, e) => (!e ? null : (isClassicLadder(name) ? classicRowScore(e.score, decodeDetails(e.detailData)) : e.score | 0));
 const ENDLESS_MAX_PC = 4;   // lockstep: client registry ENDLESS_MAX_PC (private-lobby endless maxPlayers; save_box SEAT_SLOTS) -- pinned by mvp ledger-schema-lockstep
 const ENDLESS = {
   MT: 7,
@@ -8584,6 +8613,18 @@ async function main() {
     if (!was || typeof was !== 'object' || aheadLive(was)) return;
     console.log('::warning::' + what + ' write of ' + String(k).slice(0, 8) + (on ? ' on ' + on : '') + ' waited past ' + Math.round(PENDING_W_MAX_MS / 86400000) + ' days (' + (was.n | 0) + ' failed tries, value ' + was.v + '): this run\'s settle writes ' + (v | 0) + ' in its place, its fuse starts now (Q334)');
   };
+  // O569: a waiting best write on a classic ladder (Q319 ew) keeps its exact bank (ts): repacked in the new key, so it compares with
+  //   the rows read this run (classicRowScore) in one packing. Idempotent.
+  for (const k of Object.keys(lpBacklog)) {
+    const ew = lpBacklog[k] && lpBacklog[k].ew;
+    if (!ew || typeof ew !== 'object' || Array.isArray(ew)) continue;
+    for (const name of Object.keys(ew)) {
+      const was = ew[name];
+      if (!isClassicLadder(name) || !was || typeof was !== 'object' || was.ts == null) continue;
+      const v = packClassicScore(Math.floor((was.v | 0) / ENDLESS.BOARD_SCALE), was.ts | 0);
+      if (v !== (was.v | 0)) { console.log('  endless best write of ' + k.slice(0, 8) + ' on ' + name + ': ' + (was.v | 0) + ' repacked ' + v + ' (O569)'); was.v = v; backlogDirty = true; }
+    }
+  }
   const noteReceipt = (sid, mh, change, set, clear) => {
     if (!lpBoardId) return;
     (receipts[String(sid)] = receipts[String(sid)] || []).push({ mh: mh | 0, change: change | 0, set: set | 0, clear: clear | 0 });
@@ -8990,7 +9031,7 @@ async function main() {
         if (!sid || !bid) continue;
         const was = ew[name];
         let row = null;
-        try { const e = await readUserEntry(bid, sid, 'endless best retry'); row = e ? e.score | 0 : null; }
+        try { const e = await readUserEntry(bid, sid, 'endless best retry'); row = ladderRowScore(name, e); }   // O569: classic rows repacked
         catch (e) { ghWarn('endless best retry of ' + plog(sid) + ' on ' + name + ': row read failed (' + (e && e.message) + ') -- waits (Q319)'); continue; }
         if (row != null && row >= (was.v | 0)) { aheadGone('ew|' + k + '|' + name, was, '  endless best write of ' + plog(sid) + ' on ' + name + ' laid ahead by a run that ended before its outcome was known: found on the board'); RUN.ebDone = (RUN.ebDone | 0) + 1; console.log('  endless best write of ' + plog(sid) + ' on ' + name + ' found on the board: row ' + row + ' (Q319)'); ebDrop(k, name); continue; }
         const w = ebEntry(k, name, was);
@@ -9003,6 +9044,41 @@ async function main() {
         ebAfter(name, sid, w, landed);
       }
     }
+  };
+  // ---- O569: classic ladders still in the pre-O569 packing (see packClassicScore / classicRowScore) ----
+  //   rows: { name, id, sid, s (repacked), was (as read), det }; skip(row) as classicRepackPlan. A rewrite goes out with the row's own
+  //   details, ForceUpdate, at most CLASSIC_REPACK_CAP a run (highest first). Nothing to keep across runs: the next read of the board
+  //   finds what is left. RUN.classicRepack = [rewritten, planned, left].
+  const classicRepackWrite = async (rows, tag, skip) => {
+    if (!APPLY_MMR || !CLASSIC_REPACK_CAP || !rows || !rows.length) return;
+    const all = classicRepackPlan(rows, rows.length, skip), plan = all.slice(0, CLASSIC_REPACK_CAP);
+    if (!plan.length) return;
+    const rs = await mapPool(plan, CONCURRENCY, async (r) => {
+      const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: r.id, steamid: r.sid, score: r.s, scoremethod: 'ForceUpdate', format: 'json' }, r.det);
+      const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
+      if (!okFlag) ghWarn('classic repack ' + r.name + ' ' + plog(r.sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140) + ' -- next run (O569)');
+      return okFlag;
+    });
+    const ok = rs.filter((x) => x.status === 'fulfilled' && x.value).length;
+    RUN.classicRepack = [ok, plan.length, all.length - ok];
+    console.log('  classic repack (' + tag + '): ' + ok + '/' + plan.length + ' rows rewritten in the new key, ' + (all.length - ok) + ' left (O569)');
+  };
+  // a quiet run (no consistent / no fresh match) does the rewrite on its own once an hour (one five-minute slot in CLASSIC_REPACK_EVERY): the four
+  //   classic ladders read, nothing else -- the boards of a channel nobody plays still get there
+  const classicRepackQuiet = async () => {
+    if (!APPLY_MMR || !CLASSIC_REPACK_CAP || Math.floor(nowMs / 300000) % CLASSIC_REPACK_EVERY !== 0) return;
+    const list = (lr.json && lr.json.response && lr.json.response.leaderboards) || [];
+    const idOf = (nm) => { const x = list.find((y) => String(y.name || y.Name) === nm); return x ? (x.id || x.ID) : null; };
+    const rows = [];
+    for (const name of [ENDLESS_LB_CLASSIC_SOLO, ENDLESS_LB_CLASSIC_DUO, ENDLESS_LB_CLASSIC_TRIO, ENDLESS_LB_CLASSIC_QUAD]) {
+      const id = idOf(name);
+      if (!id) continue;
+      try {
+        const br = await readBoardAll(id, 'classic ladder ' + name + ' (repack)');
+        for (const e of br.ents) { const was = e.score | 0, det = decodeDetails(e.detailData), sc = classicRowScore(was, det); if (sc !== was) rows.push({ name, id, sid: String(e.steamID), s: sc, was, det }); }
+      } catch (e) { ghWarn('classic repack: ' + name + ' read failed (' + (e && e.message) + ') -- next hour (O569)'); }
+    }
+    await classicRepackWrite(rows, 'quiet');
   };
   // ---- O480 cron_pulse (test/cron-pulse.js) ----
   //   One row on its own board per channel app id (a sandbox run: cron_pulse_test): score = the unix minute this run reached its
@@ -10579,7 +10655,7 @@ async function main() {
   };
 
   RUN.consistent = consistentMatches.length;
-  if (consistentMatches.length === 0) { console.log('no consistent matches'); await ebRetry(); await lpRetry(); await rowRetry(); persistStartsSide(); await maintainTrust(); { const st0 = loadSolo(); await maintainRating(st0, new Set()); if (await maintainCup(st0, null) && APPLY_MMR) saveSolo(st0, nowMs); } await processRedeems(null); await processCampaignGrants(); await processCampaignEndless(); await processLikes([], null); await processChatMute(); await writePulse(); await processSupporters(null, []); await processClassicOwners(null, []); writeRunSummary(); return; }
+  if (consistentMatches.length === 0) { console.log('no consistent matches'); await ebRetry(); await lpRetry(); await rowRetry(); persistStartsSide(); await classicRepackQuiet(); await maintainTrust(); { const st0 = loadSolo(); await maintainRating(st0, new Set()); if (await maintainCup(st0, null) && APPLY_MMR) saveSolo(st0, nowMs); } await processRedeems(null); await processCampaignGrants(); await processCampaignEndless(); await processLikes([], null); await processChatMute(); await writePulse(); await processSupporters(null, []); await processClassicOwners(null, []); writeRunSummary(); return; }
   // cloud audit Q245: the solo chain memory is read before the fresh list -- a processed solo key the done memory remembers
   //   per owner comes back for a writer the lane never processed under it (soloReopenOwners); every other processed key
   //   stays out as before
@@ -10604,7 +10680,7 @@ async function main() {
     for (const [m, L] of seq.lag) if (L > 0) byMh.set(mhOfKey(m), m);
     for (const ev of streakEarly) { const m = byMh.get(ev.mh | 0); if (m != null) ev.t0 = seqStartMs(seq, m, ev.t0); }
   }
-  if (fresh.length === 0) { console.log('no fresh matches, skip'); await ebRetry(); await lpRetry(); await rowRetry(); persistStartsSide(); await maintainTrust(); { const st0 = loadSolo(); await maintainRating(st0, new Set()); if (await maintainCup(st0, null) && APPLY_MMR) saveSolo(st0, nowMs); } await processRedeems(null); await processCampaignGrants(); await processCampaignEndless(); await processLikes([], null); await processChatMute(); await writePulse(); await processSupporters(null, []); await processClassicOwners(null, []); writeRunSummary(); return; }
+  if (fresh.length === 0) { console.log('no fresh matches, skip'); await ebRetry(); await lpRetry(); await rowRetry(); persistStartsSide(); await classicRepackQuiet(); await maintainTrust(); { const st0 = loadSolo(); await maintainRating(st0, new Set()); if (await maintainCup(st0, null) && APPLY_MMR) saveSolo(st0, nowMs); } await processRedeems(null); await processCampaignGrants(); await processCampaignEndless(); await processLikes([], null); await processChatMute(); await writePulse(); await processSupporters(null, []); await processClassicOwners(null, []); writeRunSummary(); return; }
 
   // playtest channel: no rating board exists (and must not -- lock layer 3); the TrueSkill
   // update block below is skipped wholesale, so the id is never consulted.
@@ -10791,7 +10867,19 @@ async function main() {
   if (!enClassicSoloId) { strictBoard('classic solo endless board not found'); ghWarn('classic solo endless board not found (pre-create ' + ENDLESS_LB_CLASSIC_SOLO + ', trusted-writes) -> classic solo segments left pending'); }
   const endlessClassicSoloBest = {};
   let enClassicSoloComplete = true;
-  if (enClassicSoloId) { const br = await readBoardAll(enClassicSoloId, 'classic solo endless board'); enClassicSoloComplete = br.complete; for (const e of br.ents) endlessClassicSoloBest[e.steamID] = e.score | 0; }
+  // O569: every classic ladder row is read through classicRowScore (bank repacked in the new key); a row still in the old packing
+  //   joins classicRepack, rewritten after this run's writes (classicRepackPlan)
+  const classicRepack = [];
+  const readClassicLadder = async (id, label, name, best) => {
+    const br = await readBoardAll(id, label);
+    for (const e of br.ents) {
+      const was = e.score | 0, det = decodeDetails(e.detailData), s = classicRowScore(was, det);
+      best[e.steamID] = s;
+      if (s !== was) classicRepack.push({ name, id, sid: String(e.steamID), s, was, det, best });
+    }
+    return br.complete;
+  };
+  if (enClassicSoloId) enClassicSoloComplete = await readClassicLadder(enClassicSoloId, 'classic solo endless board', ENDLESS_LB_CLASSIC_SOLO, endlessClassicSoloBest);
   let saveBoxId = byNameLb(SAVE_BOX_LB);
   if (!saveBoxId) saveBoxId = await findOrCreateBoard(SAVE_BOX_LB, false);
   let casualSaveBoxId = byNameLb(SAVE_BOX_LB_CASUAL);   // O218: casual solo checkpoint rows (guard-signed; the cron only prunes past seasons)
@@ -10807,7 +10895,7 @@ async function main() {
     if (!id) { strictBoard('team classic board not found'); ghWarn('team classic board not found (' + lbName + ') -> ' + low + ' classic segments left pending'); }
     const best = {};
     let complete = true;
-    if (id) { const br = await readBoardAll(id, low + ' classic board'); complete = br.complete; for (const e of br.ents) best[e.steamID] = e.score | 0; }
+    if (id) complete = await readClassicLadder(id, low + ' classic board', lbName, best);   // O569
     let sbId = byNameLb(sbName);
     if (!sbId) sbId = await findOrCreateBoard(sbName, false);
     if (!sbId) ghWarn('save box board not found (' + sbName + ', client-writable) -> guard team classic saves fail until it exists');
@@ -11152,7 +11240,7 @@ async function main() {
         if (!sid) { console.log('  endless best write of ' + k.slice(0, 8) + ' on ' + name + ': player not named this run -- waits (Q319)'); continue; }
         let row = d.best[sid] != null ? d.best[sid] | 0 : null;
         if (row == null && !d.complete && d.id) {   // the read stopped at the page cap: his row may sit beyond it
-          try { const e = await readUserEntry(d.id, sid, 'endless best ' + name); row = e ? e.score | 0 : null; }
+          try { const e = await readUserEntry(d.id, sid, 'endless best ' + name); row = ladderRowScore(name, e); }   // O569
           catch (e) { ghWarn('endless best write of ' + plog(sid) + ' on ' + name + ': row read failed (' + (e && e.message) + ') -- waits (Q319)'); continue; }
         }
         ebLay(k, d, sid, row);
@@ -13377,6 +13465,13 @@ async function main() {
     ebAfterPool(F.name, F.changed, wF);   // Q319
   }
   if (eclTeamN) console.log('  classic team ladder writes: ' + eclTeamOk + '/' + eclTeamN);
+  // O569: classic ladder rows still in the pre-O569 packing, rewritten in the new key with their own details (bank / build / team
+  //   block untouched), highest first, CLASSIC_REPACK_CAP a run; the rest next run (a failed rewrite simply comes back: it is
+  //   recomputed from the row each run, so no backlog). Not a row this run wrote (its new best) or no longer holds.
+  await classicRepackWrite(classicRepack, 'settle', (r) => {
+    const pool = r.name === ENDLESS_LB_CLASSIC_SOLO ? changedEndlessClassicSolo : ((Object.values(classicFam).find((F) => F.name === r.name) || {}).changed || {});
+    return r.best[r.sid] !== r.s || pool[r.sid] != null;
+  });
   // O93 solo competitive ladder writes (details = exact bank; packed tiebreak is /1000-saturated)
   const wComp = await mapPool(Object.keys(changedComp), CONCURRENCY, async (sid) => {
     const w = changedComp[sid];
@@ -13593,6 +13688,7 @@ module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CLASSIC_OWN
   team2TeamDissent, team2Dissent, team2HostTeam, team2AccusedKey, team2LateRefusers,   // cloud audit Q56 team-gamble team dissent (+ Q63)
   T2BY_TAG, T2AC, team2Accusations, t2acVerdict, applyTeam2Accusations, t2OwnEvidence,   // cloud audit Q43 team-gamble accusations (+ Q285 / Q286)
   ENDLESS_LB_CLASSIC_SOLO, SAVE_BOX_LB_CLASSIC, CLASSIC, classicGoalAt, classicGoalFor, packClassicScore,   // client knife 3.9b N2 (O216 classic lane)
+  classicRowScore, classicRepackPlan, isClassicLadder, ladderRowScore, CLASSIC_REPACK_CAP, CLASSIC_REPACK_EVERY,   // O569 classic tail = multiples of the depth's goal (read-normalize + repack old rows)
   ENDLESS_LB_CLASSIC_DUO, ENDLESS_LB_CLASSIC_TRIO, ENDLESS_LB_CLASSIC_QUAD, SAVE_BOX_LB_CLASSIC_DUO, SAVE_BOX_LB_CLASSIC_TRIO, SAVE_BOX_LB_CLASSIC_QUAD,   // client knife 3.9b N3 (team classic lane)
   ENDLESS_COMP_LB_OVERALL, overallScore, overallScoreMean, overallDominant,   // knife 3.5d composite ladder
   ENDLESS_LB_OVERALL, ENDLESS_LB_CLASSIC_OVERALL, V51B_PT,   // O276 casual / classic composites + the knife 5.1b rollout gate

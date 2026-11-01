@@ -50,13 +50,13 @@ assert('casual + SUSPENDED -> flags (casual saves are checkpoint rows, the run c
 assert('casual + FINAL + user-quit is legal', soloSanity(seg({ flags: A.SEG_CASUAL | A.SEG_FINAL, dispCode: 5 })).length === 0);
 assert('casual + RESUMED is legal (token resume)', soloSanity(seg({ flags: A.SEG_CASUAL | A.SEG_RESUMED, startDepth: 5, endDepth: 7 })).length === 0);
 // O216 classic (client knife 3.9b N2): CLASSIC bit legal; one life (any continue -> cont); no perks / rerolls (classic-perk); no suspended segment; own goal curve for the score cap
-eq('classic lane names + bits + curve (companion classicBoardName(false,1) / classicSaveBoardName / attest_record.h SEG_CLASSIC / ENDLESS.CLASSIC)', [v.ENDLESS_LB_CLASSIC_SOLO, v.SAVE_BOX_LB_CLASSIC, A.SEG_CLASSIC, v.CLASSIC.LIVES, v.CLASSIC.LEVEL_S_SOLO, v.CLASSIC.LEVEL_S_TEAM, v.CLASSIC.XP_MUL, v.CLASSIC.TIEBREAK_DIV],
-  ['endless_classic_solo', 'endless_save_box_classic', 32, 1, 60, 40, 0.5, 100000]);
+eq('classic lane names + bits + curve (companion classicBoardName(false,1) / classicSaveBoardName / attest_record.h SEG_CLASSIC / ENDLESS.CLASSIC)', [v.ENDLESS_LB_CLASSIC_SOLO, v.SAVE_BOX_LB_CLASSIC, A.SEG_CLASSIC, v.CLASSIC.LIVES, v.CLASSIC.LEVEL_S_SOLO, v.CLASSIC.LEVEL_S_TEAM, v.CLASSIC.XP_MUL, v.CLASSIC.TIE_PER_GOAL],
+  ['endless_classic_solo', 'endless_save_box_classic', 32, 1, 60, 40, 0.5, 2000]);
 eq('classicGoalAt 1..12 = 650 / 1195 / 2010 / 3095 / 4450 / 6075 / 7970 / 10135 / 12570 / 15275 / 17980 / 20685 (linear +2705 from L10)', [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map(v.classicGoalAt),
   [650, 1195, 2010, 3095, 4450, 6075, 7970, 10135, 12570, 15275, 17980, 20685]);
 eq('classicGoalAt(200) linear', v.classicGoalAt(200), 15275 + 2705 * 190);
 eq('classicGoalFor pc 2 = x1 / pc 3 round-half-up / pc 4 = x2', [v.classicGoalFor(2, 2), v.classicGoalFor(2, 3), v.classicGoalFor(2, 4)], [1195, Math.floor((1195 * 3 + 1) / 2), 2390]);
-eq('packClassicScore depth-major + bank/1e5 tiebreak (saturates at 9999 -> $999.9M)', [v.packClassicScore(7, 123456), v.packClassicScore(7, 2147483647)], [70001, 79999]);
+eq('packClassicScore depth-major + bank in 1/2000ths of the depth goal (O569; saturates at 9999 = 5x the goal)', [v.packClassicScore(7, 12345), v.packClassicScore(7, 123456), v.packClassicScore(7, 2147483647), v.packClassicScore(20, 55580), v.packClassicScore(20, 44389)], [73097, 79999, 79999, 202626, 202097]);
 eq('classic segment -> clean', soloSanity(seg({ flags: A.SEG_CLASSIC, endDepth: 5, score: 4450 })), []);
 assert('classic continue -> cont (one life)', soloSanity(seg({ flags: A.SEG_CLASSIC, continuesUsed: 1 })).indexOf('cont') >= 0);
 assert('classic + build -> classic-perk', soloSanity(seg({ flags: A.SEG_CLASSIC, build: 135 })).indexOf('classic-perk') >= 0);
