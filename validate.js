@@ -7,6 +7,7 @@ const MATCH_SIG = require('./match-sig.js');   // client knife 5.8a: the guard's
 const perks = require('./perks.js');     // endless perk build replay (record tail build word + pick log; perk_forge / perk_chain)
 const campaign = require('./campaign.js');   // O159 knife-7d: Vegas campaign clear attestation -> exclusive cosmetic grants
 const campaignEndless = require('./campaign-endless.js');   // knife 3.9b N4: Vegas Gold Rush run attestation -> per-difficulty best-only ladders + offense ledger
+const campaignStory = require('./campaign-story.js');   // companion knife 5d (O603): Vegas campaign story clear attestation -> per-difficulty best-only ladders
 const supporters = require('./supporters.js');   // supporter pack: DLC ownership probe -> wall board / grant bit / points bonus
 const classicOwners = require('./classic.js');   // classic loyalty crate: older-game ownership probe -> revocable grant bit (word 1)
 const chatMute = require('./chat-mute.js');     // chat moderation lane: report snapshots -> automatic mutes + expiry sweep + private mail digest
@@ -3952,7 +3953,7 @@ function writeRunSummary() {
       "| friends' room records whose writer is not on his own roster seat, not counted (Q123) | " + s('seatless', 0) + ' |',
       '| bot match records whose writer is not on his own roster seat, not counted (Q148) | ' + s('seatlessBot', 0) + ' |',
       "| friends' room / bot match keys held past maturity by results on two tables: two tables or more, each on a key of its own / one table, on a key of its own, the others' results left out / no writer on one table, still held (Q214, Q220) | " + s('tableSplit', 0) + ' / ' + s('tableOne', 0) + ' / ' + s('tableHeld', 0) + ' |',
-      '| campaign grants / campaign endless | ' + s('campaign', '-') + ' / ' + s('campaignEndless', '-') + ' |',
+      '| campaign grants / campaign endless / campaign story | ' + s('campaign', '-') + ' / ' + s('campaignEndless', '-') + ' / ' + s('campaignStory', '-') + ' |',
       '| page-cap hits | ' + RUN.cap + ' |',
       '| points receipts written / queued for a later write; cron pulse (O480) | ' + s('receipts', 0) + ' / ' + s('receiptsQueued', 0) + '; ' + s('pulse', '-') + ' |',
       '| points rows read without the last write of this job, that write taken instead ([stale-read], O481) | ' + s('staleRead', 0) + ' |',
@@ -7342,11 +7343,26 @@ const CAMPAIGN_ENDLESS_OFFENSE_LB = process.env.CAMPAIGN_ENDLESS_OFFENSE_LB || (
 const CAMPAIGN_ENDLESS_FILE = process.env.CAMPAIGN_ENDLESS_FILE || 'campaign-endless.json';
 const CE_MAIL_MIN = Math.max(1, Number(process.env.CE_MAIL_MIN || 5));
 const CE_SETTLED_TTL_MS = Number(process.env.CE_SETTLED_TTL_MS || 120 * 86400000);   // settled-signature memory (box rows are overwritten by the guard within days)
+// Companion knife 5d (O603, 2026-11-01): campaign STORY lane (campaign-story.js header). Same suffix as the Gold Rush lane
+//   ('_test' = dev / e2e guards; the only place dev-key records may settle); state rides in campaign-endless.json under 'story'
+//   (so the persisted-state allow lists need no new file). The checkpoint save rows (one row per account, guard-written,
+//   0xC0, read back only by the guard when a story run continues) are only find-or-created here, never read.
+const CAMPAIGN_STORY_BOX_PREFIX = process.env.CAMPAIGN_STORY_BOX_PREFIX || 'campaign_story_box_d';
+const CAMPAIGN_STORY_LB_PREFIX = process.env.CAMPAIGN_STORY_LB_PREFIX || 'campaign_story_d';
+const CAMPAIGN_STORY_SAVE_LB = process.env.CAMPAIGN_STORY_SAVE_LB || ('campaign_story_save_box' + (process.env.CAMPAIGN_ENDLESS_SUFFIX || ''));
+const CAMPAIGN_STORY_OFFENSE_LB = process.env.CAMPAIGN_STORY_OFFENSE_LB || ('campaign_story_offense' + (process.env.CAMPAIGN_ENDLESS_SUFFIX || ''));
+function storyStateOf(st) { const s0 = st.story = st.story || {}; s0.settled = s0.settled || {}; s0.runs = s0.runs || {}; s0.offenses = s0.offenses || {}; s0.rejects = s0.rejects || {}; s0.mailHour = s0.mailHour | 0; return s0; }
 function loadCe() { try { const st = JSON.parse(fs.readFileSync(CAMPAIGN_ENDLESS_FILE, 'utf8')) || {}; st.settled = st.settled || {}; st.offenses = st.offenses || {}; st.rejects = st.rejects || {}; st.forks = st.forks || {}; return st; } catch (e) { return { settled: {}, offenses: {}, rejects: {}, forks: {}, mailHour: 0 }; } }
 function saveCe(st, nowMs) {
   for (const k of Object.keys(st.settled)) if (nowMs - (st.settled[k] | 0) * 60000 > CE_SETTLED_TTL_MS) delete st.settled[k];
   for (const k of Object.keys(st.forks || {})) if (nowMs - ((st.forks[k] && st.forks[k].t) | 0) * 60000 > CE_SETTLED_TTL_MS) delete st.forks[k];   // knife 5.7c: same horizon as the signatures
   st.rejects = campaignEndless.pruneRejects(st.rejects, Math.floor(nowMs / 3600000));
+  if (st.story) {   // knife 5d: the story lane's memory, same horizon
+    const s0 = storyStateOf(st);
+    for (const k of Object.keys(s0.settled)) if (nowMs - (s0.settled[k] | 0) * 60000 > CE_SETTLED_TTL_MS) delete s0.settled[k];
+    for (const k of Object.keys(s0.runs)) if (nowMs - ((s0.runs[k] && s0.runs[k].t) | 0) * 60000 > CE_SETTLED_TTL_MS) delete s0.runs[k];
+    s0.rejects = campaignEndless.pruneRejects(s0.rejects, Math.floor(nowMs / 3600000));
+  }
   try { writeStateFile(CAMPAIGN_ENDLESS_FILE, JSON.stringify(st, null, 0)); } catch (e) { ghWarn('write ' + CAMPAIGN_ENDLESS_FILE + ' failed: ' + (e && e.message)); }
 }
 // Ops mail (Resend; same env as the seedcap alert). Not shared with seedcap.js: that module requires this one, so a top-level
@@ -10333,6 +10349,89 @@ async function main() {
     saveCe(st, nowMs);
     if (nUp || nSame || nPend || nRej || nDup || nHeld || nFork) { RUN.campaignEndless = nUp + 'up/' + nSame + 'same' + (nPend ? '/' + nPend + 'pend' : '') + (nHeld ? '/' + nHeld + 'held' : '') + (nRej ? '/' + nRej + 'rej' : '') + (nDup ? '/' + nDup + 'dup' : '') + (nFork ? '/' + nFork + 'fork' : ''); console.log('campaign endless: ' + nUp + ' ladder writes, ' + nSame + ' not better, ' + nPend + ' pending, ' + nHeld + ' key-held, ' + nRej + ' rejected, ' + nDup + ' already settled, ' + nFork + ' forks dropped'); }
   };
+  // Campaign STORY lane (companion knife 5d, O603): per-difficulty box -> verify + boundary plan (campaign-story.js) -> best-only
+  //   ladder; one clear per run (account + dif + runT0: a later different record = an old checkpoint played again -> dropped,
+  //   never an offense); rejected records -> offense ledger + hourly histogram. Same exit paths as the Gold Rush lane; the
+  //   playtest / demo apps never ship a full campaign -> hard-disabled there.
+  const processCampaignStory = async () => {
+    if (PT_MODE) return;
+    const list = (lr.json && lr.json.response && lr.json.response.leaderboards) || [];
+    const byName = (name) => { const f = list.find(x => String(x.name || x.Name) === name); return f ? (f.id || f.ID) : null; };
+    const cs = campaignStory;
+    let caps = null;
+    try { caps = JSON.parse(fs.readFileSync(require('path').join(__dirname, 'gr-caps.json'), 'utf8')); } catch (e) { ghWarn('campaign story: gr-caps.json unreadable -- lane skipped'); return; }
+    if (!Array.isArray(caps.storyRing)) { ghWarn('campaign story: gr-caps.json has no storyRing -- lane skipped'); return; }
+    const pubTable = loadJobPubTable(nowMs) || {};
+    const allowDevKey = CAMPAIGN_ENDLESS_SUFFIX === '_test';
+    const stAll = loadCe(), sst = storyStateOf(stAll);   // sst, not st: sst.runs is the solo chain memory (pruneSolo-only tripwire)
+    const nowSec = Math.floor(nowMs / 1000), nowMin = Math.floor(nowMs / 60000), nowHour = Math.floor(nowMs / 3600000);
+    let nUp = 0, nSame = 0, nPend = 0, nRej = 0, nDup = 0, nHeld = 0, nRun = 0;
+    const offenseRows = {};
+    try {
+      if (!byName(CAMPAIGN_STORY_SAVE_LB)) await findOrCreateBoard(CAMPAIGN_STORY_SAVE_LB, false);   // checkpoint rows (guard-written; only created here)
+      for (let dif = 1; dif <= CAMPAIGN_ENDLESS_DIF_MAX; dif++) {
+        const boxName = CAMPAIGN_STORY_BOX_PREFIX + dif + CAMPAIGN_ENDLESS_SUFFIX, lbName = CAMPAIGN_STORY_LB_PREFIX + dif + CAMPAIGN_ENDLESS_SUFFIX;
+        const boxId = byName(boxName) || await findOrCreateBoard(boxName, false);   // client-writable (the guard writes as the user)
+        const lbId = byName(lbName) || await findOrCreateBoard(lbName, true);
+        if (!boxId || !lbId) { console.log('campaign story d' + dif + ': board absent -- skip'); continue; }
+        const box = await readBoardAll(boxId, 'campaign story box d' + dif);
+        if (!box.ents.length) continue;
+        const lb = await readBoardAll(lbId, 'campaign story ladder d' + dif);
+        const best = {};
+        for (const e of lb.ents) best[String(e.steamID)] = e.score | 0;
+        for (const e of box.ents) {
+          const sid = String(e.steamID);
+          const d = decodeDetails(e.detailData);
+          const sig = cs.sigHexOf(d);
+          if (sig && sst.settled[sig]) { nDup++; continue; }
+          const v = cs.verifyStoryRecord(d, pubTable);
+          const plan = cs.storySettlePlan(v, { owner: sid, allowDevKey, boxDif: dif, caps, nowSec });
+          if (!plan.ok) {
+            if (plan.pending) { if (keyHeld(plan.reason)) nHeld++; else nPend++; continue; }
+            nRej++;
+            const p2 = pid(sid);
+            const of = sst.offenses[p2] = sst.offenses[p2] || { n: 0, t0: nowMin, rs: [] };
+            of.n++; of.t1 = nowMin;
+            if (of.rs.indexOf(plan.reason) < 0) { of.rs.push(plan.reason); if (of.rs.length > 8) of.rs.shift(); }
+            sst.rejects[nowHour] = (sst.rejects[nowHour] | 0) + 1;
+            offenseRows[sid] = { score: of.n, details: cs.offenseDetails(nowMin, plan.fields, plan.reason) };
+            if (sig) sst.settled[sig] = nowMin;
+            console.log('  campaign story d' + dif + ' ' + plog(sid) + ': rejected (' + plan.reason + ')' + (plan.fields ? ' passes=' + plan.fields.passes + ' score=' + plan.fields.score + ' flags=' + plan.fields.fast + '/' + plan.fields.skip + '/' + plan.fields.incons : ''));
+            continue;
+          }
+          const f = plan.fields;
+          const rp = cs.runPlan(sst.runs, pid(sid), f, sig);
+          if (rp.dup) { nRun++; if (sig) sst.settled[sig] = nowMin; console.log('  campaign story d' + dif + ' ' + plog(sid) + ': second clear of one run dropped (score ' + f.score + ')'); continue; }
+          if (rp.first) sst.runs[rp.key] = { sig, t: nowMin };
+          if (sig) sst.settled[sig] = nowMin;
+          if (best[sid] != null && (f.score | 0) <= best[sid]) { nSame++; continue; }
+          if (!APPLY_MMR) { console.log('  campaign story d' + dif + ' ' + plog(sid) + ': dry-run, would write ' + f.score); continue; }
+          const w = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: lbId, steamid: sid, score: f.score | 0, scoremethod: 'ForceUpdate', format: 'json' }, cs.storyLadderDetails(f));
+          const wOk = w.ok && !(w.json && w.json.result && w.json.result.result && w.json.result.result !== 1);
+          if (!wOk) { ghWarn('campaign story ladder write failed ' + plog(sid) + ': HTTP ' + w.status + ' (deferred)'); if (sig) delete sst.settled[sig]; if (rp.first) delete sst.runs[rp.key]; continue; }
+          best[sid] = f.score | 0; nUp++;
+          console.log('  campaign story d' + dif + ' ' + plog(sid) + ': best ' + f.score + ' (key ' + f.keyName + ', fails ' + f.fails + (plan.flags.length ? ', signal ' + plan.flags.join('+') : '') + ')');
+        }
+      }
+      if (Object.keys(offenseRows).length && APPLY_MMR) {
+        const offId = byName(CAMPAIGN_STORY_OFFENSE_LB) || await findOrCreateBoard(CAMPAIGN_STORY_OFFENSE_LB, true);
+        if (offId) {
+          for (const sid of Object.keys(offenseRows)) {
+            const r = offenseRows[sid];
+            const w = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: offId, steamid: sid, score: r.score | 0, scoremethod: 'ForceUpdate', format: 'json' }, r.details);
+            if (!(w.ok && !(w.json && w.json.result && w.json.result.result && w.json.result.result !== 1))) ghWarn('campaign story offense write failed ' + plog(sid) + ': HTTP ' + w.status);
+          }
+        } else ghWarn('campaign story offense board unavailable (count kept in state)');
+      }
+      const md = campaignEndless.mailDecision(sst.rejects, nowHour, sst.mailHour | 0, CE_MAIL_MIN);
+      if (md.send) {
+        const sent = await ceSendMail('campaign story ALERT: ' + md.n + ' rejected clear records in 24h', 'campaign story lane rejected ' + md.n + ' clear records in the trailing 24h (threshold ' + CE_MAIL_MIN + ').\nOffense ledger: ' + CAMPAIGN_STORY_OFFENSE_LB + ' (score = cumulative count per account, details[3] = reason code).\nA wave usually means a false-positive storm (cap table / key table lag) before it means cheating -- check the reason codes first.\n');
+        if (sent) sst.mailHour = nowHour;
+      }
+    } catch (e) { ghWarn('campaign story channel failed: ' + (e && e.message)); }
+    saveCe(stAll, nowMs);
+    if (nUp || nSame || nPend || nRej || nDup || nHeld || nRun) { RUN.campaignStory = nUp + 'up/' + nSame + 'same' + (nPend ? '/' + nPend + 'pend' : '') + (nHeld ? '/' + nHeld + 'held' : '') + (nRej ? '/' + nRej + 'rej' : '') + (nDup ? '/' + nDup + 'dup' : '') + (nRun ? '/' + nRun + 'run' : ''); console.log('campaign story: ' + nUp + ' ladder writes, ' + nSame + ' not better, ' + nPend + ' pending, ' + nHeld + ' key-held, ' + nRej + ' rejected, ' + nDup + ' already settled, ' + nRun + ' second clears dropped'); }
+  };
   // Supporter pack (supporters.js header): probe DLC ownership for known players (capped per run, cached in
   //   state), then reconcile the wall board (respecting the client-writable opt-out board), OR the grant bit
   //   and return the set of owner sids for this run's points credit. Every write is idempotent; failures are
@@ -10655,7 +10754,7 @@ async function main() {
   };
 
   RUN.consistent = consistentMatches.length;
-  if (consistentMatches.length === 0) { console.log('no consistent matches'); await ebRetry(); await lpRetry(); await rowRetry(); persistStartsSide(); await classicRepackQuiet(); await maintainTrust(); { const st0 = loadSolo(); await maintainRating(st0, new Set()); if (await maintainCup(st0, null) && APPLY_MMR) saveSolo(st0, nowMs); } await processRedeems(null); await processCampaignGrants(); await processCampaignEndless(); await processLikes([], null); await processChatMute(); await writePulse(); await processSupporters(null, []); await processClassicOwners(null, []); writeRunSummary(); return; }
+  if (consistentMatches.length === 0) { console.log('no consistent matches'); await ebRetry(); await lpRetry(); await rowRetry(); persistStartsSide(); await classicRepackQuiet(); await maintainTrust(); { const st0 = loadSolo(); await maintainRating(st0, new Set()); if (await maintainCup(st0, null) && APPLY_MMR) saveSolo(st0, nowMs); } await processRedeems(null); await processCampaignGrants(); await processCampaignEndless(); await processCampaignStory(); await processLikes([], null); await processChatMute(); await writePulse(); await processSupporters(null, []); await processClassicOwners(null, []); writeRunSummary(); return; }
   // cloud audit Q245: the solo chain memory is read before the fresh list -- a processed solo key the done memory remembers
   //   per owner comes back for a writer the lane never processed under it (soloReopenOwners); every other processed key
   //   stays out as before
@@ -10680,7 +10779,7 @@ async function main() {
     for (const [m, L] of seq.lag) if (L > 0) byMh.set(mhOfKey(m), m);
     for (const ev of streakEarly) { const m = byMh.get(ev.mh | 0); if (m != null) ev.t0 = seqStartMs(seq, m, ev.t0); }
   }
-  if (fresh.length === 0) { console.log('no fresh matches, skip'); await ebRetry(); await lpRetry(); await rowRetry(); persistStartsSide(); await classicRepackQuiet(); await maintainTrust(); { const st0 = loadSolo(); await maintainRating(st0, new Set()); if (await maintainCup(st0, null) && APPLY_MMR) saveSolo(st0, nowMs); } await processRedeems(null); await processCampaignGrants(); await processCampaignEndless(); await processLikes([], null); await processChatMute(); await writePulse(); await processSupporters(null, []); await processClassicOwners(null, []); writeRunSummary(); return; }
+  if (fresh.length === 0) { console.log('no fresh matches, skip'); await ebRetry(); await lpRetry(); await rowRetry(); persistStartsSide(); await classicRepackQuiet(); await maintainTrust(); { const st0 = loadSolo(); await maintainRating(st0, new Set()); if (await maintainCup(st0, null) && APPLY_MMR) saveSolo(st0, nowMs); } await processRedeems(null); await processCampaignGrants(); await processCampaignEndless(); await processCampaignStory(); await processLikes([], null); await processChatMute(); await writePulse(); await processSupporters(null, []); await processClassicOwners(null, []); writeRunSummary(); return; }
 
   // playtest channel: no rating board exists (and must not -- lock layer 3); the TrueSkill
   // update block below is skipped wholesale, so the id is never consulted.
@@ -13666,7 +13765,7 @@ async function main() {
   // redeem channel last: wallet debits base on the in-memory post-settle balances just written
   // above (passing the map avoids re-reading scores that global reads may still serve stale).
   await processRedeems(cp);
-  await processCampaignGrants(); await processCampaignEndless();
+  await processCampaignGrants(); await processCampaignEndless(); await processCampaignStory();
   await processClassicOwners(xp, spSids);   // last grant-box writer of the run (classic.js header)
   console.log('written: rating ' + rOk + '/' + wRating.length + ', points ' + pOk + '/' + wPoints.length + ', xp ' + xOk + '/' + wXp.length + ', cp ' + cOk + '/' + wCp.length + ', endless ' + eOk + '/' + wEndless.length + (wEndlessSeason.length ? (' (+season ' + esOk + '/' + wEndlessSeason.length + ')') : '') + (wEndlessTrio.length ? (' (+trio ' + etOk + '/' + wEndlessTrio.length + ')') : '') + (wEndlessTrioSeason.length ? (' (+trio-season ' + etsOk + '/' + wEndlessTrioSeason.length + ')') : '') + (wEndlessQuad.length ? (' (+quad ' + eqOk + '/' + wEndlessQuad.length + ')') : '') + (wEndlessQuadSeason.length ? (' (+quad-season ' + eqsOk + '/' + wEndlessQuadSeason.length + ')') : '') + (wEndlessSolo.length ? (' (+solo ' + esoOk + '/' + wEndlessSolo.length + ')') : '') + (wEndlessSoloSeason.length ? (' (+solo-season ' + esosOk + '/' + wEndlessSoloSeason.length + ')') : '') + ', state updated (idempotent)');
   RUN.writes = rOk + '/' + wRating.length + ' ' + pOk + '/' + wPoints.length + ' ' + xOk + '/' + wXp.length;
@@ -13695,7 +13794,9 @@ module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CLASSIC_OWN
   TEAM_MAGIC, TEAM_VER, TEAM_F_COUCH, teamBlock, ladderDetails,   // O207 team block on team-ladder rows (O606: + the couch bit)
   ENDLESS_COMP_LB_COUCH, SAVE_BOX_LB_COUCH, COUCH_DUO_SPLIT, COUCH_SIG_FLAG, couchSanity, isCouchRec, ratingHistView,   // O606 couch competitive (client knife 5c)
   PREFIX, RANKED_LB, LP_LB, XP_LB, UNMATCHED_LB, SUPPORTER_WALL_LB, SUPPORTER_OPTOUT_LB, CAMPAIGN_ENDLESS_DIF_MAX, CRON_PULSE_LB, TRUST_LEDGER_LB,   // cloud audit R1-X13 / Q40: the sanctions exile list is derived from the board names (test/sanctions-boards.js)
-  CAMPAIGN_ENDLESS_BOX_PREFIX, CAMPAIGN_ENDLESS_LB_PREFIX, CAMPAIGN_ENDLESS_SAVE_PREFIX, CAMPAIGN_ENDLESS_SUFFIX, CAMPAIGN_ENDLESS_OFFENSE_LB, CAMPAIGN_ENDLESS_FILE, CE_MAIL_MIN, CE_SETTLED_TTL_MS, loadCe, saveCe,   // client knife 3.9b N4 (Gold Rush lane)
+  CAMPAIGN_ENDLESS_BOX_PREFIX, CAMPAIGN_ENDLESS_LB_PREFIX, CAMPAIGN_ENDLESS_SAVE_PREFIX, CAMPAIGN_ENDLESS_SUFFIX, CAMPAIGN_ENDLESS_OFFENSE_LB, CAMPAIGN_ENDLESS_FILE, CE_MAIL_MIN, CE_SETTLED_TTL_MS, loadCe, saveCe,
+  CAMPAIGN_STORY_BOX_PREFIX, CAMPAIGN_STORY_LB_PREFIX, CAMPAIGN_STORY_SAVE_LB, CAMPAIGN_STORY_OFFENSE_LB, storyStateOf,   // companion knife 5d (story lane)
+    // client knife 3.9b N4 (Gold Rush lane)
   absentRosterSeats, absenceHold, shardPlan, persistCensus, fmtCensus, soloHoldsChain, transientStatus, ABSENT_GRACE_MS, ABSENT_GRACE_MIN_MS, LEDGER_SHARDS,   // R1-B2-04 / R1-X14 absent-seat hold
   T2LH, hostDissentCount, team2HostOwnsSeat0,   // cloud audit Q57 team-gamble host charges
   PERKS_CFG: perks.PERKS_CFG, verifyPerkPicks: perks.verifyPerkPicks,

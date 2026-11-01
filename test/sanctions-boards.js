@@ -434,10 +434,12 @@ function literalSecretNames(srcs) {
       'endless_comp_solo', 'endless_comp_duo', 'endless_comp_trio', 'endless_comp_quad', 'endless_comp_couch', 'endless_comp_overall', 'lp_ladder'].map(n => n + '_s1').sort().join(','));
   ok('season 2: keeps the season 1 twins (an archived season board is still shown) and adds _s2',
     l2.includes('lp_ladder_s1') && l2.includes('lp_ladder_s2') && l2.includes('endless_comp_overall_s2') && l2.includes('endless_board_overall_s2') && l2.length === l0.length + 24);
-  ok('preseason list: 25 display boards (campaign endless counted per difficulty; O606: + endless_comp_couch)', l0.length === 25);
+  ok('preseason list: 28 display boards (campaign endless + campaign story counted per difficulty; O606: + endless_comp_couch; knife 5d: + campaign_story_d1..d3)', l0.length === 28);
   ok('twin names come from validate.js seasonBoardName (the name the reconcile writes)', l1.includes(v.seasonBoardName(v.ENDLESS_COMP_LB_DUO, 1)));
   ok('campaign endless ladders expanded over difficulties 1..CAMPAIGN_ENDLESS_DIF_MAX',
     v.CAMPAIGN_ENDLESS_DIF_MAX === 3 && ['campaign_endless_d1', 'campaign_endless_d2', 'campaign_endless_d3'].every(n => l0.includes(n)) && !l0.includes('campaign_endless_d4'));
+  ok('knife 5d: campaign story ladders expanded over the same difficulties; its boxes / checkpoint rows / offense ledger stay up',
+    ['campaign_story_d1', 'campaign_story_d2', 'campaign_story_d3'].every(n => l0.includes(n)) && !l0.includes('campaign_story_d4') && !l0.some(n => /^campaign_story_(box|save_box|offense)/.test(n)));
   ok('no duplicates in the list', new Set(l2).size === l2.length);
   const ex = s.exileSources(0, ['custom_board', 'cp_bank', 'xp_ladder', 'campaign_endless_box_d1', 'custom_board']);
   ok('env append: a new name is added once', ex.filter(n => n === 'custom_board').length === 1 && ex[ex.length - 1] === 'custom_board');
