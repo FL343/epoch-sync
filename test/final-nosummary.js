@@ -315,7 +315,7 @@ section('[5]', () => {
 // ---- [6] wiring ----
 section('[6]', () => {
   const S0 = H.SRC;
-  T('[6] the table: name, isVoidDisp excludes 10, valid class', /'eac-drop', 'finished-nosummary'\];\nconst DISP_NOSUMMARY = 10;/.test(S0)
+  T('[6] the table: name, isVoidDisp excludes 10, valid class', /'eac-drop', 'finished-nosummary'(?:, 'game-error')?\];[^\n]*\nconst DISP_NOSUMMARY = 10;/.test(S0)   /* O618: + 11 game-error */
     && /const isVoidDisp = c => \(c \| 0\) >= 2 && \(c \| 0\) !== DISP_NOSUMMARY;/.test(S0)
     && /\(c === 0 \|\| c === 1 \|\| c === DISP_NOSUMMARY\) \? 'valid'/.test(S0));
   T('[6] groupRecords asks nosumVerdict only for a group whose vectors differ', /else \{\n\s*const ns = nosumVerdict\(g, vecOf\);   \/\/ Q68/.test(S0));

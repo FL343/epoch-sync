@@ -13,6 +13,7 @@ const supporters = require('./supporters.js');   // supporter pack: DLC ownershi
 const classicOwners = require('./classic.js');   // classic loyalty crate: older-game ownership probe -> revocable grant bit (word 1)
 const chatMute = require('./chat-mute.js');     // chat moderation lane: report snapshots -> automatic mutes + expiry sweep + private mail digest
 const likePlan = require('./like-plan.js');     // likes lane (O520, client knife 5.4d): like_box -> counted likes -> like_count (processLikes)
+const errRefund = require('./err-refund.js');   // O618: game-error reports (err_sig) -> evidence -> retro refund once confirmed-errors.json lists the error
 // O480: the visible points rules (the LP tables, the series clamp, the mismatch / premade / team plans, the leaver fine) live in
 //   points-plan.js, one copy for this job and for the client (see its header). The environment knobs this file used to read
 //   go in through configure(); the live workflows set none of them (main() warns when one is set: the client's copy then
@@ -331,7 +332,7 @@ const NOTE_DISP = new Set([2, 3, 4]);
 // and finished: XP, career and points as 'finished'), never a VOID vote. Its seat scores are the writer's own judgement, so they
 // do not take part in the score-vector consensus when they differ from the others' (nosumVerdict). Only a joiner whose
 // own base result was clean writes it (no gamble refusal, no endless segment); the host never does.
-const DISP_NAME = ['finished', 'peers-gone', 'host-left', 'level-begin-timeout', 'migrate-disband', 'user-quit', 'reconnect-failed', 'kicked', 'eac-kick', 'eac-drop', 'finished-nosummary'];
+const DISP_NAME = ['finished', 'peers-gone', 'host-left', 'level-begin-timeout', 'migrate-disband', 'user-quit', 'reconnect-failed', 'kicked', 'eac-kick', 'eac-drop', 'finished-nosummary', 'game-error'];   // O618: 11 game-error = the client left on a frame error (innocent, menu path, never written to a record)
 const DISP_NOSUMMARY = 10;
 const dispName = c => (DISP_NAME[c | 0] || ('disp' + (c | 0)));
 const isVoidDisp = c => (c | 0) >= 2 && (c | 0) !== DISP_NOSUMMARY;
@@ -1707,7 +1708,8 @@ function dropSeatlessPrivate(recs, starts, processed) {
 //     could not judge before gets no new exit at the upgrade); each would-be hit is counted as spared;
 //   - a writer of a result whose own record carries only header reasons is consoled: his record fails the sanity check on
 //     the host's header alone (a writer breaking his own fields is not, as at the gate).
-function reconcileStarts(starts, groups, consistentKeys, processed, pending, leavers, now, maturityMs, confState, readComplete, preRegistered, seenKeys, notedSet, heldKeys) {
+// O618: onAbsence(pid, key, startT0) = every exit-rate-only hit below (err-refund.noteAbsence; tests pass nothing)
+function reconcileStarts(starts, groups, consistentKeys, processed, pending, leavers, now, maturityMs, confState, readComplete, preRegistered, seenKeys, notedSet, heldKeys, onAbsence) {
   confState = confState || {};
   if (heldKeys && heldKeys.size) consistentKeys = new Set([...consistentKeys].filter((k) => !heldKeys.has(k)));   // Q294: held keys are the verdict's
   // Q144: no record of key m on the shards on a complete read (seenKeys: every key read this run, in main) -- nothing of it left
@@ -1781,6 +1783,7 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
       if (hdr) { hdrSpared.push(h.slice(0, 8)); continue; }   // Q294: the host's match header broke the match for everyone in it
       leavers[h] = leavers[h] || { leaves: 0, lastMatch: '' };
       leavers[h].leaves += 1; leavers[h].lastMatch = m;
+      if (onAbsence) { try { onAbsence(h, m, p.t0 || now); } catch (e) {} }   // O618: remembered 30 days for a confirmed game error (err-refund.absenceRefunds)
       hit.push(h.slice(0, 8));
       skEv.push({ p: h, mh: mhOfKey(m), t0: p.t0 || now, kind: 'absence' });   // O181: applied to the XP state in main (streakApplyEarly)
     }
@@ -4216,6 +4219,9 @@ function fullBanSet(ents, nowMs) {
 // hit every window) whenever the match never reached processed (fewer than two start attesters
 // visible and no consistent settlement).
 const CONFESSIONS_FILE = process.env.CONFESSIONS_FILE || 'confessions.json';
+// O618: game-error report first sightings (state, persisted per channel) + the hand-written confirmed list (config, code-hash CONFIG_JSON); err-refund.js
+const ERR_STATE_FILE = process.env.ERR_STATE_FILE || 'err-reports.json';
+const ERR_CONFIRMED_FILE = process.env.ERR_CONFIRMED_FILE || require('path').join(__dirname, 'confirmed-errors.json');
 const CONFESS_PRUNE_MS = Number(process.env.CONFESS_PRUNE_MS || 48 * 3600 * 1000);
 // ---- a convicted leave whose own finished result comes in late (cloud audit Q228) ----
 // The client keeps a result it could not upload and sends it again from the menus and at the next boot, for up to two
@@ -4291,6 +4297,7 @@ function pruneConfessions(s, now, live) {
   for (const k of Object.keys(s)) {
     if (now - (s[k].t0 || 0) <= CONFESS_PRUNE_MS) continue;
     if (!(live instanceof Set) || live.has(k)) continue;
+    if (errRefund.holdEntry(s[k], now)) continue;   // O618: an entry with a game-error report waits ERR_HOLD_MS for the list (a conviction's entry has no 0xB5 record, it went at 48 h)
     delete s[k]; dropped++;
   }
   return dropped;
@@ -4442,6 +4449,38 @@ async function reconcileConfessions(confs, groups, processed, confState, leavers
       continue;
     }
     if (closed) { st.done = 1; res.finalized++; }   // forgiveness window closed; penalty stands
+  }
+  // 3) O618: game-error refunds -- an entry carrying his game-error report for that match (es / eb / eo, err-refund.markEvidence)
+  //    that confirmed-errors.json lists for that build, first seen in its window and before it went public (opts.errRefund
+  //    = err-refund.eligible + his real sid from this run's err_sig read). Refunded as a void for him: the fine only (not the
+  //    finish he never played), the exit, a conviction's streak event a pardon; no window, no LATE_CAP (user 2026-11-02: the
+  //    version + date window bounds it). A separate pass so the forgiveness loop above stays as it was (an entry it refunded
+  //    this run is refunded already here).
+  if (opts.errRefund) for (const key of Object.keys(confState)) {
+    const st = confState[key];
+    if (!st.es || st.refunded || st.nf) continue;
+    const i = key.indexOf('|');
+    const p = key.slice(0, i), m = key.slice(i + 1);
+    const via = opts.errRefund(p, m, st);
+    if (!via) continue;
+    const onBoard = !st.cv || (st.b != null && opts.lpBoard != null && String(st.b) === String(opts.lpBoard));   // a conviction's fine: on the points board it was written on only (a new season gives nothing back)
+    const back = onBoard ? (st.ded | 0) : 0;
+    const what = '  game-error ' + m + ': ' + plog(p) + ' left on a confirmed game error (' + st.es + ' build ' + (st.eb | 0) + (via.note ? ', ' + via.note : '') + ')';
+    if (back > 0 && opts.readLp) {
+      const sid = String(via.steamID);
+      const e = await opts.readLp(sid);
+      if (st.cv && !e) console.log(what + ', no points of his to move');
+      else {
+        const nv = Math.min(opts.lpMax, ((e ? e.score : 0) | 0) + back);
+        const okW = await opts.writeLp(sid, nv, e && e.details, { m, change: nv - ((e ? e.score : 0) | 0), kind: 'refund' });   // O480 receipt: clears LEAVE
+        if (okW) res.refunded++;
+        console.log(what + ', refund +' + back + ' -> ' + nv);
+      }
+    } else console.log(what + (onBoard ? '' : ' on another points board') + ' (exit signal retracted)');
+    if (st.ex && leavers[p]) { leavers[p].leaves = Math.max(0, (leavers[p].leaves | 0) - 1); st.ex = 0; res.retracted++; }
+    if (st.cv) res.skEv.push({ p, mh: mhOfKey(m), t0: st.t0 || now, kind: 'pardon' });   // O181: the conviction's streak event turns into a freeze
+    st.refunded = 1; st.er = 1; res.errRefunded = (res.errRefunded | 0) + 1;
+    if (opts.checkpoint) opts.checkpoint();   // R1-B2-03: its marker on disk before the next exit
   }
   return res;
 }
@@ -9485,9 +9524,27 @@ async function main() {
   //   verdict owns it and voids it at maturity with its records still up (each writer of a result consoled, nobody convicted)
   const heldKeys = new Set(consistentMatches.filter((c) => !c.solo && sanityHeaderHeld(c.g)).map((c) => c.m));
   const nowMs = Date.now();
+  // O618: game-error reports (err_sig, client-writable) -> their first sightings by this job + evidence on the confession entries.
+  //   Record-only until confirmed-errors.json lists an error (err-refund.js header); a read failure / an absent board changes nothing.
+  const errSt = errRefund.loadErrState(ERR_STATE_FILE);
+  const errAbsence = (h, m, t0) => errRefund.noteAbsence(errSt, h, m, t0, nowMs);   // reconcileStarts' exit-rate-only hits (absenceRefunds below)
+  let errSids = new Map();
+  const errLb = ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).find(x => String(x.name || x.Name) === errRefund.ERR_LB);
+  if (errLb && (errLb.entries | 0) > 0) {
+    try {
+      const eb = await readBoardAll(errLb.id || errLb.ID, 'err box');
+      const eo = errRefund.observe(errSt, eb.ents.map(e => ({ steamID: e.steamID, d: decodeDetails(e.detailData) })), nowMs, pid);
+      errSids = eo.sids;
+      RUN.errSeen = eo.seen; RUN.errFresh = eo.fresh;
+      if (eo.fresh || eo.bad) console.log('err box: ' + eo.fresh + ' new game-error report(s) of ' + eo.seen + ' (' + eo.bad + ' malformed row(s)) [record-only until confirmed-errors.json lists one, O618]');
+    } catch (e) { ghWarn('err box read failed: ' + (e && e.message)); }
+  }
+  const errList = errRefund.loadConfirmed(ERR_CONFIRMED_FILE, pid, ghWarn);
+  const errMarked = errRefund.markEvidence(confState, errSt);
+  if (errMarked) console.log('err box: ' + errMarked + ' leave entr(ies) carry a game-error report (kept ' + Math.round(errRefund.ERR_HOLD_MS / 86400000) + ' days for the list, O618)');
   // Q64: exit notes read this run ("pid|key", host-left / level-begin-timeout [Q221] / migrate-disband only) -> the start-orphan verdict spares their writers
   const noted = new Set(notes.filter((n) => NOTE_DISP.has(n.dispCode | 0)).map((n) => pid(String(n.steamID)) + '|' + n.m));
-  const startsRes = reconcileStarts(starts, groups, consistentKeys, processed, startsPending, leavers, nowMs, STARTS_MATURITY_MS, confState, shardsComplete, registeredEarly, seenKeys, noted, heldKeys);   // Q144: + seenKeys; Q64: + noted; Q294: + heldKeys
+  const startsRes = reconcileStarts(starts, groups, consistentKeys, processed, startsPending, leavers, nowMs, STARTS_MATURITY_MS, confState, shardsComplete, registeredEarly, seenKeys, noted, heldKeys, errAbsence);   // Q144: + seenKeys; Q64: + noted; Q294: + heldKeys; O618: + every exit-rate-only hit
   if (startsRes.registered || startsRes.convicted || startsRes.cleaned || Object.keys(startsPending).length)
     console.log('starts: ' + Object.keys(startsPending).length + ' pending (+' + startsRes.registered + ' new), ' + startsRes.convicted + ' exit-rate hits, ' + startsRes.cleaned + ' cleaned' + (startsRes.held ? ', ' + startsRes.held + ' matured verdict(s) held (incomplete shard read)' : ''));
   // Q316: a friends' room only one player wrote a result for (the others started, wrote nothing, for PRIVATE_LONE.WAIT_MS)
@@ -9698,6 +9755,12 @@ async function main() {
       consistentKeys,   // absolution probe only trusts consistent settle groups (a lone/divergent 0xB1 cancels nothing)
       startOf: (m) => (startsPending[m] && startsPending[m].t0) || 0,   // O181: a confession's streak break sorts at the match's start
       checkpoint: () => saveEarlyMarks(true),   // R1-B2-03: after every points write (fine or refund), before the next exit can happen
+      // O618: an entry with a game-error report: refunded once confirmed-errors.json lists that error for that build (the real sid = his err_sig row)
+      errRefund: (p, m, st) => {
+        const c = errRefund.eligible({ es: st.es, eb: st.eb, eo: st.eo }, p, errList);
+        const sid = c ? errSids.get(p) : null;
+        return sid ? { steamID: sid, note: c.note } : null;
+      },
       seedFor: (sid) => { const sk = skill0[pid(sid)] || ts.DEFAULTS; return seedLp(ts.displayRating(sk.mu, sk.sigma)); },
       readLp: lpId0 ? (async (sid) => {
         const e = await lpRowOf(sid, 'points');   // O480: a row this run already wrote reads as written
@@ -9722,6 +9785,17 @@ async function main() {
     if (confRes.seen || confRes.refunded || confRes.finalized)
       console.log('confessions: ' + confRes.seen + ' seen, ' + confRes.penalized + ' penalized, ' + confRes.exitHits + ' exit-rate hits, ' + confRes.refunded + ' refunded, ' + confRes.finalized + ' finalized');
   }
+  // O618: exit-rate-only start verdicts (no confession entry, e.g. a 2P quick match the other side finished alone) the list
+  //   confirms: the exit retracted, the streak event a pardon. Then the report state goes to disk (every run: first sightings).
+  const errAbs = errRefund.absenceRefunds(errSt, errList, nowMs);
+  for (const a of errAbs) {
+    if (leavers[a.p]) leavers[a.p].leaves = Math.max(0, (leavers[a.p].leaves | 0) - 1);
+    confRes.skEv.push({ p: a.p, mh: mhOfKey(a.m), t0: (errSt.ab[a.k] && errSt.ab[a.k].t0) || nowMs, kind: 'pardon' });
+    console.log('  game-error ' + a.m + ': ' + plog(a.p) + ' left on a confirmed game error (' + a.sig + ' build ' + a.b + ') -- exit retracted (exit-rate-only start verdict, O618)');
+  }
+  if (errAbs.length) saveEarlyMarks(true);
+  RUN.errRefund = (confRes.errRefunded | 0) + '/' + errAbs.length;
+  errRefund.saveErrState(errSt, nowMs, ERR_STATE_FILE, writeStateFile);
   RUN.confess = confRes.seen + '/' + confRes.penalized + '/' + confRes.refunded;
   RUN.lateForgive = confRes.late | 0; RUN.lateCapped = confRes.lateCapped | 0;   // Q228
   // W113 (quitLoneLateDue): a quit-lone key (W103) whose quitter's own result was forgiven on above comes back for his share

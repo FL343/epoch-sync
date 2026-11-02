@@ -1,0 +1,4 @@
+{
+  "_doc": "O618 confirmed game errors (err-refund.js). Hand-written after a person confirms a game bug: sig = the 8-hex signature from the err_sig board / the client's [frame] fatal line, builds = the build numbers that had the bug, from / until = the bug's date window (UTC dates, until inclusive), added = the date this entry is pushed (a report first seen on or after it is not evidence), exclude = steamIDs not refunded (optional), note = which bug. A leave entry with that report in that window is refunded as a void for the player (the fine, the exit, the streak). No per-account cap (user 2026-11-02).",
+  "entries": []
+}

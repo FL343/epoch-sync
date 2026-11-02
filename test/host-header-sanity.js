@@ -349,8 +349,8 @@ for (const [name, mt, ws, honest, opt] of HEADER_CASES) {
   T('[6] sanitySplit drops what sanityWriterFaults names (one copy of the per-writer half)', /function sanitySplit\(g\) \{[\s\S]*?const drop = sanityWriterFaults\(g\);[\s\S]*?\n\}/.test(SRC));
   T('[6] main: held keys = the consistent (not solo) keys sanityHeaderHeld holds, passed to the verdict (which takes them out of its consistent set); confessions keep consistentKeys',
     /const heldKeys = new Set\(consistentMatches\.filter\(\(c\) => !c\.solo && sanityHeaderHeld\(c\.g\)\)\.map\(\(c\) => c\.m\)\);/.test(SRC)
-      && /const startsRes = reconcileStarts\(starts, groups, consistentKeys, [^\n]*, noted, heldKeys\);/.test(SRC) && /\n      consistentKeys,   \/\/ absolution probe/.test(SRC)
-      && /function reconcileStarts\([^\n]*, notedSet, heldKeys\) \{\n  confState = confState \|\| \{\};\n  if \(heldKeys && heldKeys\.size\) consistentKeys = new Set\(\[\.\.\.consistentKeys\]\.filter\(\(k\) => !heldKeys\.has\(k\)\)\);/.test(SRC));
+      && /const startsRes = reconcileStarts\(starts, groups, consistentKeys, [^\n]*, noted, heldKeys(?:, errAbsence)?\);/.test(SRC)   /* O618: + errAbsence */ && /\n      consistentKeys,   \/\/ absolution probe/.test(SRC)
+      && /function reconcileStarts\([^\n]*, notedSet, heldKeys(?:, onAbsence)?\) \{\n  confState = confState \|\| \{\};\n  if \(heldKeys && heldKeys\.size\) consistentKeys = new Set\(\[\.\.\.consistentKeys\]\.filter\(\(k\) => !heldKeys\.has\(k\)\)\);/.test(SRC));
   const vb = (/function reconcileStarts\([\s\S]*?\n\}/.exec(SRC) || [''])[0];
   T('[6] reconcileStarts: the mark is kept on the entry (after the lane exemption), the spare comes after the confession and exit-note checks, the consolation relaxes header reasons only',
     /\n    if \(heldKeys && heldKeys\.has\(m\) && p\.hh !== 1\) p\.hh = 1;[^\n]*\n    if \(now - \(p\.t0 \|\| 0\) < maturityMs\) continue;/.test(vb)
