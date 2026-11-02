@@ -21,7 +21,14 @@
 // SEEDCAP_REJECT env there, observe-first discipline):
 //   state.veto[m]        over-cap match keys -> reconcile flags instead of
 //                        settling (self-healing: clearing the veto lets the
-//                        still-unprocessed match settle later)
+//                        still-unprocessed match settle later). Cloud audit Q367
+//                        (2026-11-02): a vetoed key's audit stays out of the
+//                        AUDITED_KEEP count bound, so the match is not read again
+//                        while it is held (on the demo channel the bound let its
+//                        audit go within ~20 minutes: each re-read wrote a fresh veto
+//                        clock -- the 30-day hold never ran out -- and convicted the
+//                        same match again); and a match an account already stands
+//                        convicted for is never a second conviction (applyAudit `again`)
 //   state.suspects[pid]  pseudonymous repeat-offender ledger (moderation layer;
 //                        sids never enter this public state -- resolution goes
 //                        through the shard records via the private ops tool).
@@ -640,7 +647,11 @@ function applyAudit(st, pending, cliMap, processed, t, opt) {
       const obsCore = !!(opt && opt.obsOf && opt.obsOf(k));
       const couchHold = !!x.couch && !(opt && opt.couchConvict != null ? opt.couchConvict : SC_COUCH_CONVICT);   // O606
       const obs = obsCore || couchHold;
-      const blamed = obs ? [] : selfOver;
+      // Q367: a match its account already stands convicted for (the group read again) is vetoed, not convicted again --
+      //   one conviction per match, so the reject window does not grow with every re-read and an O198 replay that reverses
+      //   the match takes the whole of it back (a reversed conviction [fpm] is not standing: convicted afresh)
+      const again = obs ? [] : selfOver.filter(s2 => convictedFor(st.suspects[v.pid(x.roster[s2])], x.m));
+      const blamed = obs ? [] : selfOver.filter(s2 => again.indexOf(s2) < 0);
       const unblamed = overSeats.filter(s2 => selfOver.indexOf(s2) < 0);
       const nOf = {};
       if (obs) for (const seat of selfOver) {
@@ -673,6 +684,7 @@ function applyAudit(st, pending, cliMap, processed, t, opt) {
         offenders: blamed.map(s2 => ({ seat: s2, sid: String(x.roster[s2]), score: x.scores[s2] | 0, n: nOf[s2] | 0, ne: v.seedcapNEff(st.suspects[v.pid(x.roster[s2])]) })),
         unattributed: unblamed.map(s2 => ({ seat: s2, score: x.scores[s2] | 0 })),
       });
+      if (again.length) console.log('seedcap: m=' + x.m + ' seat(s) ' + again.join(',') + ' already convicted for this match -- vetoed, not convicted again (Q367)');
       if (obsCore) console.log('seedcap: core ' + k + ' is inside its observation window (first ' + SC_OBS_H + ' h / ' + SC_OBS_N + ' honest audits) -- m=' + x.m + ' vetoed, nobody convicted (' + selfOver.length + ' self-written seat(s) recorded only)');
       else if (couchHold) console.log('seedcap: couch segment m=' + x.m + ' vetoed, nobody convicted, no correction (couch audits observe only until SC_COUCH_CONVICT; ' + selfOver.length + ' self-written seat(s) recorded only)');
       // pids only in logs -- never sids (public run logs)
@@ -846,7 +858,10 @@ async function sendAlertMail(reasons, flags, totals, windows, more) {
 
 // ---- prune (state stays bounded) ----
 function pruneState(st, applied, tNow) {
-  const audKeys = Object.keys(st.audited);
+  // Q367: the count bound takes only audits without a live veto. A vetoed key's audit pruned here was read again on the next
+  //   run (pickAuditable): a fresh veto clock and, for a self-written over seat, a second conviction for the same match. The
+  //   veto map stays bounded by its age (VETO_KEEP_MIN, below); once a veto ages out its audit joins the bound again.
+  const audKeys = Object.keys(st.audited).filter((k) => !st.veto[k]);
   if (audKeys.length > AUDITED_KEEP) {
     audKeys.sort((a, b) => (st.audited[a].t | 0) - (st.audited[b].t | 0));
     for (const k of audKeys.slice(0, audKeys.length - AUDITED_KEEP)) delete st.audited[k];

@@ -344,7 +344,7 @@ const brk = (rs, n, tag) => { if (rs.length === n && rs.every(r => r.code === 0)
   pin('a couch run writes the duo pair while merged and the couch pair always', 'for (const F of (COUCH_DUO_SPLIT ? [couchComp] : [compFam.DUO, couchComp])) {');
   pin('the couch career reads its character block', '{ segmented: true, forced: !cc }');
   const SC = fs.readFileSync(path.join(ROOT, 'seedcap.js'), 'utf8');
-  T('[9] seedcap: a couch over-cap convicts nobody until SC_COUCH_CONVICT', SC.indexOf('const obs = obsCore || couchHold;') >= 0 && SC.indexOf('const blamed = obs ? [] : selfOver;') >= 0);
+  T('[9] seedcap: a couch over-cap convicts nobody until SC_COUCH_CONVICT', SC.indexOf('const obs = obsCore || couchHold;') >= 0 && SC.indexOf('const blamed = obs ? [] : selfOver.filter(s2 => again.indexOf(s2) < 0);') >= 0);   // Q367: less a seat already convicted for this match
 }
 
 try { fs.rmSync(TREE, { recursive: true, force: true }); } catch (e) {}

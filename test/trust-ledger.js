@@ -438,7 +438,8 @@ console.log('=== trust ledger (O198 v1, knife 5.5b-1) ===');
   T('[15] ' + sc.SC_OBS_N + ' honest audits end the observation early', sc.observationOf(st3, live, 'demo', tNow)('newcorenewco') === false);
   const SJ = read('seedcap.js');
   T('[15] main passes the observation judge of this run (snapshot before the verdicts)', /obsOf: observationOf\(st, cf\.live, SEEDCAP_CHANNEL, nowMin\(\)\)/.test(SJ));
-  T('[15] the observed branch never touches the suspect ledger', /const blamed = obs \? \[\] : selfOver;/.test(SJ));
+  // Q367: blamed also leaves out a seat already convicted for this match (again) -- still [] on the observed branch
+  T('[15] the observed branch never touches the suspect ledger', /const again = obs \? \[\] : selfOver\.filter\(/.test(SJ) && /const blamed = obs \? \[\] : selfOver\.filter\(s2 => again\.indexOf\(s2\) < 0\);/.test(SJ));
 }
 
 // ---- [16] Q325: the window that names a core starts its observation, even when the core filed verdicts here before it ----
