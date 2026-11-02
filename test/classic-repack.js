@@ -360,7 +360,7 @@ const MUT = {
   // rows taken as read (the old key) into the best maps: a poorer run of the same depth looks new and overwrites the better one
   noNormalize: ['      best[e.steamID] = s;\n', '      best[e.steamID] = was;\n'],
   // no rewrite at all
-  noRewrite: ['    if (!APPLY_MMR || !CLASSIC_REPACK_CAP || !rows || !rows.length) return;\n', '    return;\n'],
+  noRewrite: ['    if (!APPLY_MMR || !CLASSIC_REPACK_CAP || !rows || !rows.length) return 0;\n', '    return 0;\n'],   // O624: returns how many accounts it marked
   // the cap not applied
   noCap: ['plan = all.slice(0, CLASSIC_REPACK_CAP);', 'plan = all;'],
   // the rows this run writes not skipped: the rewrite of an old row lands after the run's new best

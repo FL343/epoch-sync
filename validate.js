@@ -3961,6 +3961,7 @@ function writeRunSummary() {
       '| settle XP / CP writes that failed, waiting for a later run / waiting writes that landed (Q318) | ' + s('rowQueued', 0) + ' / ' + s('rowRetried', 0) + ' |',
       '| endless best writes that failed, waiting for a later run / waiting writes that landed or were found on the board / dropped, board no longer written (Q319) | ' + s('ebQueued', 0) + ' / ' + s('ebDone', 0) + ' / ' + s('ebDropped', 0) + ' |',
       '| classic ladder rows in the old key rewritten / planned this run / still in the old key after it (O569) | ' + (Array.isArray(RUN.classicRepack) ? RUN.classicRepack.join(' / ') : '-') + ' |',
+      '| classic ladder rows in the old key of accounts that no longer own the app (result 27), not rewritten for 7 days (O624) | ' + s('classicRepackGone', 0) + ' |',
       '| solo segments held by the key policy (other channel / retired key; new this run) | ' + s('keyHeld', 0) + ' (' + s('keyHeldNew', 0) + ') |',
       '| duration | ' + ((Date.now() - (RUN.t0 || Date.now())) / 1000).toFixed(1) + 's |',
       '',
@@ -7312,6 +7313,13 @@ function classicRepackPlan(rows, cap, skip) {
 }
 const CLASSIC_REPACK_CAP = Math.max(0, Number(process.env.CLASSIC_REPACK_CAP || 300));   // O569: ladder rewrites a run (env 0 = off)
 const CLASSIC_REPACK_EVERY = Math.max(1, Number(process.env.CLASSIC_REPACK_EVERY || 12) | 0);   // O569: a quiet run repacks in one five-minute slot of this many (12 = hourly)
+// O290 follow-up / O624: an account Steam refuses a board write with result 27 (Expired = it no longer owns the app: a refund, a
+//   trial removed from the library) -- the app refuses every board of his, so one memory per account serves every derived write that
+//   would only be refused the same way (the composite rows, the classic repack): pid-keyed in the chain memory (soloState.ovGone,
+//   no steamIDs), not tried again for OV_GONE_MS. appGone(gone, k, nowMs) = k's mark is inside that window (a mark the composite
+//   writer has not pruned yet still counts only while it is fresh).
+const OV_GONE_MS = 7 * 86400000;   // one try a week: a player who adds the app back gets his rows within a week
+const appGone = (gone, k, nowMs) => !!gone && Object.prototype.hasOwnProperty.call(gone, k) && nowMs - (Number(gone[k]) || 0) < OV_GONE_MS;
 // O569: the four classic lifetime ladders (the only boards packed by packClassicScore)
 const isClassicLadder = (name) => [ENDLESS_LB_CLASSIC_SOLO, ENDLESS_LB_CLASSIC_DUO, ENDLESS_LB_CLASSIC_TRIO, ENDLESS_LB_CLASSIC_QUAD].indexOf(String(name)) >= 0;
 // O569: a board entry's score as the best maps hold it (classic ladders repacked; any other board as read); null = no entry
@@ -9121,19 +9129,43 @@ async function main() {
   //   rows: { name, id, sid, s (repacked), was (as read), det }; skip(row) as classicRepackPlan. A rewrite goes out with the row's own
   //   details, ForceUpdate, at most CLASSIC_REPACK_CAP a run (highest first). Nothing to keep across runs: the next read of the board
   //   finds what is left. RUN.classicRepack = [rewritten, planned, left].
-  const classicRepackWrite = async (rows, tag, skip) => {
-    if (!APPLY_MMR || !CLASSIC_REPACK_CAP || !rows || !rows.length) return;
-    const all = classicRepackPlan(rows, rows.length, skip), plan = all.slice(0, CLASSIC_REPACK_CAP);
-    if (!plan.length) return;
-    const rs = await mapPool(plan, CONCURRENCY, async (r) => {
-      const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: r.id, steamid: r.sid, score: r.s, scoremethod: 'ForceUpdate', format: 'json' }, r.det);
-      const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
-      if (!okFlag) ghWarn('classic repack ' + r.name + ' ' + plog(r.sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140) + ' -- next run (O569)');
-      return okFlag;
-    });
-    const ok = rs.filter((x) => x.status === 'fulfilled' && x.value).length;
-    RUN.classicRepack = [ok, plan.length, all.length - ok];
-    console.log('  classic repack (' + tag + '): ' + ok + '/' + plan.length + ' rows rewritten in the new key, ' + (all.length - ok) + ' left (O569)');
+  //   O624 (live 2026-11-01, demo job, the first two runs after O569: 215 / 300 then 109 / 249 rewritten, 140 left for good): a
+  //   rewrite Steam refuses with result 27 (the account no longer owns the app) came back every run that settled anything -- 140
+  //   Web API calls and 140 warnings a run, "left" never reaching 0. gone = the per-account memory (soloState.ovGone, see appGone):
+  //   a marked account's rows stay out of the plan for OV_GONE_MS (the cap goes to rows that can be written), a 27 marks him with a
+  //   log line (no warning), "left" counts only the rows still writable and RUN.classicRepackGone those of accounts that no longer
+  //   own the app. Nobody's score moves: such a row keeps its depth (it only ranks by its old tail at that depth); one try a week.
+  //   Returns how many accounts this call marked (the quiet run saves the memory when it is > 0).
+  const classicRepackWrite = async (rows, tag, skip, gone) => {
+    if (!APPLY_MMR || !CLASSIC_REPACK_CAP || !rows || !rows.length) return 0;
+    if (gone) for (const k of Object.keys(gone)) if (!appGone(gone, k, nowMs)) delete gone[k];   // a mark past its week: tried again (as the composite writer)
+    const cand = classicRepackPlan(rows, rows.length, skip);
+    const all = cand.filter((r) => !appGone(gone, pid(r.sid), nowMs)), away = cand.length - all.length;
+    const plan = all.slice(0, CLASSIC_REPACK_CAP);
+    let ok = 0, goneN = 0;
+    if (plan.length) {
+      const rs = await mapPool(plan, CONCURRENCY, async (r) => {
+        const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: r.id, steamid: r.sid, score: r.s, scoremethod: 'ForceUpdate', format: 'json' }, r.det);
+        const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
+        if (!okFlag && gone && res.json && res.json.result && res.json.result.result === 27) {
+          if (!appGone(gone, pid(r.sid), nowMs)) goneN++;
+          gone[pid(r.sid)] = nowMs;
+          console.log('  classic repack ' + r.name + ' ' + plog(r.sid) + ': result 27 (no longer owns the app) -> not rewritten for 7 days (O624)');
+          return 'gone';
+        }
+        if (!okFlag) ghWarn('classic repack ' + r.name + ' ' + plog(r.sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140) + ' -- next run (O569)');
+        return okFlag;
+      });
+      ok = rs.filter((x) => x.status === 'fulfilled' && x.value === true).length;
+      const goneRows = rs.filter((x) => x.status === 'fulfilled' && x.value === 'gone').length;
+      RUN.classicRepack = [ok, plan.length, all.length - ok - goneRows];
+      RUN.classicRepackGone = away + goneRows;
+      console.log('  classic repack (' + tag + '): ' + ok + '/' + plan.length + ' rows rewritten in the new key, ' + (all.length - ok - goneRows) + ' left' + (away + goneRows ? ', ' + (away + goneRows) + ' of accounts that no longer own the app not rewritten (O624)' : '') + ' (O569)');
+    } else if (away) {
+      RUN.classicRepackGone = away;
+      console.log('  classic repack (' + tag + '): nothing to rewrite, ' + away + ' rows of accounts that no longer own the app not rewritten (O624)');
+    }
+    return goneN;
   };
   // a quiet run (no consistent / no fresh match) does the rewrite on its own once an hour (one five-minute slot in CLASSIC_REPACK_EVERY): the four
   //   classic ladders read, nothing else -- the boards of a channel nobody plays still get there
@@ -9150,7 +9182,11 @@ async function main() {
         for (const e of br.ents) { const was = e.score | 0, det = decodeDetails(e.detailData), sc = classicRowScore(was, det); if (sc !== was) rows.push({ name, id, sid: String(e.steamID), s: sc, was, det }); }
       } catch (e) { ghWarn('classic repack: ' + name + ' read failed (' + (e && e.message) + ') -- next hour (O569)'); }
     }
-    await classicRepackWrite(rows, 'quiet');
+    // O624: the quiet exits save the chain memory only when the cup moved, so this run loads it, and writes it back when a 27
+    //   marked an account (the cup block after it reloads the file, so the marks stay)
+    if (!rows.length) return;
+    const st = loadSolo();
+    if (await classicRepackWrite(rows, 'quiet', null, st.ovGone || (st.ovGone = {}))) saveSolo(st, nowMs);
   };
   // ---- O480 cron_pulse (test/cron-pulse.js) ----
   //   One row on its own board per channel app id (a sandbox run: cron_pulse_test): score = the unix minute this run reached its
@@ -13749,7 +13785,7 @@ async function main() {
   await classicRepackWrite(classicRepack, 'settle', (r) => {
     const pool = r.name === ENDLESS_LB_CLASSIC_SOLO ? changedEndlessClassicSolo : ((Object.values(classicFam).find((F) => F.name === r.name) || {}).changed || {});
     return r.best[r.sid] !== r.s || pool[r.sid] != null;
-  });
+  }, soloState.ovGone || (soloState.ovGone = {}));   // O624: accounts that no longer own the app (saved with the settle)
   // O93 solo competitive ladder writes (details = exact bank; packed tiebreak is /1000-saturated)
   const wComp = await mapPool(Object.keys(changedComp), CONCURRENCY, async (sid) => {
     const w = changedComp[sid];
@@ -13851,8 +13887,7 @@ async function main() {
   //   trial removed from the library) is not retried for OV_GONE_MS -- such a row cannot be written and was retried every tick (live
   //   2026-10-18, demo job right after O290: 17 of 17 composite writes were 27). Per account (the app refuses every board), pid-keyed
   //   in the chain memory (no steamIDs); a later own settle that moves a per-size best does not lift it (the per-size write gets the
-  //   same 27), the 7 days do.
-  const OV_GONE_MS = 7 * 86400000;   // one try a week: a player who adds the app back gets his composite row within a week
+  //   same 27), the 7 days do. OV_GONE_MS / appGone sit with the classic repack constants (O624: the same memory skips its rewrites).
   const ovGone = soloState.ovGone || (soloState.ovGone = {});
   for (const k of Object.keys(ovGone)) if (!(nowMs - (Number(ovGone[k]) || 0) < OV_GONE_MS)) delete ovGone[k];
   const writeOverall = async (F, season) => {
@@ -13967,7 +14002,7 @@ module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CLASSIC_OWN
   team2TeamDissent, team2Dissent, team2HostTeam, team2AccusedKey, team2LateRefusers,   // cloud audit Q56 team-gamble team dissent (+ Q63)
   T2BY_TAG, T2AC, team2Accusations, t2acVerdict, applyTeam2Accusations, t2OwnEvidence,   // cloud audit Q43 team-gamble accusations (+ Q285 / Q286)
   ENDLESS_LB_CLASSIC_SOLO, SAVE_BOX_LB_CLASSIC, CLASSIC, classicGoalAt, classicGoalFor, packClassicScore,   // client knife 3.9b N2 (O216 classic lane)
-  classicRowScore, classicRepackPlan, isClassicLadder, ladderRowScore, CLASSIC_REPACK_CAP, CLASSIC_REPACK_EVERY,   // O569 classic tail = multiples of the depth's goal (read-normalize + repack old rows)
+  classicRowScore, classicRepackPlan, isClassicLadder, ladderRowScore, CLASSIC_REPACK_CAP, CLASSIC_REPACK_EVERY, OV_GONE_MS, appGone,   // O569 classic tail = multiples of the depth's goal (read-normalize + repack old rows)
   ENDLESS_LB_CLASSIC_DUO, ENDLESS_LB_CLASSIC_TRIO, ENDLESS_LB_CLASSIC_QUAD, SAVE_BOX_LB_CLASSIC_DUO, SAVE_BOX_LB_CLASSIC_TRIO, SAVE_BOX_LB_CLASSIC_QUAD,   // client knife 3.9b N3 (team classic lane)
   ENDLESS_COMP_LB_OVERALL, overallScore, overallScoreMean, overallDominant,   // knife 3.5d composite ladder
   ENDLESS_LB_OVERALL, ENDLESS_LB_CLASSIC_OVERALL, V51B_PT,   // O276 casual / classic composites + the knife 5.1b rollout gate
