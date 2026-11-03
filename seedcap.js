@@ -28,7 +28,11 @@
 //                        audit go within ~20 minutes: each re-read wrote a fresh veto
 //                        clock -- the 30-day hold never ran out -- and convicted the
 //                        same match again); and a match an account already stands
-//                        convicted for is never a second conviction (applyAudit `again`)
+//                        convicted for is never a second conviction (applyAudit `again`).
+//                        Cloud audit Q374 (2026-11-03): nor is a match the O198 replay
+//                        reversed for the seat, read over again (its veto aged out) on
+//                        a core that is not the run's primary -- vetoed, no correction;
+//                        the primary reading it over still convicts (it leaves fpm)
 //   state.suspects[pid]  pseudonymous repeat-offender ledger (moderation layer;
 //                        sids never enter this public state -- resolution goes
 //                        through the shard records via the private ops tool).
@@ -605,6 +609,9 @@ function standingT1(su) {
   return best != null ? best : (su.t0 | 0);
 }
 function convictedFor(su, m) { return !!su && (((su.cv || []).some(c => c[0] === m)) || ((su.ms || []).indexOf(m) >= 0)) && (su.fpm || []).indexOf(m) < 0; }
+// cloud audit Q374: the account written from a seat has had its conviction for match m reversed (the O198 replay: a fixed core put
+//   the score under its cap; fpm keeps the last CONVICTION_KEEP reversed match keys)
+function reversedFor(st, sid, m) { const su = st.suspects[v.pid(sid)]; return !!su && (su.fpm || []).indexOf(m) >= 0; }
 // opt (O198 v1, optional): { primary: the primary core's head hash }. Without it every verdict counts under 'root'.
 function applyAudit(st, pending, cliMap, processed, t, opt) {
   let over = 0, okN = 0, errN = 0;
@@ -649,8 +656,15 @@ function applyAudit(st, pending, cliMap, processed, t, opt) {
       const obs = obsCore || couchHold;
       // Q367: a match its account already stands convicted for (the group read again) is vetoed, not convicted again --
       //   one conviction per match, so the reject window does not grow with every re-read and an O198 replay that reverses
-      //   the match takes the whole of it back (a reversed conviction [fpm] is not standing: convicted afresh)
-      const again = obs ? [] : selfOver.filter(s2 => convictedFor(st.suspects[v.pid(x.roster[s2])], x.m));
+      //   the match takes the whole of it back (a reversed conviction [fpm] is not standing: convicted afresh -- by the primary)
+      // Q374: a match the O198 replay reversed for the seat (fpm), read over again later (its veto aged out, the count bound took
+      //   its audit) on a core that is NOT this run's primary -- in practice the core of the package that signed a solo record --
+      //   is the old disagreement read once more: the primary put the score under its cap, so the seat is vetoed, not convicted
+      //   again, and no correction takes its settlement (the next replay would skip it: convictedFor is false for a reversed
+      //   match). The primary itself reading it over still convicts (below: the match leaves fpm, so a replay can reverse it
+      //   again) -- a reversal is never a lasting pass.
+      const cleared = (obs || k === primary) ? [] : selfOver.filter(s2 => reversedFor(st, x.roster[s2], x.m));
+      const again = obs ? [] : selfOver.filter(s2 => cleared.indexOf(s2) >= 0 || convictedFor(st.suspects[v.pid(x.roster[s2])], x.m));
       const blamed = obs ? [] : selfOver.filter(s2 => again.indexOf(s2) < 0);
       const unblamed = overSeats.filter(s2 => selfOver.indexOf(s2) < 0);
       const nOf = {};
@@ -665,6 +679,9 @@ function applyAudit(st, pending, cliMap, processed, t, opt) {
         const nb = su.n | 0;
         su.n++; su.t1 = t; su.t1e = t;
         nOf[seat] = su.n;
+        // Q374: convicted afresh for a match reversed before (the primary reads it over): standing again -- a later replay
+        //   reverses it again (fp counts every reversal, n every conviction), and the Q367 `again` guard holds a third read
+        if (Array.isArray(su.fpm) && su.fpm.indexOf(x.m) >= 0) su.fpm = su.fpm.filter(mm => mm !== x.m);
         if (su.ms.indexOf(x.m) < 0) { su.ms.push(x.m); if (su.ms.length > SUSPECT_MATCH_KEEP) su.ms.shift(); }
         if (!Array.isArray(su.cv)) su.cv = [];
         su.cv.push([x.m, t]); if (su.cv.length > CONVICTION_KEEP) su.cv.shift();
@@ -675,8 +692,9 @@ function applyAudit(st, pending, cliMap, processed, t, opt) {
         if (x.tail) { ctx.d0 = x.tail.startDepth | 0; ctx.d1 = x.tail.endDepth | 0; }
         trustLedger.queuePush(st, { t, src: 'sc', p: p2, sev: 3, m: x.m, ctx });   // O198 v1
       }
-      if (!obs && processed.has(x.m) && x.p.entry === 'endless' && !st.corrections.some(c => c.m === x.m)) {   // (O285 (1): no correction while observed)
-        st.corrections.push({ id: 'sc-' + x.m, m: x.m, seats: overSeats, t });
+      const corrSeats = overSeats.filter(s2 => cleared.indexOf(s2) < 0);   // Q374: a cleared seat keeps its settlement
+      if (!obs && corrSeats.length && processed.has(x.m) && x.p.entry === 'endless' && !st.corrections.some(c => c.m === x.m)) {   // (O285 (1): no correction while observed)
+        st.corrections.push({ id: 'sc-' + x.m, m: x.m, seats: corrSeats, t });
       }
       flags.push({
         m: x.m, t, runSeed: x.runSeed | 0, mt: x.mt | 0, cap: capEff | 0, k, obs, couch: couchHold ? 1 : 0,   // O606: a couch over-cap mails as an observation of its core
@@ -684,7 +702,9 @@ function applyAudit(st, pending, cliMap, processed, t, opt) {
         offenders: blamed.map(s2 => ({ seat: s2, sid: String(x.roster[s2]), score: x.scores[s2] | 0, n: nOf[s2] | 0, ne: v.seedcapNEff(st.suspects[v.pid(x.roster[s2])]) })),
         unattributed: unblamed.map(s2 => ({ seat: s2, score: x.scores[s2] | 0 })),
       });
-      if (again.length) console.log('seedcap: m=' + x.m + ' seat(s) ' + again.join(',') + ' already convicted for this match -- vetoed, not convicted again (Q367)');
+      const againStanding = again.filter(s2 => cleared.indexOf(s2) < 0);
+      if (againStanding.length) console.log('seedcap: m=' + x.m + ' seat(s) ' + againStanding.join(',') + ' already convicted for this match -- vetoed, not convicted again (Q367)');
+      if (cleared.length) console.log('seedcap: m=' + x.m + ' seat(s) ' + cleared.join(',') + ' over on core ' + k + ' (not the primary) for a match the replay reversed -- vetoed, not convicted again, no correction (Q374)');
       if (obsCore) console.log('seedcap: core ' + k + ' is inside its observation window (first ' + SC_OBS_H + ' h / ' + SC_OBS_N + ' honest audits) -- m=' + x.m + ' vetoed, nobody convicted (' + selfOver.length + ' self-written seat(s) recorded only)');
       else if (couchHold) console.log('seedcap: couch segment m=' + x.m + ' vetoed, nobody convicted, no correction (couch audits observe only until SC_COUCH_CONVICT; ' + selfOver.length + ' self-written seat(s) recorded only)');
       // pids only in logs -- never sids (public run logs)
@@ -1114,7 +1134,7 @@ async function main() {
 
 module.exports = { coreFirstSeen, honestSince, observationOf, observedAlerts, SC_OBS_H, SC_OBS_N, pendingOfGroup, coreOfVerdict, coreStat, coreRate24, coreAlerts, standingT1, convictedFor, replayCandidates, applyReplay, headHashOf, coreHashOf,
   REPLAY_DAYS, REPLAY_MAX, CONVICTION_KEEP, SC_RATE_PERMIL, SC_RATE_MIN_OVER, CORE_HOURS_KEEP,
-  selectCores, resolveCores, mergeCaps, corePathOf, OVERLAP_GRACE_MS, OVERLAP_MAX_MS, cliSupportsRerolls, cliSupportsClassic, cliSupportsBuilds, cliSupportsFee, cliSupportsRv, capParamsOf, cliLineOf, cliSupportsBuild, chainKey, chainStartBank, tailOf, coreForBuildNum, selfSeatsOf, pickAuditable, takeSkips, applyAudit, pruneState, readGroups, coresForNow, auditPending, runCli, loadState, saveState, SC_STATE_FILE, AUDITED_KEEP, VETO_KEEP_MIN, CHAIN_LEGACY_KEEP_MIN, CHAIN_KEEP_MIN, offensePlanOf, writeOffense, mailDecision, sendAlertMail, alertMailText, rejectWindowsOf, OFFENSE_LB, OFFENSE_MAGIC, SC_MAIL_MIN_OVER, SC_MAIL_SUS_MIN };
+  reversedFor, selectCores, resolveCores, mergeCaps, corePathOf, OVERLAP_GRACE_MS, OVERLAP_MAX_MS, cliSupportsRerolls, cliSupportsClassic, cliSupportsBuilds, cliSupportsFee, cliSupportsRv, capParamsOf, cliLineOf, cliSupportsBuild, chainKey, chainStartBank, tailOf, coreForBuildNum, selfSeatsOf, pickAuditable, takeSkips, applyAudit, pruneState, readGroups, coresForNow, auditPending, runCli, loadState, saveState, SC_STATE_FILE, AUDITED_KEEP, VETO_KEEP_MIN, CHAIN_LEGACY_KEEP_MIN, CHAIN_KEEP_MIN, offensePlanOf, writeOffense, mailDecision, sendAlertMail, alertMailText, rejectWindowsOf, OFFENSE_LB, OFFENSE_MAGIC, SC_MAIL_MIN_OVER, SC_MAIL_SUS_MIN };
 if (require.main === module) {
   main().catch(e => { console.log('::error::seedcap run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
