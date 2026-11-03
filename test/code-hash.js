@@ -155,6 +155,15 @@ console.log('-- tools/run-tests.js --');
     T('budget: every run moves forward, the suite converges (exit 0) after about one run per file', r.status === 0 && rounds === 4 && lines().length === 4, rounds + ' runs, last exit ' + r.status);
     r = run([b, slow[0]], ['--jobs=1', '--budget-min=0.001', '--done-file=' + path.join(dir, 'done2.txt')]);
     T('a red file wins over a budget stop (exit 1, not 3)', r.status === 1 && /RED .*b\.js/.test(r.stdout), r.stdout.slice(-300));
+    // Q362 review: the reconcile runs 4 at a time -- a file finishing past the budget while another still runs must not
+    //   start a new one (with --jobs=1 every finish leaves nothing running, so the cases above cannot see this)
+    const pdone = path.join(dir, 'done3.txt');
+    const par = [w('p0.js', "setTimeout(() => console.log('par 0'), 3000);"), ...[1, 2, 3, 4].map((i) => w('p' + i + '.js', "setTimeout(() => console.log('par " + i + "'), 1000);"))];
+    r = run(par, ['--jobs=2', '--budget-min=0.005', '--done-file=' + pdone]);
+    const plines = (() => { try { return fs.readFileSync(pdone, 'utf8').split('\n').filter(Boolean); } catch (e) { return []; } })();
+    T('budget with several at a time: a finish past the budget while another runs starts nothing new, exit 3',
+      r.status === 3 && /par 0/.test(r.stdout) && /par 1/.test(r.stdout) && !/par [234]/.test(r.stdout) && JSON.stringify(plines.slice().sort()) === JSON.stringify([par[0], par[1]].sort()),
+      r.status + ' / ' + String(plines) + ' / ' + r.stdout.slice(-300));
     r = cp.spawnSync(process.execPath, [path.join(ROOT, 'tools', 'run-tests.js'), '--jobs=2', a, d], { encoding: 'utf8', timeout: 90000 });
     T('without --done-file nothing is written and nothing skipped (the nightly audit path)', r.status === 0 && (r.stdout.match(/alpha out|delta out/g) || []).length === 2 && !/already passed/.test(r.stdout));
   } finally { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) {} }
