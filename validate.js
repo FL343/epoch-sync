@@ -486,6 +486,123 @@ function leaveConfirmHold(absent, pend, now, confirmMs, ownResult, confessed) {
   out.hold = out.seats.length > 0;
   return out;
 }
+// ---- held-group records (cloud audit Q373) ----
+// A consistent group that waits for an absent seat (absenceHold, then leaveConfirmHold) can only settle while its records
+// are still on their shards. The leave wait runs up to LEAVE_CONFIRM_MS (60 min) from the absent player's start, and the
+// players still in the group keep playing meanwhile: each later record of theirs goes to their next shard, so a writer's
+// result is overwritten once he has written as many records as there are shards (live 50 = about 25 more matches; the
+// three test boards = his second match's start). Once every writer's result is gone the group is gone: the job never
+// sees the key again -- a friends' room / bot match never settles (nobody gets the match's XP), a matchmade one voids at
+// the start verdict (no rating, no points; consolation XP only for a writer still visible then) while the absent player's
+// own start still convicts him. The honest players lost the match. Repro: cloud test #483 (three friends' rooms back to
+// back, the first one's host killed at level 3; ledger-raw replay, cloud audit Q373): the third match's starts overwrote
+// the first match's four results 17 minutes into its leave wait and that key never settled. Live (50 shards) the same
+// befalls a player who changes computer (every install turns a counter of its own), loses his local storage, or plays on
+// through a job outage.
+// Now the job keeps what it read: each run a group is held, each record of the key it read is kept on the key's start
+// entry (pend.kr: pid -> sealed record; pend.kt: the first keep), and a later run that reads NO result of the key on the
+// shards reads the kept ones in their place (keptRecords, in main ahead of every gate: the same bytes run through the same
+// pipeline the shard would have fed them to -- as if the shards still held them). Only when the whole group is gone: while
+// any result of the key is up (an upload retry, a rewrite, a writer with fewer records since), the key settles from the
+// shards as before -- a group only part of which is gone keeps its own rules (Q185 puts an agreed FFA seat back for the
+// rating, XP / CP per record; Q136 / Q149 read a team seat's agreement), and a record a writer blanked or rewrote after
+// the agreement is not brought back next to the new one. Not in the endless lanes (their absence grace is short and a
+// team-comp writer may retract a segment by blanking it). A record carries its writer's and every seat's account id and the state files are public (de-identified, pid
+// keys), so a kept record is sealed: AES-256-GCM under a key derived from STATE_SALT, the IV an HMAC of the plaintext
+// under a second derived key (an unchanged record keeps its blob -- no churn in the state file -- and two different
+// records never share an IV). No salt = nothing kept, nothing read (the job of before Q373). A kept record goes once its
+// key is processed (the next run), and at the latest KEPT_REC_MAX_MS after the first keep: 24 h by default, so a job outage
+// of a few hours (seen: 5.7 h) still finds it when the wait it was kept for runs out at the first run after; floor = the
+// absence grace + the leave wait + the start floor. A key that never settles (it turned inconsistent; a friends' room
+// entry lives 30 days) drops its keep there.
+const KEPT_REC_MAX_MS = Math.max(LEAVE_CONFIRM_MS + ABSENT_GRACE_MS + START_CONFIRM_MS, Number(process.env.KEPT_REC_MAX_MS || 24 * 3600 * 1000));
+const KEPT_REC_CAP = 16;   // per key (a roster has at most 8 seats; the cap only bounds a foreign entry)
+const KEPT_TAG = 'kept:';  // shard label of a record read from its kept copy (+ the shard it was kept from)
+const SETTLE_MAGIC = 0xB1;
+// a settle record as the shard read builds it (main) -- one shape for both sources
+function resultRecOf(steamID, shard, d) {
+  const pc = d[8] | 0;
+  const dispCode = (d.length > 10 + pc && pc >= 1) ? (d[10 + pc] | 0) : 0;
+  return { steamID, shard, d, dispCode, disp: dispName(dispCode), roster: decodeRoster(d) };
+}
+function keptKeys(salt) {
+  if (!salt) return null;
+  const k = (t) => crypto.createHmac('sha256', String(salt)).update('q373 kept record ' + t).digest();
+  return { enc: k('key v1'), iv: k('iv v1') };
+}
+function keptSeal(r, keys) {
+  const pt = Buffer.from(JSON.stringify({ s: String(r.steamID), h: encodeDetails(r.d), l: String(r.shard == null ? '' : r.shard) }), 'utf8');
+  const iv = crypto.createHmac('sha256', keys.iv).update(pt).digest().subarray(0, 12);
+  const c = crypto.createCipheriv('aes-256-gcm', keys.enc, iv);
+  const ct = Buffer.concat([c.update(pt), c.final()]);
+  return 'v1.' + Buffer.concat([iv, c.getAuthTag(), ct]).toString('base64');
+}
+function keptOpen(blob, keys) {
+  try {
+    if (!keys || typeof blob !== 'string' || blob.indexOf('v1.') !== 0) return null;
+    const b = Buffer.from(blob.slice(3), 'base64');
+    if (b.length < 29) return null;
+    const dc = crypto.createDecipheriv('aes-256-gcm', keys.enc, b.subarray(0, 12));
+    dc.setAuthTag(b.subarray(12, 28));
+    const o = JSON.parse(Buffer.concat([dc.update(b.subarray(28)), dc.final()]).toString('utf8'));
+    return (o && typeof o.s === 'string' && typeof o.h === 'string' && typeof o.l === 'string') ? o : null;
+  } catch (e) { return null; }
+}
+// a held group's records read this run -> its start entry (main: the absence hold and the leave wait of the matchmade /
+//   friends' room / bot lanes). Records read from their kept copy are kept already. Returns how many results it kept (new or
+//   unchanged; an unchanged record keeps its blob).
+function keptKeep(pend, recs, now, keys) {
+  if (!pend || !keys || !Array.isArray(recs) || !recs.length) return 0;
+  const kr = (pend.kr && typeof pend.kr === 'object' && !Array.isArray(pend.kr)) ? pend.kr : {};
+  let n = 0;
+  for (const r of recs) {
+    if (!r || r.start || r.confess || r.note || !Array.isArray(r.d) || (r.d[0] | 0) !== SETTLE_MAGIC || isEndlessMt(r.d[2] | 0)) continue;
+    if (String(r.shard == null ? '' : r.shard).indexOf(KEPT_TAG) === 0) continue;
+    const h = pid(String(r.steamID));
+    if (kr[h] == null && Object.keys(kr).length >= KEPT_REC_CAP) continue;
+    kr[h] = keptSeal(r, keys);
+    n++;
+  }
+  if (Object.keys(kr).length) {
+    pend.kr = kr;
+    if (!(Number(pend.kt) > 0) || Number(pend.kt) > now) pend.kt = now;   // a stamp from the future (foreign state) restarts the clock
+  }
+  return n;
+}
+// main, after the shard read: the kept records of keys still pending none of whose results is on the shards this run (the
+//   record's own key: a friends' room split key keeps the raw one) -> settle records (shard label KEPT_TAG + the shard it was kept from) for the caller to add to its read.
+//   Upkeep on the way: a processed key's, an expired and a damaged keep are dropped. No keys (no salt): nothing is read and
+//   nothing dropped (the keep waits for a run that can open it). An incomplete shard read (complete === false) reads none:
+//   the key's results may sit on a shard that failed (a held group holds on such a read anyway, absenceHold 'read').
+function keptRecords(pending, recs, processed, now, keys, complete) {
+  const out = []; let dropped = 0;
+  if (!pending || !keys) return { recs: out, dropped };
+  const up = new Set();   // every key with a result on the shards this run
+  for (const r of recs || []) if (r && Array.isArray(r.d)) up.add(r.d[3] + '_' + r.d[4] + '_' + r.d[2]);
+  const have = new Set();
+  for (const m of Object.keys(pending)) {
+    const p = pending[m];
+    if (!p || typeof p !== 'object' || p.kr == null) continue;
+    const kt = Number(p.kt) || 0;
+    if (typeof p.kr !== 'object' || Array.isArray(p.kr) || !(kt > 0) || now - kt > KEPT_REC_MAX_MS || (processed && processed.has(m))) {
+      dropped += (p.kr && typeof p.kr === 'object') ? Object.keys(p.kr).length : 1;
+      delete p.kr; delete p.kt;
+      continue;
+    }
+    for (const h of Object.keys(p.kr)) {
+      const o = keptOpen(p.kr[h], keys);
+      const d = o ? decodeDetails(o.h) : [];
+      if (!o || pid(o.s) !== h || (d[0] | 0) !== SETTLE_MAGIC || d.length < 10) { delete p.kr[h]; dropped++; continue; }
+      if (complete === false || up.has(d[3] + '_' + d[4] + '_' + d[2])) continue;   // a result of the key is up: the shards settle it (kept again if still held)
+      const k = d[3] + '_' + d[4] + '_' + d[2] + '|' + o.s;
+      if (have.has(k)) continue;   // one per writer and key
+      have.add(k);
+      out.push(resultRecOf(o.s, KEPT_TAG + o.l, d));
+    }
+    if (!Object.keys(p.kr).length) { delete p.kr; delete p.kt; }
+  }
+  return { recs: out, dropped };
+}
 // Which listed boards are the record shards (R1-B2-04 / O348-3). Live channels: exactly PREFIX+0 .. PREFIX+(n-1). A name
 // missing from the listing makes the run's view incomplete (the listing can drop a board for a while); any other board
 // that only starts with the prefix is not read (each run reads every shard, so an extra board is pure cost). A listing
@@ -3885,6 +4002,7 @@ function writeRunSummary() {
       '| start proof (O462) mode: keys proven / starts ok / bad / none / records off the table (pf) / own start naming another table (pr) / another seat (ps) / notes scrubbed / forks / provisional rosters set to the table / contests withdrawn | ' + s('startProof', '-') + ' |',
       '| absent-seat holds (incomplete read / grace) | ' + s('absentHeld', 0) + ' |',
       '| groups waiting for a seat that started but has no result yet, until the match must be over (Q121) | ' + s('leaveWait', 0) + ' |',
+      '| results of a held group kept by the job / read from that copy, their shard row overwritten by a newer record (Q373) | ' + s('keptKeep', 0) + ' / ' + s('keptRead', 0) + ' |',
       '| confessions seen/penalized/refunded | ' + s('confess', '0/0/0') + ' |',
       '| leaves convicted at a settle this run, kept for a late result / late results forgiven (points of the finish, exit retracted) / late results over the cap, the leave stands (Q228) | ' + s('lateCv', 0) + ' / ' + s('lateForgive', 0) + ' / ' + s('lateCapped', 0) + ' |',
       '| win streak events landing before matches already counted (a late settle; its own tier counts what came before it) / stale (older than the fold, ignored) / absences frozen (the first in a week) / absences that broke a streak (O181) | ' + s('streakLate', 0) + ' / ' + s('streakStale', 0) + ' / ' + s('streakAbsFreeze', 0) + ' / ' + s('streakAbsBreak', 0) + ' |',
@@ -9296,11 +9414,8 @@ async function main() {
     const out = [];
     for (const e of ents) {
       const d = decodeDetails(e.detailData);
-      if (d[0] === 0xB1 && d.length >= 10) {
-        const pc = d[8] | 0;
-        const dispCode = (d.length > 10 + pc && pc >= 1) ? (d[10 + pc] | 0) : 0;
-        const roster = decodeRoster(d);
-        out.push({ steamID: e.steamID, shard: label, d, dispCode, disp: dispName(dispCode), roster });
+      if (d[0] === SETTLE_MAGIC && d.length >= 10) {
+        out.push(resultRecOf(e.steamID, label, d));   // Q373: one shape with a kept record
       } else if (d[0] === START_MAGIC && d.length >= 10) {
         // start attestation: same layout with zeroed result fields -> roster decodes identically
         out.push({ start: true, steamID: e.steamID, shard: label, d, roster: decodeRoster(d) });
@@ -9340,6 +9455,18 @@ async function main() {
       console.log('recover: ' + fresh.length + ' solo segment(s) + ' + got.starts.length + ' start attestation(s) kept of ' + rows.length + ' pool rows (until ' + new Date(recCfg.until).toISOString() + ')');
     } catch (e) { ghWarn('recover pools read failed: ' + (e && e.message)); }
   }
+  // Q373: the start entries and the processed keys load here (were below the seen keys): a held group's kept records are read
+  //   with the shards', ahead of the seen keys, the census and every gate (keptRecords)
+  const processed = loadProcessed();
+  let processedN0 = processed.size;   // grow-only set: a size change = keys added on this run (persistStartsSide)
+  const startsPending = loadStarts();
+  {
+    const kr = keptRecords(startsPending, recs, processed, Date.now(), keptKeys(SALT), shardsComplete);
+    for (const r of kr.recs) recs.push(r);
+    RUN.keptRead = kr.recs.length;
+    if (kr.recs.length || kr.dropped) console.log('kept records: ' + kr.recs.length + ' read in place of a rotated-off result of a held group'
+      + (kr.recs.length ? ' (' + [...new Set(kr.recs.map((r) => r.d[3] + '_' + r.d[4] + '_' + r.d[2]))].join(', ') + ')' : '') + (kr.dropped ? ', ' + kr.dropped + ' dropped (settled / expired)' : '') + ' (Q373)');
+  }
   console.log('records: ' + recs.length + (starts.length ? ' (+' + starts.length + ' start attestations)' : '') + (confessions.length ? ' (+' + confessions.length + ' abandon confessions)' : '') + (notes.length ? ' (+' + notes.length + ' exit notes)' : ''));
   RUN.rec = recs.length; RUN.starts = starts.length;
   // Q144: every key with a record on the shards this run (results, starts, confessions), before any gate drops one
@@ -9365,8 +9492,6 @@ async function main() {
   const vecTag = (r) => crypto.createHash('sha256').update(vecOf(r)).digest('hex').slice(0, 12);
   // Q80: register this run's new start rosters first, then drop every record its writer is not seated for (applySeatGate)
   //   -- before grouping, so an outside account's record votes nowhere below (consistency, dissent, absent seats, own records)
-  const processed = loadProcessed();
-  let processedN0 = processed.size;   // grow-only set: a size change = keys added on this run (persistStartsSide)
   { const pc0 = persistCensus(recs, processed); RUN.persistPending = fmtCensus(pc0); console.log('persist census (unsettled records by layout version, O199): ' + RUN.persistPending); }
   // Q220: the keys seen this run also hold the split key of every friends' room / bot match record on a table of its
   //   writer's own (applyTableSplit), so a split key is not pruned below or let go (reconcileStarts) while records of its
@@ -9383,7 +9508,6 @@ async function main() {
     const s = String(k), mt = Number(s.slice(s.lastIndexOf('_') + 1)) | 0;
     if (/^-?[0-9]/.test(s) && xpOnlyContestMt(mt) && !isEndlessMt(mt)) seenKeys.add(splitMark(s));
   }
-  const startsPending = loadStarts();
   // Q144: past PROCESSED_CAP, the oldest keys off the shards on two complete reads an hour apart are dropped
   const prunedP = pruneProcessed(processed, startsPending, seenKeys, shardsComplete, Date.now());
   if (prunedP.dropped) {
@@ -12594,6 +12718,7 @@ async function main() {
     }
     if (absHold.hold) {
       RUN.absentHeld = (RUN.absentHeld | 0) + 1;
+      RUN.keptKeep = (RUN.keptKeep | 0) + keptKeep(pend, g.concat(dropRecs), nowMs, keptKeys(SALT));   // Q373: what it read, should the shards lose it
       console.log('  absent-hold ' + c.m + ': seat' + (absentNow.length > 1 ? 's ' : ' ') + absentNow.map((x) => x.seat).join(',') + ' wrote no record -- '
         + (absHold.hold === 'read' ? 'not every record shard was read this run' : 'grace ' + Math.round(absHold.waitMs / 1000) + 's left') + ', deferred (settles in full if the record lands)');
       continue;
@@ -12610,6 +12735,7 @@ async function main() {
     const lcHold = leaveConfirmHold(lcAbsent, pend, nowMs, LEAVE_CONFIRM_MS, (h) => resultBy.has(h), (h) => confSeen.has(h + '|' + c.m) || !!confState[h + '|' + c.m]);
     if (lcHold.hold) {
       RUN.leaveWait = (RUN.leaveWait | 0) + 1;
+      RUN.keptKeep = (RUN.keptKeep | 0) + keptKeep(pend, g.concat(dropRecs), nowMs, keptKeys(SALT));   // Q373: what it read, should the shards lose it
       console.log('  leave-wait ' + c.m + ': seat' + (lcHold.seats.length > 1 ? 's ' : ' ') + lcHold.seats.join(',') + ' wrote a start but no result yet -- '
         + Math.round(lcHold.waitMs / 1000) + 's until the match must be over, deferred (Q121)');
       continue;
@@ -14100,7 +14226,8 @@ Object.assign(module.exports, { flagPlayer, flagsInWindow, stampLegacyFlags, TRU
 Object.assign(module.exports, { endlessHostOnly, SANITY_ENDLESS_HOST_SLUGS });   // cloud audit Q305 endless sanity on host-copied fields flags nobody (test/endless-host-fields.js)
 Object.assign(module.exports, { endlessRecordSplit, endlessRerollCanon, SANITY_ENDLESS_OWN_SLUGS, SANITY_ENDLESS_REC_SLUGS, SANITY_ENDLESS_GROUP_HOST });   // cloud audit Q306 endless: one record's own fields drop that record (test/endless-own-fields.js)
 Object.assign(module.exports, { endlessDispute });   // cloud audit Q317 endless co-op run of three writers or more whose records disagree (test/endless-co-op-dispute.js)
-Object.assign(module.exports, { noteOwnStarts, hasOwnStart, OWN_START_CAP });   // cloud audit Q69 own-record evidence for leaver verdicts
+Object.assign(module.exports, { noteOwnStarts, hasOwnStart, OWN_START_CAP });
+Object.assign(module.exports, { resultRecOf, keptKeys, keptSeal, keptOpen, keptKeep, keptRecords, KEPT_REC_MAX_MS, KEPT_REC_CAP, KEPT_TAG, SETTLE_MAGIC });   // cloud audit Q373 a held group's results kept against shard rotation (test/kept-held-records.js)   // cloud audit Q69 own-record evidence for leaver verdicts
 Object.assign(module.exports, { leaverXpRecordOnlyUntil, LEAVER_XP_RECORD_ONLY, LEAVER_XP_RECORD_ONLY_MAX_MS });   // M194 / W57 demo Next Fest: leaves recorded, XP not discounted
 Object.assign(module.exports, { NL_OPP_CAP, NL_REPEAT });   // cloud audit Q161 named-only losing seats counted on the account
 Object.assign(module.exports, { PAIR_DISPUTE, pairDispute1v1, pairDisputeTable, pairDisputeCount, SANITY_HOST_SLUGS, SANITY_HEADER_SLUGS, sanityHeaderHeld, sanityWriterFaults });   // cloud audit Q289 / Q290 / Q291 / Q292 a key of two voices whose writers disagree

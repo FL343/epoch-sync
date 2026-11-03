@@ -99,6 +99,7 @@ function advance(state, ms) {
     if (st[k] && st[k].t0) st[k].t0 -= ms;
     if (st[k] && st[k].absentAt) st[k].absentAt -= ms;
     if (st[k] && st[k].pl) st[k].pl -= ms;   // Q316: when a lone friends'-room claim was first seen
+    if (st[k] && st[k].kt) st[k].kt -= ms;   // Q373: when a held group's results were first kept
     if (k.charAt(0) === '~' && st[k] && st[k].r) st[k].r -= ms;
   }
   const sg = files.SIGNALS_FILE;
