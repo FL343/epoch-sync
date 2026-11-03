@@ -55,6 +55,7 @@ jobs:
         run: |
           k=$(node tools/code-hash.js) || k=""
           echo "key=tests-pass-${k:-unhashed-$GITHUB_RUN_ID}" >> "$GITHUB_OUTPUT"
+          echo "part=tests-part-${k:-unhashed-$GITHUB_RUN_ID}" >> "$GITHUB_OUTPUT"
       - name: tests passed before?
         id: passed
         if: steps.gate.outputs.yield != 'true'
@@ -64,8 +65,32 @@ jobs:
           path: .tests-passed
           key: ${{ steps.code.outputs.key }}
           lookup-only: true
-      - name: test
+      # Q362 (2026-11-02, second-round audit B2-1 leftover 1): the suite keeps growing and shares this job's 10 minutes
+      # with the settlement. Once one full pass outgrew the job, every run would be killed inside the test step, the pass
+      # never remembered, the next run starting from the top again = no settlement at all, never recovering by itself.
+      # So the files that already passed for this exact code are kept too (.tests-progress, one cache entry per run, the
+      # newest restored by prefix; the prefix carries the same code fingerprint, so a code change starts clean) and only
+      # the rest run. The step has its own timeout under the job's, and whatever passed is saved even when the step did
+      # not finish, so every run moves forward and any suite length converges in a few runs. A run that picks up earlier
+      # progress also stops starting new files after 4 min (the rest wait for the next run), which leaves the settlement
+      # its time; the first run after a code change (and a run that cannot reach the cache) has no budget and behaves as
+      # before. Settlement still needs every file green for this code (the full marker below), as before.
+      - name: tests partly passed before?
+        id: part
         if: steps.gate.outputs.yield != 'true' && steps.passed.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .tests-progress
+          key: ${{ steps.code.outputs.part }}-${{ github.run_id }}
+          restore-keys: ${{ steps.code.outputs.part }}-
+      - name: test
+        id: test
+        if: steps.gate.outputs.yield != 'true' && steps.passed.outputs.cache-hit != 'true'
+        # under the job's 10 min, so the progress save below always gets to run
+        timeout-minutes: 7
+        env:
+          PART_FROM: ${{ steps.part.outputs.cache-matched-key }}
         run: |
           # Fixture-driven tests deliberately trip the real ::warning:: emitters and the step-summary
           # writer (forgery / seedcap over-cap / signals eviction / page-cap). Stop the runner from
@@ -73,9 +98,18 @@ jobs:
           # production warning. Workflow commands resume after the suite; a failing test still fails.
           unset GITHUB_STEP_SUMMARY
           t="tests-$(date +%s%N)"; echo "::stop-commands::$t"
-          node tools/run-tests.js --jobs=4 test/*.js || exit 1
+          budget=""; [ -n "$PART_FROM" ] && budget="--budget-min=4"
+          node tools/run-tests.js --jobs=4 $budget --done-file=.tests-progress test/*.js || exit 1
           echo "::$t::"
           date -u +%FT%TZ > .tests-passed
+      # Q362: the files that passed this run are kept even when the step did not finish (red file, budget, step timeout)
+      - name: remember partial progress
+        if: always() && steps.gate.outputs.yield != 'true' && steps.passed.outputs.cache-hit != 'true' && steps.test.outcome != 'success' && steps.test.outcome != 'skipped'
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .tests-progress
+          key: ${{ steps.code.outputs.part }}-${{ github.run_id }}-${{ github.run_attempt }}
       # only after a green test step (no status function in the condition = success() implied)
       - name: remember the pass
         if: steps.gate.outputs.yield != 'true' && steps.passed.outputs.cache-hit != 'true'
