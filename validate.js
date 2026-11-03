@@ -560,7 +560,9 @@ function keptKeep(pend, recs, now, keys) {
     if (String(r.shard == null ? '' : r.shard).indexOf(KEPT_TAG) === 0) continue;
     const h = pid(String(r.steamID));
     if (kr[h] == null && Object.keys(kr).length >= KEPT_REC_CAP) continue;
-    kr[h] = keptSeal(r, keys);
+    // Q220: a record moved to a split key carries the table's letter key in d[3] (its match hash in h0): kept under the
+    //   raw match hash, the key the shards hold -- read back, it is split again onto the same table key
+    kr[h] = keptSeal(r.h0 !== undefined ? Object.assign({}, r, { d: Object.assign(r.d.slice(), { 3: r.h0 }) }) : r, keys);
     n++;
   }
   if (Object.keys(kr).length) {
@@ -14226,8 +14228,8 @@ Object.assign(module.exports, { flagPlayer, flagsInWindow, stampLegacyFlags, TRU
 Object.assign(module.exports, { endlessHostOnly, SANITY_ENDLESS_HOST_SLUGS });   // cloud audit Q305 endless sanity on host-copied fields flags nobody (test/endless-host-fields.js)
 Object.assign(module.exports, { endlessRecordSplit, endlessRerollCanon, SANITY_ENDLESS_OWN_SLUGS, SANITY_ENDLESS_REC_SLUGS, SANITY_ENDLESS_GROUP_HOST });   // cloud audit Q306 endless: one record's own fields drop that record (test/endless-own-fields.js)
 Object.assign(module.exports, { endlessDispute });   // cloud audit Q317 endless co-op run of three writers or more whose records disagree (test/endless-co-op-dispute.js)
-Object.assign(module.exports, { noteOwnStarts, hasOwnStart, OWN_START_CAP });
-Object.assign(module.exports, { resultRecOf, keptKeys, keptSeal, keptOpen, keptKeep, keptRecords, KEPT_REC_MAX_MS, KEPT_REC_CAP, KEPT_TAG, SETTLE_MAGIC });   // cloud audit Q373 a held group's results kept against shard rotation (test/kept-held-records.js)   // cloud audit Q69 own-record evidence for leaver verdicts
+Object.assign(module.exports, { noteOwnStarts, hasOwnStart, OWN_START_CAP });   // cloud audit Q69 own-record evidence for leaver verdicts
+Object.assign(module.exports, { resultRecOf, keptKeys, keptSeal, keptOpen, keptKeep, keptRecords, KEPT_REC_MAX_MS, KEPT_REC_CAP, KEPT_TAG, SETTLE_MAGIC });   // cloud audit Q373 a held group's results kept against shard rotation (test/kept-held-records.js)
 Object.assign(module.exports, { leaverXpRecordOnlyUntil, LEAVER_XP_RECORD_ONLY, LEAVER_XP_RECORD_ONLY_MAX_MS });   // M194 / W57 demo Next Fest: leaves recorded, XP not discounted
 Object.assign(module.exports, { NL_OPP_CAP, NL_REPEAT });   // cloud audit Q161 named-only losing seats counted on the account
 Object.assign(module.exports, { PAIR_DISPUTE, pairDispute1v1, pairDisputeTable, pairDisputeCount, SANITY_HOST_SLUGS, SANITY_HEADER_SLUGS, sanityHeaderHeld, sanityWriterFaults });   // cloud audit Q289 / Q290 / Q291 / Q292 a key of two voices whose writers disagree

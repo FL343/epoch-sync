@@ -27,7 +27,14 @@
 //   [8] wiring pins (read ahead of the census and every gate, kept at both holds, the processed / starts loads moved once,
 //       summary row, exports)
 //   [9] mutation self-checks (the kept copy not read -> [5] [6] red; not kept at the holds -> [5] [6] red; read while a
-//       result of the key is up -> the copy read next to that record)
+//       result of the key is up -> the copy read next to that record; a record moved to a split key kept as moved -> [10]
+//       paid twice)
+//   [10] end to end, a friends' room split into tables (Q220, the Q373 review): two tables past the Q200 maturity settle on
+//       keys of their own, then a third table writes on the same key with one seat that only started and waits on its split
+//       key. Its results stay up: never read from the copy, each finisher paid once (the first draft sealed the moved record
+//       with the letter key in its match hash -- 0 once encoded --, read it back every run as key 0_<seed>_<type> and paid
+//       it there too). Its results rotate off mid-wait: read back under the raw match hash, split onto the same table key,
+//       paid once in the run the wait ends -- the same run as with the results up
 // End to end over the REAL validate.js main() against the offline board stub of test/lib/settle-stub.js.
 const fs = require('fs'), path = require('path');
 const { spawnSync } = require('child_process');
@@ -262,6 +269,52 @@ console.log('[7] controls');
     && roomPaid(c, ta) && xp(ta) === xp(tb), xp(ta) + ' vs ' + xp(tb));
 }
 
+// [10] a friends' room split into tables (Q220): P and an outside pair PX each wrote a two-seat table on one key; held past
+//   the Q200 maturity, the key splits (each table settles on a key of its own). Ten minutes on, a third table Y writes on the
+//   same key, Y[2] only his start: Y's table waits for his seat on its split key (absence grace, then the leave wait).
+//   lost: from that many runs into Y's wait, every record of the key is off the shards but Y[2]'s start.
+const SPLIT3 = (hash, P, PX, Y, lost) => {
+  const ros = [P[0], P[1]], xr = [PX[0], PX[1]], sc = [6100, 5200], ysc = [6100, 5200, 100];
+  const st = (r, s) => ({ sid: r[s], d: H.rec(0xB2, 10, hash, s, 0, false, r, []) });
+  const re = (r, s, v) => ({ sid: r[s], d: H.rec(0xB1, 10, hash, s, s + 1, s === 0, r, v) });
+  const S = [st(ros, 0), st(ros, 1), st(xr, 0), st(xr, 1)], R = [re(ros, 0, sc), re(ros, 1, sc), re(xr, 0, sc), re(xr, 1, sc)];
+  const YS = [0, 1, 2].map((s) => st(Y, s)), YR = [re(Y, 0, ysc), re(Y, 1, ysc)];
+  const up = S.concat(R), late = up.concat(YS, YR), gone = [YS[2]];
+  const steps = [[0, S], [12 * MIN, up], [v.STARTS_MATURITY_MS - 2 * MIN, up], [3 * MIN, up], [10 * MIN, late]];
+  for (let i = 1; i <= 15; i++) steps.push([5 * MIN, lost && i > lost ? gone : late]);
+  return { P, PX, Y, key: hash + '_1234_10', steps };
+};
+const paidRunsOf = (t, sid) => t.rs.map((r, i) => (H.postsOf(r, PROGRESS, sid).length ? i : -1)).filter((i) => i >= 0);
+const splitPaidOnce = (c, t) => [c.Y[0], c.Y[1]].every((s) => xpPosts(t, s).length === 1 && xpPosts(t, s)[0].score > 0);
+
+console.log('[10] end to end: a friends\' room split into tables, its third table waiting for a seat');
+const split10 = {};
+{
+  const P = [37401, 37402].map(H.SID), PX = [37403, 37404].map(H.SID), Y = [37405, 37406, 37407].map(H.SID);
+  const cb = SPLIT3(0x37400, P, PX, Y, 0), tb = run(cb.steps);
+  T('runs ok (results up)', tb.okAll, tb.out.slice(-1500));
+  const yRun = paidRunsOf(tb, Y[0])[0];
+  T('the first two tables split and paid once each', /table-split [^\n]*\(Q220\)/.test(tb.out) && [].concat(P, PX).every((s) => xpPosts(tb, s).length === 1),
+    J([].concat(P, PX).map((s) => paidRunsOf(tb, s))));
+  T('the third table waits on its split key (kept there), its results up: never read from the copy', keptIn(tb.rs[6]).some((k) => /^t[0-9]+_1234_10$/.test(k))
+    && !/kept records: [1-9][0-9]* read/.test(tb.out), (tb.out.match(/[^\n]*kept records:[^\n]*/g) || []).join(' | ').slice(0, 600));
+  T('its finishers paid once, both in the run its wait ends, on its split key (no key 0_<seed>_<type>)', splitPaidOnce(cb, tb) && yRun >= 15
+    && paidRunsOf(tb, Y[1])[0] === yRun && /private settle t[0-9]+_1234_10: 2 writers/.test(tb.rs[yRun].out) && !/settle 0_1234_10/.test(tb.out),
+    J(Y.map((s) => paidRunsOf(tb, s))) + ' ' + (tb.out.match(/[^\n]*private settle[^\n]*/g) || []).join(' | '));
+  T('the seat that only started gets nothing', xpPosts(tb, Y[2]).length === 0);
+  const cc = SPLIT3(0x37410, [37411, 37412].map(H.SID), [37413, 37414].map(H.SID), [37415, 37416, 37417].map(H.SID), 3), tc = run(cc.steps);
+  T('runs ok (results rotate off mid-wait)', tc.okAll, tc.out.slice(-1500));
+  const wk = (r) => ((/leave-wait (t[0-9]+_1234_10): seat 2 wrote a start but no result yet/.exec(r.out) || [])[1] || '');
+  T('read back from the copy under the raw match hash, split onto the same table key, still waiting there',
+    tc.rs[9].out.indexOf('kept records: 2 read in place of a rotated-off result of a held group (' + cc.key + ')') >= 0
+    && wk(tc.rs[7]) !== '' && wk(tc.rs[9]) === wk(tc.rs[7]) && !processedIn(tc.rs[9], wk(tc.rs[7])), wk(tc.rs[7]) + ' / ' + wk(tc.rs[9]) + ' ' + tc.rs[9].out.slice(-900));
+  T('its finishers paid once, in the run its wait ends -- the same run as with the results up -- on its split key', splitPaidOnce(cc, tc)
+    && paidRunsOf(tc, cc.Y[0])[0] === yRun && paidRunsOf(tc, cc.Y[1])[0] === yRun && /private settle t[0-9]+_1234_10: 2 writers/.test(tc.rs[yRun].out)
+    && !/settle 0_1234_10/.test(tc.out), J(cc.Y.map((s) => paidRunsOf(tc, s))) + ' vs ' + yRun + ' ' + (tc.out.match(/[^\n]*private settle[^\n]*/g) || []).join(' | '));
+  T('after the settle the kept copy is gone', keptIn(tc.rs[tc.rs.length - 1]).length === 0);
+  split10.yRun = yRun;
+}
+
 // ---- [8] wiring pins ----
 console.log('[8] wiring pins');
 {
@@ -302,6 +355,11 @@ console.log('[9] mutation self-checks');
         + "console.log(v.keptRecords({m:p},[v.resultRecOf(B,'shard_4',d)],new Set(),2,K).recs.length)"], { encoding: 'utf8' });
       return (r.stdout || '').trim() === '1';
     }, 1],
+    ['a record moved to a split key kept as moved', '    kr[h] = keptSeal(r.h0 !== undefined ? Object.assign({}, r, { d: Object.assign(r.d.slice(), { 3: r.h0 }) }) : r, keys);\n',
+      '    kr[h] = keptSeal(r, keys);\n', (script) => {
+        const c = SPLIT3(0x37420, [37421, 37422].map(H.SID), [37423, 37424].map(H.SID), [37425, 37426, 37427].map(H.SID), 0), t = run(c.steps, null, script);
+        return t.okAll && !splitPaidOnce(c, t) && xpPosts(t, c.Y[0]).length === 2;
+      }, 1],
   ];
   for (const [label, from, to, check, n] of mutants) {
     if (SRC.split(from).length !== n + 1) { bad('[9] ' + label + ': anchor not found ' + n + ' time(s)'); continue; }
