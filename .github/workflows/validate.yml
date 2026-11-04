@@ -30,6 +30,8 @@ jobs:
             resp=$(curl -fsS --max-time 5 "$FLAG_URL/flag" 2>/dev/null || true)
             case "$resp" in *'"active":true'*) y=true;; esac
           fi
+          # O689: the job's start, for the push backoff in persist (never past the job's limit; tools/state-stash.js backoff)
+          echo "JOB_T0=$(date +%s)" >> "$GITHUB_ENV"
           echo "yield=$y" >> "$GITHUB_OUTPUT"
           if [ "$y" = true ]; then echo "fallback active - yielding this run"; fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -118,12 +120,31 @@ jobs:
         with:
           path: .tests-passed
           key: ${{ steps.code.outputs.key }}
+      # O689: a run whose state push failed kept its state files in the Actions cache (another service than the git push that
+      # failed). The newest copy of this channel is applied only when nothing moved the branch's copy of those files since
+      # (tools/state-stash.js restore); otherwise the checkout stays as it is = the behaviour before (settle from the branch).
+      - name: kept state
+        id: kept
+        if: steps.gate.outputs.yield != 'true'
+        continue-on-error: true
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .state-stash
+          key: state-stash-reconcile-${{ github.run_id }}
+          restore-keys: state-stash-reconcile-
+      - name: apply kept state
+        id: stash
+        if: steps.gate.outputs.yield != 'true'
+        # a crash of the tool leaves the checkout as checked out: the run goes on as before; only halt=1 (files half replaced
+        # and not put back) stops the run step
+        continue-on-error: true
+        run: node tools/state-stash.js restore reconcile
       - name: run
         id: run
         # R1-B2-03: the step times out before the job does (job: 10 min), so a wedged run still leaves the persist
         # step time to commit the one-shot marks validate.js already saved next to its board writes
         timeout-minutes: 8
-        if: steps.gate.outputs.yield != 'true'
+        if: steps.gate.outputs.yield != 'true' && steps.stash.outputs.halt != '1'
         env:
           STEAM_PUBLISHER_KEY: ${{ secrets.STEAM_PUBLISHER_KEY }}
           APPID: ${{ secrets.APPID }}
@@ -173,11 +194,14 @@ jobs:
         if: always() && steps.gate.outputs.yield != 'true' && steps.run.outcome != 'skipped'
         env:
           RUN_OUTCOME: ${{ steps.run.outcome }}
+          # = the job's timeout-minutes (test/state-stash-wiring.js): the backoff ends RESERVE_S before it
+          JOB_LIMIT_S: '600'
         run: |
           state_files=""
           for f in processed.json skill.json leavers.json xp.json starts.json signals.json groups.json confessions.json unmatched.json supporters.json classic.json endless-solo.json campaign-endless.json rfduo.json chat-mute.json pending-writes.json trust.json likes.json err-reports.json; do
             [ -f "$f" ] && state_files="$state_files $f"
           done
+          printf '%s\n' $state_files > "$RUNNER_TEMP/state-files"
           if [ -n "$state_files" ] && [ -n "$(git status --porcelain -- $state_files)" ]; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -192,12 +216,30 @@ jobs:
             n=0
             until git pull --rebase origin "${GITHUB_REF_NAME}" && git push; do
               n=$((n+1))
-              if [ "$n" -ge 3 ]; then echo "::error::state push failed after $n tries -- the next run would re-settle this batch; resolve manually"; exit 1; fi
-              sleep $((5 * n))
+              if [ "$n" -ge 4 ]; then echo "::error::state push failed after $n tries -- the files are kept in the Actions cache for the next run (O689 keep state); if that copy cannot be used there, the next run re-settles this batch"; exit 1; fi
+              # O689: 15 / 45 / 90 s (GitHub's 500s on push mostly clear in tens of seconds), cut to the job's end
+              sleep "$(node tools/state-stash.js backoff "$n" || echo 5)"
             done
           else
             echo "no state change"
           fi
+      # O689: persist failed -> keep the files it could not push for the next run; pushed after a kept copy was used -> cache
+      # the cleared marker on top of it (the newest entry wins the next restore). Best effort: losing the copy = the behaviour before.
+      - name: keep state
+        id: keep
+        if: always() && (steps.persist.outcome == 'failure' || steps.persist.outcome == 'success')
+        continue-on-error: true
+        env:
+          PERSIST_OUTCOME: ${{ steps.persist.outcome }}
+          STASH_FOUND: ${{ steps.stash.outputs.found }}
+        run: node tools/state-stash.js out reconcile "$PERSIST_OUTCOME" "$STASH_FOUND" $(cat "$RUNNER_TEMP/state-files" 2>/dev/null)
+      - name: cache kept state
+        if: always() && steps.keep.outputs.write == '1'
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .state-stash
+          key: state-stash-reconcile-${{ github.run_id }}-${{ github.run_attempt }}
       - name: heartbeat
         if: steps.gate.outputs.yield != 'true'
         run: |
