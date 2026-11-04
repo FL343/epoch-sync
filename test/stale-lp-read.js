@@ -29,6 +29,12 @@
 //       disk, so the next settle counts from his row as it is; [12g] a run killed once the payment is answered and saved: a
 //       read behind it takes the payment
 //   [11] pure: lpReadStale, lpLastLive, the prune of l
+//   [13] the season turns (W126, O481's open end): a match settled in the season's last minutes, then his first settle of the
+//       new season reads the previous season's board for the soft reset from a copy behind it: the kept write (l.b = that
+//       board) is the soft-reset source, one [stale-read]; [13b] with the hold off the copy's older score was (the match lost
+//       into the new season); [13c] current rows: every write the same as with the hold off; [13d] a kept write past the hold
+//       or of another board is not used; [13e] a confession fine at the turn reads the previous season the same way;
+//       [13f] source pin: every soft-reset read of the previous season's board goes through that check (prevLpEntryOf)
 const path = require('path'), fs = require('fs'), os = require('os');
 const H = require('./lib/settle-stub.js');
 for (const k of H.SCRUB) delete process.env[k];
@@ -449,6 +455,93 @@ console.log('=== a lagging read of the points board takes this job\'s last write
     && J(w(g, 4)) === J(o5) && staleN(g.rs[4].out) === 1, scores(w(g, 4)) + ' vs ' + scores(o5) + ' ' + (g.rs[4] ? g.rs[4].out.slice(-700) : ''));
   T('[12g] ... with the hold off the copy is taken as read: counted from the fine, the payment gone (as before O481)', gO.okAll && w(gO, 4).length === 1
     && o5.length === 1 && w(gO, 4)[0].score < o5[0].score && staleN(gO.rs[4].out) === 0, scores(w(gO, 4)) + ' vs ' + scores(o5));
+}
+// ---- [13] the season turns (W126) ----
+//   Preseason ends 2026-12-01 00:00 UTC (season 1 points go to points_s1, created on the fly; the base board 'points' is the
+//   soft-reset source). A beats B at 23:50 the night before (1500 / 1400: silver keeps its points through the soft reset, so a
+//   lost match shows), then again on the new board ten minutes later, his previous-season row read from a copy behind the first.
+{
+  const PRE = { SEASON_NOW: '2026-11-30T23:50:00Z' }, S1 = { SEASON_NOW: '2026-12-01T00:00:00Z' };
+  const S1_OFF = Object.assign({}, S1, HOLD_OFF), PRE_OFF = Object.assign({}, PRE, HOLD_OFF);
+  // the id the stub gave points_s1 in a run (ids from 90000 by FindOrCreate call order, names the fixture lacks; see settle-stub)
+  const s1Id = (r) => {
+    const have = new Set(['progress', 'rating', 'points', 'cp_bank']);
+    let n = 90000, id = null;
+    for (const p of r.posts) {
+      if (!/FindOrCreateLeaderboard/.test(p.url)) continue;
+      const nm = decodeURIComponent((/(?:^|&)name=([^&]*)/.exec(p.body) || [])[1] || '');
+      if (/^shard_/.test(nm) || have.has(nm)) continue;
+      if (nm === 'points_s1' && id == null) id = n;
+      n++;
+    }
+    return id;
+  };
+  const s1Writes = (rr, sid) => [].concat(...rr.rs.map((x) => { const id = s1Id(x); return id == null ? [] : H.postsOf(x, id, sid); }));
+  const turn = (A, B, h1, h2, lag, envPre, envS1, wait, files) => {
+    const m1 = match(2, h1, [A, B]);
+    const a = run([[0, m1.S, envPre], [5 * MIN, m1.all, envPre]], { [A]: { score: 1500 }, [B]: { score: 1400 } });
+    const m2 = match(2, h2, [A, B]);
+    const st = files ? files(a) : H.advance(a.last.state, wait == null ? 5 * MIN : wait);
+    const b = run([[0, m2.S, envS1, lag], [5 * MIN, m2.all, envS1, lag]], a.pts, st);
+    return { m1, m2, a, b };
+  };
+  const seedLine = (out, sid) => (new RegExp('seed [^\\n]*' + plog(sid) + ' first settle this season, soft-reset from (-?[0-9]+) -> pts (-?[0-9]+)').exec(out) || []).slice(1).map(Number);
+  {
+    const A = H.SID(4991), B = H.SID(4992);
+    const lag = { [A]: { score: 1500, details: [] } };   // A's previous-season row as it was before the first match
+    const t = turn(A, B, 0x4AD01, 0x4AD02, lag, PRE, S1);
+    const kept = t.a.pts[A] && t.a.pts[A].score, la = lastOf(t.a, A);
+    T('[13] (the first match settles on the preseason board at 23:50: A above 1500 and below gold, his write kept for that board)', t.a.okAll && kept > 1500 && kept < 2000
+      && la && la.b === 'points' && la.v === kept, kept + ' ' + J(la));
+    const wa = s1Writes(t.b, A), sd = seedLine(t.b.out, A);
+    T('[13] his first settle of season 1 soft-resets from the kept write, not the copy\'s 1500', t.b.okAll && /season 1: points -> points_s1 \(soft-reset source points\)/.test(t.b.out)
+      && J(sd) === J([kept, kept]) && wa.length === 1 && wa[0].score > kept, J(sd) + ' ' + J(wa) + ' ' + t.b.out.slice(-900));
+    T('[13] ... one [stale-read], on the previous season\'s board, logged and counted', staleN(t.b.out) === 1
+      && new RegExp('\\[stale-read\\] points ' + plog(A) + ' \\(prev points, points\\): read 1500 without').test(t.b.out)
+      && t.b.rs.some((r) => /\[stale-read\], O481\) \| 1 \|/.test(r.summary)), t.b.out.slice(-900));
+    T('[13] ... nothing more written to the previous season\'s board', H.setPosts(t.b.rs[0], POINTS).length === 0 && H.setPosts(t.b.rs[1], POINTS).length === 0,
+      J(H.setPosts(t.b.rs[1], POINTS).map((p) => p.body)));
+    const o = turn(A, B, 0x4AD01, 0x4AD02, lag, PRE, S1_OFF);
+    const oa = s1Writes(o.b, A), so = seedLine(o.b.out, A);
+    T('[13b] hold off (the job before W126): soft-reset from the copy\'s 1500, the last match of the season lost into the new one', o.b.okAll && J(so) === J([1500, 1500])
+      && oa.length === 1 && wa.length === 1 && oa[0].score === wa[0].score - (kept - 1500) && staleN(o.b.out) === 0, J(so) + ' ' + J(oa) + ' vs ' + J(wa));
+    T('[13b] ... B (his row current) the same either way', J(s1Writes(o.b, B)) === J(s1Writes(t.b, B)) && s1Writes(t.b, B).length === 1, J(s1Writes(o.b, B)) + ' vs ' + J(s1Writes(t.b, B)));
+    // [13e] A quits his first match of season 1 (a confession, no result yet): the fine reads his previous-season base the same way
+    const ros = [A, B], h3 = 0x4AD03, sc = [6000, 5000];
+    const S3 = ros.map((s, seat) => ({ sid: s, d: H.rec(0xB2, 2, h3, seat, 0, false, ros, sc) }));
+    const conf = { sid: A, d: H.rec(0xB5, 2, h3, 0, 0, false, ros, sc, 5) };
+    const c = run([[0, S3.concat([conf]), S1, lag]], t.a.pts, H.advance(t.a.last.state, 5 * MIN));
+    const cO = run([[0, S3.concat([conf]), S1_OFF, lag]], t.a.pts, H.advance(t.a.last.state, 5 * MIN));
+    const wc = s1Writes(c, A), wcO = s1Writes(cO, A);
+    T('[13e] a confession fine at the turn comes off the soft reset of the kept write (one [stale-read]); with the hold off off the copy\'s 1500', c.okAll && cO.okAll
+      && wc.length === 1 && wcO.length === 1 && wc[0].score - wcO[0].score === kept - 1500 && staleN(c.out) === 1 && staleN(cO.out) === 0, J(wc) + ' vs ' + J(wcO) + ' ' + c.out.slice(-700));
+  }
+  {
+    const A = H.SID(4993), B = H.SID(4994);
+    const on = turn(A, B, 0x4AD11, 0x4AD12, null, PRE, S1), off = turn(A, B, 0x4AD11, 0x4AD12, null, PRE_OFF, S1_OFF);
+    const bodies = (rr) => [].concat(...rr.rs.map((x) => { const id = s1Id(x); return x.posts.filter((p) => /SetLeaderboardScore/.test(p.url) && new RegExp('leaderboardid=(6|7|' + id + ')(&|$)').test(p.body)).map((p) => p.body); }));
+    T('[13c] current previous-season rows: every points and rating write at the turn the same as with the hold off, no [stale-read]', on.b.okAll && off.b.okAll
+      && bodies(on.b).length === 4 && J(bodies(on.b)) === J(bodies(off.b)) && staleN(on.b.out) === 0 && seedLine(on.b.out, A)[0] === on.a.pts[A].score, J(bodies(on.b)) + '\n vs ' + J(bodies(off.b)));
+  }
+  {
+    const A = H.SID(4995), B = H.SID(4996);
+    const lag = { [A]: { score: 1500, details: [] } };
+    const late = turn(A, B, 0x4AD21, 0x4AD22, lag, PRE, S1, 31 * MIN);
+    T('[13d] a kept write 36 min old at the turn is not used: the copy\'s 1500 as before', late.b.okAll && J(seedLine(late.b.out, A)) === J([1500, 1500]) && staleN(late.b.out) === 0, late.b.out.slice(-600));
+    const other = turn(A, B, 0x4AD21, 0x4AD22, lag, PRE, S1, null, (a) => {
+      const st = H.advance(a.last.state, 5 * MIN), e = (st.PENDING_WRITES_FILE || {})[v.pid(A)];
+      if (e && e.l) e.l.b = 'points_s0x';
+      return st;
+    });
+    T('[13d] a kept write of another board is not used either', other.b.okAll && J(seedLine(other.b.out, A)) === J([1500, 1500]) && staleN(other.b.out) === 0, other.b.out.slice(-600));
+  }
+  // [13f] the other two readers (the lone-1V1 payment, the leave plan) take the same path; a new reader must too
+  {
+    const src = fs.readFileSync(H.VALIDATE, 'utf8');
+    const raw = (src.match(/readUserEntry\(prevLpId\b/g) || []).length, via = (src.match(/\bprevLpEntryOf\((?!sid, label\))/g) || []).length;
+    T('[13f] the previous season\'s board is read in one place (prevLpEntryOf), by the four soft-reset readers (settle seed, leave plan, confession, lone-1V1)',
+      raw === 1 && via === 4 && /const prevLpEntryOf = async \(sid, label\) => \{\n    const e = await readUserEntry\(prevLpId,/.test(src), raw + ' raw, ' + via + ' via');
+  }
 }
 // ---- [11] pure ----
 {

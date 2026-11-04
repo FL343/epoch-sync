@@ -8912,6 +8912,22 @@ async function main() {
       + (l.v | 0) + ', ' + Math.round((Date.now() - Number(l.t)) / 1000) + ' s ago) -> that write is his row');
     return { score: l.v | 0, det: l.d.slice() };
   };
+  // O481 (W126): the previous season's board as the lazy soft-reset source (a player's first settle this season; the confession
+  //   fine, the lone-1V1 payment and the leave plan read his base the same way). A read of it behind his last write of this job
+  //   on that board (l.b its name: a match of his settled in the last LP_LAST_HOLD_MS of the season) takes that write's score,
+  //   counted and logged as lpFresh; any other read is returned as it came. The ladder gate's archive reads write no points and
+  //   read as before.
+  const prevLpName = prevLpId ? seasonBoardName(LP_LB, seasonId - 1) : null;
+  const prevLpEntryOf = async (sid, label) => {
+    const e = await readUserEntry(prevLpId, String(sid), label || 'prev points');
+    const b = lpBacklog[pid(String(sid))], l = b && b.l;
+    if (!l || l.b !== prevLpName || !lpLastLive(l, Date.now())) return e;
+    if (!lpReadStale(e ? { score: e.score | 0, det: decodeDetails(e.detailData) } : null, l)) return e;
+    RUN.staleRead = (RUN.staleRead | 0) + 1;
+    console.log('  [stale-read] points ' + plog(sid) + ' (' + (label || 'prev points') + ', ' + prevLpName + '): read ' + (e ? (e.score | 0) : 'no row')
+      + ' without the last write of this job (' + (l.v | 0) + ', ' + Math.round((Date.now() - Number(l.t)) / 1000) + ' s ago) -> that write is his row');
+    return { steamID: String(sid), score: l.v | 0 };
+  };
   // a player's points row as this run knows it: written this run, else a failed write waiting for its retry (his row on the board
   //   is what it was before it), else read from the board (null = no row this season) unless the read is behind the last write of
   //   this job (lpFresh, O481)
@@ -9838,7 +9854,7 @@ async function main() {
         const sk = skillL[pid(sid)] || ts.DEFAULTS, mmr = ts.displayRating(sk.mu, sk.sigma);
         if (e) cur = e.score | 0;
         else {
-          const pe = prevLpId ? await readUserEntry(prevLpId, sid, 'prev points') : null;
+          const pe = prevLpId ? await prevLpEntryOf(sid, 'prev points') : null;
           cur = seasonSeedLp(pe ? (pe.score | 0) : null, mmr); seeded = true;
         }
         const was = cur;
@@ -9894,7 +9910,7 @@ async function main() {
         // lazy season-seed parity with the settle path: absent from the current season board ->
         // a previous-season entry soft-resets into the penalty base; none -> null (seedFor applies).
         if (prevLpId) {
-          const pe = await readUserEntry(prevLpId, sid, 'prev points');
+          const pe = await prevLpEntryOf(sid, 'prev points');
           if (pe) return { score: softResetLp(pe.score | 0), details: null, seeded: true };
         }
         return null;
@@ -13270,7 +13286,7 @@ async function main() {
         const seedOne = async (sid, mu, sigma, tag) => {
           let prevE = null;
           if (prevLpId) {
-            try { prevE = await readUserEntry(prevLpId, sid, 'prev points'); }
+            try { prevE = await prevLpEntryOf(sid, 'prev points'); }
             catch (err) { ghErr('prev-season base read failed for ' + plog(sid) + ' -- abort run, do NOT seed blind: ' + (err && err.message)); process.exit(1); }
           }
           const disp = ts.displayRating(mu, sigma);
@@ -13461,7 +13477,7 @@ async function main() {
         if (leaver && lpx != null && !seededNow.has(x.steamID)) { const cs = confState[pid(String(x.steamID)) + '|' + c.m]; if (cs && !cs.refunded && (cs.ded | 0) > 0) lpx += cs.ded | 0; }
         if (lpx == null && lpId && appliesLp(matchType)) {
           let prevE = null;
-          if (prevLpId) { try { prevE = await readUserEntry(prevLpId, x.steamID, 'prev points'); } catch (err) { ghWarn('prev-season base read failed for ' + plog(x.steamID) + ' (plan only, nothing written): ' + (err && err.message)); } }
+          if (prevLpId) { try { prevE = await prevLpEntryOf(x.steamID, 'prev points'); } catch (err) { ghWarn('prev-season base read failed for ' + plog(x.steamID) + ' (plan only, nothing written): ' + (err && err.message)); } }
           lpx = seasonSeedLp(prevE ? (prevE.score | 0) : null, ts.displayRating(sk.mu, sk.sigma));
         }
         return { seat: x.seat | 0, mmr: ts.displayRating(r.mu, r.sigma), lp: lpx == null ? 0 : lpx };
