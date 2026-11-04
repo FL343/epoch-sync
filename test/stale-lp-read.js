@@ -34,7 +34,9 @@
 //       board) is the soft-reset source, one [stale-read]; [13b] with the hold off the copy's older score was (the match lost
 //       into the new season); [13c] current rows: every write the same as with the hold off; [13d] a kept write past the hold
 //       or of another board is not used; [13e] a confession fine at the turn reads the previous season the same way;
-//       [13f] source pin: every soft-reset read of the previous season's board goes through that check (prevLpEntryOf)
+//       [13f] source pin: every soft-reset read of the previous season's board goes through that check (prevLpEntryOf);
+//       [13g] (W126 review, added with Q341) the copy has no previous-season row of his at all (his first ranked match in the
+//       season's last half hour): the kept write is the soft-reset source too; with the hold off, the display seed
 const path = require('path'), fs = require('fs'), os = require('os');
 const H = require('./lib/settle-stub.js');
 for (const k of H.SCRUB) delete process.env[k];
@@ -535,12 +537,22 @@ console.log('=== a lagging read of the points board takes this job\'s last write
     });
     T('[13d] a kept write of another board is not used either', other.b.okAll && J(seedLine(other.b.out, A)) === J([1500, 1500]) && staleN(other.b.out) === 0, other.b.out.slice(-600));
   }
+  // [13g] (W126 review, added with Q341) his previous-season row missing from the copy altogether: no row reads as behind
+  //   the kept write (lpReadStale(null, l)), not as "nothing to check"
+  {
+    const A = H.SID(4997), B = H.SID(4998);
+    const lag = { [A]: null };
+    const t = turn(A, B, 0x4AD31, 0x4AD32, lag, PRE, S1), o = turn(A, B, 0x4AD31, 0x4AD32, lag, PRE, S1_OFF);
+    const kept = t.a.pts[A] && t.a.pts[A].score;
+    T('[13g] no previous-season row in the copy: soft-reset from the kept write, one [stale-read]', t.b.okAll && J(seedLine(t.b.out, A)) === J([kept, kept]) && staleN(t.b.out) === 1, J(seedLine(t.b.out, A)) + ' ' + t.b.out.slice(-600));
+    T('[13g] ... hold off: the display seed (no soft-reset line), no [stale-read]', o.b.okAll && seedLine(o.b.out, A).length === 0 && staleN(o.b.out) === 0 && /first settle this season, display/.test(o.b.out), o.b.out.slice(-600));
+  }
   // [13f] the other two readers (the lone-1V1 payment, the leave plan) take the same path; a new reader must too
   {
     const src = fs.readFileSync(H.VALIDATE, 'utf8');
     const raw = (src.match(/readUserEntry\(prevLpId\b/g) || []).length, via = (src.match(/\bprevLpEntryOf\((?!sid, label\))/g) || []).length;
     T('[13f] the previous season\'s board is read in one place (prevLpEntryOf), by the four soft-reset readers (settle seed, leave plan, confession, lone-1V1)',
-      raw === 1 && via === 4 && /const prevLpEntryOf = async \(sid, label\) => \{\n    const e = await readUserEntry\(prevLpId,/.test(src), raw + ' raw, ' + via + ' via');
+      raw === 1 && via === 4 && /readUserEntry\(prevLpId,/.test((/const prevLpEntryOf = async \(sid, label\) => \{\n([\s\S]*?)\n  \};/.exec(src) || [])[1] || ''), raw + ' raw, ' + via + ' via');
   }
 }
 // ---- [11] pure ----

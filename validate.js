@@ -68,6 +68,14 @@ const trustLedger = require('./trust-ledger.js');   // O198 v1 (knife 5.5b-1): t
 //     on disk before it) that would leave such a row, ahead of the write and on disk: a run that dies once Steam took it
 //     leaves the next run no l to read that row as behind (writeLpRow opt.once).
 //     LP_LAST_HOLD_MS=0 turns it off (nothing kept, nothing taken: the job of before O481).
+//   wp: { b, v, d, t, n } -- a failed points write of the season that just ended (cloud audit Q341): a w of last season's board
+//     still waiting when the season turned, moved aside by the new season's runs (its writes take w). It goes on to last
+//     season's board, where its match belongs, every run until it lands (lpPrevRetry; ForceUpdate of an absolute value:
+//     idempotent) -- then it is his kept write of that board (l, unless he has one of this season's board already), which the
+//     soft-reset read of that board checks against (prevLpEntryOf). Until it lands it is his row there for every soft-reset
+//     read (his first settle this season, a confession fine, the lone-1V1 payment, the leave plan). Until Q341 the turn dropped
+//     it (warned): last season's board never got the match, and his soft reset into the new season counted from the row before
+//     it. Past PENDING_W_MAX_MS dropped (warned), like w; a w or wp of an older season is dropped, warned, as before.
 //   xw / cw: { b, v, t, n } -- an XP / CP write of the settle that failed (cloud audit Q318; main: rowWaiting / rowAfterWrite /
 //     rowAhead / rowRetry): the board name, the absolute score, the first failure, the tries. Until Q318 such a write was logged
 //     and forfeited -- the match processed all the same, so the honest player lost his XP of it (its daily first win with it: the
@@ -137,9 +145,9 @@ function lpLastLive(l, now) {
 function loadPendingWrites() {
   try { const o = JSON.parse(fs.readFileSync(PENDING_WRITES_FILE, 'utf8')); return (o && typeof o === 'object' && !Array.isArray(o)) ? o : {}; } catch (e) { return {}; }
 }
-// pure: drop queued receipts past the hold (and beyond the cap), failed writes past the fuse (points w, Q318's XP / CP xw / cw,
-//   Q319's endless bests ew), a last write past its hold (quietly: its job is done), then empty entries; returns { receipts, writes }
-//   dropped
+// pure: drop queued receipts past the hold (and beyond the cap), failed writes past the fuse (points w, Q341's last-season wp,
+//   Q318's XP / CP xw / cw, Q319's endless bests ew), a last write past its hold (quietly: its job is done), then empty entries;
+//   returns { receipts, writes } dropped
 function prunePendingWrites(s, now) {
   let dropped = 0, droppedW = 0;
   for (const k of Object.keys(s)) {
@@ -156,6 +164,14 @@ function prunePendingWrites(s, now) {
         droppedW++;
         console.log('::warning::points write of ' + String(k).slice(0, 8) + ' dropped after ' + ((w && w.n) | 0) + ' failed tries over ' + Math.round(PENDING_W_MAX_MS / 86400000) + ' days (value ' + (w && w.v) + ')');
         delete e.w;
+      }
+    }
+    if (e && e.wp != null) {   // Q341: last season's points write that failed, the same fuse
+      const w = e.wp;
+      if (!w || typeof w !== 'object' || typeof w.b !== 'string' || !Number.isFinite(Number(w.v)) || now - (Number(w.t) || 0) > PENDING_W_MAX_MS) {
+        droppedW++;
+        console.log('::warning::points write of ' + String(k).slice(0, 8) + ' for last season\'s board ' + (w && w.b) + ' dropped after ' + ((w && w.n) | 0) + ' failed tries over ' + Math.round(PENDING_W_MAX_MS / 86400000) + ' days (value ' + (w && w.v) + ', Q341)');
+        delete e.wp;
       }
     }
     for (const f of ['xw', 'cw', 'rw']) {   // Q318: the settle's XP / CP writes that failed, the same fuse (Q334: its rating rows)
@@ -8823,6 +8839,26 @@ async function main() {
   const receipts = {}, lpWritten = {};
   const lpBacklog = loadPendingWrites();
   let backlogDirty = false;
+  // Q341: a failed points write of last season still waiting at the turn (w of that board) moves aside to wp, out of the way of
+  //   this season's writes (they take w): it goes on to last season's board (lpPrevRetry) and is his row there until it lands
+  //   (prevLpEntryOf). One of an older season -- a w (lpPendingSids, as before) or a wp past another turn -- is dropped, warned.
+  //   One laid ahead by a run that ended before it knew the outcome (Q334: a) moves the same way, a and all.
+  const lpPrevName = (lpBoardId && !PT_MODE && seasonId >= 1) ? seasonBoardName(LP_LB, seasonId - 1) : null;
+  if (lpPrevName) for (const k of Object.keys(lpBacklog)) {
+    const e = lpBacklog[k];
+    if (!e || typeof e !== 'object') continue;
+    if (e.w && e.w.b === lpPrevName) {
+      e.wp = e.w; delete e.w; backlogDirty = true;
+      console.log('  points write of ' + k.slice(0, 8) + ' for last season\'s board ' + lpPrevName + ' (value ' + e.wp.v + ', ' + (e.wp.n | 0) + ' tries' + (e.wp.a ? ', laid ahead by a run that ended before its outcome was known' : '') + ') waits on for that board, not dropped at the turn (Q341)');
+    } else if (e.wp && e.wp.b !== lpPrevName) {
+      ghWarn('points write of ' + k.slice(0, 8) + ' for board ' + e.wp.b + ' dropped: last season\'s board is ' + lpPrevName + ' (value ' + e.wp.v + ', ' + (e.wp.n | 0) + ' tries, Q341)');
+      delete e.wp; if (!Object.keys(e).length) delete lpBacklog[k]; backlogDirty = true;
+    }
+  }
+  // Q341: his failed write of last season waiting for last season's board (wp; lpPrevName only from the first season on), or null;
+  //   lpPrevWritten: sid -> the score of such a write that landed this run (a read of seconds later may not show it)
+  const lpPrevWaiting = (sid) => { const e = lpBacklog[pid(String(sid))], w = e && e.wp; return (w && lpPrevName && w.b === lpPrevName && Number.isFinite(Number(w.v))) ? w : null; };
+  const lpPrevWritten = {};
   // cloud audit Q334: the writes this run laid ahead (a in PENDING_WRITES_FILE): 'w|' / 'xw|' / 'cw|' / 'rw|' + pid, 'ew|' + pid + '|' + board
   const aheadNow = new Set();
   // an entry with a: laid this run ('now') or by a run that ended before it knew the outcome ('gone'); null: none (a failed write)
@@ -8919,6 +8955,10 @@ async function main() {
   //   read as before.
   const prevLpName = prevLpId ? seasonBoardName(LP_LB, seasonId - 1) : null;
   const prevLpEntryOf = async (sid, label) => {
+    // Q341: his failed write of last season, landed this run or still waiting, is his row there (lpRowOf takes w the same way)
+    if (lpPrevWritten[String(sid)] != null) return { steamID: String(sid), score: lpPrevWritten[String(sid)] | 0 };
+    const pw = lpPrevWaiting(sid);
+    if (pw) return { steamID: String(sid), score: pw.v | 0 };
     const e = await readUserEntry(prevLpId, String(sid), label || 'prev points');
     const b = lpBacklog[pid(String(sid))], l = b && b.l;
     if (!l || l.b !== prevLpName || !lpLastLive(l, Date.now())) return e;
@@ -9026,12 +9066,50 @@ async function main() {
   // a quiet run (no consistent / no fresh match) retries the backlog's failed points writes itself (a settling run does it with
   //   its own points writes); a player this run cannot name (no record of his read, no row read) waits for a run that can
   const lpRetry = async () => {
+    await lpPrevRetry([]);
     if (!lpBoardId || !APPLY_MMR) return;
     for (const sid of lpPendingSids([])) {
       const pw = lpWaiting(sid);
       if (!pw) continue;
       try { await writeLpRow(sid, pw.v | 0, Array.isArray(pw.d) ? pw.d : [], null, [], { retry: true }); }
       catch (e) { ghWarn('points write retry of ' + plog(sid) + ': ' + (e && e.message)); }
+    }
+  };
+  // Q341: the failed points writes of last season (wp) go on to last season's board -- the quiet runs' retry above, the settle's
+  //   with its board read -- each player this run can name (the rows given, the records / starts read this run: sidByPid), the
+  //   value and the details as they were (ForceUpdate of an absolute value: idempotent). One that lands leaves the backlog and is
+  //   his kept write of that board (O481: a soft-reset read behind it takes it, prevLpEntryOf) unless he has a kept write of this
+  //   season's board already (the reads from now on are of that one); one that fails counts a try and waits. Nothing else is
+  //   written to last season's board.
+  const lpPrevRetry = async (rowSids) => {
+    if (!prevLpId || !lpPrevName || !APPLY_MMR) return;
+    const byPid = new Map();
+    for (const s of (rowSids || [])) byPid.set(pid(String(s)), String(s));
+    for (const k of Object.keys(lpBacklog)) {
+      const e = lpBacklog[k], wp = e && e.wp;
+      if (!wp || wp.b !== lpPrevName) continue;
+      const sid = byPid.get(k) || sidByPid.get(k) || null;   // (called after sidByPid exists, as lpPendingSids)
+      if (!sid || !lpPrevWaiting(sid)) continue;
+      const det = Array.isArray(wp.d) ? wp.d : [];
+      let ok = false, why = '';
+      try {
+        const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: prevLpId, steamid: String(sid), score: wp.v | 0, scoremethod: 'ForceUpdate', format: 'json' }, det);
+        ok = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
+        if (!ok) why = 'status ' + res.status;
+      } catch (err) { why = (err && err.message) || 'error'; }
+      backlogDirty = true;
+      if (ok) {
+        lpPrevWritten[String(sid)] = wp.v | 0;
+        delete e.wp;
+        if (LP_LAST_HOLD_MS > 0 && !lpLast(sid)) e.l = { b: lpPrevName, v: wp.v | 0, d: det, t: Date.now() };
+        if (!Object.keys(e).length) delete lpBacklog[k];
+        if (wp.a) { RUN.aheadResent = (RUN.aheadResent | 0) + 1; console.log('  points write of ' + plog(sid) + ' for last season\'s board ' + lpPrevName + ' laid ahead by a run that ended before its outcome was known landed: ' + (wp.v | 0) + ' (Q334, Q341)'); }
+        else { RUN.pendingRetried = (RUN.pendingRetried | 0) + 1; console.log('  points write of ' + plog(sid) + ' for last season\'s board ' + lpPrevName + ' that failed before (' + (wp.n | 0) + ' tries) landed: ' + (wp.v | 0) + ' (Q341)'); }
+      } else {
+        delete wp.a;   // Q334: one laid ahead that fails waits as a failed one (lpWaitFailed)
+        wp.n = (wp.n | 0) + 1;
+        console.log('  points write of ' + plog(sid) + ' for last season\'s board ' + lpPrevName + ' failed again (' + why + ') -- ' + (wp.v | 0) + ' waits for the next run (try ' + wp.n + ', Q341)');
+      }
     }
   };
   const queueReceipts = () => {
@@ -11193,6 +11271,9 @@ async function main() {
     // O480: a points write that failed in an earlier run (the backlog's w) is this run's base for its player -- his row on the board
     //   is what it was before it -- and goes again with this run's points writes (lpRetrySids, below the settle)
     for (const sid of lpPendingSids(Object.keys(lp))) { const pw = lpWaiting(sid); if (!pw || lpWritten[sid]) continue; lp[sid] = pw.v | 0; lpDet[sid] = Array.isArray(pw.d) ? pw.d : []; lpRetrySids.push(sid); }
+    // Q341: last season's failed points writes go on to last season's board (ahead of this settle's soft-reset reads of it,
+    //   which take them either way)
+    await lpPrevRetry(Object.keys(lp));
   }
   // XP ladder is optional: skip the whole XP path (no board, no state) if XP_LB is unset or the board is missing.
   const xpLb = XP_LB ? ((lr.json && lr.json.response && lr.json.response.leaderboards) || []).find(x => String(x.name || x.Name) === XP_LB) : null;

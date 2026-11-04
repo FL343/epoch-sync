@@ -113,10 +113,11 @@ function advance(state, ms) {
     if (cf[k] && cf[k].t0) cf[k].t0 -= ms;
     if (cf[k] && cf[k].ql && cf[k].ql.t) cf[k].ql.t -= ms;   // W113: the quit-lone settle's stamp (the match's start)
   }
-  const pw = files.PENDING_WRITES_FILE;   // O480 points-row backlog: queued receipts [mh, change, set, clear, t], a failed write's w.t,
+  const pw = files.PENDING_WRITES_FILE;   // O480 points-row backlog: queued receipts [mh, change, set, clear, t], a failed write's w.t / wp.t,
   if (pw) for (const k of Object.keys(pw)) {   //   the last write's l.t (O481)
     if (pw[k] && Array.isArray(pw[k].rc)) for (const x of pw[k].rc) if (Array.isArray(x)) x[4] -= ms;
     if (pw[k] && pw[k].w && pw[k].w.t) pw[k].w.t -= ms;
+    if (pw[k] && pw[k].wp && pw[k].wp.t) pw[k].wp.t -= ms;   // Q341: last season's write that failed
     if (pw[k] && pw[k].l && pw[k].l.t) pw[k].l.t -= ms;
   }
   return files;
