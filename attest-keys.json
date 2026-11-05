@@ -322,6 +322,18 @@
         }
       }
     },
+    "2026110501": {
+      "pubs": [
+        "3c47fbc7a5a0dac27efd79ecb5b4beb0e0f58224d666169538e427a9cbb0bc97"
+      ],
+      "sealed": true,
+      "at": "2026-11-05T11:58:29.615Z",
+      "pubInfo": {
+        "3c47fbc7a5a0dac27efd79ecb5b4beb0e0f58224d666169538e427a9cbb0bc97": {
+          "ch": "demo"
+        }
+      }
+    },
     "dev": {
       "pubs": [
         "f341d48777a90ad4ca0db15deb16824c7162c872fd48fa8c07b9b0458844d835"
