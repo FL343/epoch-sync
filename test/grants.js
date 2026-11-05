@@ -217,6 +217,96 @@ function world0() {
     assert('mutant (raw id in the log) is caught by the log check', l2.some((m) => /\d{17}/.test(m)));
   } finally { fs.unlinkSync(tmp2); }
 
+  console.log('=== grants [8] many players: time budget, rotation, several at a time, backoff ===');
+  // a whole population nobody earned anything in except the promo sweep: who is swept in which run. The fake clock
+  //   moves one tick per Steam call, so a budget of 300 ticks cuts each run at about 100 of the 450 players.
+  const POP = 450;
+  const popSids = Array.from({ length: POP }, (_, i) => String(76561198100000000n + BigInt(i)));
+  async function sweeps(mod, mode, runs, budget) {
+    const out = [];
+    for (let k = 0; k < runs; k++) {
+      const now = mode === 'full' ? Date.UTC(2027, k, 1, 6, 41) : NOW + k * DAY;
+      const nm = Math.floor(now / 60000);
+      const wk = { boards: { mirror_box: popSids.map((sid, i) => mrow(sid, nm - 60 - i)) }, own: {}, inv: {} };
+      const fk2 = fakeSteam(wk);
+      let tick = 0;
+      const lg = [];
+      const st = await mod.run({ v, env: ENV, nowMs: now, mode, fetch: async (u, o) => { tick++; return fk2.fetch(u, o); }, clock: () => tick, budgetMs: budget, log: (m) => lg.push(m) });
+      out.push({ st, logs: lg, swept: new Set(fk2.calls.filter((c) => c.path.endsWith('/AddPromoItem/v1/')).map((c) => c.input.steamid)) });
+    }
+    return out;
+  }
+  const runsUntilAll = (rs) => { const seen = new Set(); for (let k = 0; k < rs.length; k++) { for (const s of rs[k].swept) seen.add(s); if (seen.size === POP) return k + 1; } return -seen.size; };
+  const daily = await sweeps(g, 'daily', 12, 300);
+  const perRun = daily.map((r) => r.st.looked);
+  assert('budget cuts each daily run short (about 100 of 450 looked)', perRun.every((n) => n >= 90 && n <= 120));
+  assert('stat.cut = candidates not looked at', daily.every((r) => r.st.cut === POP - r.st.looked && r.st.candidates === POP));
+  assert('the cut is logged as a count, never a raw account id', daily.every((r) => r.logs.some((m) => /left for later runs/.test(m)) && r.logs.every((m) => !/\d{17}/.test(m))));
+  // a perfect hand-off (each run starting where the last one stopped) would need POP / looked runs; the golden-ratio
+  //   start points need at most about 1.7 times that -- the bound allows twice
+  const bound = Math.ceil(2 * POP / Math.min(...perRun));
+  const dN = runsUntilAll(daily);
+  assert('daily runs on consecutive days reach every player within ' + bound + ' runs (rotation; ' + dN + ')', dN > 0 && dN <= bound);
+  assert('two consecutive daily runs do not sweep the same players', [...daily[1].swept].some((s) => !daily[0].swept.has(s)));
+  const full = await sweeps(g, 'full', 12, 300);
+  const fN = runsUntilAll(full);
+  assert('full runs on consecutive months reach every player within ' + bound + ' runs (' + fN + ')', fN > 0 && fN <= bound);
+  // ring order: a permutation, stable per step, moving with the step; fast keeps newest first
+  const ro = g.ringOrder(popSids, 'test-salt', 20000);
+  eq('ring order is a permutation', ro.slice().sort().join() === popSids.slice().sort().join(), true);
+  eq('ring order is the same for the same step', g.ringOrder(popSids, 'test-salt', 20000).join() === ro.join(), true);
+  assert('ring order moves with the step', g.ringOrder(popSids, 'test-salt', 20001)[0] !== ro[0]);
+  eq('ring step: daily = the UTC day, full = the month', [g.ringStepOf('daily', at('2027-01-20T06:41:00Z')), g.ringStepOf('full', at('2027-02-01T06:41:00Z'))], [Math.floor(at('2027-01-20T06:41:00Z') / DAY), 2027 * 12 + 1]);
+  // a budget already spent: nobody looked at, everybody counted as cut
+  const z = await sweeps(g, 'daily', 1, 0);
+  assert('budget 0: nobody looked at, nobody swept, all counted as cut', z[0].st.looked === 0 && z[0].swept.size === 0 && z[0].st.cut === POP);
+  // several players at a time, never more than CONCURRENCY in flight, same plan as one at a time
+  {
+    let inFlight = 0, maxIn = 0;
+    const wk = { boards: { mirror_box: popSids.slice(0, 60).map((sid, i) => mrow(sid, nowMin - 60 - i)) }, own: {}, inv: {} };
+    const fk2 = fakeSteam(wk);
+    const slow = async (u, o) => { inFlight++; maxIn = Math.max(maxIn, inFlight); await new Promise((r) => setTimeout(r, 1)); inFlight--; return fk2.fetch(u, o); };
+    const stA = await g.run({ v, env: ENV, nowMs: NOW, mode: 'daily', fetch: slow, log: () => {} });
+    const fk3 = fakeSteam({ boards: { mirror_box: popSids.slice(0, 60).map((sid, i) => mrow(sid, nowMin - 60 - i)) }, own: {}, inv: {} });
+    const stB = await g.run({ v, env: ENV, nowMs: NOW, mode: 'daily', fetch: fk3.fetch, concurrency: 1, log: () => {} });
+    assert('several players in flight at once, at most ' + GRANTS.CONCURRENCY + ' (' + maxIn + ')', maxIn >= 2 && maxIn <= GRANTS.CONCURRENCY);
+    eq('same plan as one at a time', [stA.looked, stA.promoCalls, stA.ownershipCalls, stA.cut], [stB.looked, stB.promoCalls, stB.ownershipCalls, stB.cut]);
+  }
+  // backoff: reads retry 429 / 5xx / network errors after 1 s, 2 s, 4 s; writes retry only 429
+  {
+    const seq = (codes) => { let i = 0; return async () => { const c = codes[Math.min(i++, codes.length - 1)]; if (c === 'net') throw new Error('net'); return { status: c, ok: c < 400, text: async () => '{"appownership":{"ownsapp":false}}' }; }; };
+    let waits = [];
+    const sleep = async (ms) => { waits.push(ms); };
+    let A2 = g.api(seq([429, 503, 200]), 'k', sleep);
+    await A2.ownership(1, S1);
+    eq('read: 429, 503 then 200 -> waits', waits, [1000, 2000]);
+    waits = []; A2 = g.api(seq(['net', 'net', 'net', 'net']), 'k', sleep);
+    let threw = false; try { await A2.ownership(1, S1); } catch (e) { threw = true; }
+    assert('read: network error four times -> gives up after waiting 1 s, 2 s, 4 s', threw && JSON.stringify(waits) === '[1000,2000,4000]');
+    waits = []; A2 = g.api(seq([429, 200]), 'k', sleep);
+    const pr = await A2.promo(1, S1);
+    assert('write: 429 then 200 -> sent again once', pr.ok && JSON.stringify(waits) === '[1000]');
+    waits = []; A2 = g.api(seq([500, 200]), 'k', sleep);
+    const ad = await A2.add(1, S1, 401, '7');
+    assert('write: 5xx -> not sent again (the next run recomputes it)', !ad.ok && ad.status === 500 && waits.length === 0);
+  }
+
+  console.log('=== grants [9] mutation proofs (rotation / budget) ===');
+  const mutant = (name, from, to) => {
+    const m = src.replace(from, to);
+    assert(name + ': mutation applied', m !== src);
+    const f = path.join(__dirname, '..', '.mutant-grants-' + name + '.js');
+    fs.writeFileSync(f, m);
+    try { return require(f); } finally { fs.unlinkSync(f); }
+  };
+  // newest first in every mode (the old order): the same players are cut every day -- the coverage check must catch it
+  const gNoRing = mutant('noring', "if (mode !== 'fast') cands = ringOrder(cands, env.STATE_SALT, ringStepOf(mode, nowMs));", '');
+  const nr = runsUntilAll(await sweeps(gNoRing, 'daily', 12, 300));
+  assert('mutant (no rotation) never reaches everybody in 12 daily runs (' + nr + ')', nr < 0);
+  const gNoBudget = mutant('nobudget', 'while (next < cands.length && clock() - t0 < budgetMs)', 'while (next < cands.length)');
+  const nb = await sweeps(gNoBudget, 'daily', 1, 0);
+  assert('mutant (no budget check) is caught by the budget-0 check', nb[0].st.looked === POP);
+
   if (failN) { console.log('\n' + failN + ' FAIL'); process.exit(1); }
   console.log('\nALL PASS');
 })().catch((e) => { console.log('  FAIL  threw ' + (e && e.stack)); process.exit(1); });

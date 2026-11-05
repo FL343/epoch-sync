@@ -20,6 +20,15 @@
 //   The mirror row is client-written: it only decides WHEN a player is looked at, never WHAT he gets --
 //   eligibility comes from the trusted boards and from Steam's own license records.
 //
+// How many per run: several players at a time (CONCURRENCY) until the run's time budget is spent (RUN_BUDGET_MS,
+//   inside the job's 15 minutes) or the ceiling is reached (MAX_PLAYERS_PER_RUN). Whoever is left is looked at by a
+//   later run -- which only holds if the later run does not cut at the same place: a fast run keeps newest first
+//   (the players who just finished a match), a daily / full run walks a ring of per-player HMAC positions from a
+//   start point that moves by the golden ratio every day (daily) / every month (full). The arcs of consecutive runs
+//   then cover the whole ring within a few runs (three-gap theorem), with no state file: the players a run did not
+//   reach are first in line a few runs later. (Newest first in every mode used to cut at the same 400 players each
+//   time: the players who stopped playing never got their playtime lamps or purchase badges.)
+//
 // Item catalog: the companion repo generates the item definitions (ids below are pinned against it by a
 // lockstep test there). Game ids and dates come from the environment, as everywhere in this public repo:
 //   APPID                 the game (required)
@@ -50,8 +59,12 @@ const GRANTS = Object.freeze({
   FIRST_WEEKS_MS: 14 * 24 * 3600 * 1000,        // the first-weeks badge covers licenses granted before launch + 14 days
   MIRROR_LB: 'mirror_box',
   WINDOW_MIN: { fast: 20, daily: 48 * 60 },
-  MAX_PLAYERS_PER_RUN: 400,                     // the rest is picked up by the next run (grants tolerate delay)
+  RUN_BUDGET_MS: 11 * 60 * 1000,                // stop starting players after this (the job times out at 15 minutes)
+  CONCURRENCY: 6,                               // players looked at at the same time
+  MAX_PLAYERS_PER_RUN: 4000,                    // ceiling on Steam calls per run (about 4 per player); the rest is
+                                                //   picked up by later runs (ringOrder), grants tolerate delay
 });
+const GOLDEN = (Math.sqrt(5) - 1) / 2;
 const ENDLESS_TIER_ORDER = ['bronze', 'silver', 'gold', 'platinum', 'diamond', 'master', 'grandmaster'];
 
 // ---- pure helpers ----
@@ -120,6 +133,24 @@ function candidatesOf(mirrorEnts, nowMs, windowMin, decodeDetails) {
   const seen = new Set();
   return rows.filter((r) => (seen.has(r.sid) ? false : (seen.add(r.sid), true))).map((r) => r.sid);
 }
+// a player's fixed place on the ring, in [0, 1): HMAC(salt, sid), so it is stable from run to run and not guessable
+function ringPos(salt, sid) {
+  const h = crypto.createHmac('sha256', String(salt || '')).update('ring:' + sid).digest();
+  return Number(h.readBigUInt64BE(0) >> 11n) / 2 ** 53;
+}
+// the order a daily / full run looks at its candidates: around the ring, from start point frac(step * golden ratio),
+//   step = the UTC day (daily) or month (full) number. A run cut short covers one arc; consecutive steps put the
+//   start points so evenly around the ring that a few runs cover all of it.
+function ringOrder(sids, salt, step) {
+  const start = (step * GOLDEN) % 1;
+  const rows = sids.map((sid) => ({ sid, k: (ringPos(salt, sid) - start + 1) % 1 }));
+  rows.sort((a, b) => a.k - b.k || (a.sid < b.sid ? -1 : 1));
+  return rows.map((r) => r.sid);
+}
+function ringStepOf(mode, nowMs) {
+  const d = new Date(nowMs);
+  return mode === 'full' ? d.getUTCFullYear() * 12 + d.getUTCMonth() : Math.floor(nowMs / 86400000);
+}
 // the run mode from the trigger: dispatched with mode, else the schedule -> daily, full on the 1st (UTC)
 function modeOf(input, nowMs) {
   if (input === 'fast' || input === 'daily' || input === 'full') return input;
@@ -133,24 +164,33 @@ function missingItems(earned, held) {
 
 // ---- Steam calls (publisher key in the header, never in a URL that could reach a log) ----
 const BASE = 'https://partner.steam-api.com';
-function api(fetchImpl, key) {
+// Retries wait 1 s, 2 s, 4 s (several players at a time can get throttled): reads on 429 / 5xx / a network error,
+//   writes only on 429 (throttled = not processed; a 5xx write is left to the next run, which recomputes it).
+const RETRIES = 3;
+function api(fetchImpl, key, sleep) {
   const headers = { 'x-webapi-key': key };
+  const wait = sleep || ((ms) => new Promise((res) => setTimeout(res, ms)));
+  const backoff = (attempt) => wait(1000 * 2 ** attempt);
   async function get(p, q) {
     const qs = Object.keys(q).map((k) => k + '=' + encodeURIComponent(q[k])).join('&');
     for (let attempt = 0; ; attempt++) {
       let r, t;
       try { r = await fetchImpl(BASE + p + '?' + qs, { headers }); t = await r.text(); }
-      catch (e) { if (attempt >= 2) throw e; continue; }
-      if ((r.status >= 500 || r.status === 429) && attempt < 2) continue;
+      catch (e) { if (attempt >= RETRIES) throw e; await backoff(attempt); continue; }
+      if ((r.status >= 500 || r.status === 429) && attempt < RETRIES) { await backoff(attempt); continue; }
       let j = null; try { j = JSON.parse(t); } catch (e) {}
       return { status: r.status, ok: r.ok, json: j };
     }
   }
   async function post(p, input) {
     const body = 'input_json=' + encodeURIComponent(JSON.stringify(input));
-    const r = await fetchImpl(BASE + p, { method: 'POST', headers: Object.assign({ 'content-type': 'application/x-www-form-urlencoded' }, headers), body });
-    const t = await r.text(); let j = null; try { j = JSON.parse(t); } catch (e) {}
-    return { status: r.status, ok: r.ok, json: j };
+    for (let attempt = 0; ; attempt++) {
+      const r = await fetchImpl(BASE + p, { method: 'POST', headers: Object.assign({ 'content-type': 'application/x-www-form-urlencoded' }, headers), body });
+      const t = await r.text();
+      if (r.status === 429 && attempt < RETRIES) { await backoff(attempt); continue; }
+      let j = null; try { j = JSON.parse(t); } catch (e) {}
+      return { status: r.status, ok: r.ok, json: j };
+    }
   }
   const itemsOf = (res) => { try { const a = JSON.parse((res.json && res.json.response && res.json.response.item_json) || '[]'); return Array.isArray(a) ? a : []; } catch (e) { return []; } };
   return {
@@ -199,9 +239,11 @@ async function run(opts) {
   const live = env.GRANTS_LIVE === '1' || (cfg.launchMs != null && nowMs >= cfg.launchMs), dry = env.GRANTS_DRY === '1';
   const allow = new Set(String(env.GRANTS_ALLOW || '').split(',').map((s) => s.trim()).filter(Boolean));
   const mode = modeOf(opts.mode, nowMs);
-  const A = api(opts.fetch, env.STEAM_PUBLISHER_KEY);
+  const A = api(opts.fetch, env.STEAM_PUBLISHER_KEY, opts.sleep);
+  const clock = opts.clock || Date.now, t0 = clock();
+  const budgetMs = opts.budgetMs != null ? opts.budgetMs : GRANTS.RUN_BUDGET_MS;
   const pid = (s) => v.pid(s);
-  const stat = { mode, live, candidates: 0, looked: 0, promoCalls: 0, promoGranted: 0, ownershipCalls: 0, inventoryCalls: 0, granted: {}, wouldGrant: {}, errors: {} };
+  const stat = { mode, live, candidates: 0, looked: 0, cut: 0, promoCalls: 0, promoGranted: 0, ownershipCalls: 0, inventoryCalls: 0, granted: {}, wouldGrant: {}, errors: {} };
   const err = (k) => { stat.errors[k] = (stat.errors[k] | 0) + 1; };
 
   const boards = await A.boards(appid);
@@ -214,6 +256,7 @@ async function run(opts) {
     const mirrorId = idOf(GRANTS.MIRROR_LB);
     if (!mirrorId) { log('grants: mirror board missing -- nothing to scan'); return stat; }
     cands = candidatesOf(await A.entries(appid, mirrorId), nowMs, window, v.decodeDetails);
+    if (mode !== 'fast') cands = ringOrder(cands, env.STATE_SALT, ringStepOf(mode, nowMs));
   }
   if (!live) cands = cands.filter((s) => allow.has(s));
   stat.candidates = cands.length;
@@ -243,8 +286,7 @@ async function run(opts) {
   const xpRows = await rowsOf(xpId);
   const famRows = []; for (const [fam, id] of famIds) famRows.push([fam, await rowsOf(id)]);
 
-  for (const sid of cands) {
-    stat.looked++;
+  const one = async (sid) => {
     try {
       const earned = [];
       // ranked points tiers
@@ -274,7 +316,7 @@ async function run(opts) {
         if (cfg.classicAppid) { stat.ownershipCalls++; classicMs = ownLicenseMs(await A.ownership(cfg.classicAppid, sid), sid); }
         earned.push(...purchaseItems(mainMs, classicMs, nowMs, cfg));
       }
-      if (!earned.length) continue;
+      if (!earned.length) return;
       stat.inventoryCalls++;
       const need = missingItems(earned, await A.held(appid, sid));
       for (const id of need) {
@@ -285,13 +327,22 @@ async function run(opts) {
       }
       if (need.length) log('grants: ' + pid(sid) + ' ' + (dry ? 'would get ' : 'got ') + need.join(','));
     } catch (e) { err('player'); log('grants: ' + pid(sid) + ' skipped (' + String(e && e.message).replace(/\d{17}/g, '<id>') + ')'); }
-  }
+  };
+  // several players at a time; a player is only started while the time budget lasts (the ones in flight finish)
+  let next = 0;
+  const worker = async () => {
+    while (next < cands.length && clock() - t0 < budgetMs) { const sid = cands[next++]; stat.looked++; await one(sid); }
+  };
+  const nWorkers = Math.max(1, Math.min(opts.concurrency || GRANTS.CONCURRENCY, cands.length));
+  await Promise.all(Array.from({ length: nWorkers }, worker));
+  stat.cut = stat.candidates - stat.looked;
+  if (stat.cut) log('grants: ' + stat.cut + ' of ' + stat.candidates + ' candidates left for later runs (time budget / ceiling)');
   log('grants summary ' + JSON.stringify(stat));
   return stat;
 }
 
 module.exports = { GRANTS, ENDLESS_TIER_ORDER, lpPeakOf, versusRankItems, endlessRankItems, bestTier, levelItems, ownLicenseMs,
-  purchaseItems, requestIdOf, candidatesOf, modeOf, missingItems, api, run };
+  purchaseItems, requestIdOf, candidatesOf, ringPos, ringOrder, ringStepOf, modeOf, missingItems, api, run };
 
 if (require.main === module) {
   const v = require(path.join(__dirname, 'validate.js'));
