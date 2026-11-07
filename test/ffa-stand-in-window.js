@@ -300,7 +300,7 @@ function wd2(mt, h, ros, Ls, truth, fake, extra) {
 }
 const GUARD = '    if (baseMt(matchType) === 1 || baseMt(matchType) === 2) {\n      let back = 0;\n';
 const LOOP = '      for (const x of detectLeavers(g)) {\n';
-const STAND = "          if (baseMt(matchType) === 2 && !PT_MODE && pend.agv && pend.agv[hx] != null && !(cx && !cx.refunded && (cx.ded > 0 || cx.ex))) {\n";
+const STAND = "          if (anyAppliesLp(matchType) && !PT_MODE && pend.agv && pend.agv[hx] != null && !(cx && !cx.refunded && (cx.ded > 0 || cx.ex))) {\n";
 const WIN_DEF = 'const STAND_IN_WINDOW_MS = Number(process.env.STAND_IN_WINDOW_MS || 30 * 86400000);\n';
 const DECL = '    const stoodCand = [];   // Q227: the seats that would stand in (see Q263 at the end of this block)\n';
 const CAND = '            stoodCand.push(x);   // Q263: stands in only if no player rated here settled with a stand-in lately (after this loop)\n';

@@ -329,12 +329,12 @@ const a1 = C1R.run();
 }
 
 // ===== step two: at a ranked settle such a seat stands in for the players there, never rated himself =====
-const STAND = "          if (baseMt(matchType) === 2 && !PT_MODE && pend.agv && pend.agv[hx] != null && !(cx && !cx.refunded && (cx.ded > 0 || cx.ex))) {\n";
+const STAND = "          if (anyAppliesLp(matchType) && !PT_MODE && pend.agv && pend.agv[hx] != null && !(cx && !cx.refunded && (cx.ded > 0 || cx.ex))) {\n";
 const STAND_CX = '!(cx && !cx.refunded && (cx.ded > 0 || cx.ex))) {\n';
 const FILTER = "        if (stoodIds.size) tsOut = tsOut.filter((r) => !stoodIds.has(String(r.id)));   // Q227: rated against, never rated\n";
 const LIVE = '    const live = stoodIds.size ? parts.filter((p) => !p.stood) : parts;\n';
-const SEED_SKIP = "lp[t.id] == null && !stoodIds.has(String(t.id))) await seedOne(";
-const PLAN_SEED = "      if (stoodIds.size && lpId && appliesLp(matchType)) for (const q of planIn) if (stoodIds.has(String(q.steamID)) && lp[q.steamID] == null) q.lp = (await planRow(q)).lp;\n";
+const SEED_SKIP = "lp[t.id] == null && !stoodIds.has(String(t.id)) && seatLp(t.id)) await seedOne(";   // O716: + the seat's own entry
+const PLAN_SEED = "      if (stoodIds.size && lpId && anyLp) for (const q of planIn) if (stoodIds.has(String(q.steamID)) && lp[q.steamID] == null) q.lp = (await planRow(q)).lp;\n";
 const STOOD_RE = /\| of those, at a ranked settle with no confession of their own standing: stood in for the players there at the place read now, not rated themselves \(Q227\) \| (\d+) \|/;
 const STOOD_LINE = (key, sid) => new RegExp('agreed-stood ' + key + ': seat [0-9] = ' + v.pid(sid).slice(0, 8) + ' stands in at place [0-9] of [0-9] read now for the players there, his own rating and points unchanged \\(Q227\\)');
 const xpIn = (rs, sid) => [].concat(...rs.map(r => posts(r, 5).filter(p => new RegExp('steamid=' + sid + '(&|$)').test(p.body)).map(p => Number(/score=(-?[0-9]+)/.exec(p.body)[1]))));

@@ -289,6 +289,10 @@ const HEADER_CASES = [
   ['a ranked brawl of three, a trio bit (0x202: seats 1..3 of 3)', 0x202, [[H, 0, three, 3, true], [J, 1, three, 3, true], [X, 2, three, 3, true]], [J, X]],
   ['a quick brawl of four, a pair overlapping the trio (0x111)', 0x111, [[H, 0, [H, J, X, Y], 4, true], [J, 1, [H, J, X, Y], 4, true], [X, 2, [H, J, X, Y], 4, true], [Y, 3, [H, J, X, Y], 4, true]], [J, X, Y]],
   ['the demo job, a ranked 1V1 code (2) the job does not run', 2, [[H, 0, two, 2, true], [J, 1, two, 2, true]], [J], { env: DEMO }],
+  // O716: the ranked-seat mask rides START_GAME with the party bits -- a modded host's mask is his header too
+  ['O716 the demo job, a quick 1V1 with a ranked-seat mask (1 | seat 0 << 11)', 1 | (1 << 11), [[H, 0, two, 2, true], [J, 1, two, 2, true]], [J], { env: DEMO }],
+  ['O716 a quick 1V1 with a ranked-seat bit past the seats (1 | seat 2 << 11)', 1 | (4 << 11), [[H, 0, two, 2, true], [J, 1, two, 2, true]], [J]],
+  ['O716 a ranked-seat mask on the old ranked code (2 | seat 1 << 11)', 2 | (2 << 11), [[H, 0, two, 2, true], [J, 1, two, 2, true]], [J]],
   ['a bot match of two humans with no bot seat (11)', 11, [[H, 0, two, 2, true], [J, 1, two, 2, true]], [J]],
 ];
 for (const [name, mt, ws, honest, opt] of HEADER_CASES) {
@@ -375,7 +379,11 @@ for (const [name, mt, ws, honest, opt] of HEADER_CASES) {
     T(tag + ': voided at maturity, every writer consoled once with 50 XP and paid nothing else, nobody convicted',
       now.processed && who.every(s => JSON.stringify(now[s].xp) === '[50]' && now[s].lv === 0 && now[s].f === 0), JSON.stringify(now));
     T(tag + ': the verdict says the host\'s header held it (Q294)', /the host's match header held it \(Q294\): nobody convicted/.test(now.verdict), now.verdict);
-    if (v.appliesLp(mt) && !(opt && opt.env && opt.env.PT_MODE)) T(tag + ': a ranked key -> a VOID receipt for its accounts', new RegExp('receipt ' + p.key + ': never settled -> VOID receipt for ' + who.length + ' account').test(outOf(p.rs)));
+    // O716: a ranked-seat mask voids its ranked seats' points only (a seat the mask leaves out, or names past the table, gets none)
+    const lpWho = ws.filter((w) => v.seatAppliesLp(mt, w[1])).length;
+    if (v.anyAppliesLp(mt) && !(opt && opt.env && opt.env.PT_MODE)) T(tag + ': a ranked key -> a VOID receipt for its ranked seats\' accounts (' + lpWho + ')', lpWho
+      ? new RegExp('receipt ' + p.key + ': never settled -> VOID receipt for ' + lpWho + ' account').test(outOf(p.rs))
+      : !new RegExp('receipt ' + p.key + ': never settled').test(outOf(p.rs)));
     withMutant(VOID_BEFORE, tag, (sc) => {
       const old = sum(play(mt, ws, opt, sc), who);
       T(tag + ' mutant (the job before): not voided, nobody paid', old.ok && !old.processed && who.every(s => old[s].xp.length === 0), JSON.stringify(old));

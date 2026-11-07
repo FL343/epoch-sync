@@ -230,8 +230,9 @@ console.log('=== a losing-side leaver counts at his pre-match rating for the win
   T('[0] the ranked rating: the winners and the present losers take the full-team update (rework 2)',
     /const full = ts\.updateTeamMatch\(\[\{ players: sd\[winT\], rank: 1 \}, \{ players: sd\[1 - winT\]\.concat\(gR\), rank: 2 \}\]\);/.test(SRC)
     && /playedOut = full\.filter\(\(o\) => !gIds\.has\(o\.id\)\);/.test(SRC));
-  T('[0] the stored stand-in at a ranked settle only (rework 2)', /if \(!ghost\.length && ghostLoss\.length && appliesLp\(matchType\)\) \{/.test(SRC));
-  T('[0] a whole absent team at a quick settle moves nobody (Q210)', /if \(ghost\.length && !appliesLp\(matchType\)\) \{\n\s*tsOut = \[\];/.test(SRC));
+  // O716: anyLp = any ranked seat (a mixed table takes the ranked branch, D10; an old code reads the whole-table rule)
+  T('[0] the stored stand-in at a ranked settle only (rework 2)', /if \(!ghost\.length && ghostLoss\.length && anyLp\) \{/.test(SRC));
+  T('[0] a whole absent team at a quick settle moves nobody (Q210)', /if \(ghost\.length && !anyLp\) \{[^\n]*\n\s*tsOut = \[\];/.test(SRC));
   T('[0] a losing seat seen agreeing whose record is gone stands in too', /for \(const x of leavers0\.concat\(agreedAbs\)\) if \(teamOfSeat\(x\.seat, _mts\) === 1 - winTeam/.test(SRC)
     && /agreedSeats\.push\(x\.seat\);\n      agreedAbs\.push\(x\);/.test(SRC));
   T('[0] the absent losers\' ranked rating takes their side of the full-team update, the stored one never',

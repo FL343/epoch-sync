@@ -59,6 +59,13 @@ T('[3] the settle composes its plan and its points line through the module (matc
   T('[4] seat: an all-ranked and an all-quick code without a mask', st.some((c) => !c.out.mask && c.out.seats.every(Boolean)) && st.some((c) => !c.out.mask && !c.out.seats.some(Boolean)));
   T('[4] seat: a mixed mask on bases 1, 5 and 8, and one beside a pair and a trio', [1, 5, 8].every((b) => st.some((c) => c.out.base === b && c.out.mask && c.out.seats.some(Boolean) && !c.out.seats.every(Boolean) || c.out.base === b && c.out.mask === 0x3F))
     && st.some((c) => c.out.mask && PP.premadeMaskOf(c.in.mt)) && st.some((c) => c.out.mask && PP.premadeTrioAtOf(c.in.mt)));
+  // O716 part B: mixed tables -- a quick seat's out is null, a ranked seat has its points line; FFA and team, a plan with a flag
+  const mx = doc.cases.filter((c) => c.kind === 'match' && PP.rankedSeatMaskOf(c.in.mt));
+  const quickNull = mx.every((c) => c.in.parts.every((p) => PP.seatAppliesLp(c.in.mt, p.seat) ? (c.out[p.id] && typeof c.out[p.id].nv === 'number') : c.out[p.id] === null));
+  T('[4] mixed tables (O716): FFA and team, a quick seat settles no line, a ranked seat its own', mx.length >= 4 && quickNull && mx.some((c) => PP.isTeamMt(c.in.mt)) && mx.some((c) => !PP.isTeamMt(c.in.mt))
+    && mx.some((c) => Object.values(c.out).some((o) => o && o.plan && o.plan.flag)), mx.length + ' ' + quickNull);
+  // the planners open on a mixed table (part B gate): a mixed mismatch case carries plan rows -- the gate back on appliesLp gives none
+  T('[4] a mixed mismatch FFA carries plan rows (the planner gate is anyAppliesLp)', mx.some((c) => !PP.isTeamMt(c.in.mt) && Object.values(c.out).some((o) => o && o.plan)));
   const m = doc.cases.filter((c) => c.kind === 'match');
   const rows = [];
   for (const c of m) for (const id of Object.keys(c.out)) rows.push(Object.assign({ c, id }, c.out[id]));

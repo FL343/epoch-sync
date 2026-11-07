@@ -213,6 +213,18 @@ function groupSids(g) {
   for (const r of (g || [])) { if (r && r.steamID != null) out.add(String(r.steamID)); for (const s of Object.values((r && r.roster) || {})) if (s) out.add(String(s)); }
   return [...out];
 }
+// O716: the accounts of a group that move points under match type mt -- groupSids narrowed to the ranked seats of a mixed table
+//   (a writer by his record's seat, a roster account by its seat); every account of an old ranked code; none of a quick one
+function lpGroupSids(g, mt) {
+  if (!rankedSeatMaskOf(mt)) return appliesLp(mt) ? groupSids(g) : [];
+  const out = new Set();
+  for (const r of (g || [])) {
+    if (!r) continue;
+    if (r.steamID != null && r.d && seatAppliesLp(mt, r.d[5] | 0)) out.add(String(r.steamID));
+    for (const s of Object.keys(r.roster || {})) if (r.roster[s] && seatAppliesLp(mt, s | 0)) out.add(String(r.roster[s]));
+  }
+  return [...out];
+}
 
 const APPID = Number(process.env.APPID);
 const PREFIX = process.env.LB_PREFIX;
@@ -4510,6 +4522,14 @@ async function reconcileConfessions(confs, groups, processed, confState, leavers
     }
     return null;
   };
+  // O716: the confessor's seat -- his confession record's own seat (d[5]), else (a team-gamble accusation verdict) his seat on
+  //   the key's roster; -1 when neither names one (a mixed table then fines nobody: architecture decision 10; an old ranked
+  //   code fines the whole table as before, seatAppliesLp)
+  const confSeatOf = (c) => {
+    if (c.seat != null) return c.seat | 0;
+    for (const r of ((groups && groups[c.m]) || [])) for (const s of Object.keys((r && r.roster) || {})) if (String(r.roster[s]) === String(c.steamID)) return s | 0;
+    return -1;
+  };
   const byKey = {};
   for (const c of (confs || [])) { const p = pid(String(c.steamID)); byKey[p + '|' + c.m] = Object.assign({ p }, c); }
   // 1) NEW confessions (visible on shards this run)
@@ -4528,7 +4548,7 @@ async function reconcileConfessions(confs, groups, processed, confState, leavers
     // O181: a confessed quit breaks the streak (his own result, if he comes back and finishes, replaces it at that settle);
     //   ordered by the match's start when its entry is still pending (opts.startOf), else by this sighting
     res.skEv.push({ p: c.p, mh: mhOfKey(c.m), t0: (opts.startOf && opts.startOf(c.m)) || now, kind: 'break' });
-    if (opts.appliesLpFn(c.mt | 0) && opts.readLp) {
+    if (opts.appliesLpFn(c.mt | 0, confSeatOf(c)) && opts.readLp) {   // O716: a mixed table fines a ranked seat only (D9)
       const e = await opts.readLp(String(c.steamID));
       const base = e ? (e.score | 0) : (opts.seedFor ? opts.seedFor(String(c.steamID)) : 0);
       const nv = leaverLpPenalty(base, opts.penalty);
@@ -4695,7 +4715,8 @@ function disputeFloorOf(p, g) {
     let money = Infinity, cls = 'valid';
     for (const r of both) { const x = (seat >= 0 && seat < (r.d[8] | 0) && r.d.length > 10 + seat) ? (r.d[10 + seat] | 0) : 0; if (x < money) money = x; }
     for (const r of recs) { const c = dispClassOf(r.dispCode); if (DISPUTE_CLS_ORDER[c] < DISPUTE_CLS_ORDER[cls]) cls = c; }
-    out.set(s, { cls, money: Math.max(0, money), ranked: baseMt(mt) === 2 && !PT_MODE });
+    // O716: a mixed 1V1 (the quick brawl code with a ranked-seat mask) pays each writer's floor by his own entry (x1.25 ranked)
+    out.set(s, { cls, money: Math.max(0, money), ranked: (baseMt(mt) === 2 || (baseMt(mt) === 1 && seatAppliesLp(mt, seat))) && !PT_MODE });
   }
   return out;
 }
@@ -5946,8 +5967,11 @@ function creditCareerMatch(g, matchType, rankOf, xpState, touched) {
     const cls = dispClassOf(r.dispCode);
     if (cls === 'abandoner') continue;
     const st = xpState[pid(sid)] = xpState[pid(sid)] || { lastWinDay: 0, games: 0 };
-    const win = (((CAREER_WL_MASK >> mode) & 1) && cls === 'valid' && rankOf) ? careerWon(matchType, rankOf[sid]) : null;
-    careerCellAdd(st, mode, sc.codes[seat] | 0, careerSecOf(mode, r.d[9], null), win, true);
+    // O716: a mixed table's ranked seat counts in the ranked cell (his entry), its quick seats in the quick cell -- the client's
+    //   career page files the match under the entry he queued with
+    const md = (mode === 0 && seatAppliesLp(matchType, seat)) ? 1 : mode;
+    const win = (((CAREER_WL_MASK >> md) & 1) && cls === 'valid' && rankOf) ? careerWon(matchType, rankOf[sid]) : null;
+    careerCellAdd(st, md, sc.codes[seat] | 0, careerSecOf(md, r.d[9], null), win, true);
     if (touched) touched.add(sid);
     n++;
   }
@@ -6107,7 +6131,6 @@ function computeXpGain(cls, rank0, money, isRanked, firstWinToday, factor, boost
 //   writer's gain is at least CONSOLATION_XP (what the start-orphan verdict paid him for it before), and it never takes his
 //   daily first win (his client's interrupted end never takes it either: it stays for his next win).
 function creditXp(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers, today, progFrac, careerDet, spSet, sk, quitLone) {
-  const isRanked = appliesLp(matchType);
   const pf = (progFrac == null ? 1 : progFrac);
   const recBySeat = {};
   for (const r of g) { const s = r.d[5] | 0; if (recBySeat[s] == null) recBySeat[s] = r; }
@@ -6115,6 +6138,7 @@ function creditXp(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers,
   const absentSeats = (sk && sk.absentSeats) || new Set();
   for (const seatKey of Object.keys(recBySeat)) {
     const r = recBySeat[seatKey], seat = seatKey | 0, sid = r.steamID, p = pid(sid);
+    const isRanked = seatAppliesLp(matchType, seat);   // O716: the ranked x1.25 by the seat's own entry (a mixed table: per seat)
     const cls = dispClassOf(r.dispCode);
     const st = xpState[p] = xpState[p] || { lastWinDay: 0, games: 0 };
     // O181: the streak moves first (the win's own tier goes into this match's boost). Interrupted (innocent class, or the
@@ -8045,11 +8069,11 @@ function endlessTestified(pend, keyStarts, roster0, pc, writerSids) {
 // branches do their own CP (continue / resume debits, competitive milestone credits) and their own
 // progress XP (creditXpEndless).
 function creditCp(g, matchType, rankOf, cp, changedCp) {
-  const isRanked = appliesLp(matchType);
   const recBySeat = {};
   for (const r of g) { const s = r.d[5] | 0; if (recBySeat[s] == null) recBySeat[s] = r; }
   for (const seatKey of Object.keys(recBySeat)) {
     const r = recBySeat[seatKey], sid = r.steamID;
+    const isRanked = seatAppliesLp(matchType, seatKey | 0);   // O716: the ranked x2 by the seat's own entry (a mixed table: per seat)
     const cls = dispClassOf(r.dispCode);
     const rank0 = ((rankOf[sid] || 1) | 0) - 1;
     const gain = endlessCpGain(cls, rank0, isRanked);
@@ -9536,7 +9560,7 @@ async function main() {
         // abandon confession: writer identity is the penalty target; disp slot at the v3 offset
         const pc = d[8] | 0;
         const dispCode = (d.length > 10 + pc && pc >= 1) ? (d[10 + pc] | 0) : 0;
-        out.push({ confess: true, steamID: e.steamID, shard: label, m: d[3] + '_' + d[4] + '_' + d[2], mt: d[2] | 0, dispCode });
+        out.push({ confess: true, steamID: e.steamID, shard: label, m: d[3] + '_' + d[4] + '_' + d[2], mt: d[2] | 0, seat: d[5] | 0, dispCode });   // O716: his seat (a mixed table fines a ranked seat only)
       } else if (d[0] === NOTE_MAGIC && d.length >= 10) {
         // exit note (Q64): writer identity is the only thing it speaks for; disp slot at the v3 offset
         const pc = d[8] | 0;
@@ -9807,11 +9831,14 @@ async function main() {
   //   points back instead of waiting for a settle that will not come. A void writes nobody's row: the receipt rides the player's
   //   next points write (queued in the backlog meanwhile, see PENDING_WRITES_FILE).
   for (const vk of (startsRes.voided || [])) {
-    if (!lpBoardId || !appliesLp(String(vk.m).split('_')[2] | 0)) continue;
+    const vmt = String(vk.m).split('_')[2] | 0;
+    if (!lpBoardId || !anyAppliesLp(vmt)) continue;
+    // O716: a mixed table's ranked seats only, named by the records' / starts' seats (the attested pids carry no seat: an old
+    //   ranked code takes them as before)
     const vs = new Set();
-    for (const h of (vk.pids || [])) { const s = sidByPid.get(h); if (s) vs.add(String(s)); }
-    for (const s of groupSids(groups[vk.m])) vs.add(s);
-    for (const s of groupSids(starts.filter((r) => (r.d[3] + '_' + r.d[4] + '_' + r.d[2]) === vk.m))) vs.add(s);
+    if (!rankedSeatMaskOf(vmt)) for (const h of (vk.pids || [])) { const s = sidByPid.get(h); if (s) vs.add(String(s)); }
+    for (const s of lpGroupSids(groups[vk.m], vmt)) vs.add(s);
+    for (const s of lpGroupSids(starts.filter((r) => (r.d[3] + '_' + r.d[4] + '_' + r.d[2]) === vk.m), vmt)) vs.add(s);
     for (const s of vs) noteReceipt(s, mhOfKey(vk.m), 0, RECEIPT_F.VOID, 0);
     if (vs.size) console.log('  receipt ' + vk.m + ': never settled -> VOID receipt for ' + vs.size + ' account(s)');
   }
@@ -9988,7 +10015,7 @@ async function main() {
     confRes = await reconcileConfessions(confessions, groups, processed, confState, leavers, nowMs, {
       penalty: LEAVER_LP_PENALTY, lpMax: LP_MAX, maturityMs: STARTS_MATURITY_MS,
       lateMs: LATE_RESULT_MS, vecTag, lpBoard: lpId0,   // Q228: a conviction's entry (cv)
-      appliesLpFn: appliesLp,
+      appliesLpFn: seatAppliesLp,   // O716: (mt, seat) -- a ranked seat of a mixed table; every seat of an old ranked code
       consistentKeys,   // absolution probe only trusts consistent settle groups (a lone/divergent 0xB1 cancels nothing)
       startOf: (m) => (startsPending[m] && startsPending[m].t0) || 0,   // O181: a confession's streak break sorts at the match's start
       checkpoint: () => saveEarlyMarks(true),   // R1-B2-03: after every points write (fine or refund), before the next exit can happen
@@ -11216,9 +11243,9 @@ async function main() {
         for (const x of wr) { const v0 = x.status === 'fulfilled' ? x.value : 0; if (v0 === 1) nOk++; else if (v0 === 2) nGone++; else nFail++; }
       }
       const whyTxt = Object.keys(h.why).sort().map(k => k + ' ' + h.why[k]).join(', ');
-      if (nCnt || h.pended || plan.writes.length || cert.unknown || cert.pair || plan.adopted || plan.behind || (boxOk && rows.length && whyTxt)) {
+      if (nCnt || h.pended || plan.writes.length || cert.unknown || cert.pair || cert.teammate || plan.adopted || plan.behind || (boxOk && rows.length && whyTxt)) {
         console.log('likes: counted +' + nCnt + ' (match ' + (h.counted.filter(c => c.kind === L.KIND_MATCH).length + cert.resolved.length) + ', board ' + h.counted.filter(c => c.kind === L.KIND_BOARD).length + ')' +
-          (h.pended ? ', waiting +' + h.pended : '') + (cert.certified ? ', keys certified ' + cert.certified : '') + (cert.unknown ? ', waiting dropped (unknown target) ' + cert.unknown : '') + (cert.pair ? ', waiting dropped (pair week) ' + cert.pair : '') +
+          (h.pended ? ', waiting +' + h.pended : '') + (cert.certified ? ', keys certified ' + cert.certified : '') + (cert.unknown ? ', waiting dropped (unknown target) ' + cert.unknown : '') + (cert.pair ? ', waiting dropped (pair week) ' + cert.pair : '') + (cert.teammate ? ', waiting dropped (teammate, O717) ' + cert.teammate : '') +
           (whyTxt ? ', skipped: ' + whyTxt : '') + '; boxes ' + rows.length + ', count rows ' + (APPLY_MMR ? nOk + '/' + plan.writes.length : 'would write ' + plan.writes.length) +
           (nGone ? ' (' + nGone + ' gone)' : '') + (nFail ? ' (' + nFail + ' failed)' : '') + (plan.more ? ' (+' + plan.more + ' next run)' : '') +
           (plan.adopted || plan.behind ? '; state took ' + (plan.adopted + plan.behind) + ' row(s) back from the board (adopted ' + plan.adopted + ', behind ' + plan.behind + ')' : '') + (APPLY_MMR ? '' : ' [dry-run]'));
@@ -11750,7 +11777,7 @@ async function main() {
       scPut(compFam.TRIO.weekBest, sn.sid, sn.compTrioWeekBest); scPut(compFam.TRIO.weekTeam, sn.sid, sn.compTrioWeekTeam); scPut(changedCompTrioWeek, sn.sid, sn.changedCompTrioWeek);
       scPut(compFam.QUAD.weekBest, sn.sid, sn.compQuadWeekBest); scPut(compFam.QUAD.weekTeam, sn.sid, sn.compQuadWeekTeam); scPut(changedCompQuadWeek, sn.sid, sn.changedCompQuadWeek);
       scPut(careerDet, sn.sid, sn.careerDet); scPut(reveal, sn.sid, sn.reveal); scPut(receipts, sn.sid, sn.receipts);
-      if (pend.voidMh != null) noteReceipt(sn.sid, pend.voidMh, 0, RECEIPT_F.VOID, 0);   // S3: the ranked writer's client rolls its optimistic points back
+      if (pend.voidMh != null && (!pend.voidSids || pend.voidSids.indexOf(String(sn.sid)) >= 0)) noteReceipt(sn.sid, pend.voidMh, 0, RECEIPT_F.VOID, 0);   // S3: the ranked writer's client rolls its optimistic points back (O716: a ranked seat of a mixed table)
       console.log('  seedcap reject ' + pend.m + ': ' + plog(sn.sid) + ' settlement discarded except XP (state restored)');
     }
   };
@@ -12359,7 +12386,8 @@ async function main() {
       const nowMin = Math.floor(nowMs / 60000);
       const dropSids = writerSids.concat(dropSeat ? [...dropSeat.keys()] : []).filter(sid => seedcapRejectActive(seedcap.suspects[pid(sid)], nowMin));   // Q109: a sanity-dropped writer is still ranked
       if (dropSids.length) {
-        scPendingRestore = { m: c.m, sids: dropSids, snaps: dropSids.map(scSnapshotOf), voidMh: (lpId && appliesLp(matchType)) ? (g[0].d[3] | 0) : null };
+        scPendingRestore = { m: c.m, sids: dropSids, snaps: dropSids.map(scSnapshotOf), voidMh: (lpId && anyAppliesLp(matchType)) ? (g[0].d[3] | 0) : null,
+          voidSids: rankedSeatMaskOf(matchType) ? lpGroupSids(g, matchType) : null };   // O716: a mixed table voids its ranked seats' points only
         RUN.seedcapReject = (RUN.seedcapReject | 0) + dropSids.length;
         for (const sid of dropSids) {
           const su = seedcap.suspects[pid(sid)];
@@ -12936,7 +12964,10 @@ async function main() {
           }
           console.log('  agreed-back ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' record gone, but the result read now is not the one he was seen agreeing to -- left out (Q185 review)');
           const cx = confState[hx + '|' + c.m];
-          if (baseMt(matchType) === 2 && !PT_MODE && pend.agv && pend.agv[hx] != null && !(cx && !cx.refunded && (cx.ded > 0 || cx.ex))) {
+          // O716: a stand-in keeps the OTHER players' points whole (he is never rated himself), so a mixed brawl takes him when any
+          //   seat is ranked -- the ranked branch, as Q210 / Q167 take it there (the user's call 2026-11-07, D10; the quick branch's
+          //   reason, the stored-rating lever, is theirs)
+          if (anyAppliesLp(matchType) && !PT_MODE && pend.agv && pend.agv[hx] != null && !(cx && !cx.refunded && (cx.ded > 0 || cx.ex))) {
             stoodCand.push(x);   // Q263: stands in only if no player rated here settled with a stand-in lately (after this loop)
           }
           continue;
@@ -13147,7 +13178,7 @@ async function main() {
       recordMatchSignals(signals, g, live, null, matchType, true, nowMs); sigDirty = true;   // co-presence + void counters (dodge-ring history)
       // O480: every account of a voided ranked match gets a VOID receipt (delta 0): its client rolls the optimistic points back.
       //   A void writes nobody's row: the receipt rides the player's next points write (the backlog keeps it meanwhile)
-      if (lpId && appliesLp(matchType)) for (const sid of groupSids(g)) noteReceipt(sid, g[0].d[3] | 0, 0, RECEIPT_F.VOID, 0);
+      if (lpId) for (const sid of lpGroupSids(g, matchType)) noteReceipt(sid, g[0].d[3] | 0, 0, RECEIPT_F.VOID, 0);
       console.log('  VOID ' + c.m + ': consensus -> no MMR/points'); processed.add(c.m); voided++; continue;
     }
     if (c.quitLone) {   // W103 (quitLoneVerdicts): one writer -- no rating, no signals, nobody convicted here (his confession counted the leave)
@@ -13354,6 +13385,14 @@ async function main() {
           + (rep ? ', repeated' : '') + (unw ? ', more lower places unwritten than written' : '') + '; counted, nobody flagged (Q174)');
       }
     }
+    // O716 one queue for quick + ranked: a table may seat both (the ranked-seat mask of the match type; the user's calls of
+    //   2026-11-07, plan KNIFE_O716 section 0). What asks "does this settle move points at all" asks the table (anyLp: the plan,
+    //   the ranked rating reading, the Q210 / Q167 / Q227 branches -- D10); what writes one player's points asks his own seat
+    //   (seatLp: his placement seed, his points line, his ranked rating, his leaver fine -- D3 / D9). An old code (no mask) reads
+    //   the whole-table rule for both, as before.
+    const anyLp = anyAppliesLp(matchType);
+    const seatOfSid = new Map(parts.map((p) => [String(p.steamID), p.seat | 0]));
+    const seatLp = (sid) => (rankedSeatMaskOf(matchType) ? (seatOfSid.has(String(sid)) && seatAppliesLp(matchType, seatOfSid.get(String(sid)))) : appliesLp(matchType));
     let seededSet = null;   // O480: the players this settle seeded (seededNow below), for the leaver fine's points receipt
     // ===== playtest channel: no rating/points surface (lock layer 3) -- the TrueSkill update,
     // placement seeding, group-decay memory and every points write are skipped wholesale, so
@@ -13376,7 +13415,7 @@ async function main() {
       //   crossline skip aligned settle for settle), so both ends skip the same settle.
       const seededNow = new Set();
       seededSet = seededNow;
-      if (lpId && appliesLp(matchType)) {
+      if (lpId && anyLp) {
         // lazy season seed (first settle this season): previous-season entry soft-resets in, else
         // display-derived placement seed (seasonSeedLp priority). A prev-board read FAILURE aborts
         // the run -- seeding blind would silently discard last season's finish (same "never settle
@@ -13393,9 +13432,11 @@ async function main() {
           console.log('  seed ' + c.m + ': ' + plog(sid) + ' ' + tag +
             (prevE ? (', soft-reset from ' + (prevE.score | 0)) : (', display ' + disp)) + ' -> pts ' + lp[sid]);
         };
-        for (const t of tsIn) if (!noRating && lp[t.id] == null && !stoodIds.has(String(t.id))) await seedOne(t.id, t.mu, t.sigma, 'first settle this season');
+        // O716: a quick seat of a mixed table is not seeded (no points row of his is written; the plan reads his seed unwritten, D8)
+        for (const t of tsIn) if (!noRating && lp[t.id] == null && !stoodIds.has(String(t.id)) && seatLp(t.id)) await seedOne(t.id, t.mu, t.sigma, 'first settle this season');
         for (const x of leavers0) {
           if (t2ex.has(pid(String(x.steamID)))) continue;   // Q56 excused: this match does not count for him
+          if (!seatAppliesLp(matchType, x.seat)) continue;   // O716: a quick leaver of a mixed table pays no points, so no seed (D9)
           if (lp[x.steamID] == null) {
             const sk = skill[pid(x.steamID)] || ts.DEFAULTS;
             await seedOne(x.steamID, sk.mu, sk.sigma, 'leaver, first settle this season');
@@ -13452,7 +13493,7 @@ async function main() {
         //   yet (Q160), so the pair then left a ranked match against two grandmasters as if strong (+10 points a match with
         //   Q167). A quick settle moves no points; the present winners give up a hidden-rating gain against an empty side,
         //   nobody loses one, and the match settles as before (XP, the leavers convicted). Ranked settles are unchanged.
-        if (ghost.length && !appliesLp(matchType)) {
+        if (ghost.length && !anyLp) {   // O716: a mixed table takes the ranked branch (D10)
           tsOut = [];
           console.log('  team rating ' + c.m + ': whole team ' + empty + ' absent at a quick settle -> no rating move (Q210)');
         } else if (ghost.length) {
@@ -13488,7 +13529,7 @@ async function main() {
         //   the start and leaves) walked each other's stored rating up to about 2750 in 30 matches, and the mismatch check
         //   reads the stored rating for an account with no ranked rating yet (Q160), so one of them then left against two
         //   grandmasters as if strong (+10 points a match). A quick settle rates the present against the present, as before Q167.
-        if (!ghost.length && ghostLoss.length && appliesLp(matchType)) {
+        if (!ghost.length && ghostLoss.length && anyLp) {   // O716: a mixed table takes the ranked branch (D10)
           const g0 = ghostLoss.map(x => { const sk = skill[pid(x.steamID)] || ts.DEFAULTS; return { id: x.steamID, mu: sk.mu, sigma: sk.sigma }; });
           tsOut = leaverGhostUpdate(sides[winTeam], sides[1 - winTeam], g0);
           console.log('  leaver-ghost ' + c.m + ': team ' + winTeam + ' rated against team ' + (1 - winTeam) + ' with its ' + ghostLoss.length
@@ -13504,7 +13545,7 @@ async function main() {
       //   matchType mask settle at their average rank -- design line 66; solos = original formula).
       //   Q160: the rating side of the plan is the ranked rating (see RANKED RATING), the stored one standing in until a player
       //   has one.
-      const rankedNow = !!(lpId && appliesLp(matchType));
+      const rankedNow = !!(lpId && anyLp);   // O716: a mixed table reads every seat's ranked rating (D11; none yet = the stored one, Q160)
       const rIn = (sid, base) => { const rr = rankedNow ? rankedRatingOf(skill[pid(sid)]) : null; return rr ? Object.assign({}, base, { mu: rr.mu, sigma: rr.sigma }) : base; };
       const asPlayed = tsIn.map((t) => rIn(t.id, t));
       const planIn = tsIn.map((t, i) => ({ steamID: t.id, seat: parts[i].seat | 0, mmr: ts.displayRating(asPlayed[i].mu, asPlayed[i].sigma), rank: t.rank, lp: (lp[t.id] == null ? 0 : lp[t.id]) }));
@@ -13573,7 +13614,7 @@ async function main() {
         //   his points after the leave; add the recorded fine back, so his points read as at his leave as for a convicted one.
         //   Not when this settle seeded him (no row on this season's board: the fine is not on it, the seed is the base already)
         if (leaver && lpx != null && !seededNow.has(x.steamID)) { const cs = confState[pid(String(x.steamID)) + '|' + c.m]; if (cs && !cs.refunded && (cs.ded | 0) > 0) lpx += cs.ded | 0; }
-        if (lpx == null && lpId && appliesLp(matchType)) {
+        if (lpx == null && lpId && anyLp) {
           let prevE = null;
           if (prevLpId) { try { prevE = await prevLpEntryOf(x.steamID, 'prev points'); } catch (err) { ghWarn('prev-season base read failed for ' + plog(x.steamID) + ' (plan only, nothing written): ' + (err && err.message)); } }
           lpx = seasonSeedLp(prevE ? (prevE.score | 0) : null, ts.displayRating(sk.mu, sk.sigma));
@@ -13582,12 +13623,17 @@ async function main() {
       };
       // Q227: a seat standing in with no points yet this season reads, in the plan only, the placement seed the settle would
       //   have given him (not persisted), as a finished member reads at Q183
-      if (stoodIds.size && lpId && appliesLp(matchType)) for (const q of planIn) if (stoodIds.has(String(q.steamID)) && lp[q.steamID] == null) q.lp = (await planRow(q)).lp;
+      if (stoodIds.size && lpId && anyLp) for (const q of planIn) if (stoodIds.has(String(q.steamID)) && lp[q.steamID] == null) q.lp = (await planRow(q)).lp;
+      // O716 (the user's call 2026-11-07, D8): a quick member of a mixed team match with no points this season reads, in the plan
+      //   only, the placement seed the settle would give him (not written; his points row stays absent) -- his ranked teammate's
+      //   team-average tier is read as the client's pseudo-realtime settle reads it (a row, else the seed), not dragged down by a 0.
+      //   An FFA reads no other seat's points (a premade unit is one entry, D4), so nothing to read there.
+      if (lpId && rankedSeatMaskOf(matchType) && isTeamMt(matchType)) for (const q of planIn) if (!seatLp(q.steamID) && lp[q.steamID] == null) q.lp = (await planRow(q)).lp;
       const absentIn = [], finishedIn = [];
       if (!noRating && isTeamMt(matchType)) {
         for (const x of ghostLoss) if (!agreedIds.has(String(x.steamID))) absentIn.push(await planRow(x, true));
         for (const x of agreedAbs) finishedIn.push(await planRow(x));
-        if (finishedIn.length && lpId && appliesLp(matchType)) console.log('  agreed-gone ' + c.m + ': ' + agreedAbs.map((x) => 'seat ' + x.seat).join(', ')
+        if (finishedIn.length && lpId && anyLp) console.log('  agreed-gone ' + c.m + ': ' + agreedAbs.map((x) => 'seat ' + x.seat).join(', ')
           + ' read as finished member(s) of their team in the points plan (Q183)');
       }
       // the match's points plan (points-plan.js matchPlan: the team planner for a team code, else the FFA planner on the code's party bits)
@@ -13609,7 +13655,8 @@ async function main() {
           console.log('  group-decay ' + c.m + ': ' + plog(r.id) + ' repeat-group streak ' + gp.k + ' -> rating weight x' + gp.w);
         }
         {   // Q160: the ranked rating (see RANKED RATING) moves on at a ranked settle and stays as it was at a quick one
-          const prevR = rankedRatingOf(skill[pid(r.id)]), po = playedOut && playedOut.find((x) => x.id === r.id);
+          // O716: ... and at a quick seat of a mixed table too (his seat settles as a quick one: a quick seat moving it was Q160's hole)
+          const prevR = rankedRatingOf(skill[pid(r.id)]), po = playedOut && seatLp(r.id) && playedOut.find((x) => x.id === r.id);
           const ent = { mu: r.mu, sigma: r.sigma };
           if (po) { ent.rm = po.mu; ent.rv = po.sigma; }
           else if (prevR) { ent.rm = prevR.mu; ent.rv = prevR.sigma; }
@@ -13617,7 +13664,7 @@ async function main() {
         }
         changed[r.id] = { mu: r.mu, sigma: r.sigma };
         let lpLine = '';
-        if (lpId && appliesLp(matchType)) {   // quick = MMR only; visible LP ladder is ranked-only
+        if (lpId && seatLp(r.id)) {   // quick = MMR only; visible LP ladder is ranked-only (O716: by the seat's own entry, D3)
           const cur = lp[r.id] == null ? 0 : lp[r.id];
           const own = stoodOwn.has(String(r.id)), nP = own ? live.length : parts.length;   // Q264: as before Q227 for him
           const rs = own ? (rsPlanOwn && rsPlanOwn[r.id]) : (rsPlan && rsPlan[r.id]);
@@ -13639,7 +13686,7 @@ async function main() {
       // Q228: what each leaver convicted below would have taken with his record there, and what the other members of his
       //   premade unit gained by his absence (lateShadow) -- kept on his conviction's entry for a late result of his own
       //   (before his ranked rating moves below)
-      if (lpId && appliesLp(matchType) && !noRating) {
+      if (lpId && anyLp && !noRating) {
         const rankWith = (list) => {   // the settle's ranking (above) of list = [{ steamID, seat, score }]
           const so = [...list].sort((a, b) => b.score - a.score), out = {}; let rr = 1;
           for (let i = 0; i < so.length; i++) { if (i > 0 && so[i].score < so[i - 1].score) rr = i + 1; out[so[i].steamID] = rr; }
@@ -13661,6 +13708,7 @@ async function main() {
         for (const x of leavers0) {
           const hx = pid(String(x.steamID));
           if (confState[hx + '|' + c.m] || t2ex.has(hx)) continue;   // not convicted below
+          if (!seatAppliesLp(matchType, x.seat)) continue;   // O716: a quick leaver of a mixed table takes no fine and no points (D9)
           const xr = Object.assign({ steamID: x.steamID }, await planRow(x));
           const rk = rankWith(planIn.concat([xr]).map((q) => ({ steamID: q.steamID, seat: q.seat | 0, score: scores[q.seat | 0] | 0 })));
           const withRank = (q) => Object.assign({}, q, { rank: rk[q.steamID] });
@@ -13713,14 +13761,14 @@ async function main() {
       const cvKey = pid(x.steamID) + '|' + c.m;
       confState[cvKey] = { t0: nowMs, mt: matchType, ded: 0, ex: 1, cv: 1, s: x.seat | 0, v: vecTag(g[0]) };
       RUN.lateCv = (RUN.lateCv | 0) + 1;
-      if (lpId && appliesLp(matchType)) {
+      if (lpId && seatAppliesLp(matchType, x.seat)) {   // O716: a quick leaver of a mixed table has no fine to give back (D9)
         const sh = lateSh[x.steamID];   // none at a settle that moves no rating (Q136): the finish there gives nobody points
         Object.assign(confState[cvKey], { b: String(lpId), w: sh ? sh.w : 0, g: sh ? sh.g.reduce((a, y) => a + y[1], 0) : 0 });
         lateCv.push([cvKey, String(x.steamID), sh ? sh.g : []]);
       }
       // authoritative ranked leaver penalty: deduct LEAVER_LP_PENALTY from the points board so a client optimistic deduction survives read-back
       //   (would otherwise be reverted). Ranked-only; consensus-detected leaver only (single side can't frame); once/match (processed).
-      if (lpId && appliesLp(matchType)) {
+      if (lpId && seatAppliesLp(matchType, x.seat)) {   // O716: the leaver's own entry -- a ranked seat -100, a quick seat the exit rate only (D9)
         const cur = lp[x.steamID] == null ? 0 : lp[x.steamID];
         const nv = leaverLpPenalty(cur, LEAVER_LP_PENALTY);
         if (nv !== cur) { lp[x.steamID] = nv; changedLp[x.steamID] = nv; confState[cvKey].ded = cur - nv; }

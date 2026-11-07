@@ -326,5 +326,26 @@ console.log('[4] end to end: the edges');
   T('ranked: no quit-lone line, the stayer not paid a win', !/quit-lone/.test(t.out) && !xpPosts(t, P0).some((p) => p.score > v.CONSOLATION_XP), J(xpPosts(t, P0).map((p) => p.score)));
 }
 
+// ---- [5] O716 one queue: a 1V1 of the quick brawl code with a ranked-seat mask (bits 11-16) ----
+// The user's call of 2026-11-07 (D12): before EA a mixed / new-format 1V1 whose other player quit takes the quick lane -- the
+// stayer is paid the win's XP (his own entry's x1.25 on a ranked seat), never points; the quitter's confession fines him by his
+// own entry (D9). Not paid back later either (the user: no retroactive points).
+console.log('[5] O716: a 1V1 with a ranked-seat mask takes the quick lane');
+const pointsPosts = (m, sid) => [].concat(...m.rs.map((r) => H.postsOf(r, POINTS, sid)));
+for (const [tag, seats, hash, P0, P1] of [['stayer ranked, quitter quick', 0b01, 0x10401, H.SID(9811), H.SID(9812)],
+  ['stayer quick, quitter ranked', 0b10, 0x10402, H.SID(9821), H.SID(9822)], ['both ranked', 0b11, 0x10403, H.SID(9831), H.SID(9832)]]) {
+  const mt = 1 | (seats << 11);
+  const m = quick(hash, [P0, P1], { res: { 0: PEERS_GONE }, conf: [1], mt });
+  const all = m.S.concat(m.R, m.C);
+  const t = run([[0, all], [STEP, all], [STEP, all], [STEP, all], [2 * HOUR, all], [24 * HOUR, all]]);
+  const stayerRanked = !!(seats & 1), quitterRanked = !!(seats & 2);
+  T('[5] ' + tag + ': runs ok, settled on the quit-lone lane', t.okAll && new RegExp('quit-lone settle ' + m.key + ': ').test(t.out), t.out.slice(-1500));
+  T('[5] ' + tag + ': the stayer paid the win\'s XP once (' + (stayerRanked ? 'x1.25, ranked seat' : QUIT_WIN + ', quick seat') + '), no points',
+    xpPosts(t, P0).length === 1 && (stayerRanked ? xpAfter(t, 5, P0) > QUIT_WIN : xpAfter(t, 5, P0) === QUIT_WIN) && pointsPosts(t, P0).length === 0, J([xpPosts(t, P0).map((p) => p.score), pointsPosts(t, P0)]));
+  T('[5] ' + tag + ': the quitter ' + (quitterRanked ? 'fined at his confession (a points write)' : 'the exit rate only (no points write)') + ', one leave',
+    pointsPosts(t, P1).length === (quitterRanked ? 1 : 0) && leavesOf(t, P1) === 1, J([pointsPosts(t, P1), leavesOf(t, P1)]));
+  T('[5] ' + tag + ': nobody rated (no rating write), no lone-1V1 points claim', [].concat(...t.rs.map((r) => H.setPosts(r, RATING))).length === 0 && !/lone-1v1 /.test(t.out));
+}
+
 console.log(failN ? '\nquit-lone-1v1: ' + failN + ' FAILED' : '\nquit-lone-1v1: all ok');
 process.exit(failN ? 1 : 0);

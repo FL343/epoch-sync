@@ -210,7 +210,7 @@ console.log('=== the points plan reads the ranked rating: quick matches and the 
 // ---- [0] wiring pins ----
 {
   T('[0] the ranked rating lives in the skill entry (rm / rv)', /function rankedRatingOf\(sk\) \{ return \(sk && Number\.isFinite\(sk\.rm\) && Number\.isFinite\(sk\.rv\)\) \? \{ mu: sk\.rm, sigma: sk\.rv \} : null; \}/.test(SRC));
-  T('[0] the points plan reads it at a ranked settle', SRC.split(HELD).length === 2 && /const rankedNow = !!\(lpId && appliesLp\(matchType\)\);/.test(SRC)
+  T('[0] the points plan reads it at a ranked settle', SRC.split(HELD).length === 2 && /const rankedNow = !!\(lpId && anyLp\);/.test(SRC)
     && /const asPlayed = tsIn\.map\(\(t\) => rIn\(t\.id, t\)\);/.test(SRC) && /mmr: ts\.displayRating\(asPlayed\[i\]\.mu, asPlayed\[i\]\.sigma\)/.test(SRC));
   T('[0] the settle stores it (moved at a ranked settle, kept at a quick one)', /if \(po\) \{ ent\.rm = po\.mu; ent\.rv = po\.sigma; \}\n\s*else if \(prevR\) \{ ent\.rm = prevR\.mu; ent\.rv = prevR\.sigma; \}\n\s*skill\[pid\(r\.id\)\] = ent;/.test(SRC));
   T('[0] the streak memory carries no rating', !/prev\.sm|ge\.sm|g\.sm/.test(SRC));

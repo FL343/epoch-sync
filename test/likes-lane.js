@@ -24,8 +24,8 @@
 //   [10] (W79 rework) a like_count read answering 200 with a broken body (not JSON / no entry info) is a failed read, the
 //       whole board and a capped read's single reads alike: nothing written (a restored older state would otherwise write a
 //       count DOWN), the like still counted into the state; LIKES_STRICT_BODY=0 shows what the strict read prevents
-//   [11] (W79 rework) team match: a stranger teammate's like counts, under the pair token (one per pair per 7 days, shared
-//       with board likes; a waiting one is checked at its settle), an opponent's every match
+//   [11] (O717 N5) team match: a teammate's like never counts (the user's call of 2026-10-24), takes no pair token (a board
+//       like of the pair still counts), an opponent's every match
 //   [12] (Q68) a voter whose own record is 10 (finished, the voter's seat scores judged without the host guard's final summary):
 //       the match settles on the others' vector and the voter's match like counts as a finished voter's
 const { spawnSync } = require('child_process');
@@ -427,7 +427,7 @@ console.log('=== likes-lane [10] a like_count read with a broken body is a faile
     /if \(opts && opts\.strictBody && /.test(SRC));
 }
 
-console.log('=== likes-lane [11] team match: a stranger teammate counts, one per pair per 7 days (W79 rework) ===');
+console.log('=== likes-lane [11] team match: a teammate never counts, an opponent every match (O717 N5) ===');
 {
   const PPm = require(path.join(__dirname, '..', 'points-plan.js'));
   let mt2 = null;
@@ -439,19 +439,20 @@ console.log('=== likes-lane [11] team match: a stranger teammate counts, one per
   const BOXT = { [W]: [ML(X, K5, T0 - 5 * MIN)], [Y]: [ML(W, K5, T0 - 5 * MIN)] };   // W -> teammate X, Y -> opponent W
   const t1 = runCron(world(BOXT, null, null, false, M1), null, {});
   const t2 = runCron(world(BOXT, null, null, false, M1), carry(t1), { FAKE_NOW: String(T1) });
-  T('[11] team match settles: the stranger teammate\'s like counts (X 1), the opponent\'s too (W 1)', t2.code === 0 && /likes: counted \+2 \(match 2, board 0\)/.test(t2.out) && nOf(likesOf(t2), X) === 1 && nOf(likesOf(t2), W) === 1,
+  T('[11] team match settles: the teammate\'s like does not count (X 0, skipped: teammate), the opponent\'s does (W 1)',
+    t2.code === 0 && /likes: counted \+1 \(match 1, board 0\)/.test(t1.out + t2.out) && /teammate 1/.test(t1.out + t2.out) && nOf(likesOf(t2), X) === 0 && nOf(likesOf(t2), W) === 1,
     (t1.out.match(/likes: [^\n]*/) || [''])[0] + ' || ' + (t2.out.match(/likes: [^\n]*/) || [''])[0] + tail(t2));
   const stT = likesOf(t2) || {};
-  T('[11] the teammate like took a pair token, the opponent like none', Object.keys(stT.pr || {}).length === 1);
-  // the same four an hour later: W likes X again (teammate, waits for the settle), Y likes W again (opponent)
+  T('[11] no pair token taken (a teammate like takes nothing)', Object.keys(stT.pr || {}).length === 0);
+  // the same four an hour later: W likes X again (teammate: refused, never waits), Y likes W again (opponent: waits, counts)
   const BOXT2 = { [W]: [ML(X, K5, T0 - 5 * MIN), ML(X, K5b, T1 + 55 * MIN)], [Y]: [ML(W, K5, T0 - 5 * MIN), ML(W, K5b, T1 + 55 * MIN)] };
   const t3 = runCron(world(BOXT2, null, null, false, M2), carry(t2), { FAKE_NOW: String(T1 + 60 * MIN) });
   const t4 = runCron(world(BOXT2, null, null, false, M2), carry(t3), { FAKE_NOW: String(T1 + 60 * MIN + v.STARTS_MATURITY_MS + MIN) });
-  T('[11] second team match within 7 days: the waiting teammate like is dropped by the pair week (X stays 1), the opponent like counts (W 2)',
-    t3.code === 0 && t4.code === 0 && /waiting \+2/.test(t3.out) && /keys certified 1/.test(t4.out) && /waiting dropped \(pair week\) 1/.test(t4.out) && nOf(likesOf(t4), X) === 1 && nOf(likesOf(t4), W) === 2,
+  T('[11] second team match: only the opponent like waits and counts (W 2), the teammate like never (X 0)',
+    t3.code === 0 && t4.code === 0 && /waiting \+1/.test(t3.out) && /keys certified 1/.test(t4.out) && nOf(likesOf(t4), X) === 0 && nOf(likesOf(t4), W) === 2,
     (t3.out.match(/likes: [^\n]*/) || [''])[0] + ' || ' + (t4.out.match(/likes: [^\n]*/) || [''])[0] + tail(t4));
   const t5 = runCron(world(Object.assign({}, BOXT2, { [W]: BOXT2[W].concat([BL(X, T1 + 90 * MIN)]) }), null, null, false, M2), carry(t4), { FAKE_NOW: String(T1 + 90 * MIN + v.STARTS_MATURITY_MS) });
-  T('[11] a board like of the same pair inside the week: refused by the shared token (week), X stays 1', t5.code === 0 && /week 1/.test(t5.out) && nOf(likesOf(t5), X) === 1, (t5.out.match(/likes: [^\n]*/) || [''])[0] + tail(t5));
+  T('[11] a board like of the same pair: counted (no pair token from the teammate likes), X 1', t5.code === 0 && nOf(likesOf(t5), X) === 1, (t5.out.match(/likes: [^\n]*/) || [''])[0] + tail(t5));
 }
 
 console.log('=== likes-lane [12] (Q68) a voter who finished without the host guard\'s final summary (disp 10) ===');

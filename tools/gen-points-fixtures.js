@@ -13,7 +13,9 @@
 //   match: one ranked settle. parts = the rated players (seat, mmr = the rating the plan reads, rank = the settle's place among
 //     them, lp = points before the match -- the seed for a player seeded by this settle, seeded = true then); team (team codes
 //     only) = { scores, leaverSeats, winTeam, absent, finished } as the settle passes them. out = per player the plan row (or
-//     null) and the points line (settleLine: d0 / d / won / nv).
+//     null) and the points line (settleLine: d0 / d / won / nv). O716: a mixed table (a ranked-seat mask on the code) rates
+//     every seat in the plan (the mismatch reads the whole table, D11; a quick team member at his row or his unwritten
+//     placement seed, D8) and settles its ranked seats only: a quick seat's out is null (no points line).
 //   seed: { prev, display } -> seasonSeedLp (prev null = no row on the previous season's board).
 //   leave: { cur } -> the points after the leaver fine (LEAVER_LP_PENALTY).
 //   boundary: { lp } -> boundaryOf (the client's series banner reads the same).
@@ -116,6 +118,24 @@ const CASES = [
   { name: 'seat: quick 2V2 (5), one ranked seat a side', kind: 'seat', mt: seats(5, 0b000101) },
   { name: 'seat: quick 3V3 (8), every seat ranked', kind: 'seat', mt: seats(8, 0b111111) },
   { name: 'seat: a 1V1, seat 1 ranked', kind: 'seat', mt: seats(1, 0b000010) },
+  // ---- O716 mixed tables (part B): the plan over every seat, the points lines of the ranked seats only ----
+  { name: 'mixed ffa4 fair: seats 0 and 2 ranked (no plan: each ranked seat at its own place of four)', kind: 'match', mt: seats(1, 0b0101),
+    parts: [P('a', 0, 1300, 1, 1000), P('q1', 1, 1310, 2, 0), P('c', 2, 1290, 3, 1200), P('q3', 3, 1300, 4, 900)] },
+  { name: 'mixed ffa4 mismatch: a strong quick seat, the ranked seats read the whole table (D11)', kind: 'match', mt: seats(1, 0b1010),
+    parts: [P('q0', 0, 2100, 1, 0), P('b', 1, 1300, 2, 1500), P('q2', 2, 1350, 3, 0), P('d', 3, 1250, 4, 1400)] },
+  { name: 'mixed ffa4 with a quick premade pair (seats 2-3) and two ranked solos', kind: 'match', mt: seats(ffa(1, 2, 0), 0b0011),
+    parts: [P('a', 0, 1400, 2, 2400), P('b', 1, 1450, 4, 2600), P('q2', 2, 1420, 1, 0), P('q3', 3, 1430, 3, 0)] },
+  { name: 'mixed ffa3: a ranked seat seeded by this settle among two quick seats', kind: 'match', mt: seats(1, 0b001),
+    parts: [P('n', 0, 1720, 1, 2880, true), P('q1', 1, 1700, 2, 0), P('q2', 2, 1650, 3, 0)] },
+  { name: 'mixed team brawl (3): one ranked, one quick a side; the quick members at their row / placement seed (D8)', kind: 'match', mt: seats(3, 0b0101),
+    parts: [P('a0', 0, 1500, 1, 1000), P('q1', 1, 2360, 2, 3200), P('a2', 2, 1500, 3, 1000), P('q3', 3, 1500, 4, 500)],
+    team: { scores: [900, 700, 600, 500], leaverSeats: [], winTeam: null } },
+  { name: 'mixed 2V2 (5): a ranked pair against a quick pair, the quick pair wins on the sub-score', kind: 'match', mt: seats(5, 0b0011),
+    parts: [P('a0', 0, 1600, 3, 2300), P('a1', 1, 1600, 4, 2600), P('q2', 2, 1500, 1, 0), P('q3', 3, 1500, 2, 0)],
+    team: { scores: [100, 40, 95, 60], leaverSeats: [], winTeam: 1 } },
+  { name: 'mixed 3V3 (8): one ranked member a side, a quick member of the losing side left (shield)', kind: 'match', mt: seats(8, 0b001001),
+    parts: [P('a0', 0, 1600, 1, 3100), P('q1', 1, 1600, 2, 3000), P('q2', 2, 1600, 3, 2900), P('a3', 3, 1600, 4, 3000), P('q4', 4, 1600, 5, 3200)],
+    team: { scores: [500, 400, 300, 200, 250, 0], leaverSeats: [5], winTeam: 0 } },
 ];
 
 // the out of one case, from a points-plan module (this repo's file, or the client's vendored copy)
@@ -129,6 +149,7 @@ function replay(PP, c) {
   const plan = PP.matchPlan(parts, c.mt, c.team || null);
   const out = {};
   for (const p of c.parts) {
+    if (!PP.seatAppliesLp(c.mt, p.seat)) { out[p.id] = null; continue; }   // O716: a quick seat of a mixed table settles no points
     const row = (plan && plan[p.id]) || null;
     const line = PP.settleLine(p.lp, row, p.rank, parts.length, !!p.seeded);
     out[p.id] = { plan: row, d0: line.d0, d: line.d, won: line.won, nv: line.nv };

@@ -23,7 +23,7 @@
   else if (root) root.POINTS_PLAN = api;
 })(typeof module === 'object' && !!module && typeof exports === 'object' && this === exports, typeof window !== 'undefined' ? window : null, function () {
   const RULES_VER = 1;
-  const FIXTURES_HASH = '8c71b61b59f7edfc';
+  const FIXTURES_HASH = '4d8d4a4ee886655b';
   // the knobs configure() can move (production runs these defaults)
   const DEFAULTS = Object.freeze({ RS_THRESHOLD: 400, RS_UPSET_BONUS: 1.0, RS_STRONG_UPSET_LOSS: 0.5, RS_SOLO_VS_TRIO: 0.6, RS_TRIO_WIN: 0.7, LEAVER_LP_PENALTY: 100 });
   const LP_MAX = 9999;
@@ -167,7 +167,9 @@
   //   1-man units == the original per-player formula, bit for bit. A pair whose partner is absent (leaver)
   //   falls back to solo. With no live pair and no mismatch this returns null (caller's plain lpDelta path).
   function reducedStakesPlan(parts, matchType, premadeMask, premadeTrioAt) {
-    if (!appliesLp(matchType) || isTeamMt(matchType) || !parts || parts.length < 2) return null;
+    // O716: a mixed table (a ranked-seat mask) plans too -- every seat, the mismatch read over the whole table (the user's
+    //   call 2026-11-07, D11); the settle takes the rows of its ranked seats only. A premade unit is one entry (D4).
+    if (!anyAppliesLp(matchType) || isTeamMt(matchType) || !parts || parts.length < 2) return null;
     const units = [], used = new Set();
     const bySeat = {};
     for (const p of parts) bySeat[p.seat | 0] = p;
@@ -246,7 +248,10 @@
   //   finished): members of their team for every reading, as if their record were still there; no output of their own.
   //   Returns { [steamID]: { adjDelta, flag, normalDelta } } or null. =====
   function teamLpPlan(parts, matchType, scores, leaverSeats, winTeamOverride, absent, finished) {
-    if (!appliesLp(matchType) || !isTeamMt(matchType)) return null;
+    // O716: a mixed table plans too (team averages over every seat: a quick member reads his points row, or with none this
+    //   season the placement seed the settle would give him, not written -- the user's call 2026-11-07, D8); the settle takes
+    //   the rows of its ranked seats only
+    if (!anyAppliesLp(matchType) || !isTeamMt(matchType)) return null;
     const ts = teamSizeOfMt(matchType);
     if (!parts || !parts.length || !scores || scores.length < 2 * ts) return null;
     const teamOf = s => teamOfSeat(s, ts);
