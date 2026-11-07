@@ -1929,8 +1929,7 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
       if (confState[h + '|' + m]) continue;   // confession already counted this leave (no double exit-rate)
       if (Array.isArray(p.noted) && p.noted.indexOf(h) >= 0) { spared.push(h.slice(0, 8)); continue; }   // Q64: his own exit note -- the match died on him
       if (hdr) { hdrSpared.push(h.slice(0, 8)); continue; }   // Q294: the host's match header broke the match for everyone in it
-      leavers[h] = leavers[h] || { leaves: 0, lastMatch: '' };
-      leavers[h].leaves += 1; leavers[h].lastMatch = m;
+      noteLeave(leavers, h, m);   // O717 N2: the lifetime count + the leave window
       if (onAbsence) { try { onAbsence(h, m, p.t0 || now); } catch (e) {} }   // O618: remembered 30 days for a confirmed game error (err-refund.absenceRefunds)
       hit.push(h.slice(0, 8));
       skEv.push({ p: h, mh: mhOfKey(m), t0: p.t0 || now, kind: 'absence' });   // O181: applied to the XP state in main (streakApplyEarly)
@@ -4542,8 +4541,7 @@ async function reconcileConfessions(confs, groups, processed, confState, leavers
     if (!c.nf && settledBy(c.m, c.p)) { confState[key] = { t0: now, mt: c.mt | 0, done: 1 }; continue; }  // already came back and finished before first sighting
     const st = confState[key] = { t0: now, mt: c.mt | 0, ded: 0, ex: 1 };
     if (c.nf) { st.nf = 1; console.log('  confess ' + c.m + ': ' + plog(String(c.steamID)) + ' from a team-gamble accusation verdict (never forgiven)'); }   // Q43: his own record on the key proves nothing (he wrote it)
-    leavers[c.p] = leavers[c.p] || { leaves: 0, lastMatch: '' };
-    leavers[c.p].leaves += 1; leavers[c.p].lastMatch = c.m;
+    noteLeave(leavers, c.p, c.m);   // O717 N2: the lifetime count + the leave window
     res.exitHits++;
     // O181: a confessed quit breaks the streak (his own result, if he comes back and finishes, replaces it at that settle);
     //   ordered by the match's start when its entry is still pending (opts.startOf), else by this sighting
@@ -4614,7 +4612,7 @@ async function reconcileConfessions(confs, groups, processed, confState, leavers
         console.log(tag + m + ': ' + plog(p) + ' settled after all (exit signal retracted)'
           + (st.cv ? ' (convicted before his result came in' + (sameBoard ? ': fine ' + (st.ded | 0) + ', finish ' + (st.w | 0) + ', the others\' gain ' + (st.g | 0) + ', nothing to give back' : '') + ', Q228)' : ''));
       }
-      if (st.ex && leavers[p]) { leavers[p].leaves = Math.max(0, (leavers[p].leaves | 0) - 1); st.ex = 0; retracted = true; res.retracted++; }
+      if (st.ex && leavers[p]) { unnoteLeave(leavers, p, m); st.ex = 0; retracted = true; res.retracted++; }   // O717 N2: + its listed leave
       if (st.cv) { leavers[p].lf = lf.concat([now]); res.late++; res.skEv.push({ p, mh: mhOfKey(m), t0: st.t0 || now, kind: 'pardon' }); }   // O181: the conviction's streak event turns into a freeze
       st.refunded = 1;
       if (wrote && opts.checkpoint) opts.checkpoint();   // R1-B2-03: the refund is relative too -- its marker on disk before the next exit
@@ -4650,7 +4648,7 @@ async function reconcileConfessions(confs, groups, processed, confState, leavers
         console.log(what + ', refund +' + back + ' -> ' + nv);
       }
     } else console.log(what + (onBoard ? '' : ' on another points board') + ' (exit signal retracted)');
-    if (st.ex && leavers[p]) { leavers[p].leaves = Math.max(0, (leavers[p].leaves | 0) - 1); st.ex = 0; res.retracted++; }
+    if (st.ex && leavers[p]) { unnoteLeave(leavers, p, m); st.ex = 0; res.retracted++; }   // O717 N2: + its listed leave
     if (st.cv) res.skEv.push({ p, mh: mhOfKey(m), t0: st.t0 || now, kind: 'pardon' });   // O181: the conviction's streak event turns into a freeze
     st.refunded = 1; st.er = 1; res.errRefunded = (res.errRefunded | 0) + 1;
     if (opts.checkpoint) opts.checkpoint();   // R1-B2-03: its marker on disk before the next exit
@@ -4738,7 +4736,7 @@ function disputeFloorAdmit(consoleFloor, signals, now) {
 // the XP of one admitted writer: the leaver factor (record-only on the demo's fest window) and the level boost of the
 //   board value before this credit, as creditXp applies them; no supporter, streak or daily first; never below the 50
 function disputeFloorXp(fl, boardXp, leaves, games) {
-  const factor = LEAVER_XP_RECORD_ONLY ? 1 : effectiveLeaverFactor(leaves | 0, games | 0);
+  const factor = LEAVER_XP_RECORD_ONLY ? 1 : leaverFactorOf(leaves, games | 0);   // O717 N2: leaves = his leavers entry (a bare count: an old caller)
   return Math.max(CONSOLATION_XP, computeXpGain(fl.cls, 1, fl.money, !!fl.ranked, false, factor, xpBoostMult(xpLevelOf(boardXp | 0), false, 0)));
 }
 // ---- a consolation XP write that failed: paid by a later run, never twice (cloud audit Q315) ----
@@ -6059,15 +6057,101 @@ function fillCareerDetails(changedXp, careerDet, xpState) {
 }
 function careerWon(matchType, rank) { return isTeamMt(matchType) ? ((rank | 0) <= teamSizeOfMt(matchType)) : ((rank | 0) === 1); }
 // repeat-leaver discount: gradient + minimum-sample gate in one, via min-denominator smoothing. values tunable on real data.
-const LEAVER_XP = { minSample: 20, tiers: [{ maxRate: 0.05, factor: 1.0 }, { maxRate: 0.15, factor: 0.5 }, { maxRate: 1.01, factor: 0.3 }] };
+// O717 N2 (user ruling 2026-11-07, a freeze exception under architecture decision 10): the rate is taken over the player's last
+//   `window` matchmade events (valid finishes + convicted leaves), not his whole career -- the lifetime count never decayed, so
+//   10 leaves in a first 40 games took ~160 clean games to clear; now 50 clean games clear any past. Strictly the window, as
+//   the design has it: a long clean record followed by a run of leaves is discounted by those leaves (the user chose this
+//   over "the lighter of the window and the lifetime rate": the full game starts from zero at launch, no old record to
+//   carry). Tiers and minSample as before. Client mirror: rating-store LEAVER_XP_MIRROR + estimatedLeaverFactor (the
+//   recentAbandons window), lockstep 9c.
+const LEAVER_XP = { minSample: 20, window: 50, tiers: [{ maxRate: 0.05, factor: 1.0 }, { maxRate: 0.15, factor: 0.5 }, { maxRate: 1.01, factor: 0.3 }] };
 // per-end disposition -> credit class (lockstep mirror of client table): 0,1,10 valid / 5,7 abandoner / else innocent.
 function dispClassOf(code) { const c = code | 0; return (c === 0 || c === 1 || c === DISP_NOSUMMARY) ? 'valid' : ((c === 5 || c === 7) ? 'abandoner' : 'innocent'); }
-// effective leave rate with min-denominator smoothing -> tier factor. leaves/games cumulative per player; a first leave cannot spike to 100%.
+// effective leave rate with min-denominator smoothing -> tier factor (the table function: leaves and finishes over whatever span
+//   the caller counts -- the lifetime, or the window through leaverFactorOf). A first leave cannot spike to 100%.
 function effectiveLeaverFactor(leaves, games) {
   const total = (leaves | 0) + (games | 0);
   const rate = total > 0 ? (leaves | 0) / Math.max(total, LEAVER_XP.minSample) : 0;
   for (const t of LEAVER_XP.tiers) if (rate <= t.maxRate) return t.factor;
   return LEAVER_XP.tiers[LEAVER_XP.tiers.length - 1].factor;
+}
+// ---- O717 N2: the leave window on the leaver state ----
+// leavers[pid] = { leaves, lastMatch, lf?, w?, o? }
+//   leaves = lifetime convicted leaves, kept as before (the lifetime floor, the logs, and a rolled-back cron reads it unchanged)
+//   w      = [[mh, g], ...] the leaves the window may still see, oldest first: mh = the match hash (what a retraction names),
+//            g = his valid finishes after that leave (up to the next listed one, or now)
+//   o      = leaves from before the window was kept (an entry written by the old cron has no w): their order is unknown, so
+//            they count as his OLDEST events, ahead of every finish -- the one reading that never puts more of them inside the
+//            window than the truth would (architecture decision 9: the old format is read, only the new one written; 10: of
+//            the readings, the lightest). An old entry is converted on its first write; read as it is until then.
+// The finishes themselves are the XP state's lifetime count (xpState[pid].games): the finishes ahead of the first listed leave
+//   are what that count holds beyond the listed g's.
+function leaverEntry(leavers, p) {
+  const e = leavers[p] = leavers[p] || { leaves: 0, lastMatch: '' };
+  if (!Array.isArray(e.w)) { const o = e.leaves | 0; e.w = []; if (o > 0) e.o = o; }
+  return e;
+}
+// a convicted leave (start verdict / confession / roster conviction): the lifetime count + a new listed leave
+function noteLeave(leavers, p, m) {
+  const e = leaverEntry(leavers, p);
+  e.leaves = (e.leaves | 0) + 1; e.lastMatch = m;
+  e.w.push([mhOfKey(m), 0]);
+  if (e.w.length > LEAVER_XP.window) { e.w.splice(0, e.w.length - LEAVER_XP.window); delete e.o; }   // window-many later leaves: out for good
+  return e;
+}
+// a leave taken back (a late result / a confirmed game error): the lifetime count, and that match's listed leave -- its finishes
+//   join the leave before it. Not listed (an old one, or one the window no longer sees): one old leave fewer, if any.
+function unnoteLeave(leavers, p, m) {
+  const e = leavers[p];
+  if (!e) return false;
+  e.leaves = Math.max(0, (e.leaves | 0) - 1);
+  if (!Array.isArray(e.w)) return true;   // old format: the lifetime count is all it holds (its old leaves = leaves)
+  const mh = mhOfKey(m);
+  for (let i = e.w.length - 1; i >= 0; i--) {
+    if (((e.w[i] && e.w[i][0]) | 0) !== mh) continue;
+    if (i > 0) e.w[i - 1][1] = (e.w[i - 1][1] | 0) + ((e.w[i][1]) | 0);
+    e.w.splice(i, 1);
+    return true;
+  }
+  if ((e.o | 0) > 0) { e.o = (e.o | 0) - 1; if (!e.o) delete e.o; }
+  return true;
+}
+// what the window sees: { lw: leaves inside, gw: finishes inside, keep: the first listed leave still inside, oldIn: old leaves
+//   inside }. Walks from the newest event back until `window` events are taken.
+function leaverWindowOf(e, games) {
+  const W = LEAVER_XP.window, G = Math.max(0, games | 0);
+  const w = (e && Array.isArray(e.w)) ? e.w : [];
+  const o = e ? Math.max(0, (Array.isArray(e.w) ? e.o : e.leaves) | 0) : 0;
+  let ev = 0, lw = 0, gw = 0, sumG = 0, j = w.length - 1, oldIn = 0;
+  for (; j >= 0; j--) {
+    const g = Math.max(0, (w[j] && w[j][1]) | 0);
+    sumG += g;
+    const take = Math.min(g, W - ev); gw += take; ev += take;
+    if (ev >= W) break;   // this leave and every older one: outside
+    lw++; ev++;
+  }
+  if (j < 0 && ev < W) {
+    const take = Math.min(Math.max(0, G - sumG), W - ev); gw += take; ev += take;   // the finishes ahead of the first listed leave
+    oldIn = Math.min(o, W - ev); lw += oldIn; ev += oldIn;
+  }
+  return { lw, gw, keep: j + 1, oldIn };
+}
+// the XP factor of a player's leaves (entry = his leavers[pid], or a bare lifetime count for an old caller; games = his lifetime
+//   valid finishes)
+function leaverFactorOf(entry, games) {
+  const e = (entry && typeof entry === 'object') ? entry : { leaves: entry | 0 };
+  const win = leaverWindowOf(e, games);
+  return effectiveLeaverFactor(win.lw, win.gw);
+}
+// a valid finish (creditXp): the newest listed leave has one more finish after it; what the window no longer sees is dropped
+//   (games = his lifetime finishes, this one included)
+function noteFinish(leavers, p, games) {
+  const e = leavers && leavers[p];
+  if (!e || !Array.isArray(e.w) || !e.w.length) return;
+  e.w[e.w.length - 1][1] = (e.w[e.w.length - 1][1] | 0) + 1;
+  const win = leaverWindowOf(e, games);
+  if (win.keep > 0) { e.w.splice(0, win.keep); delete e.o; }
+  else if (e.o && !win.oldIn) delete e.o;
 }
 // M194 / W57 (2026-10-15, user ruling under architecture decision 10 -- when anti-cheat and not hurting honest players
 //   collide, do not hurt them): during the Steam Next Fest the DEMO channel records leaves but does not discount XP for
@@ -6157,7 +6241,7 @@ function creditXp(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers,
       if (sr && k === streakPlan.K.WIN && !sr.stale) streakPct = streakPlan.xpPct(sr.at);
       if (sr) skNote = ' streak ' + (sr.stale ? 'stale' : (['f', 'w', 'l', 'b'][k] + sr.at)) + (streakPct ? ' +' + streakPct + '%' : '');
     }
-    const lf = effectiveLeaverFactor((leavers[p] && leavers[p].leaves) || 0, st.games);
+    const lf = leaverFactorOf(leavers[p] || 0, st.games);   // O717 N2: the last LEAVER_XP.window events (never below the lifetime factor)
     const factor = LEAVER_XP_RECORD_ONLY ? 1 : lf;   // M194 / W57: demo Next Fest window = leaves recorded, not discounted
     const rank0 = ((rankOf[sid] || 1) | 0) - 1;   // 0-based for rankBonus index (group rank is 1-based)
     let firstWin = false;
@@ -6171,7 +6255,7 @@ function creditXp(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers,
     const gain0 = computeXpGain(cls, rank0, scores[seat] | 0, isRanked, firstWin, factor * pf, bm);
     const gain = (quitLone && cls !== 'abandoner') ? Math.max(CONSOLATION_XP, gain0) : gain0;   // W103: never below the consolation it replaces
     if (gain > 0) { xp[sid] = (xp[sid] | 0) + gain; changedXp[sid] = xp[sid]; }
-    if (cls === 'valid') st.games += 1;   // denominator = real finishes (innocent/abandoner don't count; mirrors client window)
+    if (cls === 'valid') { st.games += 1; noteFinish(leavers, p, st.games); }   // denominator = real finishes (innocent/abandoner don't count; mirrors client window); O717 N2: + the leave window
     // career counters (client recordGame mirror): a leaver writes no record -> counts nothing here,
     // which is exactly the client's abandoner branch (nothing credited). Cumulative in state, so the
     // detail write always carries the latest totals even across multiple settles in one run.
@@ -9922,7 +10006,7 @@ async function main() {
       try {
         e = xwP ? null : await readUserEntry(xpId0, sid, 'xp');
         c = xwP ? (xwP.v | 0) : (e ? (e.score | 0) : 0);
-        const leaves = (leavers[h] && leavers[h].leaves) || 0;
+        const leaves = leavers[h] || 0;   // O717 N2: his leavers entry (the window), read by disputeFloorXp
         plan = consoleOwedPlan(h, c, cq0, item, (it) => owedItemXp(it, c, leaves, () => ((xsFloor || (xsFloor = loadXp()))[h] || {}).games));
       } catch (err) {
         ghWarn('consolation xp read failed for ' + plog(sid) + ': ' + (err && err.message) + ' -- owed to a later run (Q315)');
@@ -10053,7 +10137,7 @@ async function main() {
   //   confirms: the exit retracted, the streak event a pardon. Then the report state goes to disk (every run: first sightings).
   const errAbs = errRefund.absenceRefunds(errSt, errList, nowMs);
   for (const a of errAbs) {
-    if (leavers[a.p]) leavers[a.p].leaves = Math.max(0, (leavers[a.p].leaves | 0) - 1);
+    if (leavers[a.p]) unnoteLeave(leavers, a.p, a.m);   // O717 N2: + its listed leave
     confRes.skEv.push({ p: a.p, mh: mhOfKey(a.m), t0: (errSt.ab[a.k] && errSt.ab[a.k].t0) || nowMs, kind: 'pardon' });
     console.log('  game-error ' + a.m + ': ' + plog(a.p) + ' left on a confirmed game error (' + a.sig + ' build ' + a.b + ') -- exit retracted (exit-rate-only start verdict, O618)');
   }
@@ -13751,8 +13835,7 @@ async function main() {
         console.log('  leaver ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' team-gamble dissent not yet due -- excused, no conviction');
         continue;
       }
-      leavers[pid(x.steamID)] = leavers[pid(x.steamID)] || { leaves: 0, lastMatch: '' };
-      leavers[pid(x.steamID)].leaves += 1; leavers[pid(x.steamID)].lastMatch = c.m; leaverHits++;
+      noteLeave(leavers, pid(x.steamID), c.m); leaverHits++;   // O717 N2: the lifetime count + the leave window
       console.log('  leaver ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' (in roster, no record; total ' + leavers[pid(x.steamID)].leaves + ')');
       // O181: a convicted absence -- the week's first freezes the streak, later ones break it; his row is rewritten this run
       //   (same score, fresh tail) so the streak others are shown for him drops now, not at his next settle
@@ -14393,6 +14476,7 @@ Object.assign(module.exports, { endlessDispute });   // cloud audit Q317 endless
 Object.assign(module.exports, { noteOwnStarts, hasOwnStart, OWN_START_CAP });   // cloud audit Q69 own-record evidence for leaver verdicts
 Object.assign(module.exports, { resultRecOf, keptKeys, keptSeal, keptOpen, keptKeep, keptRecords, KEPT_REC_MAX_MS, KEPT_REC_CAP, KEPT_TAG, SETTLE_MAGIC });   // cloud audit Q373 a held group's results kept against shard rotation (test/kept-held-records.js)
 Object.assign(module.exports, { leaverXpRecordOnlyUntil, LEAVER_XP_RECORD_ONLY, LEAVER_XP_RECORD_ONLY_MAX_MS });   // M194 / W57 demo Next Fest: leaves recorded, XP not discounted
+Object.assign(module.exports, { leaverEntry, noteLeave, unnoteLeave, leaverWindowOf, leaverFactorOf, noteFinish });   // O717 N2: the leave window
 Object.assign(module.exports, { NL_OPP_CAP, NL_REPEAT });   // cloud audit Q161 named-only losing seats counted on the account
 Object.assign(module.exports, { PAIR_DISPUTE, pairDispute1v1, pairDisputeTable, pairDisputeCount, SANITY_HOST_SLUGS, SANITY_HEADER_SLUGS, sanityHeaderHeld, sanityWriterFaults });   // cloud audit Q289 / Q290 / Q291 / Q292 a key of two voices whose writers disagree
 Object.assign(module.exports, { ffaPlaceOf, ffaLowerHalf });   // cloud audit Q174 named-only lower-half FFA seats counted on the account

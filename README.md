@@ -263,7 +263,9 @@ absent, so a run is unaffected before it is provisioned.
   `ENDLESS_CUP_HONOR_LB`.
 
 State files committed back each run (idempotency): `processed.json`, `skill.json`,
-`leavers.json`, `xp.json` (per-player `{ lastWinDay, games }` for the daily-first bonus
+`leavers.json` (per-player `{ leaves, lastMatch, w: [[matchHash, finishes after]], o }`: the lifetime
+leave count plus the leaves the repeat-leaver window -- the last 50 matchmade events -- can still see; an
+entry without `w` predates the window and its leaves count as the player's oldest events), `xp.json` (per-player `{ lastWinDay, games }` for the daily-first bonus
 and the repeat-leaver rate, the career counters, and on the full game's job the win streak
 `sk`: `{ p, b, h, l, e: [[start minute, matchHash, k]], f: [[minute, matchHash]] }`), `starts.json` (pending start attestations awaiting
 settlement or maturity), `signals.json` (rolling per-player/pairwise signal aggregates +

@@ -168,7 +168,7 @@ console.log('=== [6] reconcileConfessions ===');
   console.log('=== [9] wiring pins ===');
   {
     const src = fs.readFileSync(path.join(__dirname, '..', 'validate.js'), 'utf8');
-    T('[9] reconcileStarts takes onAbsence and calls it on the exit-rate hit', /seenKeys, notedSet, heldKeys, onAbsence\) \{/.test(src) && /leavers\[h\]\.leaves \+= 1; leavers\[h\]\.lastMatch = m;\n\s*if \(onAbsence\) \{ try \{ onAbsence\(h, m, p\.t0 \|\| now\); \} catch \(e\) \{\} \}/.test(src));
+    T('[9] reconcileStarts takes onAbsence and calls it on the exit-rate hit', /seenKeys, notedSet, heldKeys, onAbsence\) \{/.test(src) && /noteLeave\(leavers, h, m\);[^\n]*\n\s*if \(onAbsence\) \{ try \{ onAbsence\(h, m, p\.t0 \|\| now\); \} catch \(e\) \{\} \}/.test(src));
     T('[9] main: reads the err box, marks evidence, passes noteAbsence + errRefund, absence refunds, saves the state', /errRefund\.observe\(errSt, eb\.ents/.test(src) && /errRefund\.markEvidence\(confState, errSt\)/.test(src) && /errRefund\.noteAbsence\(errSt, h, m, t0, nowMs\)/.test(src) && /seenKeys, noted, heldKeys, errAbsence\);/.test(src) && /errRefund: \(p, m, st\) =>/.test(src) && /errRefund\.absenceRefunds\(errSt, errList, nowMs\)/.test(src) && /errRefund\.saveErrState\(errSt, nowMs, ERR_STATE_FILE, writeStateFile\)/.test(src) && /const ERR_STATE_FILE = process\.env\.ERR_STATE_FILE \|\| 'err-reports\.json';/.test(src));
     T('[9] the err box read sits before reconcileStarts (an absence of this run sees this run\'s reports)', src.indexOf('errRefund.observe(errSt') < src.indexOf('const startsRes = reconcileStarts('));
     const wf = (f) => fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', f), 'utf8');

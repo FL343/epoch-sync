@@ -407,7 +407,7 @@ const e7 = (P) => {
   T('[11] notes count as a key seen on the shards (Q144)', /\.concat\(confessions\.map\(\(c\) => c\.m\), notes\.map\(\(c\) => c\.m\)\)/.test(main));
   const rs = SRC.slice(SRC.indexOf('function reconcileStarts('), SRC.indexOf('function reconcileStarts(') + 9000);
   const iSettled = rs.indexOf("if (p.settled.indexOf(h) >= 0) continue;"), iOwn = rs.indexOf('if (!hasOwnStart(p, h)) continue;'),
-    iConf = rs.indexOf("if (confState[h + '|' + m]) continue;"), iNote = rs.indexOf('if (Array.isArray(p.noted) && p.noted.indexOf(h) >= 0)'), iHit = rs.indexOf('leavers[h].leaves += 1;');
+    iConf = rs.indexOf("if (confState[h + '|' + m]) continue;"), iNote = rs.indexOf('if (Array.isArray(p.noted) && p.noted.indexOf(h) >= 0)'), iHit = rs.indexOf('noteLeave(leavers, h, m);');   // O717 N2: the hit goes through noteLeave
   T('[11] verdict order: settled, own start, confession, note, then the hit', iSettled > 0 && iSettled < iOwn && iOwn < iConf && iConf < iNote && iNote < iHit, [iSettled, iOwn, iConf, iNote, iHit].join(','));
   T('[11] p.noted is gathered before the consistent-key exit (a pending key keeps its notes whatever happens next)',
     rs.indexOf("if (notedSet && notedSet.size) for (const seat of Object.keys(p.roster))") > 0
