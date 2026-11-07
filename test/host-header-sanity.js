@@ -233,7 +233,7 @@ function sum(p, sids, n) {
 
 // ---- [1] units ----
 {
-  eq('[1] SANITY_HEADER_SLUGS', v.SANITY_HEADER_SLUGS, ['mt', 'pc', 'mask-range', 'trio-range', 'unit-overlap', 'nobot']);
+  eq('[1] SANITY_HEADER_SLUGS', v.SANITY_HEADER_SLUGS, ['mt', 'pc', 'mask-range', 'trio-range', 'unit-overlap', 'nobot', 'seat-mask', 'seat-mask-range']);   // O716: the ranked-seat mask rides START_GAME too
   const g1 = (mt, ros, pc, extra) => ros.map((s, i) => s == null ? null : R(s, rec(0xB1, mt, 0x2900, i, i + 1, i === 0, ros, null, pc))).filter(Boolean).concat(extra || []);
   const held = (g) => v.sanityHeaderHeld(g);
   const cases = [
@@ -243,6 +243,8 @@ function sum(p, sids, n) {
     ['a pair overlapping the trio (0x111, four seats)', g1(0x111, [H, J, X, Y], 4), ['unit-overlap']],
     ['a team code (3) on a brawl of three', g1(3, three, 3), ['pc']],
     ['a ranked 2V2 code (4) on six seats', g1(4, [H, J, X, Y, Z, P], 6), ['pc']],
+    ['O716 a ranked-seat mask on the old ranked code (2 | seat 0 << 11)', g1(2 | (1 << 11), two, 2), ['seat-mask']],
+    ['O716 a ranked-seat bit past the seats (1 | seat 2 << 11, two seats)', g1(1 | (4 << 11), two, 2), ['seat-mask-range']],
     ['a bot match with no bot seat (11)', g1(11, two, 2), ['nobot']],
   ];
   for (const [name, g, want] of cases) {

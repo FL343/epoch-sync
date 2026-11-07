@@ -57,6 +57,17 @@
     {"name":"boundary: 2120 (relegation)","kind":"boundary","in":{"lp":2120},"out":"relegation"},
     {"name":"boundary: 0 (none at the floor)","kind":"boundary","in":{"lp":0},"out":null},
     {"name":"boundary: 8100 (relegation at the grandmaster line)","kind":"boundary","in":{"lp":8100},"out":"relegation"},
-    {"name":"boundary: 9999 (none at the top)","kind":"boundary","in":{"lp":9999},"out":null}
+    {"name":"boundary: 9999 (none at the top)","kind":"boundary","in":{"lp":9999},"out":null},
+    {"name":"seat: quick brawl (1), no mask = no seat","kind":"seat","in":{"mt":1},"out":{"mask":0,"sans":1,"base":1,"any":false,"seats":[false,false,false,false,false,false]}},
+    {"name":"seat: old ranked brawl (2), no mask = every seat","kind":"seat","in":{"mt":2},"out":{"mask":0,"sans":2,"base":2,"any":true,"seats":[true,true,true,true,true,true]}},
+    {"name":"seat: old ranked brawl with a pair (2 | pair 0), no mask = every seat","kind":"seat","in":{"mt":18},"out":{"mask":0,"sans":18,"base":2,"any":true,"seats":[true,true,true,true,true,true]}},
+    {"name":"seat: old ranked 3V3 (9), no mask = every seat","kind":"seat","in":{"mt":9},"out":{"mask":0,"sans":9,"base":9,"any":true,"seats":[true,true,true,true,true,true]}},
+    {"name":"seat: quick team brawl (3), no mask = no seat","kind":"seat","in":{"mt":3},"out":{"mask":0,"sans":3,"base":3,"any":false,"seats":[false,false,false,false,false,false]}},
+    {"name":"seat: quick brawl of four, seats 0 and 2 ranked","kind":"seat","in":{"mt":10241},"out":{"mask":5,"sans":1,"base":1,"any":true,"seats":[true,false,true,false,false,false]}},
+    {"name":"seat: quick brawl, a ranked pair at seats 0-1 (pair bit 0)","kind":"seat","in":{"mt":6161},"out":{"mask":3,"sans":17,"base":1,"any":true,"seats":[true,true,false,false,false,false]}},
+    {"name":"seat: quick brawl of six, a ranked trio at seats 3-5 (trio bits)","kind":"seat","in":{"mt":115713},"out":{"mask":56,"sans":1025,"base":1,"any":true,"seats":[false,false,false,true,true,true]}},
+    {"name":"seat: quick 2V2 (5), one ranked seat a side","kind":"seat","in":{"mt":10245},"out":{"mask":5,"sans":5,"base":5,"any":true,"seats":[true,false,true,false,false,false]}},
+    {"name":"seat: quick 3V3 (8), every seat ranked","kind":"seat","in":{"mt":129032},"out":{"mask":63,"sans":8,"base":8,"any":true,"seats":[true,true,true,true,true,true]}},
+    {"name":"seat: a 1V1, seat 1 ranked","kind":"seat","in":{"mt":4097},"out":{"mask":2,"sans":1,"base":1,"any":true,"seats":[false,true,false,false,false,false]}}
   ]
 }

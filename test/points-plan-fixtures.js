@@ -42,7 +42,8 @@ const want = doc.cases.map((c) => J(c.out));
   got.forEach((g, i) => { if (g !== want[i]) off.push(doc.cases[i].name); });
   T('[3] every case replays to its out (' + doc.cases.length + ' cases)', !off.length, off.slice(0, 5).join(' | '));
 }
-for (const k of ['lpSeg', 'lpDelta', 'seedLp', 'softResetLp', 'seasonSeedLp', 'boundaryOf', 'crosslineDelta', 'reducedStakesPlan', 'teamLpPlan', 'leaverLpPenalty', 'appliesLp', 'isTeamMt', 'baseMt', 'premadeMaskOf', 'premadeTrioAtOf', 'teamSizeOfMt', 'teamOfSeat'])
+for (const k of ['lpSeg', 'lpDelta', 'seedLp', 'softResetLp', 'seasonSeedLp', 'boundaryOf', 'crosslineDelta', 'reducedStakesPlan', 'teamLpPlan', 'leaverLpPenalty', 'appliesLp', 'isTeamMt', 'baseMt', 'premadeMaskOf', 'premadeTrioAtOf', 'teamSizeOfMt', 'teamOfSeat',
+  'rankedSeatMaskOf', 'mtSansSeats', 'seatAppliesLp', 'anyAppliesLp'])
   if (v[k] !== PP[k]) bad('[3] validate.js ' + k + ' is not the module\'s function');
 T('[3] the settle\'s exported rules are the module\'s own (identity)', ['LP_SEG', 'LP_SEED', 'SOFT_RESET', 'reducedStakesPlan', 'teamLpPlan', 'lpDelta', 'crosslineDelta'].every((k) => v[k] === PP[k]));
 const VSRC = fs.readFileSync(path.join(ROOT, 'validate.js'), 'utf8');
@@ -52,7 +53,12 @@ T('[3] the settle composes its plan and its points line through the module (matc
 // [4]
 {
   const kinds = new Set(doc.cases.map((c) => c.kind));
-  T('[4] all four kinds present', ['match', 'seed', 'leave', 'boundary'].every((k) => kinds.has(k)), [...kinds].join(','));
+  T('[4] all five kinds present', ['match', 'seed', 'leave', 'boundary', 'seat'].every((k) => kinds.has(k)), [...kinds].join(','));
+  // O716: the seat cases read both ways -- the old whole-table rule (no mask: all or nothing) and a mixed mask on every quick family base
+  const st = doc.cases.filter((c) => c.kind === 'seat');
+  T('[4] seat: an all-ranked and an all-quick code without a mask', st.some((c) => !c.out.mask && c.out.seats.every(Boolean)) && st.some((c) => !c.out.mask && !c.out.seats.some(Boolean)));
+  T('[4] seat: a mixed mask on bases 1, 5 and 8, and one beside a pair and a trio', [1, 5, 8].every((b) => st.some((c) => c.out.base === b && c.out.mask && c.out.seats.some(Boolean) && !c.out.seats.every(Boolean) || c.out.base === b && c.out.mask === 0x3F))
+    && st.some((c) => c.out.mask && PP.premadeMaskOf(c.in.mt)) && st.some((c) => c.out.mask && PP.premadeTrioAtOf(c.in.mt)));
   const m = doc.cases.filter((c) => c.kind === 'match');
   const rows = [];
   for (const c of m) for (const id of Object.keys(c.out)) rows.push(Object.assign({ c, id }, c.out[id]));

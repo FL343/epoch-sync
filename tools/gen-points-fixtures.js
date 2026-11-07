@@ -17,6 +17,9 @@
 //   seed: { prev, display } -> seasonSeedLp (prev null = no row on the previous season's board).
 //   leave: { cur } -> the points after the leaver fine (LEAVER_LP_PENALTY).
 //   boundary: { lp } -> boundaryOf (the client's series banner reads the same).
+//   seat: { mt } -> which seats of the code move points (O716 one queue: the ranked-seat mask in bits 11-16; no mask = the old
+//     whole-table rule): { mask, sans: the code without the mask, base, any: anyAppliesLp, seats: seatAppliesLp of seats 0..5 }.
+//     A case added here moves no settled delta (no RULES_VER bump): it pins the reading both sides share.
 // ============================================================
 const fs = require('fs');
 const path = require('path');
@@ -25,6 +28,7 @@ const crypto = require('crypto');
 const FILE = path.join(__dirname, '..', 'fixtures', 'points-plan', 'cases.json');
 const P = (id, seat, mmr, rank, lp, seeded) => Object.assign({ id, seat, mmr, rank, lp }, seeded ? { seeded: true } : {});
 const ffa = (b, mask, trioAt) => (b | ((mask | 0) << 4) | ((trioAt | 0) << 8));
+const seats = (mt, ranked) => (mt | ((ranked | 0) << 11));   // O716: the ranked-seat mask (RANKED_SEAT_SHIFT)
 
 const CASES = [
   // ---- solo FFA, fair (no plan: the plain lpDelta at each own place) ----
@@ -100,6 +104,18 @@ const CASES = [
   { name: 'boundary: 0 (none at the floor)', kind: 'boundary', lp: 0 },
   { name: 'boundary: 8100 (relegation at the grandmaster line)', kind: 'boundary', lp: 8100 },
   { name: 'boundary: 9999 (none at the top)', kind: 'boundary', lp: 9999 },
+  // ---- O716 one queue: which seats move points (the ranked-seat mask) ----
+  { name: 'seat: quick brawl (1), no mask = no seat', kind: 'seat', mt: 1 },
+  { name: 'seat: old ranked brawl (2), no mask = every seat', kind: 'seat', mt: 2 },
+  { name: 'seat: old ranked brawl with a pair (2 | pair 0), no mask = every seat', kind: 'seat', mt: ffa(2, 1, 0) },
+  { name: 'seat: old ranked 3V3 (9), no mask = every seat', kind: 'seat', mt: 9 },
+  { name: 'seat: quick team brawl (3), no mask = no seat', kind: 'seat', mt: 3 },
+  { name: 'seat: quick brawl of four, seats 0 and 2 ranked', kind: 'seat', mt: seats(1, 0b000101) },
+  { name: 'seat: quick brawl, a ranked pair at seats 0-1 (pair bit 0)', kind: 'seat', mt: seats(ffa(1, 1, 0), 0b000011) },
+  { name: 'seat: quick brawl of six, a ranked trio at seats 3-5 (trio bits)', kind: 'seat', mt: seats(ffa(1, 0, 4), 0b111000) },
+  { name: 'seat: quick 2V2 (5), one ranked seat a side', kind: 'seat', mt: seats(5, 0b000101) },
+  { name: 'seat: quick 3V3 (8), every seat ranked', kind: 'seat', mt: seats(8, 0b111111) },
+  { name: 'seat: a 1V1, seat 1 ranked', kind: 'seat', mt: seats(1, 0b000010) },
 ];
 
 // the out of one case, from a points-plan module (this repo's file, or the client's vendored copy)
@@ -107,6 +123,7 @@ function replay(PP, c) {
   if (c.kind === 'seed') return PP.seasonSeedLp(c.prev, c.display);
   if (c.kind === 'leave') return PP.leaverLpPenalty(c.cur, PP.LEAVER_LP_PENALTY);
   if (c.kind === 'boundary') return PP.boundaryOf(c.lp);
+  if (c.kind === 'seat') return { mask: PP.rankedSeatMaskOf(c.mt), sans: PP.mtSansSeats(c.mt), base: PP.baseMt(c.mt), any: PP.anyAppliesLp(c.mt), seats: [0, 1, 2, 3, 4, 5].map((s) => PP.seatAppliesLp(c.mt, s)) };
   if (c.kind !== 'match') throw new Error('unknown case kind ' + c.kind);
   const parts = c.parts.map((p) => ({ steamID: p.id, seat: p.seat, mmr: p.mmr, rank: p.rank, lp: p.lp }));
   const plan = PP.matchPlan(parts, c.mt, c.team || null);

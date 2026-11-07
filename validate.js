@@ -24,6 +24,7 @@ const PP_OVERRIDES = pointsPlan.configure({ RS_THRESHOLD: process.env.RS_THRESHO
   LEAVER_LP_PENALTY: process.env.LEAVER_LP_PENALTY });
 const { RULES_VER, LP_MAX, LP_SEG, lpSeg, LP_SEED, seedLp, SOFT_RESET, softResetLp, seasonSeedLp, lpDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND,
   boundaryOf, crosslineDelta, matchPlan, settleLine, baseMt, premadeMaskOf, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, appliesLp, isTeamMt, leaverLpPenalty,
+  rankedSeatMaskOf, mtSansSeats, seatAppliesLp, anyAppliesLp,
   RS_MAGIC, reducedStakesPlan, teamLpPlan, RS_THRESHOLD, RS_UPSET_BONUS, RS_STRONG_UPSET_LOSS, RS_SOLO_VS_TRIO, RS_TRIO_WIN, LEAVER_LP_PENALTY,
   ratingDetails, RECEIPT_F, lpDetailsOf, lpDetails, receiptPush, pulseDetails } = pointsPlan;
 // O480 points receipts: the details of every points-board write = the RS reveal slot (rv = this run's flagged outcome { matchHash,
@@ -1280,7 +1281,7 @@ const SEEN_PER_WRITER = 64;
 // contests the key) is the start-proof plan's (O462), not this one's.
 const LONE1V1_LATE_CAP = 2;
 function keepLateOwn(e, r, id, resW) {
-  if ((r.d[2] | 0) !== 2 || (r.d[8] | 0) !== 2 || !resW) return false;
+  if (mtSansSeats(r.d[2]) !== 2 || (r.d[8] | 0) !== 2 || !resW) return false;
   const w = id.split('@')[0], seat = r.d[5] | 0;
   if (!resW.has(w) || String((r.roster || {})[seat]) !== String(r.steamID)) return false;
   const lo = Array.isArray(e.lo) ? e.lo : (e.lo = []);
@@ -1312,7 +1313,7 @@ function lateWriterRoster(e, m, lateStarts, results, pending, processed, now, re
   if (readComplete === false || !e || !e.r || e.r !== now || e.c || e.n || !Array.isArray(e.s) || e.s.length !== 1) return null;
   if (processed.has(m) || pending[m] || !results || !results.length) return null;
   for (const r of lateStarts || []) {
-    const mt = r.d[2] | 0, seat = r.d[5] | 0, ro = r.roster || {};
+    const mt = mtSansSeats(r.d[2]), seat = r.d[5] | 0, ro = r.roster || {};
     if ((mt !== 1 && mt !== 2) || (r.d[8] | 0) !== 2 || (seat !== 0 && seat !== 1)) continue;
     const w = String(r.steamID), l = ro[1 - seat] != null ? String(ro[1 - seat]) : '';
     if (String(ro[seat]) !== w || !l || l === w) continue;
@@ -2007,7 +2008,7 @@ const LONE1V1 = { GATE: 2, OPP_CAP: 8, QUEUE_CAP: 4, RETRO_MS: 14 * 86400000, WE
 function lone1v1Claim(e, key, g, confState, confSeen) {
   if (!e || e.c || !Array.isArray(e.s) || !g || !g.length) return null;
   const r0 = g[0];
-  if ((r0.d[2] | 0) !== 2 || (r0.d[8] | 0) !== 2) return null;   // ranked brawl with two seats; quick, party bits and teams keep their rules
+  if (mtSansSeats(r0.d[2]) !== 2 || (r0.d[8] | 0) !== 2) return null;   // ranked brawl with two seats; quick, party bits and teams keep their rules
   const w = String(r0.steamID), seat = r0.d[5] | 0, ro = r0.roster || {};
   if ((seat !== 0 && seat !== 1) || String(ro[seat]) !== w) return null;
   const o = ro[1 - seat] != null ? String(ro[1 - seat]) : '';
@@ -2054,7 +2055,7 @@ function lone1v1Claim(e, key, g, confState, confSeen) {
 // honest winner whose opponent's record was spoiled by somebody else (a modded host's seat table, Q109) is paid only when
 // that record admits the loss.
 function lone1v1Spoiled(e, key, g, confState, confSeen, strict, pids) {
-  if (!e || !Array.isArray(e.s) || !g || !g.length || (g[0].d[2] | 0) !== 2) return null;
+  if (!e || !Array.isArray(e.s) || !g || !g.length || mtSansSeats(g[0].d[2]) !== 2) return null;
   const writers = [...new Set(g.map((r) => String(r.steamID)))];
   if (writers.length !== 2) return null;
   let out = null;
@@ -2208,6 +2209,9 @@ const SANITY = {
   MIN_START_AGE_MS: Number(process.env.SANITY_MIN_START_AGE_MS || 300000),
   MT_ALLOWED: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],               // quick/ranked x brawl/team1/mode2 + endless co-op + O82 3V3 (8/9 joined with the 6P matchmaking client gate) + O140 private friend rooms (10, XP-only track) + O156 bot matches (11, XP-only track)
 };
+// O716: the bases a ranked-seat mask may ride on = the matchmade quick family (brawl 1, team brawl 3, 2V2 5, 3V3 8); one queue
+//   writes every matchmade table on it, ranked seats in the mask (sanityFlags)
+const SEAT_MASK_BASES = [1, 3, 5, 8];
 // Mode-2 (base 5/6) score headroom: the mid-run gamble round can at most multiply a player's bank
 // by x10 (client knife 3.9, 2026-09-16: the top gamble row / the red-black green pocket / the cups
 // gold ball all chain into a second-stage wheel whose top slice is x10; bet bounded by own coins),
@@ -2362,7 +2366,7 @@ const QUIT_LONE = { MT: 1, PC: 2, LEVEL_SECONDS: 60 };
 //   Returns { m, w, o, seat, prog } or null.
 function quitLoneClaim(p, key, g, pending, processed, confState, confSeen, quitSeen, vecOf) {
   if (!p || !g || !g.length || processed.has(key) || processed.has(splitMark(key))) return null;
-  if ((g[0].d[2] | 0) !== QUIT_LONE.MT || (p.mt | 0) !== QUIT_LONE.MT || (g[0].d[8] | 0) !== QUIT_LONE.PC) return null;
+  if (mtSansSeats(g[0].d[2]) !== QUIT_LONE.MT || mtSansSeats(p.mt) !== QUIT_LONE.MT || (g[0].d[8] | 0) !== QUIT_LONE.PC) return null;
   const ro = seatGateRoster(p);
   if (!ro || p.prov || p.lent) return null;
   const cn = pending['~' + key];
@@ -2398,7 +2402,7 @@ function quitLoneVerdicts(pending, groups, processed, consistentKeys, now, matur
   const res = { due: [], waiting: 0, held: 0 };
   for (const m of Object.keys(pending)) {
     const p = pending[m];
-    if (m.charAt(0) === '~' || !p || typeof p !== 'object' || (p.mt | 0) !== QUIT_LONE.MT || consistentKeys.has(m) || !groups[m]) continue;
+    if (m.charAt(0) === '~' || !p || typeof p !== 'object' || mtSansSeats(p.mt) !== QUIT_LONE.MT || consistentKeys.has(m) || !groups[m]) continue;
     if (now - (p.t0 || 0) >= maturityMs) continue;   // the start-orphan verdict's (it ran first this run)
     const c = quitLoneClaim(p, m, groups[m], pending, processed, confState, confSeen, quitSeen, vecOf);
     if (!c) continue;
@@ -2456,7 +2460,7 @@ function quitLoneLateDue(confState, consistentMatches, processed) {
     let o = null, w = null, why = '';
     for (const r of c.g) {
       const h = pid(String(r.steamID)), seat = r.d[5] | 0;
-      if ((r.d[2] | 0) !== QUIT_LONE.MT || (r.d[8] | 0) !== QUIT_LONE.PC) { why = 'not a quick 1V1'; break; }
+      if (mtSansSeats(r.d[2]) !== QUIT_LONE.MT || (r.d[8] | 0) !== QUIT_LONE.PC) { why = 'not a quick 1V1'; break; }
       if (h === op && seat === qs) {
         if (dispClassOf(r.dispCode) === 'abandoner') { why = 'a quit end of his'; break; }
         if (!o) o = String(r.steamID);
@@ -2860,6 +2864,17 @@ function sanityFlags(g) {
   // playtest channel: the allowed set narrows to quick + endless -- a ranked-typed record has
   // no legit writer on this channel (queue guard refuses ranked), so it is flagged as forgery.
   if ((PT_MODE ? PT_MT_ALLOWED : SANITY.MT_ALLOWED).indexOf(base) < 0) out.push('mt');
+  // O716 one queue for quick + ranked: bits 11-16 = the seats that came in through ranked, on a matchmade table of the quick
+  //   family (SEAT_MASK_BASES). Each reason is the host's header (the mask rides START_GAME like the party bits), so each is a
+  //   header reason (SANITY_HEADER_SLUGS, Q294): (1) a mask on the playtest / demo job, which has no ranked entry -- 'mt', like a
+  //   ranked code there; (2) a mask on a code that never carries one: endless, a friends' room, a bot match, or the old ranked
+  //   codes 2/4/6/9 (a writer that sets the mask writes the quick family base); (3) a bit past the seats.
+  const seatMask = rankedSeatMaskOf(mt);
+  if (seatMask) {
+    if (PT_MODE && out.indexOf('mt') < 0) out.push('mt');
+    if (SEAT_MASK_BASES.indexOf(base) < 0) out.push('seat-mask');
+    if ((seatMask >> Math.max(0, Math.min(pc, 6))) !== 0) out.push('seat-mask-range');
+  }
   let scoreCap = SANITY.SCORE_CAP, scoreFloor = SANITY.SCORE_FLOOR;
   if (isTeamMt(base)) {
     if (mask !== 0 || trioAt !== 0) out.push('team-mask');   // team codes never carry premade fields (pair mask OR trio)
@@ -3014,7 +3029,9 @@ const sanityDropFlags = (x) => x.why.some((f) => SANITY_HOST_SLUGS.indexOf(f) < 
 //   carries a party field, a bot tier is one of the job's codes), and on two or more writers' word alone the job cannot tell
 //   the host from his joiners -- the host chooses the seat table, so 'seat 0' is whoever he puts there (architecture
 //   decision 10: let a cheat through rather than wrong an honest player).
-const SANITY_HEADER_SLUGS = ['mt', 'pc', 'mask-range', 'trio-range', 'unit-overlap', 'nobot'];
+// O716: a ranked-seat mask is the host's header too (it rides START_GAME with the party bits) -- 'seat-mask' (a code that never
+//   carries one) / 'seat-mask-range' (a bit past the seats) join, so a modded host's mask holds the match and flags no joiner.
+const SANITY_HEADER_SLUGS = ['mt', 'pc', 'mask-range', 'trio-range', 'unit-overlap', 'nobot', 'seat-mask', 'seat-mask-range'];
 // the per-writer half of sanitySplit: every writer whose own records break a bound of their own ({ sid, why, recs }; why =
 //   recordSanityFlags of each of his records, 'dup-writer' first when he wrote the key twice)
 function sanityWriterFaults(g) {
@@ -14368,3 +14385,4 @@ Object.assign(module.exports, { quitLoneLateDue });   // W113 the quitter's own 
 Object.assign(module.exports, { PRIVATE_LONE, privateLoneClaim, privateLoneVerdicts });   // cloud audit Q316 a friends' room only one player wrote a result for (test/private-lone-stayer.js)
 Object.assign(module.exports, { START_PROOF_ENFORCE, startProof, proofState, proofTable, proofOwnsId, applyStartProof, screenLateStarts, seenNote, startSeenId, startSig });   // O462 matchmade start proof (test/start-proof-step.js)
 Object.assign(module.exports, { LIKE: likePlan.LIKE, LIKES_FILE, LIKE_BOX_LB, LIKE_COUNT_LB, loadLikes, saveLikes });   // O520 likes lane (client knife 5.4d, W79; test/likes-lane.js)
+Object.assign(module.exports, { rankedSeatMaskOf, mtSansSeats, seatAppliesLp, anyAppliesLp, SEAT_MASK_BASES });   // O716 one queue for quick + ranked: the ranked-seat mask (test/seat-mask.js)

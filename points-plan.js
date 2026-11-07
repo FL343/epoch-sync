@@ -23,7 +23,7 @@
   else if (root) root.POINTS_PLAN = api;
 })(typeof module === 'object' && !!module && typeof exports === 'object' && this === exports, typeof window !== 'undefined' ? window : null, function () {
   const RULES_VER = 1;
-  const FIXTURES_HASH = '4dcc2726b3af67cf';
+  const FIXTURES_HASH = '8c71b61b59f7edfc';
   // the knobs configure() can move (production runs these defaults)
   const DEFAULTS = Object.freeze({ RS_THRESHOLD: 400, RS_UPSET_BONUS: 1.0, RS_STRONG_UPSET_LOSS: 0.5, RS_SOLO_VS_TRIO: 0.6, RS_TRIO_WIN: 0.7, LEAVER_LP_PENALTY: 100 });
   const LP_MAX = 9999;
@@ -131,6 +131,13 @@
   // full-stakes LP path. Base 9 (ranked 3V3) joins in the same change that generalizes every
   // team-code consumer to teamSizeOfMt -- same red line, wider seats.
   function appliesLp(mt) { const b = baseMt(mt); return b === 2 || b === 4 || b === 6 || b === 9; }
+  // O716 one queue for quick + ranked: bits 11-16 of the match type = the seats that came in through ranked (a mixed table of
+  //   one quick family base). No mask (every record written before O716) = the old whole-table rule, so 2/4/6/9 stay all-ranked.
+  const RANKED_SEAT_SHIFT = 11;
+  function rankedSeatMaskOf(mt) { return ((mt | 0) >> RANKED_SEAT_SHIFT) & 0x3F; }
+  function mtSansSeats(mt) { return (mt | 0) & ((1 << RANKED_SEAT_SHIFT) - 1); }
+  function seatAppliesLp(mt, seat) { const m = rankedSeatMaskOf(mt); return m ? !!((m >> (seat | 0)) & 1) : appliesLp(mt); }
+  function anyAppliesLp(mt) { return appliesLp(mt) || rankedSeatMaskOf(mt) !== 0; }
   // team match types: 3/4 = quick/ranked team-brawl (mode 1); 5/6 = quick/ranked mode 2 (true 2v2);
   // 8/9 = quick/ranked mode 2 at teamSize 3 (O82 6P matchmaking).
   function isTeamMt(mt) { const b = baseMt(mt); return b === 3 || b === 4 || b === 5 || b === 6 || b === 8 || b === 9; }
@@ -436,6 +443,7 @@
     LP_MAX, LP_SEG, lpSeg, LP_SEED, seedLp, SOFT_RESET, softResetLp, seasonSeedLp, lpDelta,
     BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, boundaryOf, crosslineDelta, matchPlan, settleLine,
     baseMt, premadeMaskOf, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, appliesLp, isTeamMt,
+    RANKED_SEAT_SHIFT, rankedSeatMaskOf, mtSansSeats, seatAppliesLp, anyAppliesLp,
     leaverLpPenalty, RS_MAGIC, reducedStakesPlan, teamLpPlan,
     RATING_MAGIC, ratingDetails, ratingDetailsOf,
     RECEIPT_MAGIC, RECEIPT_CAP, RS_SLOT, RECEIPT_F, receiptVer, lpDetailsOf, lpDetails, receiptPush, receiptOf,
