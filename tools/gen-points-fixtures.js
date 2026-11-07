@@ -22,6 +22,9 @@
 //   seat: { mt } -> which seats of the code move points (O716 one queue: the ranked-seat mask in bits 11-16; no mask = the old
 //     whole-table rule): { mask, sans: the code without the mask, base, any: anyAppliesLp, seats: seatAppliesLp of seats 0..5 }.
 //     A case added here moves no settled delta (no RULES_VER bump): it pins the reading both sides share.
+//   endless: { fn, args } -> PP[fn](...args), one O728 endless points function (hiddenOf / tierOfHidden / targetOffset / targetOf /
+//     endlessDelta / endlessSettle / endlessSeedLp / elpRowDetails / elpRowOf / elpTableDetails / elpTableOf) at fixed inputs. The
+//     endless rules carry their own version (ELP.VER on the published table), not RULES_VER: an endless case that moves bumps ELP.VER.
 // ============================================================
 const fs = require('fs');
 const path = require('path');
@@ -136,7 +139,104 @@ const CASES = [
   { name: 'mixed 3V3 (8): one ranked member a side, a quick member of the losing side left (shield)', kind: 'match', mt: seats(8, 0b001001),
     parts: [P('a0', 0, 1600, 1, 3100), P('q1', 1, 1600, 2, 3000), P('q2', 2, 1600, 3, 2900), P('a3', 3, 1600, 4, 3000), P('q4', 4, 1600, 5, 3200)],
     team: { scores: [500, 400, 300, 200, 250, 0], leaverSeats: [5], winTeam: 0 } },
+  // ---- O728 endless competitive points: the per-run target, the pass / miss points, the placement seed, the row and the table ----
+  ...endlessCases(),
 ];
+// the endless cases (O728): fixed pass lines (not ELP.PRIOR, so retuning the prior moves no case)
+function endlessCases() {
+  const SOLO = [2, 6, 10, 15, 24, 38, 55], DUO = [3, 10, 16, 24, 38, 61, 88];
+  const E = (name, fn, args) => ({ name: 'endless: ' + name, kind: 'endless', fn, args });
+  const out = [
+    // the hidden skill (depths newest first)
+    E('hidden, no run', 'hiddenOf', [[]]),
+    E('hidden, 4 runs (placement: null)', 'hiddenOf', [[10, 9, 8, 7]]),
+    E('hidden, 4 runs read for a placement target (plain mean)', 'hiddenOf', [[10, 9, 8, 7], 1]),
+    E('hidden, 1 run read for a placement target', 'hiddenOf', [[0], 1]),
+    E('hidden, 5 runs (the highest and the lowest leave)', 'hiddenOf', [[30, 9, 8, 7, 0]]),
+    E('hidden, 12 runs (the newest 10 count)', 'hiddenOf', [[5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 90, 90]]),
+    E('hidden, a rounding mean (x100 to the nearest)', 'hiddenOf', [[3, 4, 4, 5, 9, 1]]),
+    E('hidden, a negative depth counts as 0', 'hiddenOf', [[-3, 2, 2, 2, 2]]),
+    // the tier of a hidden skill (nearest line, the lower tier on a tie)
+    E('skill tier, 950 = gold (line 10 nearer than 6)', 'tierOfHidden', [950, SOLO]),
+    E('skill tier, 400 = bronze (a tie between 2 and 6)', 'tierOfHidden', [400, SOLO]),
+    E('skill tier, 0 = bronze', 'tierOfHidden', [0, SOLO]),
+    E('skill tier, 9000 = grandmaster', 'tierOfHidden', [9000, SOLO]),
+    E('skill tier, duo lines, 2000 = platinum', 'tierOfHidden', [2000, DUO]),
+    E('skill tier, no skill = null', 'tierOfHidden', [null, SOLO]),
+  ];
+  // the target offset of a run seed (signed and unsigned of the same bits read the same)
+  for (const s of [0, 1, 2, 3, 4, 5, 6, 7, 123456789, -1, 4294967295, -2147483648]) out.push(E('offset of seed ' + s, 'targetOffset', [s]));
+  out.push(
+    E('target, bronze 300 (line 2), seed 7', 'targetOf', [300, SOLO, 7, null, false]),
+    E('target, bronze 300, seed 1 (offset -2: the floor 1)', 'targetOf', [300, SOLO, 1, null, false]),
+    E('target, silver 1000, seed 123456789', 'targetOf', [1000, SOLO, 123456789, null, false]),
+    E('target, gold 2500, seed -1', 'targetOf', [2500, SOLO, -1, null, false]),
+    E('target, grandmaster 9000, seed 2', 'targetOf', [9000, SOLO, 2, null, false]),
+    E('target, duo diamond 4500, seed 5', 'targetOf', [4500, DUO, 5, null, false]),
+    E('target, placement first run (the silver line)', 'targetOf', [0, SOLO, 7, null, true]),
+    E('target, placement with a skill of 2400 (platinum line)', 'targetOf', [0, SOLO, 7, 2400, true]),
+    E('target, placement with a skill of 50 (bronze line)', 'targetOf', [0, SOLO, 4, 50, true]),
+  );
+  // the points before the clamp: every tier, pass / miss, skill one tier below / the same / one tier above, offsets -2 / 0 / +2
+  const LPS = [300, 1000, 2500, 3500, 5000, 7000, 9000];
+  for (let t = 0; t < 7; t++) {
+    for (const isPass of [true, false]) for (const sk of ['below', 'same', 'above']) for (const o of [-2, 0, 2]) {
+      const k = sk === 'below' ? t - 1 : sk === 'above' ? t + 1 : t;
+      if (k < 0 || k > 6) continue;
+      out.push(E('delta, lp ' + LPS[t] + ' ' + (isPass ? 'pass' : 'miss') + ', skill ' + sk + ', offset ' + o, 'endlessDelta', [LPS[t], isPass, SOLO[k] * 100, SOLO, o]));
+    }
+  }
+  out.push(
+    E('delta, the largest swing (bronze pass, skill above, offset +2)', 'endlessDelta', [0, true, 5500, SOLO, 2]),
+    E('delta, a miss floored at -1 (bronze, skill grandmaster, offset +2)', 'endlessDelta', [0, false, 5500, SOLO, 2]),
+    E('delta, an offset out of range reads as +2', 'endlessDelta', [1000, true, 600, SOLO, 9]),
+    E('delta, no skill (fewer than 5 runs in the window): neutral', 'endlessDelta', [4500, false, null, SOLO, 0]),
+    // the points line (series clamp, demotion protection, the board bounds)
+    E('settle, gold 2500 pass', 'endlessSettle', [2500, true, 1000, SOLO, 0]),
+    E('settle, gold 2500 miss, skill gold (protection holds but moves nothing)', 'endlessSettle', [2500, false, 1000, SOLO, 0]),
+    E('settle, promotion band silver 1950 pass (forced up to 2010)', 'endlessSettle', [1950, true, 600, SOLO, 0]),
+    E('settle, promotion band silver 1950 miss', 'endlessSettle', [1950, false, 600, SOLO, 0]),
+    E('settle, relegation band gold 2050 miss, skill silver (forced down to 1985)', 'endlessSettle', [2050, false, 600, SOLO, 0]),
+    E('settle, relegation band gold 2050 miss, skill gold (protected: no forced drop)', 'endlessSettle', [2050, false, 1000, SOLO, 0]),
+    E('settle, relegation band gold 2010 miss, skill platinum (protected: no forced drop)', 'endlessSettle', [2010, false, 1500, SOLO, 1]),
+    E('settle, relegation band gold 2010 miss, skill gold, offset -2 (protected: held at the floor)', 'endlessSettle', [2010, false, 1000, SOLO, -2]),
+    E('settle, gold floor 2000 miss, skill gold (protected: d 0)', 'endlessSettle', [2000, false, 1000, SOLO, -2]),
+    E('settle, relegation band gold 2050 pass', 'endlessSettle', [2050, true, 600, SOLO, 0]),
+    E('settle, grandmaster line 8050 miss, skill grandmaster (protected)', 'endlessSettle', [8050, false, 5500, SOLO, 0]),
+    E('settle, grandmaster line 8050 miss, skill master (forced down)', 'endlessSettle', [8050, false, 3800, SOLO, 0]),
+    E('settle, the top 9990 pass (9999)', 'endlessSettle', [9990, true, 5500, SOLO, 2]),
+    E('settle, the floor 5 miss (0)', 'endlessSettle', [5, false, 0, SOLO, -2]),
+    E('settle, bronze 590 pass, skill gold (a crossing in the promotion band)', 'endlessSettle', [590, true, 1000, SOLO, 2]),
+    E('settle, duo lines, platinum 3100 miss, skill diamond (protected)', 'endlessSettle', [3100, false, 3800, DUO, 0]),
+    // the placement seed
+    E('seed, no skill', 'endlessSeedLp', [null, SOLO]),
+    E('seed, below the bronze line', 'endlessSeedLp', [100, SOLO]),
+    E('seed, bronze between 2 and 6', 'endlessSeedLp', [400, SOLO]),
+    E('seed, near the silver line (bronze promotion band avoided)', 'endlessSeedLp', [590, SOLO]),
+    E('seed, silver 950 (near the gold line: kept below the band)', 'endlessSeedLp', [950, SOLO]),
+    E('seed, exactly the gold line (kept above the relegation band)', 'endlessSeedLp', [1000, SOLO]),
+    E('seed, gold 1250', 'endlessSeedLp', [1250, SOLO]),
+    E('seed, platinum 1600 (above the relegation band)', 'endlessSeedLp', [1600, SOLO]),
+    E('seed, platinum 2000 (the cap)', 'endlessSeedLp', [2000, SOLO]),
+    E('seed, above the grandmaster line (the cap)', 'endlessSeedLp', [9000, SOLO]),
+    E('seed, duo silver 1400', 'endlessSeedLp', [1400, DUO]),
+    // the family row and the published table
+    E('row details, placed silver with two receipts', 'elpRowDetails', [{ n: 7, hidden100: 950, tier: 1, placed: 1 }, [{ mh: -5, delta: 40, flags: 264 }, { mh: 77, delta: -13, flags: 258 }]]),
+    E('row details, the window short of 5 runs (hidden -1)', 'elpRowDetails', [{ n: 9, hidden100: null, tier: 3, placed: 1 }, []]),
+    E('row read', 'elpRowOf', [[494, 7, 950, 1, 1, 198, 2, -5, 40, 264, 77, -13, 258]]),
+    E('row read, hidden -1 = null, a short ring', 'elpRowOf', [[494, 9, -1, 3, 1, 198, 2, 1, 2, 3]]),
+    E('row read, another magic = null', 'elpRowOf', [[0xEF | 256, 7, 950, 1, 1, 198, 0]]),
+    E('row read, version 2 = null', 'elpRowOf', [[0xEE | 512, 7, 950, 1, 1, 198, 0]]),
+    E('row read, the O103 rating row = null', 'elpRowOf', [[12, 850, 6, 0]]),
+    E('table details, solo live, the rest prior', 'elpTableDetails', [1, { solo: { N: 30, pass: SOLO }, duo: { N: 4, pass: DUO } }]),
+    E('table read', 'elpTableOf', [20261201, [0xEC | 512, 1, 1, 1500, 500, 100, 2].concat([30], SOLO, [4], DUO, [0], DUO, [0], DUO)]),
+    E('table read, another constant (rulesSame false)', 'elpTableOf', [20261201, [0xEC | 512, 1, 1, 1500, 500, 120, 2].concat([30], SOLO, [4], DUO, [0], DUO, [0], DUO)]),
+    E('table read, a v1 cut table = null', 'elpTableOf', [20261108, [0xEC | 256, 0, 0, 6000, 4000, 2800, 2000, 1400, 800].concat(new Array(21).fill(0))]),
+    E('table read, a v3 table = null', 'elpTableOf', [20261201, [0xEC | 768, 1, 1, 1500, 500, 100, 2].concat(new Array(32).fill(0))]),
+    E('table read, short = null', 'elpTableOf', [20261201, [0xEC | 512, 1, 1, 1500, 500, 100, 2]]),
+  );
+  return out;
+}
 
 // the out of one case, from a points-plan module (this repo's file, or the client's vendored copy)
 function replay(PP, c) {
@@ -144,6 +244,7 @@ function replay(PP, c) {
   if (c.kind === 'leave') return PP.leaverLpPenalty(c.cur, PP.LEAVER_LP_PENALTY);
   if (c.kind === 'boundary') return PP.boundaryOf(c.lp);
   if (c.kind === 'seat') return { mask: PP.rankedSeatMaskOf(c.mt), sans: PP.mtSansSeats(c.mt), base: PP.baseMt(c.mt), any: PP.anyAppliesLp(c.mt), seats: [0, 1, 2, 3, 4, 5].map((s) => PP.seatAppliesLp(c.mt, s)) };
+  if (c.kind === 'endless') return PP[c.fn].apply(null, c.args);   // O728: one endless points function at fixed inputs
   if (c.kind !== 'match') throw new Error('unknown case kind ' + c.kind);
   const parts = c.parts.map((p) => ({ steamID: p.id, seat: p.seat, mmr: p.mmr, rank: p.rank, lp: p.lp }));
   const plan = PP.matchPlan(parts, c.mt, c.team || null);

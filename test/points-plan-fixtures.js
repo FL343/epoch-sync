@@ -53,7 +53,19 @@ T('[3] the settle composes its plan and its points line through the module (matc
 // [4]
 {
   const kinds = new Set(doc.cases.map((c) => c.kind));
-  T('[4] all five kinds present', ['match', 'seed', 'leave', 'boundary', 'seat'].every((k) => kinds.has(k)), [...kinds].join(','));
+  T('[4] all six kinds present', ['match', 'seed', 'leave', 'boundary', 'seat', 'endless'].every((k) => kinds.has(k)), [...kinds].join(','));
+  // O728: the endless cases call the endless functions only (the replay is PP[fn]), each of them, and the settle shapes the rules name
+  const ELP_FNS = ['hiddenOf', 'tierOfHidden', 'targetOffset', 'targetOf', 'endlessDelta', 'endlessSettle', 'endlessSeedLp', 'elpRowDetails', 'elpRowOf', 'elpTableDetails', 'elpTableOf'];
+  const en = doc.cases.filter((c) => c.kind === 'endless');
+  T('[4] endless (O728): every endless function has a case, no other function is called', ELP_FNS.every((f) => en.some((c) => c.in.fn === f)) && en.every((c) => ELP_FNS.includes(c.in.fn)));
+  const es = en.filter((c) => c.in.fn === 'endlessSettle').map((c) => c.out);
+  T('[4] endless: a protected miss, a protected miss at the floor (d 0), a forced drop, a forced crossing up, both board bounds',
+    es.some((o) => o.protect && o.d < 0) && es.some((o) => o.protect && o.d === 0) && es.some((o) => o.clamped && o.d < o.d0) && es.some((o) => o.clamped && o.d > o.d0)
+    && es.some((o) => o.nv === PP.LP_MAX) && es.some((o) => o.nv === 0));
+  const ed = en.filter((c) => c.in.fn === 'endlessDelta');
+  T('[4] endless: deltas of all 7 tiers, pass and miss, offsets -2 and +2, a skill above and below',
+    [0, 1, 2, 3, 4, 5, 6].every((t) => ed.some((c) => PP.lpTierIdx(c.in.args[0]) === t)) && ed.some((c) => c.in.args[1]) && ed.some((c) => !c.in.args[1])
+    && ed.some((c) => c.in.args[4] === -2) && ed.some((c) => c.in.args[4] === 2) && ed.some((c) => c.out.gap === 1500) && ed.some((c) => c.out.gap === 500));
   // O716: the seat cases read both ways -- the old whole-table rule (no mask: all or nothing) and a mixed mask on every quick family base
   const st = doc.cases.filter((c) => c.kind === 'seat');
   T('[4] seat: an all-ranked and an all-quick code without a mask', st.some((c) => !c.out.mask && c.out.seats.every(Boolean)) && st.some((c) => !c.out.mask && !c.out.seats.some(Boolean)));

@@ -23,7 +23,7 @@
   else if (root) root.POINTS_PLAN = api;
 })(typeof module === 'object' && !!module && typeof exports === 'object' && this === exports, typeof window !== 'undefined' ? window : null, function () {
   const RULES_VER = 1;
-  const FIXTURES_HASH = '4d8d4a4ee886655b';
+  const FIXTURES_HASH = 'ddd60888a90ea2e6';
   // the knobs configure() can move (production runs these defaults)
   const DEFAULTS = Object.freeze({ RS_THRESHOLD: 400, RS_UPSET_BONUS: 1.0, RS_STRONG_UPSET_LOSS: 0.5, RS_SOLO_VS_TRIO: 0.6, RS_TRIO_WIN: 0.7, LEAVER_LP_PENALTY: 100 });
   const LP_MAX = 9999;
@@ -423,6 +423,160 @@
   }
   // the receipt of match mh on a row's details, or null
   function receiptOf(det, mh) { return lpDetailsOf(det).ring.find((e) => e.mh === (mh | 0)) || null; }
+
+  // ===== O728 endless competitive points (user calls 2026-11-08; companion KNIFE_O728_ENDLESS_LP_PLAN sections 2-3) =====
+  // A competitive endless run of a family (solo / duo / trio / quad) settles on the versus points scale 0..LP_MAX with the versus
+  //   tier table LP_SEG. At its start the run gets a target T: the pass line of the player's tier (levels), moved by an offset of
+  //   -SPREAD..+SPREAD drawn from the run seed. A run that passes level T gains points, one that does not loses -- the sign never
+  //   flips; only the size calibrates. The size is the tier's win (or loss) scaled by two per-mille factors, plus the tier's drip:
+  //     gap:   the hidden skill (the trimmed mean depth of the last WINDOW runs) sits in a higher tier than the points -> a pass
+  //            x GAP_UP, a miss x GAP_DOWN; a lower tier -> the reverse; the same tier (or no skill yet) -> 1000;
+  //     stake: a harder target (offset o > 0) gains more and loses less: a pass 1000 + STAKE_STEP x o, a miss 1000 - STAKE_STEP x o.
+  //   The run settles through settleLine (the series clamp: a pass in the promotion band always crosses up, a miss in the relegation
+  //   band always crosses down) except under the demotion protection: a miss whose hidden skill tier is at or above the points tier
+  //   skips the clamp and never drops below the floor of the tier. The first MIN_RUNS runs of a season are placement (no points);
+  //   the last one seeds the points from the hidden skill (endlessSeedLp). All pure: the job settles the runs in start order.
+  // ELP.PRIOR: the loose pass lines (levels, bronze .. grandmaster) per family -- the job's prior, blended into the live lines as
+  //   players place, and published every day in the tier-cut table v2 (elpTableDetails) the client reads. Moving a constant of ELP
+  //   other than PRIOR moves settled runs: ELP.VER + 1 in the same change (the table carries it; a client built with other
+  //   constants shows "to be confirmed"). RULES_VER stays the versus rules version.
+  // Invariant (test/endless-lp.js): the largest swing of one run stays under BOUNDARY_MARGIN, so a tier line is crossed in a series
+  //   run only (the largest is a bronze pass: 45 x 1.5 x 1.2 + 5 = 86).
+  const ELP = Object.freeze({
+    WINDOW: 10, MIN_RUNS: 5, TRIM: 1, GAP_UP: 1500, GAP_DOWN: 500, STAKE_STEP: 100, SPREAD: 2, SEED_CAP: 3200, VER: 1,
+    // 2026-11-08 board read (best run per player; a usual run is about 0.7 of the best): playtest solo n 74 -- top 60 % 7, 35 % 13,
+    //   20 % 20, 10 % 30, 4 % 63; trial solo n 318 (capped at 20) -- top 80 % 2, 60 % 7, 35 % 14. Bronze is 2 (0.7 x the top-80 %
+    //   best of 2..3); the team lines are solo x 1.6 (trial team bests sit far above them, the lines stay loose).
+    PRIOR: Object.freeze({
+      solo: Object.freeze([2, 6, 10, 15, 24, 38, 55]),
+      duo: Object.freeze([3, 10, 16, 24, 38, 61, 88]),
+      trio: Object.freeze([3, 10, 16, 24, 38, 61, 88]),
+      quad: Object.freeze([3, 10, 16, 24, 38, 61, 88]),
+    }),
+    ROW_MAGIC: 0xEE, ROW_VER: 1,   // the family points row (elpRowDetails)
+    TC_MAGIC: 0xEC, TC_VER: 2,     // the published pass-line table (elpTableDetails; v1 = the O103 cut table, read as no table)
+    PROTECT_RS: 2,                 // a protected miss carries the RS value 2 (protected, as a versus row) on its receipt
+  });
+  const ELP_FAMS = Object.freeze(['solo', 'duo', 'trio', 'quad']);
+  // the tier index (0 bronze .. 6 grandmaster) of a points value
+  function lpTierIdx(lp) { let i = 0; for (let k = 0; k < LP_SEG.length; k++) if ((lp | 0) >= LP_SEG[k].min) i = k; return i; }
+  function elpHash(s) { let h = 0x811c9dc5; s = String(s); for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); } return h >>> 0; }
+  const elpLinesOk = (pass) => Array.isArray(pass) && pass.length >= LP_SEG.length;
+  // the hidden skill x 100 of a family's runs this season. depths = the levels each run passed, NEWEST first; the first WINDOW count.
+  //   From MIN_RUNS runs the TRIM highest and the TRIM lowest leave before the mean. Fewer runs than minRuns (default MIN_RUNS) = null;
+  //   the placement target reads it with minRuns 1 (the plain mean of the runs so far).
+  function hiddenOf(depths, minRuns) {
+    const d = (Array.isArray(depths) ? depths : []).slice(0, ELP.WINDOW).map((x) => Math.max(0, x | 0));
+    const need = minRuns == null ? ELP.MIN_RUNS : Math.max(1, minRuns | 0);
+    if (!d.length || d.length < need) return null;
+    const use = d.length >= ELP.MIN_RUNS ? d.slice().sort((a, b) => a - b).slice(ELP.TRIM, d.length - ELP.TRIM) : d;
+    let sum = 0; for (const x of use) sum += x;
+    return Math.round(sum * 100 / use.length);
+  }
+  // the tier (0..6) a hidden skill sits in: the pass line nearest to it, the lower tier on a tie. No skill (or no lines) = null.
+  function tierOfHidden(hidden100, pass) {
+    if (hidden100 == null || !elpLinesOk(pass)) return null;
+    let at = 0, best = Infinity;
+    for (let k = 0; k < LP_SEG.length; k++) { const g = Math.abs((hidden100 | 0) - (pass[k] | 0) * 100); if (g < best) { best = g; at = k; } }
+    return at;
+  }
+  // the target offset of a run, -SPREAD..+SPREAD (> 0 = a harder target), from its run seed (signed or unsigned 32-bit: the same)
+  function targetOffset(runSeed) { return (elpHash((runSeed >>> 0) + ':tgt') % (2 * ELP.SPREAD + 1)) - ELP.SPREAD; }
+  // the target T of a run (the run passes when it passes level T). lpBefore = the points before the run; pass = the family's 7 lines;
+  //   placing = a placement run: the tier then comes from placingHidden100 = hiddenOf(this season's runs so far, 1), and with no run
+  //   so far (null) the silver line.
+  function targetOf(lpBefore, pass, runSeed, placingHidden100, placing) {
+    const k = placing ? (placingHidden100 == null ? 1 : tierOfHidden(placingHidden100, pass)) : lpTierIdx(lpBefore);
+    const line = (elpLinesOk(pass) && k != null) ? (pass[k] | 0) : 0;
+    return Math.max(1, line + targetOffset(runSeed));
+  }
+  // the points of one settled run before the series clamp: { d (never 0: a pass >= 1, a miss <= -1), base (the tier's win or -loss),
+  //   gap, stake (per mille), drip, protect (the demotion protection holds: a miss with the hidden skill tier >= the points tier) }
+  function endlessDelta(lpBefore, isPass, hidden100, pass, offset) {
+    const seg = lpSeg(lpBefore | 0), cur = lpTierIdx(lpBefore), ht = tierOfHidden(hidden100, pass);
+    const o = Math.max(-ELP.SPREAD, Math.min(ELP.SPREAD, offset | 0));
+    const base = isPass ? seg.win : -seg.loss;
+    const gap = (ht == null || ht === cur) ? 1000 : ((ht > cur) === !!isPass ? ELP.GAP_UP : ELP.GAP_DOWN);
+    const stake = isPass ? 1000 + ELP.STAKE_STEP * o : 1000 - ELP.STAKE_STEP * o;
+    let d = Math.round(base * gap * stake / 1000000 + seg.drip);
+    d = isPass ? Math.max(1, d) : Math.min(-1, d);
+    return { d, base, gap, stake, drip: seg.drip, protect: !isPass && ht != null && ht >= cur };
+  }
+  // the points line of one settled run: { d0 (endlessDelta's d), d (the change after the clamp / the protection), nv (the new points,
+  //   0..LP_MAX), series (boundaryOf the points before: 'promotion' / 'relegation' / null), clamped (the series clamp moved the delta:
+  //   the receipt's SERIES), protect (the protection moved the result: the clamp skipped and / or the tier floor held -- the receipt's
+  //   PROTECT_RS; a protected miss at the floor changes nothing, d 0), plan (endlessDelta's result) }
+  function endlessSettle(lpBefore, isPass, hidden100, pass, offset) {
+    const cur = Math.max(0, Math.min(LP_MAX, lpBefore | 0));
+    const r = endlessDelta(cur, isPass, hidden100, pass, offset);
+    const plain = settleLine(cur, { adjDelta: r.d, flag: 0, won: !!isPass }, 0, 0, false);
+    let nv = plain.nv, protect = false;
+    if (r.protect) {
+      const pv = Math.max(LP_SEG[lpTierIdx(cur)].min, Math.max(0, Math.min(LP_MAX, cur + r.d)));
+      if (pv !== plain.nv) { nv = pv; protect = true; }
+    }
+    return { d0: r.d, d: nv - cur, nv, series: boundaryOf(cur), clamped: !protect && plain.d !== plain.d0, protect, plan: r };
+  }
+  // the points a finished placement seeds from the hidden skill: between the pass lines k and k+1 the skill interpolates over the
+  //   tier's width, kept out of both series bands (BOUNDARY_MARGIN + 1 from either line; bronze has no relegation band and starts
+  //   at 0), capped at SEED_CAP (mid platinum: diamond and up are climbed, as the versus LP_SEED.CAP). No skill / no lines = 0.
+  function endlessSeedLp(hidden100, pass) {
+    if (hidden100 == null || !elpLinesOk(pass)) return 0;
+    const h = hidden100 | 0, top = LP_SEG.length - 1;
+    if (h >= (pass[top] | 0) * 100) return ELP.SEED_CAP;
+    let k = 0; for (let i = 0; i < top; i++) if (h >= (pass[i] | 0) * 100) k = i;
+    const lo = LP_SEG[k].min, hi = LP_SEG[k + 1].min, span = Math.max(1, ((pass[k + 1] | 0) - (pass[k] | 0)) * 100);
+    let lp = lo + Math.round((h - (pass[k] | 0) * 100) * (hi - lo) / span);
+    lp = Math.max(k === 0 ? 0 : lo + BOUNDARY_MARGIN + 1, Math.min(hi - BOUNDARY_MARGIN - 1, lp));
+    return Math.max(0, Math.min(ELP.SEED_CAP, lp));
+  }
+  // the points row of an endless family board (endless_rating_<fam>[_test][_s<N>]; the job writes it, the client reads it). score =
+  //   the points (no row before the placement ends). details = [ROW_MAGIC | ROW_VER << 8, runs this season, hidden100 (-1 = fewer than
+  //   MIN_RUNS runs in the window), points tier 0..6, placed (1), RECEIPT_MAGIC, n, (runId, delta, flags) x n]: the receipt ring of
+  //   receiptPush with mh = the run id (fnv32 of the run's chain key | 0). Receipt flags: RS bits PROTECT_RS on a protected miss,
+  //   SERIES when the clamp moved the delta, SEEDED on the placement's last run, VOID on a run refunded after a conviction.
+  function elpRowDetails(row, ring) {
+    const r = (ring || []).slice(0, RECEIPT_CAP), x = row || {};
+    const out = [ELP.ROW_MAGIC | (ELP.ROW_VER << 8), x.n | 0, x.hidden100 == null ? -1 : (x.hidden100 | 0), x.tier | 0, x.placed ? 1 : 0, RECEIPT_MAGIC, r.length];
+    for (const e of r) out.push(e.mh | 0, e.delta | 0, e.flags | 0);
+    return out;
+  }
+  // { n, hidden100 (or null), tier, placed, ring: [{ mh, delta, flags }] newest first } of a row's details; another layout = null
+  function elpRowOf(det) {
+    if (!Array.isArray(det) || det.length < 7 || ((det[0] | 0) & 0xff) !== ELP.ROW_MAGIC || (((det[0] | 0) >>> 8) & 0xff) !== ELP.ROW_VER) return null;
+    const ring = [];
+    if (((det[5] | 0) & 0xff) === RECEIPT_MAGIC) {
+      const n = Math.min(RECEIPT_CAP, Math.max(0, det[6] | 0));
+      for (let i = 0; i < n && 9 + 3 * i <= det.length; i++) { const o = 7 + 3 * i; ring.push({ mh: det[o] | 0, delta: det[o + 1] | 0, flags: det[o + 2] | 0 }); }
+    }
+    return { n: det[1] | 0, hidden100: (det[2] | 0) < 0 ? null : (det[2] | 0), tier: det[3] | 0, placed: (det[4] | 0) === 1, ring };
+  }
+  // the receipt of run runId on a family row's details, or null
+  function elpReceiptOf(det, runId) { const r = elpRowOf(det); return r ? (r.ring.find((e) => e.mh === (runId | 0)) || null) : null; }
+  // the published pass-line table (tier-cut carrier v2 on endless_tiercut; the job writes it once a UTC day and at once when the
+  //   season, a line or a rules constant moves). score = the UTC day YYYYMMDD; details = [TC_MAGIC | TC_VER << 8, season, VER, GAP_UP,
+  //   GAP_DOWN, STAKE_STEP, SPREAD, (N, pass x 7) x ELP_FAMS] = 39 ints; N = the family's players placed this season.
+  //   byFam = { fam: { N, pass } } (a missing family writes N 0 and its prior).
+  function elpTableDetails(season, byFam) {
+    const out = [ELP.TC_MAGIC | (ELP.TC_VER << 8), season | 0, ELP.VER, ELP.GAP_UP, ELP.GAP_DOWN, ELP.STAKE_STEP, ELP.SPREAD];
+    for (const fam of ELP_FAMS) {
+      const c = (byFam || {})[fam] || null, p = (c && elpLinesOk(c.pass)) ? c.pass : ELP.PRIOR[fam];
+      out.push(c ? (c.N | 0) : 0);
+      for (let k = 0; k < LP_SEG.length; k++) out.push(p[k] | 0);
+    }
+    return out;
+  }
+  // { day, season, ver, gapUp, gapDown, stakeStep, spread, rulesSame (the constants are this copy's), byFam } of a table row; a v1 row
+  //   (the O103 cut table), another version or a short row = null (no table: the client shows "being rated")
+  function elpTableOf(score, det) {
+    const need = 7 + ELP_FAMS.length * (1 + LP_SEG.length);
+    if (!Array.isArray(det) || det.length < need || ((det[0] | 0) & 0xff) !== ELP.TC_MAGIC || (((det[0] | 0) >>> 8) & 0xff) !== ELP.TC_VER) return null;
+    const byFam = {}; let at = 7;
+    for (const fam of ELP_FAMS) { byFam[fam] = { N: det[at] | 0, pass: det.slice(at + 1, at + 1 + LP_SEG.length).map((x) => x | 0) }; at += 1 + LP_SEG.length; }
+    const t = { day: score | 0, season: det[1] | 0, ver: det[2] | 0, gapUp: det[3] | 0, gapDown: det[4] | 0, stakeStep: det[5] | 0, spread: det[6] | 0, byFam };
+    t.rulesSame = t.ver === ELP.VER && t.gapUp === ELP.GAP_UP && t.gapDown === ELP.GAP_DOWN && t.stakeStep === ELP.STAKE_STEP && t.spread === ELP.SPREAD;
+    return t;
+  }
   // ---- the job's pulse (O480): one cron_pulse row per channel ----
   //   score = the unix minute a run of the job reached its end; details = [PULSE_MAGIC, RULES_VER]. A client reads it on idle
   //   screens: a pulse a few ticks old = the job is behind, a RULES_VER other than its own = the rules moved since its build.
@@ -453,6 +607,8 @@
     RATING_MAGIC, ratingDetails, ratingDetailsOf,
     RECEIPT_MAGIC, RECEIPT_CAP, RS_SLOT, RECEIPT_F, receiptVer, lpDetailsOf, lpDetails, receiptPush, receiptOf,
     PULSE_MAGIC, pulseDetails, pulseOf,
+    ELP, ELP_FAMS, lpTierIdx, hiddenOf, tierOfHidden, targetOffset, targetOf, endlessDelta, endlessSettle, endlessSeedLp,
+    elpRowDetails, elpRowOf, elpReceiptOf, elpTableDetails, elpTableOf,
   }, knobs());
   return api;
 });
