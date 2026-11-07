@@ -13547,6 +13547,7 @@ async function main() {
         return out.map((r) => (stoodOwn.has(String(r.id)) ? no.find((o) => o.id === r.id) : r));
       };
       let tsOut;
+      let quickView = null;   // O716 review (Q389): a quick seat of a mixed table keeps the update an all-quick settle gives it (below)
       const ghostLoss = [];   // Q167: the losing team's convicted leavers rated against in the winners' update (below)
       if (noRating) {
         tsOut = [];   // Q136: nothing below moves (no TrueSkill update, no points line)
@@ -13584,6 +13585,7 @@ async function main() {
           sides[empty] = ghost;
           const here = new Set(parts.map(p => p.steamID));
           tsOut = ts.updateTeamMatch([{ players: sides[winTeam], rank: 1 }, { players: sides[1 - winTeam], rank: 2 }]).filter(r => here.has(r.id));
+          if (rankedSeatMaskOf(matchType)) quickView = new Map();   // O716 review (Q389): a quick seat there moves nothing, as at Q210
           console.log('  ' + (Array.isArray(c.t2ex) ? 'team2 dissent ' : 'team rating ') + c.m + ': whole team ' + empty + ' absent -> rated against its ' + ghost.length + ' pre-match rating(s)');
         } else tsOut = (sides[0].length && sides[1].length)
           ? ts.updateTeamMatch([{ players: sides[winTeam], rank: 1 }, { players: sides[1 - winTeam], rank: 2 }])
@@ -13615,6 +13617,7 @@ async function main() {
         //   grandmasters as if strong (+10 points a match). A quick settle rates the present against the present, as before Q167.
         if (!ghost.length && ghostLoss.length && anyLp) {   // O716: a mixed table takes the ranked branch (D10)
           const g0 = ghostLoss.map(x => { const sk = skill[pid(x.steamID)] || ts.DEFAULTS; return { id: x.steamID, mu: sk.mu, sigma: sk.sigma }; });
+          if (rankedSeatMaskOf(matchType)) quickView = new Map(tsOut.map((r) => [r.id, r]));   // O716 review (Q389): a quick seat keeps the present-against-present update (rework 2)
           tsOut = leaverGhostUpdate(sides[winTeam], sides[1 - winTeam], g0);
           console.log('  leaver-ghost ' + c.m + ': team ' + winTeam + ' rated against team ' + (1 - winTeam) + ' with its ' + ghostLoss.length
             + ' leaver(s) at their pre-match rating (' + ghostLoss.map(x => 'seat ' + x.seat).join(', ') + '), its ' + sides[1 - winTeam].length + ' present player(s) against team ' + winTeam + ' only (Q167)');
@@ -13725,6 +13728,15 @@ async function main() {
       // Q264: the points plan of a player who settles as before Q227: the players rated here at their places there
       const ownRows = stoodOwn.size ? planIn.filter((q) => !stoodIds.has(String(q.steamID))).map((q) => Object.assign({}, q, { rank: rankNo[q.steamID] })) : null;
       const rsPlanOwn = ownRows ? reducedStakesPlan(ownRows, matchType, premadeMaskOf(matchType), premadeTrioAtOf(matchType)) : null;
+      // O716 review (Q389): D10 takes the ranked branch of Q210 / Q167 for the whole mixed table, so the ranked seats' points and
+      //   ranked rating settle against the absent team. A QUICK seat of that table, though, settles as a quick one (D3): it takes
+      //   the stored-rating update an all-quick table gives it (Q210: none against a whole absent team; Q167 rework 2: the present
+      //   against the present), never the update against the absent. Otherwise one ranked-unlocked account and three quick ones
+      //   taking turns at quick-family team codes with the ranked seat set walked the quick seat's stored rating up against the
+      //   absent pair (1000 -> 1795 in 12 turns), and his first ranked settle seeded him from it (3194 points, the seed cap).
+      //   Applied after the plan above: the ranked branch's plan, ranked rating (playedOut) and the absent losers' ranked
+      //   rating read as D10 has them; only the quick seats' stored rating and group decay read the quick update.
+      if (quickView) tsOut = tsOut.flatMap((r) => (seatLp(r.id) ? [r] : (quickView.has(r.id) ? [quickView.get(r.id)] : [])));
       for (const r of tsOut) {
         // repeat-group decay: blend the update toward the pre-match rating by the streak weight
         //   (w=1 full, w=0 frozen). Blending sigma the same way keeps a frozen player's uncertainty
