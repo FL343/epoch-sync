@@ -1,15 +1,15 @@
 'use strict';
 // O606 couch competitive (client knife 5c, 2026-10-31): two local seats on ONE account, the guard judges and signs the segment
 //   (attest.js A3), the solo lane settles it (validate.js soloSettleOwner, c.couch) into the duo competitive family (merged by
-//   default; COUCH_DUO=split = the couch ladder only) and always into the couch ladder (dual write); the duo rating reads 'duo' +
-//   'duoc' while merged. No milestones, no cup. The trial jobs never settle one; a failed check holds the run (never flags) while
+//   default; COUCH_DUO=split = the couch ladder only) and always into the couch ladder (dual write); the couch run settles on the duo
+//   points while merged (O728: written to the 'duo' history). No milestones, no cup. The trial jobs never settle one; a failed check holds the run (never flags) while
 //   COUCH_SIG_FLAG is off.
 //   [1] attest: verifyCouchRecord verdicts (ok with / without the character block, pc / ledger / block / attVer / key states,
 //       trailing, bad signature), couchSettleGate (dev key, a stranger on any seat), couchTail (keyId for the seed-cap core)
 //   [2] couchSanity bounds + isCouchRec
-//   [3] team block couch bit (written, decoded by teamBlockSids, ladderDetails) + ratingHistView merge / split
+//   [3] team block couch bit (written, decoded by teamBlockSids, ladderDetails) + the couch runs on the duo points (O728: couchRatingFam)
 //   [4] main(): a saved couch segment settles -- duo + couch rows (team block [P1, P1] + couch bit), XP, chain under teamRunKey,
-//       rating history 'duoc', no milestone CP, nobody flagged; the resumed segment pays the resume fee once
+//       rating history 'duo' (O728), no milestone CP, nobody flagged; the resumed segment pays the resume fee once
 //   [5] main(): COUCH_DUO=split -> the couch ladder only
 //   [6] main(): PT_MODE -> not settled, not processed, no couch board created
 //   [7] main(): a broken signature -> held (not flagged, not processed); COUCH_SIG_FLAG=1 -> flagged
@@ -133,18 +133,18 @@ console.log('=== O606 couch competitive settle (client knife 5c) ===');
   eq('[3] teamBlockSids still decodes a couch row', v.teamBlockSids([5, 0].concat(blk)), [S, S]);
   eq('[3] ladderDetails carries the couch bit only when cc', [(v.ladderDetails({ s: 1, ts: 9, build: 0, team: [S, S], cc: 1 })[2] >>> 24) & 0xff, (v.ladderDetails({ s: 1, ts: 9, build: 0, team: [S, SID(6302)] })[2] >>> 24) & 0xff], [1, 0]);
   const p = v.pid(S);
+  // O728: couch competitive runs settle on the duo points while merged (the couch lane writes the 'duo' history itself, one line
+  //   of points: a points value is a sum, two histories cannot be merged by reading); a split leaves them on 'duoc' (no points, no board)
+  eq('[3] couch runs go to the duo history while merged (COUCH_DUO unset)', v.couchRatingFam(), 'duo');
   const st = { hist: {} };
-  for (let i = 0; i < 3; i++) v.ratingHistUpsert(st, p, 'duo', 1, 100 + i, 10 + i, 1000 + i);
-  for (let i = 0; i < 3; i++) v.ratingHistUpsert(st, p, 'duoc', 1, 200 + i, 20 + i, 2000 + i);
-  const mg = v.ratingHistView(st, p, 'duo', 1, false), sp = v.ratingHistView(st, p, 'duo', 1, true);
-  eq('[3] merged view: both families\' runs in time order, best = the deeper', [mg.runs.map((r) => r[0]), mg.best], [[100, 101, 102, 200, 201, 202], [202, 22]]);
-  eq('[3] split view: duo only', [sp.runs.map((r) => r[0]), sp.best], [[100, 101, 102], [102, 12]]);
-  eq('[3] merged view: rated from the 5th run over both (split: 3 runs, not rated)', [!!v.ratingScoreOf(mg), v.ratingScoreOf(sp)], [true, null]);
-  for (let i = 0; i < 8; i++) v.ratingHistUpsert(st, p, 'duoc', 1, 300 + i, 5, 3000 + i);
-  eq('[3] merged view keeps the last WINDOW runs', v.ratingHistView(st, p, 'duo', 1, false).runs.length, 10);
-  eq('[3] another family is never merged', v.ratingHistView(st, p, 'trio', 1, false), undefined);
-  const plan = v.ratingPlan(st, 1, 'duo', {}, [S], { split: false }), planS = v.ratingPlan(st, 1, 'duo', {}, [S], { split: true });
-  eq('[3] ratingPlan: merged writes a duo rating row; split (3 duo runs) writes none', [plan.writes.length, planS.writes.length], [1, 0]);
+  for (let i = 0; i < 3; i++) v.ratingHistUpsert(st, p, 'duo', 1, 100 + i, 10 + i, 1000 + i, A.SEG_FINAL, 50 + i);
+  for (let i = 0; i < 2; i++) v.ratingHistUpsert(st, p, v.couchRatingFam(), 1, 200 + i, 20 + i, 2000 + i, A.SEG_FINAL, 60 + i);
+  for (let i = 0; i < 3; i++) v.ratingHistUpsert(st, p, 'duoc', 1, 300 + i, 30 + i, 3000 + i, A.SEG_FINAL, 70 + i);   // what a split writes
+  const done = v.elpSettleAll(st, 1, 9000);
+  const h = st.hist[v.ratingHistKey(p, 'duo', 1)];
+  eq('[3] the five online + couch runs settle on one duo line: placed (the fifth seeds), the split couch runs settle nothing', [done.length, h.placed, h.n, done.every((x) => x.k.indexOf('|duo|') > 0)], [5, 1, 5, true]);
+  const plan = v.ratingPlan(st, 1, 'duo', {}, [S]);
+  eq('[3] ratingPlan: one duo points row; no family reads the duoc history', [plan.writes.length, plan.writes[0] && plan.writes[0].score === h.lp, v.ratingPlan(st, 1, 'trio', {}, [S]).writes.length], [1, true, 0]);
 }
 
 // ---- main() harness (copied tree + one sealed test key; a stub Steam) ----
@@ -288,7 +288,7 @@ const brk = (rs, n, tag) => { if (rs.length === n && rs.every(r => r.code === 0)
     eq('[4] r1: duo row details = [team bank, build, team block (couch bit) + the account on both seats]', det ? [det[0], (det[2] >>> 24) & 0xff, (det[2] >>> 16) & 0xff, v.teamBlockSids(det)] : null, [1000, 1, 2, [S, S]]);
     T('[4] r1: XP written for the account', writesTo(r1, LB.xp, S).length === 1);
     const hk = Object.keys(((r1.state.SOLO_FILE || {}).hist) || {});
-    T('[4] r1: rating history under duoc', hk.some((k) => k.indexOf(v.pid(S) + '|duoc|') === 0) && !hk.some((k) => k.indexOf(v.pid(S) + '|duo|') === 0), JSON.stringify(hk));
+    T('[4] r1: rating history under duo (O728: one points line while merged, no duoc entry)', hk.some((k) => k.indexOf(v.pid(S) + '|duo|') === 0) && !hk.some((k) => k.indexOf(v.pid(S) + '|duoc|') === 0), JSON.stringify(hk));
     T('[4] r1: the chain is keyed by teamRunKey of the one-account roster', !!((r1.state.SOLO_FILE || {}).runs || {})[v.teamRunKey([S, S], 0, RS)]);
     T('[4] r1: no milestone CP (depth 5 has none anyway) and no cup line; nobody flagged', !/milestone/.test(r1.out.split('\n').filter((l) => l.indexOf(m0) >= 0).join('\n')) && !/weekly best/.test(r1.out) && flaggedOf(r1, S) === 0);
     T('[4] r3: the resumed final segment settles and pays the resume fee once', /couch settle /.test(r3.out) && procHas(r3, m1) && cpOf(r3, S) === 1000 - v.COMP.RESUME_CP,

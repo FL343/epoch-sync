@@ -90,6 +90,13 @@ function endlessRankItems(tier) {
   GRANTS.RANK_TIERS.forEach(([t], i) => { if (at >= 0 && at >= ENDLESS_TIER_ORDER.indexOf(t)) out.push(GRANTS.RANK_ENDLESS_BASE + i); });
   return out;
 }
+// O728: the endless tier a points row reached -- the tier of the highest points over the receipts still on the row (as the versus
+//   peak); score / det = the row's score and decoded details; a row of another layout (the O103 rating rows) = null (unrated)
+function endlessTierOf(score, det) {
+  const row = pp.elpRowOf(det);
+  if (!row || !row.placed) return null;
+  return ENDLESS_TIER_ORDER[pp.lpTierIdx(lpPeakOf(score | 0, row.ring))];
+}
 function bestTier(tiers) {
   let best = null;
   for (const t of tiers || []) if (t && (best == null || ENDLESS_TIER_ORDER.indexOf(t) > ENDLESS_TIER_ORDER.indexOf(best))) best = t;
@@ -263,17 +270,13 @@ async function run(opts) {
   cands = cands.slice(0, GRANTS.MAX_PLAYERS_PER_RUN);
 
   // result sources: this season's points board (+ last season's, its final receipts still count), the level
-  //   board, the four endless rating boards + the tier-cut carrier row
+  //   board, the four endless points boards (O728: the same scale and tiers as the versus points; this season's + last season's)
   const seasonId = v.seasonAt(nowMs);
   const lpIds = [];
   if (env.LP_LB) for (let s = seasonId; s >= Math.max(0, seasonId - 1); s--) { const id = idOf(v.seasonBoardName(env.LP_LB, s)); if (id) lpIds.push(id); }
   const xpId = env.XP_LB ? idOf(env.XP_LB) : null;
-  const famIds = v.RATING_FAMS.map(([fam, name]) => [fam, idOf(name)]).filter(([, id]) => id);
-  let cuts = null;
-  const tcId = idOf(v.ENDLESS_TIERCUT_LB);
-  if (tcId) {
-    try { const top = (await A.entries(appid, tcId))[0]; if (top) cuts = v.tiercutDecode(top.score | 0, v.decodeDetails(top.detailData)); } catch (e) { err('tiercut'); }
-  }
+  const famIds = [];
+  for (const [fam, name] of v.RATING_FAMS) for (let s = seasonId; s >= Math.max(0, seasonId - 1); s--) { const id = idOf(v.seasonBoardName(name, s)); if (id) famIds.push([fam, id]); }
   const bulk = cands.length > 40;          // a big run reads whole boards once; a small one reads the players' own rows
   const rowsOf = async (id) => {
     if (!id) return new Map();
@@ -297,8 +300,8 @@ async function run(opts) {
       }
       if (peak != null) earned.push(...versusRankItems(peak));
       // competitive endless tiers (best family)
-      if (cuts) {
-        const tiers = famRows.map(([fam, rows]) => { const e = rows.get(sid); return e && cuts.byFam && cuts.byFam[fam] && cuts.byFam[fam].N > 0 ? v.ratingTierOf(e.score | 0, cuts.byFam[fam].cuts) : null; });
+      {
+        const tiers = famRows.map(([, rows]) => { const e = rows.get(sid); return e ? endlessTierOf(e.score | 0, v.decodeDetails(e.detailData)) : null; });
         earned.push(...endlessRankItems(bestTier(tiers)));
       }
       // level
@@ -341,7 +344,7 @@ async function run(opts) {
   return stat;
 }
 
-module.exports = { GRANTS, ENDLESS_TIER_ORDER, lpPeakOf, versusRankItems, endlessRankItems, bestTier, levelItems, ownLicenseMs,
+module.exports = { GRANTS, ENDLESS_TIER_ORDER, lpPeakOf, versusRankItems, endlessRankItems, endlessTierOf, bestTier, levelItems, ownLicenseMs,
   purchaseItems, requestIdOf, candidatesOf, ringPos, ringOrder, ringStepOf, modeOf, missingItems, api, run };
 
 if (require.main === module) {

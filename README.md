@@ -240,16 +240,25 @@ absent, so a run is unaffected before it is provisioned.
   counted per reason and per hour in `rfduo.json` (shared mass-anomaly mail), never written to an
   offense board; 0 passes / final money <= 0 / a late reel receipt are skipped, not rejected. The
   save rows `rfduo_save` are only find-or-created. Main app only.
-- Endless competitive rating (client knife 5.1a, 2026-10-15; `test/endless-rating.js`): every settled
-  competitive endless segment (solo lane, team lane) enters or raises its run in a per-(player, family,
-  season) history kept in `endless-solo.json` (`hist`, pid-keyed: deepest run + the last 10 runs); players
-  with 5 or more runs get a row on `endless_rating_{solo,duo,trio,quad}` (+ season twins; EA app id only)
-  = 75 x deepest + 25 x mean of the window, in 0.01-depth units, maintained like `trust_tier` (read, write
-  the rows that differ, delete the rows that no longer qualify; a seedcap conviction removes the run). A
-  carrier row on `endless_tiercut` publishes, once per UTC day, the lowest score of each tier per family
-  (prior depth floors blending into the live percentile as the field grows; details = magic, season, then
-  N + six cuts per family). The carrier account is `TIERCUT_CARRIER_SID` or, unset, the account already
-  carrying the app's `version_gate` row. Board names: `ENDLESS_RATING_LB_*`, `ENDLESS_TIERCUT_LB`.
+- Endless competitive points (O728, 2026-11-08, replacing the O103 rating; rules in `points-plan.js` ELP,
+  `test/endless-lp.js` + golden cases kind `endless`; settle `test/endless-rating.js`): every settled
+  competitive endless segment (solo lane, team lane, couch lane on duo while merged) enters or raises its
+  run in a per-(player, family, season) history kept in `endless-solo.json` (`hist`, pid-keyed). Each run
+  settles once, in start order (its final segment, a newer run of the player, or 24 h without a segment and
+  without a save point), onto the family's points on the versus scale, shaped like a versus match (rules v2):
+  the target follows the player's own hidden skill (trimmed mean depth of the last 10 runs) plus an offset by
+  the run seed, so about half the runs pass; passing gains, missing loses, the versus table times a per-tier
+  multiplier (capped under the series margin). Below master grinding climbs (no pull down, a tier floor);
+  master and grandmaster open only once the hidden skill reaches their line (the gate); at master and up a
+  skill below the points is stricter and the series clamp applies. `test/endless-lp-sim.js` simulates it.
+  The first 5 runs of a season are placement (no points; the fifth seeds the points from the hidden skill). Rows on `endless_rating_{solo,duo,trio,quad}` (+ season twins; EA app id
+  only) are the projection: score = the points, details = magic 0xEE, runs, hidden skill, tier, placed and a
+  receipt ring keyed by the run seed; a seedcap conviction refunds the run as recorded (VOID receipt). The
+  pass lines (prior blending into the live percentile middles as players place) are recorded once per UTC
+  day (and at once on a rules change) and published on the `endless_tiercut` carrier (v2: magic 0xEC | 2 << 8,
+  season, the rules constants, N + seven lines per family; v1 rows read as no table). The carrier account is
+  `TIERCUT_CARRIER_SID` or, unset, the account already carrying the app's `version_gate` row. Board names:
+  `ENDLESS_RATING_LB_*`, `ENDLESS_TIERCUT_LB`.
 - Gold Rush Cup (client knife 5.1c-1, 2026-10-18; `test/endless-cup.js`): every competitive endless settle
   on the EA app id also keeps the player's best of the week on `<competitive ladder>_w<YYYYWW>` (ISO week,
   Monday 00:00 UTC; the week the settle runs in; team rows carry the team block; created at the week's

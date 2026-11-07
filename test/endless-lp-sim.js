@@ -1,0 +1,143 @@
+'use strict';
+// O728 endless competitive points: a simulation over the pure rules (points-plan.js ELP), fixed random seed, under a second.
+//   Made-up players with a true level (mean depth) and a luck spread (lognormal depth, coefficient of variation 0.3 / 0.6) place
+//   (5 runs, the seed) and then play against the prior solo pass lines. The rules are built like versus (the user's call
+//   2026-11-08): the target follows the player's own level, so
+//   [1] about half the runs pass (overall and at each luck spread: 0.42..0.58)
+//   [2] below master grinding climbs: runs from the placement to diamond (the median of a group) for a silver / gold / platinum /
+//       diamond-level player within 30 % of 150 / 80 / 40 / 20 (the user's table)
+//   [3] the master gate: a player whose hidden skill is below master never reaches master in 300 runs
+//   [4] promotion / relegation ping-pong: tier-line crossings a player in 300 runs <= 35 (and the share crossed back in 10 runs)
+//   [5] the zero-sum top: grandmaster-level players started at 8600 drift nowhere in 300 runs (mean change within +-200 points)
+//   [6] (printed) per tier: the pass rate the players had beside the table's balance rate, and where each level ended
+//   [7] mutations: no master gate -> [3] red; the old target (the points tier line) -> [1] red; MUL 1000 -> [2] red; no floor
+//       below master -> [4] red
+// Required (not run) it exports the simulation, for tuning MUL / TARGET_Q.
+const path = require('path');
+const fs = require('fs');
+const PP0 = require(path.join(__dirname, '..', 'points-plan.js'));
+const NAMES = ['bronze', 'silver', 'gold', 'platinum', 'diamond', 'master', 'grandmaster'];
+const LINES = PP0.ELP.PRIOR.solo;
+
+function rng(seed) { let a = seed >>> 0; return () => { a = (a + 0x6D2B79F5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+function gauss(r) { let u = 0, v = 0; while (u === 0) u = r(); while (v === 0) v = r(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); }
+function depthOf(r, mu, cv) { const s = Math.sqrt(Math.log(1 + cv * cv)); return Math.max(0, Math.round(mu * Math.exp(s * gauss(r) - s * s / 2))); }
+const mean = (a) => a.reduce((s, x) => s + x, 0) / (a.length || 1);
+const median = (a) => { const b = a.slice().sort((x, y) => x - y); return b.length ? b[Math.floor((b.length - 1) / 2)] : NaN; };
+
+// one player: placement (the target rule of a placement run) then n runs; startLp = null (the seed) or points set by hand
+function play(M, mu, cv, seed, n, startLp) {
+  const r = rng(seed);
+  const depths = [];
+  for (let i = 0; i < M.ELP.MIN_RUNS; i++) depths.unshift(depthOf(r, mu, cv));
+  let lp = startLp != null ? startLp : M.endlessSeedLp(M.hiddenOf(depths), LINES);
+  const lp0 = lp, tiers = [], passAt = [], hts = [];
+  let toDiamond = null;
+  for (let i = 0; i < n; i++) {
+    const seedRun = (r() * 4294967296) >>> 0, H = M.hiddenOf(depths);
+    const tgt = M.targetOf(lp, LINES, seedRun, H, false), d = depthOf(r, mu, cv), pass = d >= tgt;
+    passAt.push([M.lpTierIdx(lp), pass]);
+    lp = M.endlessSettle(lp, pass, H, LINES, M.targetOffset(seedRun)).nv;
+    depths.unshift(d); if (depths.length > M.ELP.WINDOW) depths.pop();
+    tiers.push(M.lpTierIdx(lp)); hts.push(M.tierOfHidden(M.hiddenOf(depths), LINES));
+    if (toDiamond == null && lp >= M.LP_SEG[4].min) toDiamond = i + 1;
+  }
+  return { lp0, lp, tiers, passAt, hts, toDiamond };
+}
+function crossingsOf(tiers) { let c = 0, back = 0; for (let i = 1; i < tiers.length; i++) { if (tiers[i] === tiers[i - 1]) continue; c++; for (let j = i + 1; j < Math.min(tiers.length, i + 11); j++) if (tiers[j] === tiers[i - 1]) { back++; break; } } return { c, back }; }
+
+const MUS = [3, 5, 8, 12, 18, 25, 35, 45, 60], CVS = [0.3, 0.6], PER = 6, N = 300;
+const LEVELS = [['silver', 6], ['gold', 10], ['platinum', 15], ['diamond', 24]], WANT = { silver: 150, gold: 80, platinum: 40, diamond: 20 };
+function simulate(M) {
+  const out = { pop: [], toD: {}, gm: [] };
+  let k = 0;
+  for (const mu of MUS) for (const cv of CVS) for (let j = 0; j < PER; j++) {
+    const seed = 1000 + (k++) * 7919, p = play(M, mu, cv, seed, N, null);
+    out.pop.push({ mu, cv, p, cross: crossingsOf(p.tiers), hid: M.tierOfHidden(Math.round(mu * 100), LINES) });
+  }
+  for (const [name, mu] of LEVELS) {
+    const runs = [];
+    for (const cv of CVS) for (let j = 0; j < 10; j++) { const p = play(M, mu, cv, 50000 + mu * 101 + j * 13 + (cv > 0.5 ? 7 : 0), 600, null); runs.push(p.toDiamond == null ? 601 : p.toDiamond); }
+    out.toD[name] = { median: median(runs), runs };
+  }
+  for (const cv of CVS) for (let j = 0; j < 10; j++) { const p = play(M, 70, cv, 90000 + j * 31 + (cv > 0.5 ? 3 : 0), N, 8600); out.gm.push(p.lp - 8600); }
+  return out;
+}
+// the highest points a player held over his runs (the gate check)
+function maxPoints(M, mu, cv, seed) {
+  const r = rng(seed), depths = [];
+  for (let i = 0; i < M.ELP.MIN_RUNS; i++) depths.unshift(depthOf(r, mu, cv));
+  let lp = M.endlessSeedLp(M.hiddenOf(depths), LINES), mx = lp;
+  for (let i = 0; i < N; i++) {
+    const seedRun = (r() * 4294967296) >>> 0, H = M.hiddenOf(depths);
+    const d = depthOf(r, mu, cv);
+    lp = M.endlessSettle(lp, d >= M.targetOf(lp, LINES, seedRun, H, false), H, LINES, M.targetOffset(seedRun)).nv;
+    depths.unshift(d); if (depths.length > M.ELP.WINDOW) depths.pop();
+    if (lp > mx) mx = lp;
+  }
+  return mx;
+}
+function gateMax(M) { let mx = 0; for (const mu of [3, 5, 8, 12, 18, 25]) for (const cv of CVS) for (let j = 0; j < 10; j++) mx = Math.max(mx, maxPoints(M, mu, cv, 70000 + mu * 37 + j * 11 + (cv > 0.5 ? 5 : 0))); return mx; }
+function passRates(sim) {
+  const all = [], byCv = {};
+  for (const x of sim.pop) for (const [, pass] of x.p.passAt) { all.push(pass ? 1 : 0); (byCv[x.cv] = byCv[x.cv] || []).push(pass ? 1 : 0); }
+  return { all: mean(all), byCv: Object.fromEntries(Object.entries(byCv).map(([k, v]) => [k, mean(v)])) };
+}
+function loadVariant(pairs) {
+  let s = fs.readFileSync(path.join(__dirname, '..', 'points-plan.js'), 'utf8');
+  for (const [a, b] of pairs) { if (s.indexOf(a) < 0) throw new Error('mutation anchor missing: ' + a.slice(0, 80)); s = s.split(a).join(b); }
+  const win = {}; new Function('window', s)(win); return win.POINTS_PLAN;
+}
+module.exports = { simulate, passRates, gateMax, loadVariant, WANT, LEVELS };
+
+if (require.main === module) {
+  let failN = 0;
+  const ok = (m) => console.log('  ok    ' + m);
+  const bad = (m) => { failN++; console.log('  FAIL  ' + m); };
+  const T = (label, cond, detail) => { if (cond) ok(label); else bad(label + (detail ? ' -- ' + detail : '')); };
+  const E = PP0.ELP;
+  console.log('=== O728 endless points simulation (MUL ' + E.MUL.join('/') + ', TARGET_Q ' + E.TARGET_Q + ', SWING_CAP ' + E.SWING_CAP + '; prior solo lines ' + JSON.stringify(LINES) + ') ===');
+  const S = simulate(PP0);
+  const perMu = (sim) => MUS.map((mu) => mean([].concat(...sim.pop.filter((x) => x.mu === mu).map((x) => x.p.passAt.map((y) => (y[1] ? 1 : 0))))));
+  const passOk = (sim) => { const pr = passRates(sim); return [pr.all, pr.byCv['0.3'], pr.byCv['0.6']].every((x) => x >= 0.42 && x <= 0.58) && perMu(sim).every((x) => x >= 0.40 && x <= 0.65); };
+  // [1]
+  const pr = passRates(S), pm = perMu(S);
+  T('[1] about half the runs pass: overall ' + pr.all.toFixed(3) + ', cv 0.3 ' + pr.byCv['0.3'].toFixed(3) + ', cv 0.6 ' + pr.byCv['0.6'].toFixed(3) + ' (0.42..0.58)', [pr.all, pr.byCv['0.3'], pr.byCv['0.6']].every((x) => x >= 0.42 && x <= 0.58));
+  T('[1] at every true level too (0.40..0.65): ' + MUS.map((mu, i) => mu + ' ' + pm[i].toFixed(2)).join(' | '), pm.every((x) => x >= 0.40 && x <= 0.65));
+  // [2]
+  for (const [name] of LEVELS) {
+    const m = S.toD[name].median, w = WANT[name];
+    T('[2] ' + name + '-level player: placement to diamond in ' + m + ' runs (median of 20; wanted ' + w + ' +-30 %; spread ' + Math.min.apply(null, S.toD[name].runs) + '..' + Math.max.apply(null, S.toD[name].runs) + ')', m >= w * 0.7 && m <= w * 1.3);
+  }
+  // [3]
+  const gm = gateMax(PP0);
+  T('[3] master gate: players below master in hidden skill (mean depth 3..25) never reach master in 300 runs (highest ' + gm + ')', gm < PP0.LP_SEG[5].min);
+  // [4]
+  const cr = S.pop.map((x) => x.cross.c), back = S.pop.reduce((s, x) => s + x.cross.back, 0), tot = cr.reduce((s, x) => s + x, 0);
+  T('[4] ping-pong: tier-line crossings a player in 300 runs: mean ' + mean(cr).toFixed(1) + ', max ' + Math.max.apply(null, cr) + ' (<= 35); crossed back within 10 runs ' + (tot ? (100 * back / tot).toFixed(1) : '0') + ' %', Math.max.apply(null, cr) <= 35);
+  // [5]
+  T('[5] zero-sum top: 20 grandmaster-level players from 8600, mean change after 300 runs ' + mean(S.gm).toFixed(0) + ' (within +-200; spread ' + Math.min.apply(null, S.gm) + '..' + Math.max.apply(null, S.gm) + ')', Math.abs(mean(S.gm)) <= 200);
+  // [6]
+  console.log('  [6] per tier: the pass rate players had there | the table balance rate (loss - drip) / (win + loss)');
+  for (let k = 0; k < 7; k++) {
+    const s = PP0.LP_SEG[k], runs = [];
+    for (const x of S.pop) for (const [t, pass] of x.p.passAt) if (t === k) runs.push(pass ? 1 : 0);
+    console.log('        ' + NAMES[k].padEnd(11) + ' ' + (runs.length ? mean(runs).toFixed(3) : '  -  ') + ' (' + String(runs.length).padStart(5) + ' runs) | ' + ((s.loss - s.drip) / (s.win + s.loss)).toFixed(3));
+  }
+  console.log('  [6] tier after 300 runs, by true level (min..max of ' + (CVS.length * PER) + ' players):');
+  for (const mu of MUS) { const g = S.pop.filter((x) => x.mu === mu).map((x) => x.p.tiers[x.p.tiers.length - 1]); console.log('        mean depth ' + String(mu).padStart(2) + ' (nearest line ' + NAMES[PP0.tierOfHidden(mu * 100, LINES)] + '): ' + NAMES[Math.min.apply(null, g)] + '..' + NAMES[Math.max.apply(null, g)]); }
+  // [7] mutations
+  const noGate = loadVariant([['if (cur < line && nv > Math.max(cur, cap))', 'if (false)']]);
+  T('[7] no master gate turns [3] red', gateMax(noGate) >= PP0.LP_SEG[5].min);
+  const oldTarget = loadVariant([["return hidden100 == null ? (elpLinesOk(pass) ? (pass[1] | 0) : 0) : Math.round((hidden100 | 0) * ELP.TARGET_Q / 100000);", "return elpLinesOk(pass) ? (pass[lpTierIdx(lpBefore)] | 0) : 0;"]]);
+  const sO = simulate(oldTarget);
+  T('[7] the old target (the points tier line) turns [1] red (per level ' + perMu(sO).map((x) => x.toFixed(2)).join(' ') + ')', !passOk(sO));
+  const mul1 = loadVariant([['MUL: Object.freeze([' + E.MUL.join(', ') + '])', 'MUL: Object.freeze([1000, 1000, 1000, 1000, 1000, 1000, 1000])']]);
+  const s1 = simulate(mul1);
+  T('[7] MUL all 1000 turns [2] red (' + LEVELS.map(([n]) => n + ' ' + s1.toD[n].median).join(', ') + ' runs)', LEVELS.some(([name]) => !(s1.toD[name].median >= WANT[name] * 0.7 && s1.toD[name].median <= WANT[name] * 1.3)));
+  const noFloor = loadVariant([['protect: !isPass && (cur < ELP.GATE_TIER || (ht != null && ht >= cur))', 'protect: !isPass && ht != null && ht >= cur']]);
+  const sF = simulate(noFloor), crF = sF.pop.map((x) => x.cross.c);
+  T('[7] without the floor below master the ping-pong comes back (max ' + Math.max.apply(null, crF) + ' crossings) -- [4] red', Math.max.apply(null, crF) > 35);
+  console.log(failN ? ('endless-lp-sim: ' + failN + ' FAIL') : 'endless-lp-sim: all ok');
+  process.exit(failN ? 1 : 0);
+}

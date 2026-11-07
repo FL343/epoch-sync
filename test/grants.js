@@ -124,8 +124,10 @@ function world0() {
       lp_ladder_s1: [lpRow(S1, 3950, [{ mh: 1, delta: -120, flags: 0 }]), lpRow(S2, 8100)],
       lp_ladder: [lpRow(S3, 6100)],     // last season's board (S3 peaked in the pre-season)
       xp_ladder: [{ steamID: S1, score: xpFor(55), detailData: '' }],
-      endless_rating_solo: [{ steamID: S3, score: 9000, detailData: '' }],
-      endless_tiercut: [{ steamID: '76561198000000099', score: 0, detailData: v.encodeDetails(v.tiercutEncode(1, { solo: { N: 50, cuts: [8000, 6000, 5000, 4000, 3000, 2000] } })) }],
+      // O728: endless points rows (the versus scale); last season's board. S3 at 8100 = grandmaster. An O103 rating row (no
+      //   points details) on this season's duo board counts nothing (S1's items stay the versus / level ones)
+      endless_rating_solo: [{ steamID: S3, score: 8100, detailData: v.encodeDetails(pp.elpRowDetails({ n: 20, hidden100: 5600, tier: 6, placed: 1 }, [])) }],
+      endless_rating_duo_s1: [{ steamID: S1, score: 9000, detailData: v.encodeDetails([1200, 950, 6, 0]) }],
     },
     own: {
       4815320: { [S1]: own(S1, '2026-11-20T00:00:00Z'), [S2]: own(S2, '2026-11-20T00:00:00Z', { ownersteamid: S4 }), [S3]: own(S3, '2027-01-15T00:00:00Z') },
@@ -143,7 +145,7 @@ function world0() {
   eq('daily run looked at the 48 h candidates', st.looked, 3);
   eq('S1: diamond peak (4070) + level 55 + first weeks + veteran + classic', w.inv[S1].slice().sort((a, b) => a - b), [201, 202, 203, 401, 402, 411]);
   eq('S2: grandmaster ranks, already held 404 not regranted, borrowed license gets no purchase item', w.inv[S2].slice().sort((a, b) => a - b), [401, 402, 403, 404]);
-  eq('S3: last season master + endless 9000 -> grandmaster tier; license too fresh -> no purchase item', w.inv[S3].slice().sort((a, b) => a - b), [401, 402, 403, 405, 406, 407, 408]);
+  eq('S3: last season master + endless points 8100 (last season) -> grandmaster tier; license too fresh -> no purchase item', w.inv[S3].slice().sort((a, b) => a - b), [401, 402, 403, 405, 406, 407, 408]);
   assert('S4 (mirror row older than 48 h) untouched', !w.inv[S4]);
   const promos = fk.calls.filter((c) => c.path.endsWith('/AddPromoItem/v1/'));
   eq('one promo sweep per candidate', promos.length, 3);

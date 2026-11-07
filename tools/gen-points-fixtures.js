@@ -22,7 +22,7 @@
 //   seat: { mt } -> which seats of the code move points (O716 one queue: the ranked-seat mask in bits 11-16; no mask = the old
 //     whole-table rule): { mask, sans: the code without the mask, base, any: anyAppliesLp, seats: seatAppliesLp of seats 0..5 }.
 //     A case added here moves no settled delta (no RULES_VER bump): it pins the reading both sides share.
-//   endless: { fn, args } -> PP[fn](...args), one O728 endless points function (hiddenOf / tierOfHidden / targetOffset / targetOf /
+//   endless: { fn, args } -> PP[fn](...args), one O728 endless points function (hiddenOf / tierOfHidden / skillTierOf / targetOffset / targetLineOf / targetOf /
 //     endlessDelta / endlessSettle / endlessSeedLp / elpRowDetails / elpRowOf / elpTableDetails / elpTableOf) at fixed inputs. The
 //     endless rules carry their own version (ELP.VER on the published table), not RULES_VER: an endless case that moves bumps ELP.VER.
 // ============================================================
@@ -163,19 +163,30 @@ function endlessCases() {
     E('skill tier, 9000 = grandmaster', 'tierOfHidden', [9000, SOLO]),
     E('skill tier, duo lines, 2000 = platinum', 'tierOfHidden', [2000, DUO]),
     E('skill tier, no skill = null', 'tierOfHidden', [null, SOLO]),
+    // the gate's tier reading: master and grandmaster only on reaching their own line
+    E('gate tier, 3400 = diamond (nearer the master line, not on it)', 'skillTierOf', [3400, SOLO]),
+    E('gate tier, 3800 = master', 'skillTierOf', [3800, SOLO]),
+    E('gate tier, 5000 = master (nearer the grandmaster line, not on it)', 'skillTierOf', [5000, SOLO]),
+    E('gate tier, 5500 = grandmaster', 'skillTierOf', [5500, SOLO]),
+    E('gate tier, 1200 = gold (below master: the nearest line)', 'skillTierOf', [1200, SOLO]),
+    E('gate tier, no skill = null', 'skillTierOf', [null, DUO]),
   ];
   // the target offset of a run seed (signed and unsigned of the same bits read the same)
   for (const s of [0, 1, 2, 3, 4, 5, 6, 7, 123456789, -1, 4294967295, -2147483648]) out.push(E('offset of seed ' + s, 'targetOffset', [s]));
   out.push(
-    E('target, bronze 300 (line 2), seed 7', 'targetOf', [300, SOLO, 7, null, false]),
-    E('target, bronze 300, seed 1 (offset -2: the floor 1)', 'targetOf', [300, SOLO, 1, null, false]),
-    E('target, silver 1000, seed 123456789', 'targetOf', [1000, SOLO, 123456789, null, false]),
-    E('target, gold 2500, seed -1', 'targetOf', [2500, SOLO, -1, null, false]),
-    E('target, grandmaster 9000, seed 2', 'targetOf', [9000, SOLO, 2, null, false]),
-    E('target, duo diamond 4500, seed 5', 'targetOf', [4500, DUO, 5, null, false]),
-    E('target, placement first run (the silver line)', 'targetOf', [0, SOLO, 7, null, true]),
-    E('target, placement with a skill of 2400 (platinum line)', 'targetOf', [0, SOLO, 7, 2400, true]),
-    E('target, placement with a skill of 50 (bronze line)', 'targetOf', [0, SOLO, 4, 50, true]),
+    E('target, skill 1000, seed 7 (the points do not move it)', 'targetOf', [300, SOLO, 7, 1000, false]),
+    E('target, skill 1000, seed 7, grandmaster points', 'targetOf', [9000, SOLO, 7, 1000, false]),
+    E('target, skill 150, seed 1 (offset -2: the floor 1)', 'targetOf', [300, SOLO, 1, 150, false]),
+    E('target, skill 1849, seed 123456789 (rounding)', 'targetOf', [1000, SOLO, 123456789, 1849, false]),
+    E('target, skill 2400, seed -1', 'targetOf', [2500, SOLO, -1, 2400, false]),
+    E('target, skill 6000, seed 2', 'targetOf', [9000, SOLO, 2, 6000, false]),
+    E('target, duo skill 4000, seed 5', 'targetOf', [4500, DUO, 5, 4000, false]),
+    E('target, placement first run (no skill: the silver line)', 'targetOf', [0, SOLO, 7, null, true]),
+    E('target, placement with a skill of 2400 so far', 'targetOf', [0, SOLO, 7, 2400, true]),
+    E('target, placement with a skill of 50 so far', 'targetOf', [0, SOLO, 4, 50, true]),
+    E('target line, skill 1849 (the dial middle)', 'targetLineOf', [1000, SOLO, 1849, false]),
+    E('target line, skill 150 (the line under the floor of 1)', 'targetLineOf', [300, SOLO, 150, false]),
+    E('target line, no skill yet (the silver line)', 'targetLineOf', [0, DUO, null, true]),
   );
   // the points before the clamp: every tier, pass / miss, skill one tier below / the same / one tier above, offsets -2 / 0 / +2
   const LPS = [300, 1000, 2500, 3500, 5000, 7000, 9000];
@@ -196,17 +207,26 @@ function endlessCases() {
     E('settle, gold 2500 miss, skill gold (protection holds but moves nothing)', 'endlessSettle', [2500, false, 1000, SOLO, 0]),
     E('settle, promotion band silver 1950 pass (forced up to 2010)', 'endlessSettle', [1950, true, 600, SOLO, 0]),
     E('settle, promotion band silver 1950 miss', 'endlessSettle', [1950, false, 600, SOLO, 0]),
-    E('settle, relegation band gold 2050 miss, skill silver (forced down to 1985)', 'endlessSettle', [2050, false, 600, SOLO, 0]),
+    E('settle, relegation band gold 2050 miss, skill silver (below master: no forced drop)', 'endlessSettle', [2050, false, 600, SOLO, 0]),
     E('settle, relegation band gold 2050 miss, skill gold (protected: no forced drop)', 'endlessSettle', [2050, false, 1000, SOLO, 0]),
-    E('settle, relegation band gold 2010 miss, skill platinum (protected: no forced drop)', 'endlessSettle', [2010, false, 1500, SOLO, 1]),
-    E('settle, relegation band gold 2010 miss, skill gold, offset -2 (protected: held at the floor)', 'endlessSettle', [2010, false, 1000, SOLO, -2]),
+    E('settle, relegation band gold 2010 miss, skill silver, offset -2 (held at the floor)', 'endlessSettle', [2010, false, 600, SOLO, -2]),
     E('settle, gold floor 2000 miss, skill gold (protected: d 0)', 'endlessSettle', [2000, false, 1000, SOLO, -2]),
     E('settle, relegation band gold 2050 pass', 'endlessSettle', [2050, true, 600, SOLO, 0]),
+    E('settle, diamond 5850 pass, skill 3700 (the master gate: held at 5879)', 'endlessSettle', [5850, true, 3700, SOLO, 2]),
+    E('settle, diamond 5850 pass, skill 3800 (the master gate open)', 'endlessSettle', [5850, true, 3800, SOLO, 2]),
+    E('settle, diamond 5950 pass, skill 3800 (forced up into master)', 'endlessSettle', [5950, true, 3800, SOLO, 0]),
+    E('settle, master 6050 miss, skill 3000 (master: the strict factor, forced down)', 'endlessSettle', [6050, false, 3000, SOLO, 0]),
+    E('settle, master 6100 miss, skill 3000, offset +2 (forced down to 5985)', 'endlessSettle', [6100, false, 3000, SOLO, 2]),
+    E('settle, master 6500 pass, skill 3000 (master: a pass still gains, smaller)', 'endlessSettle', [6500, true, 3000, SOLO, 0]),
+    E('settle, master 7850 pass, skill 5000 (the grandmaster gate: held at 7879)', 'endlessSettle', [7850, true, 5000, SOLO, 2]),
+    E('settle, master 7950 pass, skill 5500 (forced up into grandmaster)', 'endlessSettle', [7950, true, 5500, SOLO, -2]),
     E('settle, grandmaster line 8050 miss, skill grandmaster (protected)', 'endlessSettle', [8050, false, 5500, SOLO, 0]),
-    E('settle, grandmaster line 8050 miss, skill master (forced down)', 'endlessSettle', [8050, false, 3800, SOLO, 0]),
+    E('settle, grandmaster line 8050 miss, skill master (dropped to master)', 'endlessSettle', [8050, false, 3800, SOLO, 0]),
+    E('settle, grandmaster 9000 pass and miss are equal and opposite (zero-sum)', 'endlessDelta', [9000, true, 5500, SOLO, 0]),
     E('settle, the top 9990 pass (9999)', 'endlessSettle', [9990, true, 5500, SOLO, 2]),
     E('settle, the floor 5 miss (0)', 'endlessSettle', [5, false, 0, SOLO, -2]),
     E('settle, bronze 590 pass, skill gold (a crossing in the promotion band)', 'endlessSettle', [590, true, 1000, SOLO, 2]),
+    E('settle, platinum 3500 pass, skill diamond, offset +2 (the swing cap)', 'endlessSettle', [3500, true, 2400, SOLO, 2]),
     E('settle, duo lines, platinum 3100 miss, skill diamond (protected)', 'endlessSettle', [3100, false, 3800, DUO, 0]),
     // the placement seed
     E('seed, no skill', 'endlessSeedLp', [null, SOLO]),

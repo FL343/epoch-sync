@@ -14,10 +14,10 @@
 // lower of the cut with and without the banned players, and a failed ban read falls back to what the job did before.
 //   [1] the ban row: banRowFull agrees with sanctions.js (banDetails, ACT_*, expiredSids) and the client gate (unknown action = full)
 //   [2] cup (pure): solo, a tie, a team with an honest member, an all-banned team, the held count, no ban = the old verdict, fuzz
-//   [3] tier cuts (pure): banned on top lowers a cut, banned at the bottom leaves it, no ban = the old cuts, fuzz (no tier drops)
+//   [3] pass lines (pure, O728): banned on top lowers a line, banned at the bottom leaves it, no ban = the lines over everyone, fuzz (no line rises)
 //   [4] e2e cup over the REAL main(): banned champion + team; a winner banned after the settle loses his row and gets it back on
 //       an unban; a failed ban read waits inside CUP_BAN_WAIT_MS and settles as before past it
-//   [5] e2e tier cuts: banned on top; a failed ban read publishes the cuts over everyone
+//   [5] e2e pass-line table (O728 v2): banned on top; a failed ban read publishes the lines over everyone
 //   [6] e2e composite: no row for a banned account, a stray one deleted, an honest one untouched; a failed ban read = as before
 //   [7] wiring pins + mutation self-checks (each mutation of validate.js turns a check of [2]-[6] red)
 // Usage: node test/ban-skip.js
@@ -116,41 +116,40 @@ const podOf = (vd, pc) => ((vd.pod || {})[pc] || []).map((e) => [e[0], e[2].slic
   T('[2] fuzz: some honest accounts moved up into a mark (the fix does something) -- ' + gained, gained > 0);
 }
 
-// ---- [3] tier cuts (pure) ----
-console.log('-- [3] tier cuts without full bans (pure) --');
-const tierIdx = (score, cuts) => { for (let i = 0; i < 6; i++) if ((score | 0) >= (cuts[i] | 0)) return i; return 6; };
+// ---- [3] pass lines (pure; O728: the published table is pass lines, a lower line = an easier target) ----
+console.log('-- [3] pass lines without full bans (pure) --');
 {
-  const prior = v.RATING.PRIOR.solo;
+  const prior = require(path.join(__dirname, '..', 'points-plan.js')).ELP.PRIOR.solo;
+  const hid = (m) => { const o = {}; for (const sid of Object.keys(m)) o[v.pid(sid)] = m[sid]; return o; };
   const rows = {};
   for (let i = 0; i < 220; i++) rows[SID(1000 + i)] = 100 * (230 - i);
   const top = Object.assign({}, rows); for (let i = 0; i < 3; i++) top[SID(1500 + i)] = 90000;
   const topBan = new Set([0, 1, 2].map((i) => SID(1500 + i)));
-  const all = v.ratingCutsOf(Object.values(top), prior), nw = v.ratingCutsSkipBanned(top, topBan, prior);
-  T('[3] no ban set = ratingCutsOf over everyone', JSON.stringify(v.ratingCutsSkipBanned(top, null, prior)) === JSON.stringify(all) && JSON.stringify(v.ratingCutsSkipBanned(top, new Set(), prior)) === JSON.stringify(all));
-  eq('[3] three banned at 90000: the grandmaster cut comes down from their score to the third honest player', [all.cuts[0], nw.cuts[0]], [90000, 22800]);
-  T('[3] every cut <= the cut over everyone; N = everyone (223); nb = 3', nw.cuts.every((c, i) => c <= all.cuts[i]) && nw.N === 223 && nw.nb === 3, JSON.stringify(nw));
-  const low = Object.assign({}, rows); for (let i = 0; i < 3; i++) low[SID(1500 + i)] = 100;
-  const allL = v.ratingCutsOf(Object.values(low), prior), nwL = v.ratingCutsSkipBanned(low, topBan, prior), honL = v.ratingCutsOf(Object.values(rows), prior);
-  T('[3] three banned at the bottom: leaving them out alone would RAISE some cut (the case the rule is for)', honL.cuts.some((c, i) => c > allL.cuts[i]), JSON.stringify([honL.cuts, allL.cuts]));
-  eq('[3] ... so the published cuts stay those over everyone (nobody drops a tier)', nwL.cuts, allL.cuts);
-  // few players (blend with the prior): fewer players means more weight on the prior -- either direction, the lower wins
+  const all = v.elpLinesOf(Object.values(top), prior), nw = v.elpLinesSkipBanned(hid(top), topBan, prior);
+  T('[3] no ban set = elpLinesOf over everyone', JSON.stringify(v.elpLinesSkipBanned(hid(top), null, prior)) === JSON.stringify(all) && JSON.stringify(v.elpLinesSkipBanned(hid(top), new Set(), prior)) === JSON.stringify(all));
+  T('[3] three banned at depth 900: the grandmaster line comes down from their skill to the honest field', all.pass[6] > 900 && nw.pass[6] < 400, JSON.stringify([all.pass, nw.pass]));
+  T('[3] every line <= the line over everyone; N = everyone (223); nb = 3', nw.pass.every((c, i) => c <= all.pass[i]) && nw.N === 223 && nw.nb === 3, JSON.stringify(nw));
+  const low = Object.assign({}, rows); for (let i = 0; i < 3; i++) low[SID(1500 + i)] = 0;
+  const allL = v.elpLinesOf(Object.values(low), prior), nwL = v.elpLinesSkipBanned(hid(low), topBan, prior), honL = v.elpLinesOf(Object.values(rows), prior);
+  T('[3] three banned at the bottom: leaving them out alone would RAISE some line (the case the rule is for)', honL.pass.some((c, i) => c > allL.pass[i]), JSON.stringify([honL.pass, allL.pass]));
+  eq('[3] ... so the published lines stay those over everyone (no target gets harder)', nwL.pass, allL.pass);
   const few = {}; for (let i = 0; i < 30; i++) few[SID(2000 + i)] = 100 * (40 - i);
   const fb = new Set([SID(2000), SID(2001), SID(2029)]);
-  const allF = v.ratingCutsOf(Object.values(few), prior), nwF = v.ratingCutsSkipBanned(few, fb, prior);
-  T('[3] a small field (prior blend): every cut <= the cut over everyone', nwF.cuts.every((c, i) => c <= allF.cuts[i]), JSON.stringify([nwF.cuts, allF.cuts]));
+  const allF = v.elpLinesOf(Object.values(few), prior), nwF = v.elpLinesSkipBanned(hid(few), fb, prior);
+  T('[3] a small field (prior blend): every line <= the line over everyone', nwF.pass.every((c, i) => c <= allF.pass[i]), JSON.stringify([nwF.pass, allF.pass]));
   let harm = 0, mono = 0, lowered = 0;
   for (let it = 0; it < 400; it++) {
     const n = rnd(320), r = {}, b = new Set();
     for (let i = 0; i < n; i++) { const sid = SID(3000 + i); r[sid] = rnd(30000); if (rnd(10) === 0) b.add(sid); }
-    const a0 = v.ratingCutsOf(Object.values(r), prior), b0 = v.ratingCutsSkipBanned(r, b, prior);
-    for (let i = 0; i < 5; i++) if (b0.cuts[i] < b0.cuts[i + 1] + 100) mono++;
-    if (b0.N !== a0.N) mono++;
-    for (const sid of Object.keys(r)) if (!b.has(sid) && tierIdx(r[sid], b0.cuts) > tierIdx(r[sid], a0.cuts)) harm++;
-    if (b0.cuts.some((c, i) => c < a0.cuts[i])) lowered++;
+    const a0 = v.elpLinesOf(Object.values(r), prior), b0 = v.elpLinesSkipBanned(hid(r), b, prior);
+    for (let i = 0; i < 6; i++) if (b0.pass[i + 1] < b0.pass[i] + 1) mono++;
+    if (b0.pass[0] < 1 || b0.N !== a0.N) mono++;
+    if (b0.pass.some((c, i) => c > a0.pass[i])) harm++;
+    if (b0.pass.some((c, i) => c < a0.pass[i])) lowered++;
   }
-  eq('[3] fuzz 400 fields: an honest player in a lower tier than before', harm, 0);
-  eq('[3] fuzz 400 fields: cuts not one depth apart / N changed', mono, 0);
-  T('[3] fuzz: some cuts came down (the fix does something) -- ' + lowered, lowered > 0);
+  eq('[3] fuzz 400 fields: a line higher (a target harder) than over everyone', harm, 0);
+  eq('[3] fuzz 400 fields: lines not rising by one / under 1 / N changed', mono, 0);
+  T('[3] fuzz: some lines came down (the fix does something) -- ' + lowered, lowered > 0);
 }
 
 // ---- e2e harness (test/endless-cup.js / test/endless-rating.js / test/overall-ladder.js shapes) ----
@@ -234,18 +233,20 @@ let E4;
   T('[4] no ban board on the app: settled as before Q338, the board is not created', r7.code === 0 && JSON.stringify(cup7.w && cup7.w[WK]) === JSON.stringify(old) && !r7.posts.some((p) => /FindOrCreateLeaderboard/.test(p.url) && field(p, 'name') === 'ban_board'));
 }
 
-// ---- [5] tier cuts e2e ----
-console.log('-- [5] e2e: tier cuts over the real main() --');
+// ---- [5] pass-line table e2e ----
+console.log('-- [5] e2e: the pass-line table over the real main() --');
 function ratingWorld() {
   const st = { runs: {}, wait: {}, ms: {}, held: {}, hist: {} };
-  const rows = [];
-  const add = (sid, depth) => {
-    for (let r = 0; r < 5; r++) v.ratingHistUpsert(st, v.pid(sid), 'solo', 0, 1000 + r, depth, NOW_MS - 86400000 + r);
-    const sc = v.ratingScoreOf(st.hist[v.ratingHistKey(v.pid(sid), 'solo', 0)]);
-    rows.push({ steamID: sid, score: sc.score, details: sc.details });
-  };
+  const add = (sid, depth) => { for (let r = 0; r < 5; r++) v.ratingHistUpsert(st, v.pid(sid), 'solo', 0, 1000 + r, depth, NOW_MS - 86400000 + r, attest.SEG_FINAL, 77 + r); };
   for (let i = 0; i < 220; i++) add(SID(1000 + i), 230 - i);
   for (let i = 0; i < 3; i++) add(SID(1500 + i), 900);
+  v.elpSettleAll(st, 0, NOW_MS);   // all placed (five final runs each)
+  const rows = [];
+  for (let i = 0; i < 223; i++) {
+    const sid = i < 220 ? SID(1000 + i) : SID(1500 + i - 220);
+    const sc = v.ratingScoreOf(st.hist[v.ratingHistKey(v.pid(sid), 'solo', 0)]);
+    rows.push({ steamID: sid, score: sc.score, details: sc.details });
+  }
   rows.sort((a, b) => b.score - a.score);
   return { st, rows };
 }
@@ -254,16 +255,18 @@ const tcOf = (r) => { const p = setTo(r, BOARD.tiercut)[0]; return p ? v.tiercut
 const RBAN = [0, 1, 2].map((i) => banEnt(SID(1500 + i)));
 let E5;
 {
+  const prior = require(path.join(__dirname, '..', 'points-plan.js')).ELP.PRIOR.solo;
   E5 = run(world([], [], { rSolo: RW.rows, ban: RBAN }), { SOLO_FILE: RW.st });
   const dec = tcOf(E5);
-  const all = v.ratingCutsOf(RW.rows.map((x) => x.score), v.RATING.PRIOR.solo);
-  T('[5] run exits 0, no rating row rewritten (history matches the board), carrier published', E5.code === 0 && setTo(E5, BOARD.rSolo).length === 0 && delTo(E5, BOARD.rSolo).length === 0 && !!dec, E5.out.split('\n').filter((l) => /tiercut|rating|ban/.test(l)).join(' | '));
-  eq('[5] published solo cuts: the lower of with / without the 3 banned (grandmaster 22800, not 90000), N 223', dec && [dec.byFam.solo.cuts, dec.byFam.solo.N], [v.ratingCutsSkipBanned(Object.fromEntries(RW.rows.map((x) => [x.steamID, x.score])), new Set(RBAN.map((e) => e.steamID)), v.RATING.PRIOR.solo).cuts, 223]);
-  T('[5] every published cut <= the cut over everyone', dec && dec.byFam.solo.cuts.every((c, i) => c <= all.cuts[i]));
+  const hid = v.elpHiddensOf(RW.st, 'solo', 0);
+  const all = v.elpLinesOf(Object.values(hid), prior);
+  T('[5] run exits 0, no points row rewritten (history matches the board), table published', E5.code === 0 && setTo(E5, BOARD.rSolo).length === 0 && delTo(E5, BOARD.rSolo).length === 0 && !!dec, E5.out.split('\n').filter((l) => /tiercut|rating|ban/.test(l)).join(' | '));
+  eq('[5] published solo lines: the lower of with / without the 3 banned, N 223', dec && [dec.byFam.solo.pass, dec.byFam.solo.N], [v.elpLinesSkipBanned(hid, new Set(RBAN.map((e) => e.steamID)), prior).pass, 223]);
+  T('[5] every published line <= the line over everyone, and the grandmaster line came down', dec && dec.byFam.solo.pass.every((c, i) => c <= all.pass[i]) && dec.byFam.solo.pass[6] < all.pass[6], JSON.stringify([dec && dec.byFam.solo.pass, all.pass]));
   T('[5] the log says the banned were left out', /tiercut solo: N=223 .*\(3 banned left out/.test(E5.out));
   const rf = run(world([], [], { rSolo: RW.rows, ban: RBAN }), { SOLO_FILE: RW.st }, { STUB_FAIL: JSON.stringify({ ban_board: 500 }) });
   const decF = tcOf(rf);
-  eq('[5] ban board read fails: the cuts over everyone are published (as before Q338)', decF && decF.byFam.solo.cuts, all.cuts);
+  eq('[5] ban board read fails: the lines over everyone are published (as before Q338)', decF && decF.byFam.solo.pass, all.pass);
 }
 
 // ---- [6] composite e2e ----
@@ -329,8 +332,8 @@ function mutant(pairs) {
   const pure = [
     ['cupSkipBanned returns the groups untouched', [['if (!banned || !banned.size) return groups;', 'return groups;']], (m) => JSON.stringify(podOf(m.cupVerdict({ 1: soloRows(C.THR_SOLO) }, thr, new Set([SID(100)])), 1)[0]) !== JSON.stringify([1, [SID(101)]])],
     ['a team keeps a banned member in its mark list', [['const sids = g.sids.filter((s) => !banned.has(String(s)));', 'const sids = g.sids.slice();']], (m) => JSON.stringify(podOf(m.cupVerdict({ 2: duoRows(C.THR_TEAM) }, thr, new Set([SID(300)])), 2)[0]) !== JSON.stringify([1, [SID(301)]])],
-    ['the cut over the players not banned replaces the cut over everyone (no lower-of)', [['cuts: all.cuts.map((c, i) => Math.min(c | 0, hon.cuts[i] | 0))', 'cuts: hon.cuts']], (m) => { const low = {}; for (let i = 0; i < 220; i++) low[SID(1000 + i)] = 100 * (230 - i); for (let i = 0; i < 3; i++) low[SID(1500 + i)] = 100; const a = m.ratingCutsOf(Object.values(low), m.RATING.PRIOR.solo).cuts; return m.ratingCutsSkipBanned(low, new Set([0, 1, 2].map((i) => SID(1500 + i))), m.RATING.PRIOR.solo).cuts.some((c, i) => c > a[i]); }],
-    ['the published N drops the banned players', [['return { N: all.N, w: all.w,', 'return { N: hon.N, w: all.w,']], (m) => { const r = {}; for (let i = 0; i < 30; i++) r[SID(1 + i)] = i * 100; return m.ratingCutsSkipBanned(r, new Set([SID(1)]), m.RATING.PRIOR.solo).N !== 30; }],
+    ['the lines over the players not banned replace the lines over everyone (no lower-of)', [['const pass = all.pass.map((x, i) => Math.min(x, hon.pass[i]));', 'const pass = hon.pass.slice();']], (m) => { const low = {}; for (let i = 0; i < 220; i++) low[m.pid(SID(1000 + i))] = 100 * (230 - i); for (let i = 0; i < 3; i++) low[m.pid(SID(1500 + i))] = 0; const a = m.elpLinesOf(Object.values(low), require('../points-plan.js').ELP.PRIOR.solo).pass; return m.elpLinesSkipBanned(low, new Set([0, 1, 2].map((i) => SID(1500 + i))), require('../points-plan.js').ELP.PRIOR.solo).pass.some((c, i) => c > a[i]); }],
+    ['the published N drops the banned players', [['return { N: all.N, w: all.w, pass, nb:', 'return { N: hon.N, w: all.w, pass, nb:']], (m) => { const r = {}; for (let i = 0; i < 30; i++) r[m.pid(SID(1 + i))] = i * 100; return m.elpLinesSkipBanned(r, new Set([SID(1)]), require('../points-plan.js').ELP.PRIOR.solo).N !== 30; }],
     ['matchmaking-only read as a full ban', [['if (act === BAN_ACT_MM) return false;', '']], (m) => m.banRowFull(1, [0, 2], NOW_MS) === true],
     ['an expired row read as a ban', [['if (expMin > 0 && expMin * 60000 <= nowMs) return false;', '']], (m) => m.banRowFull(1, [Math.floor(NOW_MS / 60000) - 10, 1], NOW_MS) === true],
   ];
@@ -345,7 +348,7 @@ function mutant(pairs) {
     ['the settle ignores the bans (cupVerdict without them)', [['podium: CUP.PODIUM }, bans);', 'podium: CUP.PODIUM });']], (p) => JSON.stringify(cupE2e(p).honor1) !== JSON.stringify(CUP_WIN)],   // the upkeep still keeps SID(100) off, but the honest #4 loses his place
     ['the honor upkeep writes banned winners', [["if (bans) for (const sid of Object.keys(want)) if (bans.has(sid)) { delete want[sid]; if (existing[sid]) banGone.add(sid); }", '']], (p) => { const r = run(world([], weekBoards().concat(cupBoards()), { ban: [banEnt(SID(101))] }), { SOLO_FILE: Object.assign(solo0(), { cup: { s: WK, w: { [WK]: v.cupVerdict({ 1: soloRows(C.THR_SOLO) }, thr) } } }) }, null, p); return sidsOf(setTo(r, BOARD.honor)).indexOf(SID(101)) >= 0; }],
     ['the settle does not wait for a failed ban read', [["if (seasonNowMs() < cupWeekStart(cupNextWeek(wk)) + CUP_BAN_WAIT_MS) { ghWarn('cup: ban board not read -- week ' + wk + ' settled next run'); break; }", '']], (p) => { const r = run(world([], weekBoards().concat(cupBoards()), { ban: CUP_BAN }), { SOLO_FILE: solo0() }, { STUB_FAIL: JSON.stringify({ ban_board: 500 }) }, p); return ((r.state.SOLO_FILE || {}).cup || {}).s === WK; }],
-    ['the tier cuts ignore the bans', [['byFam[fam] = ratingCutsSkipBanned(rows, bans, RATING.PRIOR[fam]);', 'byFam[fam] = ratingCutsSkipBanned(rows, null, RATING.PRIOR[fam]);']], (p) => { const d = tcOf(run(world([], [], { rSolo: RW.rows, ban: RBAN }), { SOLO_FILE: RW.st }, null, p)); return !d || d.byFam.solo.cuts[0] === 90000; }],
+    ['the pass lines ignore the bans', [['byFam[fam] = elpLinesSkipBanned(elpHiddensOf(st, fam, seasonId), bans, ELP.PRIOR[fam]);', 'byFam[fam] = elpLinesSkipBanned(elpHiddensOf(st, fam, seasonId), null, ELP.PRIOR[fam]);']], (p) => { const d = tcOf(run(world([], [], { rSolo: RW.rows, ban: RBAN }), { SOLO_FILE: RW.st }, null, p)); const all = v.elpLinesOf(Object.values(v.elpHiddensOf(RW.st, 'solo', 0)), require('../points-plan.js').ELP.PRIOR.solo).pass; return !d || d.byFam.solo.pass[6] === all[6]; }],
     ['the composite writer writes banned accounts', [["if (ovBans && ovBans.has(sid)) return false;   // Q338: no composite row for a fully banned account", '']], (p) => sidsOf(setTo(run(world(SEG, [], Object.assign({ ban: OVBAN }, OV)), {}, { SEASON_NOW: '2026-10-01T12:00:00Z' }, p), BOARD.compOverall)).indexOf(X) >= 0],
     ['the composite writer leaves a banned stray row', [['const strays = ovBans ? Object.keys(cur).filter((sid) => ovBans.has(sid)) : [];', 'const strays = [];']], (p) => delTo(run(world(SEG, [], Object.assign({ ban: OVBAN }, OV)), {}, { SEASON_NOW: '2026-10-01T12:00:00Z' }, p), BOARD.compOverall).length === 0],
   ];

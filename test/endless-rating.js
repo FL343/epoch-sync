@@ -1,27 +1,31 @@
 'use strict';
 // ============================================================
-// endless-rating.js - O103 endless competitive rating (client knife 5.1a, 2026-10-15): run history -> rating ladders -> tier cuts
+// endless-rating.js - O728 endless competitive points (user calls 2026-11-08; companion KNIFE_O728_ENDLESS_LP_PLAN), the cron half
 // ============================================================
-// The companion repo's KNIFE_51_SEASON_BOARDS_PLAN (sections 0b / 2.1) in cron terms: every settled COMPETITIVE endless segment
-// enters / raises its run in a per-(player, family, season) history (endless-solo.json `hist`); players with >= MIN_RUNS runs get
-// a rating row (W_BEST x deepest + W_AVG x mean of the last WINDOW runs, 0.01-depth units) on endless_rating_{solo,duo,trio,quad}
-// (+ season twins); a carrier row on endless_tiercut publishes, once per UTC day, the lowest score of each tier (prior floors
-// blending into the live percentile as the field grows). The client only reads: its own rating row + the carrier.
-//   [1] history: first segment enters a run, later ones raise it in place, window of 10 in first-seen order, ids pushed out guard
-//       a late segment, best never drops
-//   [2] conviction: the run leaves the history, best is recomputed from the window
-//   [3] score: below MIN_RUNS none; weights; details [best, mean x 100, runs, 0]
-//   [4] plan: new / changed rows written, current rows untouched, unqualified rows deleted, touched sids without history ignored
-//   [5] cuts: no players = prior; <= 20 pure prior; >= 200 pure percentile; blend in between; monotone (one depth apart); tierOf
-//   [6] carrier: encode / decode round trip, due on a new day / season / empty, history prune keeps two seasons
-//   [7] wiring pins: provisioning, both lanes feed the history (EA only), correction removes the run, every exit path runs the
-//       lane, PT_MODE guard, summary row, details shape kept off the ladder-write pin
-//   [8] end to end over the REAL validate.js main() (offline board stub, settle-free tick): stale / unqualified / foreign rows on
-//       the solo board are rewritten / deleted, the carrier is published from the resulting field (season 0, N = 25, blended
-//       cuts; duo..quad = prior); a second tick with everything current writes nothing; the next UTC day republishes
-//   [9] end to end settle: a duo competitive segment ten minutes old enters both writers' duo history; its next segment raises
-//       the same run in place (still one run, nobody rated)
-//  [10] mutation self-checks: the weights / MIN_RUNS pinned by [3] go red when changed
+// Replaces the O103 rating (75 % season best + 25 % mean). Every settled COMPETITIVE endless segment enters / raises its run in a
+// per-(player, family, season) history (endless-solo.json `hist`, pid-keyed); each run settles ONCE, in start order, onto the
+// family's points (0..9999, the versus tiers) by points-plan.js ELP (its own golden cases + test/endless-lp.js); the points rows on
+// endless_rating_{solo,duo,trio,quad} (+ season twins) are the projection; the pass-line table (v2) rides the endless_tiercut carrier.
+//   [1] history: a run enters with its flags and run seed, later segments raise it in place, final sticks, the save bit follows the
+//       newest segment, a run that left never re-enters
+//   [2] when a run settles: final / a newer run / idle 24 h without a save point; a save point waits; start order; an ended season
+//       and the split couch history ('duoc') settle nothing
+//   [3] placement: four runs of d 0 (a receipt each, no row), the fifth seeds from the hidden skill over the five (SEEDED receipt);
+//       the placement targets (silver first, then the skill so far)
+//   [4] points: each run = points-plan.js endlessSettle at the points before and the hidden skill of the runs before; receipts
+//       keyed by the run seed (SERIES / PROTECT_RS); the line sets a target may have come from, the best for the player taken
+//   [5] window + conviction: settled runs past the window go to gone; a conviction refunds a settled run (in the window or gone) as
+//       recorded (VOID receipt), takes the placement back when it was the seeding run, removes an unsettled one; no re-entry
+//   [6] pass lines: prior with few players, live percentile middles with many, the blend, rising by one; the recorded tables (the
+//       one in force at an instant, 14 days kept, due on a new day / season / rules), the v2 carrier codec (v1 = no table), prune
+//   [7] wiring pins: provisioning, the three lanes feed the history with flags + run seed (EA only), the team's final ends a dropped
+//       member's run, the couch family, the correction, the upkeep on every exit path (before the save), the projection lane
+//   [8] end to end over the REAL validate.js main() (offline board stub, settle-free tick): rows rewritten / deleted from the history,
+//       an idle run settled and saved, the table published (blend), current on the second tick, republished the next day and at once
+//       on a rules change, carrier env / none; season 1 (12-01): the season boards, no rows (placement again), a season-1 table
+//   [9] end to end settle: a duo competitive run over two segments (the second final) enters both writers' history and settles as
+//       their first placement run (d 0, a receipt keyed by the run seed)
+//  [10] mutation self-checks on validate.js copies: each rule of [2]-[5] turns red when changed
 // Usage: node test/endless-rating.js
 // ============================================================
 const { spawnSync } = require('child_process');
@@ -30,11 +34,12 @@ const SCRUB = ['PT_MODE', 'STRICT_BOARDS', 'APPLY_MMR', 'ALLOW_TEST', 'DEMO_APPI
   'SEEDCAP_ENFORCE', 'SEEDCAP_REJECT', 'GITHUB_STEP_SUMMARY', 'LEDGER_SHARDS', 'PT_SHARD_COUNT', 'ABSENT_GRACE_MS', 'READ_RETRY_MS', 'SANITY_MIN_START_AGE_MS', 'BOT_PACE_FRAC',
   'SHARD_STRICT_BODY', 'SEASON_NOW', 'ENDLESS_LB', 'ENDLESS_LB_TRIO', 'ENDLESS_LB_QUAD', 'COMP_CHAIN_WAIT_MS', 'ENDLESS_PACE_FRAC', 'CP_LB', 'TRUST_LB', 'REPORT_LB',
   'ENDLESS_COMP_LB_DUO', 'ENDLESS_COMP_LB_TRIO', 'ENDLESS_COMP_LB_QUAD', 'ENDLESS_RATING_LB_SOLO', 'ENDLESS_RATING_LB_DUO', 'ENDLESS_RATING_LB_TRIO', 'ENDLESS_RATING_LB_QUAD',
-  'ENDLESS_TIERCUT_LB', 'TIERCUT_CARRIER_SID'];
+  'ENDLESS_TIERCUT_LB', 'TIERCUT_CARRIER_SID', 'ELP_IDLE_MS', 'COUCH_DUO'];
 for (const k of SCRUB) delete process.env[k];
 process.env.STATE_SALT = 's';   // same salt as the child runs below, so v.pid() addresses their state rows
 const v = require(path.join(__dirname, '..', 'validate.js'));
 const attest = require(path.join(__dirname, '..', 'attest.js'));
+const PP = require(path.join(__dirname, '..', 'points-plan.js'));
 
 let failN = 0;
 const ok = (m) => console.log('  ok    ' + m);
@@ -42,151 +47,244 @@ const bad = (m) => { failN++; console.log('  FAIL  ' + m); };
 const T = (label, cond, detail) => { if (cond) ok(label); else bad(label + (detail ? ' -- ' + detail : '')); };
 const eq = (label, got, exp) => { const a = JSON.stringify(got), b = JSON.stringify(exp); if (a === b) ok(label + ' = ' + a); else bad(label + ' = ' + a + ' (EXPECT ' + b + ')'); };
 
-const R = v.RATING;
+const R = v.RATING, ELP = PP.ELP, F = attest.SEG_FINAL, SUS = attest.SEG_SUSPENDED;
+const SOLO = ELP.PRIOR.solo;
 const SID = (n) => '7656119800' + String(n).padStart(7, '0');
 const P = (sid) => v.pid(sid);
+const H = (st, p, fam, s) => st.hist[v.ratingHistKey(p, fam == null ? 'solo' : fam, s == null ? 0 : s)];
+const DAY = 86400000;
+// a player's runs (depths, all final), first seen one minute apart from t0, run ids 100.., run seeds 500..
+function played(st, p, depths, t0, fam, s) { depths.forEach((d, i) => v.ratingHistUpsert(st, p, fam || 'solo', s || 0, 100 + i, d, t0 + i * 60000, F, 500 + i)); }
 
 // ---- [1] history ----
 console.log('-- [1] run history --');
 {
   const st = { hist: {} };
   const pA = P(SID(1));
-  const h = v.ratingHistUpsert(st, pA, 'solo', 0, 11, 5, 1000);
-  eq('[1] first segment enters the run (depth reached, first-seen stamp) and sets best', [h.runs, h.best], [[[11, 5, 1000]], [11, 5]]);
-  v.ratingHistUpsert(st, pA, 'solo', 0, 11, 10, 2000);
-  eq('[1] a later segment raises the run in place (no second run, first-seen kept)', [h.runs, h.best], [[[11, 10, 1000]], [11, 10]]);
-  v.ratingHistUpsert(st, pA, 'solo', 0, 11, 7, 3000);
-  eq('[1] a shallower sighting never lowers the run', h.runs[0][1], 10);
-  for (let i = 0; i < 12; i++) v.ratingHistUpsert(st, pA, 'solo', 0, 100 + i, i + 1, 4000 + i);
-  eq('[1] window keeps the last 10 runs in first-seen order; best stays the deepest ever (run 100+11 = 12)', [h.runs.length, h.runs[0][0], h.runs[9][0], h.best], [10, 102, 111, [111, 12]]);
-  eq('[1] ids pushed out of the window are remembered (run 11, 100, 101)', h.old, [11, 100, 101]);
-  v.ratingHistUpsert(st, pA, 'solo', 0, 11, 30, 9000);
-  eq('[1] a late segment of a run that left the window does not re-enter it, but can still raise best', [h.runs.length, h.runs.some(r => r[0] === 11), h.best], [10, false, [11, 30]]);
-  v.ratingHistUpsert(st, pA, 'duo', 0, 11, 3, 9500);
-  v.ratingHistUpsert(st, pA, 'solo', 1, 11, 3, 9600);
-  eq('[1] family and season are separate entries', Object.keys(st.hist).sort(), [pA + '|duo|0', pA + '|solo|0', pA + '|solo|1'].sort());
-  eq('[1] run id = fnv32 of the chain key (stable, 32-bit unsigned)', [v.ratingRunId('a|0|7'), v.ratingRunId('a|0|7') === v.fnv32('a|0|7'), v.fnv32('') === 0x811c9dc5], [v.fnv32('a|0|7'), true, true]);
-  eq('[1] family of a seat count: 1 solo / 2 duo / 3 trio / 4 quad', [1, 2, 3, 4].map(v.ratingFamOf), ['solo', 'duo', 'trio', 'quad']);
-  eq('[1] a depth-0 run (died on the first level) still counts as a run', v.ratingHistUpsert({ hist: {} }, pA, 'solo', 0, 5, 0, 1).runs, [[5, 0, 1]]);
+  const h = v.ratingHistUpsert(st, pA, 'solo', 0, 11, 5, 1000, 0, -7);
+  eq('[1] first segment enters the run: [runId, depth, firstSeen, settled 0, d 0, T 0, lastSeen, flags 0, run seed]', h.runs, [[11, 5, 1000, 0, 0, 0, 1000, 0, -7]]);
+  v.ratingHistUpsert(st, pA, 'solo', 0, 11, 10, 2000, SUS, -7);
+  eq('[1] a later segment raises it in place; a save-point segment sets the save bit', [h.runs.length, h.runs[0][1], h.runs[0][2], h.runs[0][6], h.runs[0][7]], [1, 10, 1000, 2000, 2]);
+  v.ratingHistUpsert(st, pA, 'solo', 0, 11, 7, 3000, attest.SEG_RESUMED, -7);
+  eq('[1] a shallower resumed segment never lowers the run; the newest segment without a save clears the save bit', [h.runs[0][1], h.runs[0][7]], [10, 0]);
+  v.ratingHistUpsert(st, pA, 'solo', 0, 11, 12, 4000, F, -7);
+  v.ratingHistUpsert(st, pA, 'solo', 0, 11, 12, 5000, SUS, -7);
+  eq('[1] the final bit sticks (a stray save after it changes nothing)', h.runs[0][7], 1);
+  eq('[1] best kept for the logs', h.best, [11, 12]);
+  h.old.push(99); (h.gone = []).push([98, 4, 3]);
+  v.ratingHistUpsert(st, pA, 'solo', 0, 99, 3, 6000, F, 1); v.ratingHistUpsert(st, pA, 'solo', 0, 98, 3, 6000, F, 1);
+  eq('[1] a run that left (old / gone) never re-enters', h.runs.map((r) => r[0]), [11]);
+  v.ratingHistUpsert(st, pA, 'solo', 1, 11, 2, 7000, 0, 1); v.ratingHistUpsert(st, pA, 'duo', 0, 11, 2, 7000, 0, 1);
+  eq('[1] families and seasons are separate entries', Object.keys(st.hist).sort(), [pA + '|duo|0', pA + '|solo|0', pA + '|solo|1']);
 }
 
-// ---- [2] conviction ----
-console.log('-- [2] conviction removes the run --');
+// ---- [2] when a run settles ----
+console.log('-- [2] when a run settles --');
 {
-  const st = { hist: {} };
-  const pA = P(SID(1));
-  for (let i = 0; i < 6; i++) v.ratingHistUpsert(st, pA, 'solo', 0, 200 + i, [4, 9, 30, 6, 7, 8][i], 100 + i);
-  T('[2] removing the deepest run drops it and recomputes best from the window', v.ratingHistRemove(st, pA, 'solo', 0, 202) === true && st.hist[pA + '|solo|0'].runs.length === 5 && JSON.stringify(st.hist[pA + '|solo|0'].best) === JSON.stringify([201, 9]));
-  T('[2] removing an unknown run changes nothing', v.ratingHistRemove(st, pA, 'solo', 0, 999) === false && st.hist[pA + '|solo|0'].runs.length === 5);
-  T('[2] removing from a missing entry is false', v.ratingHistRemove(st, pA, 'quad', 0, 200) === false);
-  const h = st.hist[pA + '|solo|0']; h.old = [777];
-  T('[2] an id in `old` is cleared too (a later segment may then re-enter it as a fresh run)', v.ratingHistRemove(st, pA, 'solo', 0, 777) === true && h.old.length === 0);
+  const now = 100 * DAY;
+  const st = { hist: {} }, p = P(SID(2));
+  v.ratingHistUpsert(st, p, 'solo', 0, 1, 6, now - 60000, 0, 9);
+  eq('[2] a run with no final segment, seen a minute ago, waits', v.elpSettleAll(st, 0, now).length, 0);
+  v.ratingHistUpsert(st, p, 'solo', 0, 1, 7, now - 30000, F, 9);
+  const d1 = v.elpSettleAll(st, 0, now);
+  eq('[2] its final segment settles it (at the deepest depth)', [d1.length, H(st, p).runs[0][3], H(st, p).runs[0][1]], [1, 1, 7]);
+  eq('[2] a settled run never settles again', v.elpSettleAll(st, 0, now + DAY).length, 0);
+  v.ratingHistUpsert(st, p, 'solo', 0, 2, 4, now - R.IDLE_MS - 1, 0, 10);
+  eq('[2] no segment for 24 h and no save point: settles at the depth reached (a crash / a killed process)', [v.elpSettleAll(st, 0, now).length, H(st, p).runs[1][3], H(st, p).runs[1][1]], [1, 1, 4]);
+  v.ratingHistUpsert(st, p, 'solo', 0, 3, 8, now - 3 * DAY, SUS, 11);
+  eq('[2] idle 3 days with a save point open: waits (it may still be resumed)', v.elpSettleAll(st, 0, now).length, 0);
+  v.ratingHistUpsert(st, p, 'solo', 0, 4, 1, now, 0, 12);
+  const d2 = v.elpSettleAll(st, 0, now);
+  eq('[2] a newer run starts: the saved run settles at its depth (starting another gives the save up), the newer one waits', [d2.length, d2[0] && d2[0].runId, H(st, p).runs[3][3]], [1, 3, 0]);
+  const s2 = { hist: {} }, q = P(SID(3));
+  played(s2, q, [3, 9, 1], now - DAY);
+  eq('[2] several runs settle in first-seen order', v.elpSettleAll(s2, 0, now).map((x) => x.runId), [100, 101, 102]);
+  const s3 = { hist: {} };
+  played(s3, q, [5, 5], now - DAY, 'solo', 0); played(s3, q, [5], now - DAY, 'duoc', 1); played(s3, q, [5], now - DAY, 'solo', 1);
+  eq('[2] only the current season settles; the split couch history (duoc) settles nothing', v.elpSettleAll(s3, 1, now).map((x) => x.k.split('|').slice(1).join('|')), ['solo|1']);
 }
 
-// ---- [3] score ----
-console.log('-- [3] score --');
+// ---- [3] placement ----
+console.log('-- [3] placement --');
 {
-  const st = { hist: {} };
-  const pA = P(SID(1));
-  for (let i = 0; i < 4; i++) v.ratingHistUpsert(st, pA, 'solo', 0, 300 + i, 10, i);
-  eq('[3] four runs: not rated', v.ratingScoreOf(st.hist[pA + '|solo|0']), null);
-  v.ratingHistUpsert(st, pA, 'solo', 0, 304, 20, 4);
-  // best 20, mean (10*4 + 20) / 5 = 12 -> 75 * 20 + 25 * 12 = 1800
-  eq('[3] five runs: score = 75 x best + 25 x mean (0.01 depths); details [best, mean x 100, runs, 0]', v.ratingScoreOf(st.hist[pA + '|solo|0']), { score: 1800, best: 20, avg100: 1200, n: 5, details: [20, 1200, 5, 0] });
-  v.ratingHistUpsert(st, pA, 'solo', 0, 305, 7, 5);
-  eq('[3] mean rounds to the nearest 0.01 depth (6 runs: (40 + 20 + 7) / 6 = 11.1667)', v.ratingScoreOf(st.hist[pA + '|solo|0']).score, Math.round(75 * 20 + 25 * (67 / 6)));
-  eq('[3] constants pinned (lockstep with the client RANKED_CONFIG.ENDLESS.RATING)', [R.W_BEST, R.W_AVG, R.MIN_RUNS, R.WINDOW, R.PCT_MIN_PLAYERS, R.TIERS7],
-    [75, 25, 5, 10, 50, [[1, 'grandmaster'], [4, 'master'], [10, 'diamond'], [20, 'platinum'], [35, 'gold'], [60, 'silver'], [100, 'bronze']]]);
-  eq('[3] board names (season 0 = base; twins _s<N>)', [v.ENDLESS_RATING_LB_SOLO, v.ENDLESS_RATING_LB_DUO, v.ENDLESS_RATING_LB_TRIO, v.ENDLESS_RATING_LB_QUAD, v.ENDLESS_TIERCUT_LB, v.seasonBoardName(v.ENDLESS_RATING_LB_SOLO, 1)],
-    ['endless_rating_solo', 'endless_rating_duo', 'endless_rating_trio', 'endless_rating_quad', 'endless_tiercut', 'endless_rating_solo_s1']);
-  eq('[3] prior floors per family (depths, grandmaster..silver) + blend bounds', [R.PRIOR.solo, R.PRIOR.duo, R.PRIOR.trio, R.PRIOR.quad, R.N_PRIOR_ONLY, R.N_FULL],
-    [[60, 40, 28, 20, 14, 8], [96, 64, 45, 32, 22, 13], [96, 64, 45, 32, 22, 13], [96, 64, 45, 32, 22, 13], 20, 200]);
+  const now = 100 * DAY;
+  const st = { hist: {} }, p = P(SID(4));
+  const depths = [4, 12, 7, 9, 30];
+  played(st, p, depths.slice(0, 4), now - DAY);
+  const d4 = v.elpSettleAll(st, 0, now), h = H(st, p);
+  eq('[3] four placement runs: d 0 each, not placed, no row', [d4.map((x) => x.d), h.placed | 0, h.n, v.ratingScoreOf(h)], [[0, 0, 0, 0], 0, 4, null]);
+  eq('[3] placement targets: the first from the silver line, the next from the plain mean of the runs so far',
+    d4.map((x) => x.T), [PP.targetOf(0, SOLO, 500, null, true), PP.targetOf(0, SOLO, 501, 400, true), PP.targetOf(0, SOLO, 502, 800, true), PP.targetOf(0, SOLO, 503, 767, true)]);
+  eq('[3] each placement run leaves a receipt of 0 keyed by its run seed', h.ring.map((e) => [e.mh, e.delta]), [[503, 0], [502, 0], [501, 0], [500, 0]]);
+  v.ratingHistUpsert(st, p, 'solo', 0, 104, 30, now - DAY + 4 * 60000, F, 504);
+  const d5 = v.elpSettleAll(st, 0, now);
+  const seed = PP.endlessSeedLp(PP.hiddenOf([30, 9, 7, 12, 4]), SOLO);
+  eq('[3] the fifth seeds the points from the hidden skill over all five (this run included)', [d5[0].seeded, h.placed, h.lp, d5[0].d, h.seedRun], [true, 1, seed, seed, 104]);
+  const top = h.ring[0];
+  T('[3] its receipt carries the seed as the change and SEEDED', top.mh === 504 && top.delta === seed && (top.flags & PP.RECEIPT_F.SEEDED) !== 0, JSON.stringify(top));
+  const row = v.ratingScoreOf(h), back = PP.elpRowOf(row.details);
+  eq('[3] the row now: score = the points, details = points-plan.js elpRowDetails (n, hidden skill, tier, placed, ring)', [row.score, back.n, back.hidden100, back.tier, back.placed, back.ring.length], [seed, 5, PP.hiddenOf([30, 9, 7, 12, 4]), PP.lpTierIdx(seed), true, 5]);
 }
 
-// ---- [4] plan ----
-console.log('-- [4] plan --');
+// ---- [4] points ----
+console.log('-- [4] points --');
 {
-  const st = { hist: {} };
-  const [A, B, C, D] = [SID(1), SID(2), SID(3), SID(4)];
-  for (let i = 0; i < 5; i++) { v.ratingHistUpsert(st, P(A), 'solo', 0, 400 + i, 10, i); v.ratingHistUpsert(st, P(B), 'solo', 0, 500 + i, 20, i); }
-  for (let i = 0; i < 3; i++) v.ratingHistUpsert(st, P(C), 'solo', 0, 600 + i, 10, i);
-  const existing = { [B]: { s: 2000, det: [20, 2000, 5, 0] }, [C]: { s: 1000, det: [10, 1000, 5, 0] }, [D]: { s: 1234, det: [] } };
-  const plan = v.ratingPlan(st, 0, 'solo', existing, new Set([A, B, C]));
-  eq('[4] A (touched, rated, no row) written; B current; C (3 runs) and D (no history) deleted',
-    [plan.writes, plan.deletes.sort()], [[{ sid: A, score: 1000, details: [10, 1000, 5, 0] }], [C, D].sort()]);
-  const plan2 = v.ratingPlan(st, 0, 'solo', { [B]: { s: 2000, det: [20, 2000] } }, new Set([SID(9)]));
-  eq('[4] a row whose details are short / stale is rewritten once; a touched sid without history is ignored', plan2, { writes: [{ sid: B, score: 2000, details: [20, 2000, 5, 0] }], deletes: [] });
-  eq('[4] another season / family sees none of it', v.ratingPlan(st, 1, 'solo', {}, new Set([A])), { writes: [], deletes: [] });
+  const now = 100 * DAY;
+  const st = { hist: {} }, p = P(SID(5));
+  played(st, p, [10, 10, 10, 10, 10], now - 2 * DAY);
+  v.elpSettleAll(st, 0, now);
+  const h = H(st, p);
+  let lp = h.lp, before = [10, 10, 10, 10, 10];
+  const plan = [[0, 14], [1, 2], [2, 25], [3, 9], [4, 11]];   // [index, depth]
+  let okAll = true, why = '';
+  for (const [i, depth] of plan) {
+    const id = 200 + i, seed = 900 + i * 7;
+    v.ratingHistUpsert(st, p, 'solo', 0, id, depth, now - DAY + i * 60000, F, seed);
+    const x = v.elpSettleAll(st, 0, now)[0];
+    const Hb = PP.hiddenOf(before), Tg = PP.targetOf(lp, SOLO, seed, Hb, false), want = PP.endlessSettle(lp, depth >= Tg, Hb, SOLO, PP.targetOffset(seed));
+    const rc = h.ring[0];
+    const flags = (want.protect ? ELP.PROTECT_RS : 0) | (want.clamped ? PP.RECEIPT_F.SERIES : 0);
+    if (!(x.d === want.nv - lp && x.T === Tg && h.lp === want.nv && rc.mh === seed && rc.delta === x.d && (rc.flags & 0xff) === flags)) { okAll = false; why = JSON.stringify([i, x, want, rc]); }
+    lp = h.lp; before = [depth].concat(before);
+  }
+  T('[4] five rated runs: each = endlessSettle(points before, pass = depth >= target, the hidden skill of the runs BEFORE it, the prior lines, the seed offset), receipt keyed by the run seed', okAll, why);
+  // the series clamp and the protection reach the receipt
+  const s2 = { hist: {} }, q = P(SID(6));
+  played(s2, q, [10, 10, 10, 10, 10], now - 2 * DAY); v.elpSettleAll(s2, 0, now);
+  const hq = H(s2, q); hq.lp = 2050;
+  v.ratingHistUpsert(s2, q, 'solo', 0, 300, 0, now - DAY, F, 4242); v.elpSettleAll(s2, 0, now);
+  T('[4] a miss in the relegation band with the skill at the gold line: protected (no forced drop), RS bits = PROTECT_RS', hq.lp >= 2000 && (hq.ring[0].flags & PP.RECEIPT_F.RS) === ELP.PROTECT_RS, JSON.stringify([hq.lp, hq.ring[0]]));
+  const s3 = { hist: {} }, r = P(SID(7));
+  played(s3, r, [3, 3, 3, 3, 3], now - 2 * DAY); v.elpSettleAll(s3, 0, now);
+  const hr = H(s3, r); hr.lp = 2050;
+  v.ratingHistUpsert(s3, r, 'solo', 0, 300, 0, now - DAY, F, 4242); v.elpSettleAll(s3, 0, now);
+  T('[4] the same miss with the skill at bronze: below master the floor holds too (>= 2000, PROTECT_RS)', hr.lp >= 2000 && (hr.ring[0].flags & PP.RECEIPT_F.RS) === ELP.PROTECT_RS, JSON.stringify([hr.lp, hr.ring[0]]));
+  hr.lp = 6100;
+  v.ratingHistUpsert(s3, r, 'solo', 0, 301, 0, now - DAY + 60000, F, 4243); v.elpSettleAll(s3, 0, now);
+  T('[4] at master the same miss drops to diamond (the strict factor, the series clamp)', hr.lp <= 5985 && PP.lpTierIdx(hr.lp) === 4, JSON.stringify([hr.lp, hr.ring[0]]));
+  // the line sets: the run first seen under a table, a looser table now (or the reverse): the better for the player
+  const strict = [3, 8, 14, 20, 30, 45, 60], loose = [2, 5, 8, 12, 20, 30, 45];
+  const mk = (tabs) => { const s = { hist: {}, elpTab: tabs }; played(s, P(SID(8)), [8, 8, 8, 8, 8], now - 10 * DAY); return s; };
+  const tabAt = (ms, pass) => ({ day: 1, season: 0, ms, key: v.elpTableKey(), byFam: { solo: { N: 300, pass } } });
+  let differed = 0;
+  for (const [label, tabs] of [['strict then, loose now', [tabAt(now - 20 * DAY, strict), tabAt(now - DAY / 2, loose)]], ['loose then, strict now', [tabAt(now - 20 * DAY, loose), tabAt(now - DAY / 2, strict)]]]) {
+    const s = mk(tabs); v.elpSettleAll(s, 0, now - DAY);   // placed under the first table
+    const hh = H(s, P(SID(8))), lp0 = hh.lp;
+    v.ratingHistUpsert(s, P(SID(8)), 'solo', 0, 400, 9, now - DAY, F, 77);
+    v.elpSettleAll(s, 0, now);
+    const each = [strict, loose].map((ls) => PP.endlessSettle(lp0, 9 >= PP.targetOf(lp0, ls, 77, 800, false), 800, ls, PP.targetOffset(77)).nv);
+    if (each[0] !== each[1]) differed++;
+    T('[4] ' + label + ': the run takes the line set that leaves the most points (' + each.join(' / ') + ')', hh.lp === Math.max.apply(null, each), JSON.stringify([hh.lp, each]));
+  }
+  T('[4] (the two line sets gave different points in at least one of the two)', differed >= 1);
+  T('[4] elpRunRk (the receipt key, lockstep with the client): the run seed | 0, the season left out', v.elpRunRk(1, 4294967295) === -1 && v.elpRunRk(0, -5) === -5 && v.elpRunRk(3, 2147483648) === -2147483648 && v.elpRunRk(0, 77) === 77);
+  T('[4] elpCandidates: in force a day before the first sighting, at it, now (distinct)', JSON.stringify(v.elpCandidates({ elpTab: [tabAt(10, strict), tabAt(20 * DAY, loose)] }, 'solo', 0, 20 * DAY + 5, 30 * DAY)) === JSON.stringify([strict, loose])
+    && JSON.stringify(v.elpCandidates({}, 'duo', 0, 5, 6)) === JSON.stringify([ELP.PRIOR.duo]));
 }
 
-// ---- [5] cuts ----
-console.log('-- [5] cuts --');
+// ---- [5] window + conviction ----
+console.log('-- [5] window + conviction --');
 {
-  const prior = R.PRIOR.solo;
-  eq('[5] nobody rated: cuts = prior x 100, N 0, w 0', v.ratingCutsOf([], prior), { N: 0, w: 0, cuts: [6000, 4000, 2800, 2000, 1400, 800] });
-  const few = Array.from({ length: 20 }, (_, i) => 9000 - i * 100);
-  eq('[5] 20 rated players: still pure prior (w = 0) whatever they scored', v.ratingCutsOf(few, prior), { N: 20, w: 0, cuts: [6000, 4000, 2800, 2000, 1400, 800] });
-  const many = Array.from({ length: 200 }, (_, i) => 20100 - i * 100);   // 20100 .. 200 (rank r -> 20100 - (r-1) * 100)
-  const live = [1, 4, 10, 20, 35, 60].map(p => 20100 - (Math.ceil(p / 100 * 200) - 1) * 100);   // the score at rank ceil(p% x N)
-  eq('[5] 200 rated players: pure live percentile (w = 1): rank ceil(p% x N) scores', v.ratingCutsOf(many, prior), { N: 200, w: 1, cuts: live });
-  eq('[5] percentile ranks: 1% of 200 = rank 2, 4% = 8, 10% = 20, 20% = 40, 35% = 70, 60% = 120', live, [20000, 19400, 18200, 16200, 13200, 8200]);
-  const mid = Array.from({ length: 110 }, (_, i) => 11000 - i * 100);
-  const w = (110 - 20) / 180;
-  const liveMid = [1, 4, 10, 20, 35, 60].map(p => 11000 - (Math.ceil(p / 100 * 110) - 1) * 100);
-  const expMid = liveMid.map((l, i) => Math.round((1 - w) * prior[i] * 100 + w * l));
-  eq('[5] 110 rated players: w = 0.5, each cut halfway between prior and live', v.ratingCutsOf(mid, prior), { N: 110, w: 0.5, cuts: expMid });
-  const flat = Array.from({ length: 200 }, () => 1500);   // everybody at the same score
-  eq('[5] monotone repair: with a flat field every live cut is equal -> pushed one depth apart from silver upward', v.ratingCutsOf(flat, prior).cuts, [2000, 1900, 1800, 1700, 1600, 1500]);
-  const cuts = [6000, 4000, 2800, 2000, 1400, 800];
-  eq('[5] tierOf: first cut the score reaches, top down; below silver = bronze', [6000, 5999, 4000, 2800, 2000, 1400, 800, 799, 0].map(s => v.ratingTierOf(s, cuts)),
-    ['grandmaster', 'master', 'master', 'diamond', 'platinum', 'gold', 'silver', 'bronze', 'bronze']);
-  eq('[5] tierOf without a table = null (client: "rating pending")', v.ratingTierOf(5000, null), null);
+  const now = 100 * DAY;
+  const st = { hist: {} }, p = P(SID(9));
+  played(st, p, [8, 8, 8, 8, 8, 12, 12, 2, 12, 12, 12, 12, 12], now - DAY);
+  v.elpSettleAll(st, 0, now);
+  const h = H(st, p);
+  eq('[5] 13 settled runs: the window keeps 10, the 3 oldest go to gone with their d and run seed (and to old)', [h.runs.length, h.gone.map((g) => g[0]), h.gone.map((g) => g[2]), h.old], [10, [100, 101, 102], [500, 501, 502], [100, 101, 102]]);
+  // conviction of a rated run in the window
+  const r7 = h.runs.find((r) => r[0] === 107), d7 = r7[4], lp0 = h.lp;
+  T('[5] (the convicted run moved points)', d7 !== 0, String(d7));
+  T('[5] a conviction removes a settled run and refunds its points as recorded (its receipt, keyed by its seed: VOID, net change 0)', v.ratingHistRemove(st, p, 'solo', 0, 107) && h.lp === Math.max(0, lp0 - d7) && h.ring[0].mh === 507 && h.ring[0].delta === 0 && (h.ring[0].flags & PP.RECEIPT_F.VOID) !== 0 && h.n === 12 && !h.runs.some((r) => r[0] === 107),
+    JSON.stringify([h.lp, lp0, d7, h.ring[0]]));
+  const lp1 = h.lp, g = h.gone.find((x) => x[0] === 101);
+  T('[5] a run out of the window (gone, a placement run of d 0): removed, nothing to refund, VOID receipt', v.ratingHistRemove(st, p, 'solo', 0, 101) && h.lp === lp1 && !h.gone.some((x) => x[0] === 101) && h.ring[0].mh === 501 && g[1] === 0);
+  v.ratingHistUpsert(st, p, 'solo', 0, 107, 30, now, F, 507);
+  T('[5] the convicted run never comes back', !h.runs.some((r) => r[0] === 107));
+  // the seeding run
+  const s2 = { hist: {} }, q = P(SID(10));
+  played(s2, q, [9, 9, 9, 9, 9, 9], now - DAY); v.elpSettleAll(s2, 0, now);
+  const hq = H(s2, q);
+  T('[5] convicting the seeding run takes the placement back (no row), VOID receipt of the seed', hq.seedRun === 104 && v.ratingHistRemove(s2, q, 'solo', 0, 104) && !hq.placed && hq.lp == null && v.ratingScoreOf(hq) === null && hq.ring[0].mh === 504 && (hq.ring[0].flags & PP.RECEIPT_F.VOID) !== 0);
+  v.ratingHistUpsert(s2, q, 'solo', 0, 120, 9, now, F, 620); v.elpSettleAll(s2, 0, now + 1);
+  T('[5] ... and the next settled run seeds again (5 runs settled again)', hq.placed === 1 && hq.seedRun === 120 && hq.n === 6, JSON.stringify([hq.placed, hq.seedRun, hq.n]));
+  const s3 = { hist: {} }, r = P(SID(11));
+  v.ratingHistUpsert(s3, r, 'solo', 0, 1, 5, now, 0, 3);
+  T('[5] an unsettled convicted run: removed, no receipt', v.ratingHistRemove(s3, r, 'solo', 0, 1) && H(s3, r).runs.length === 0 && !(H(s3, r).ring || []).length);
+  T('[5] no history / unknown run: false', !v.ratingHistRemove(s3, P(SID(12)), 'solo', 0, 1) && !v.ratingHistRemove(s3, r, 'solo', 0, 999));
+  // the team's final for a member who stopped writing
+  const s4 = { hist: {} }, m = P(SID(13));
+  v.ratingHistUpsert(s4, m, 'duo', 0, 77, 6, now - 60000, 0, 8);
+  T('[5] ratingHistFinal: marks an existing run final once; unknown run / no history = false', v.ratingHistFinal(s4, m, 'duo', 0, 77) && !v.ratingHistFinal(s4, m, 'duo', 0, 77) && !v.ratingHistFinal(s4, m, 'duo', 0, 78) && !v.ratingHistFinal(s4, P(SID(14)), 'duo', 0, 77)
+    && v.elpSettleAll(s4, 0, now).length === 1 && H(s4, m, 'duo').runs[0][1] === 6);
 }
 
-// ---- [6] carrier + prune ----
-console.log('-- [6] carrier --');
+// ---- [6] pass lines + tables ----
+console.log('-- [6] pass lines + tables --');
 {
-  const byFam = { solo: v.ratingCutsOf([], R.PRIOR.solo), duo: { N: 7, cuts: [1, 2, 3, 4, 5, 6] }, trio: v.ratingCutsOf([], R.PRIOR.trio), quad: v.ratingCutsOf([], R.PRIOR.quad) };
-  const det = v.tiercutEncode(1, byFam);
-  eq('[6] carrier details = 30 ints: magic | version << 8 (O199), season, then N + six cuts per family (solo, duo, trio, quad)', [det.length, det[0], det[1], det.slice(2, 9), det.slice(9, 16)], [30, 0xEC | (1 << 8), 1, [0, 6000, 4000, 2800, 2000, 1400, 800], [7, 1, 2, 3, 4, 5, 6]]);
-  const dec = v.tiercutDecode(20261201, det);
-  eq('[6] decode round trip (day from the score)', [dec.day, dec.season, dec.byFam.duo, dec.byFam.quad.cuts], [20261201, 1, { N: 7, cuts: [1, 2, 3, 4, 5, 6] }, [9600, 6400, 4500, 3200, 2200, 1300]]);
-  eq('[6] decode refuses a short / foreign row', [v.tiercutDecode(1, det.slice(0, 20)), v.tiercutDecode(1, [0x77].concat(det.slice(1))), v.tiercutDecode(1, null)], [null, null, null]);
-  // O199 (knife 5.5b-2, architecture decision 9): version 0 rows (written before the version byte) still decode; an unknown version does not
-  eq('[6] version 0 row (pre-version carrier) decodes to the same table', JSON.stringify(v.tiercutDecode(20261201, [0xEC].concat(det.slice(1)))), JSON.stringify(dec));
-  eq('[6] unknown version 2 -> null (no table)', v.tiercutDecode(20261201, [0xEC | (2 << 8)].concat(det.slice(1))), null);
-  eq('[6] due: no row / another day / another season; not when both match', [v.tiercutDue(null, 1, 20261201), v.tiercutDue(dec, 1, 20261202), v.tiercutDue(dec, 2, 20261201), v.tiercutDue(dec, 1, 20261201)], [true, true, true, false]);
+  eq('[6] no placed players = the prior', v.elpLinesOf([], SOLO).pass, SOLO);
+  const few = []; for (let i = 0; i < 20; i++) few.push(5000);
+  eq('[6] 20 placed players = still the prior (w 0)', [v.elpLinesOf(few, SOLO).pass, v.elpLinesOf(few, SOLO).w], [SOLO, 0]);
+  const many = []; for (let i = 0; i < 200; i++) many.push((i + 1) * 100);   // skills 1..200 levels
+  const L = v.elpLinesOf(many, SOLO);
+  // top 1 % = rank 2 (199), 4 % = 8 (193), 10 % = 20 (181), 20 % = 40 (161), 35 % = 70 (131), 60 % = 120 (81)
+  eq('[6] 200 placed players = the live lines (w 1): each tier the middle of its span (grandmaster: its cut + half the master span)', [L.w, L.pass], [1, [41, 106, 146, 171, 187, 196, 202]]);
+  const mid = []; for (let i = 0; i < 110; i++) mid.push(4000);
+  const B = v.elpLinesOf(mid, SOLO);
+  eq('[6] 110 players (all at 40): the blend w = 0.5 of the prior and the live middles (bronze 20, the rest 40)', [B.w, B.pass], [0.5, SOLO.map((x, k) => Math.round(0.5 * x + 0.5 * (k === 0 ? 20 : 40)))]);
+  T('[6] the lines rise by one at least and start at 1 (a flat field)', (() => { const z = v.elpLinesOf(new Array(250).fill(0), SOLO).pass; return z.every((x, k) => x >= (k ? z[k - 1] + 1 : 1)); })());
+  const now = 50 * DAY;
+  const st = {};
+  T('[6] due with no table; recorded; not due the same day / season / rules', v.tiercutDue(st, 0, 20261001) && (v.elpTabRecord(st, 0, 20261001, now, { solo: { N: 3, pass: SOLO } }), !v.tiercutDue(st, 0, 20261001)));
+  T('[6] due on another day, another season, other rules (the key)', v.tiercutDue(st, 0, 20261002) && v.tiercutDue(st, 1, 20261001) && (() => { const t = v.elpTabNewest(st); const k = t.key; t.key = 'x'; const due = v.tiercutDue(st, 0, 20261001); t.key = k; return due; })());
+  v.elpTabRecord(st, 0, 20261002, now + DAY, { solo: { N: 4, pass: [1, 2, 3, 4, 5, 6, 7] } });
+  eq('[6] the table in force at an instant: the newest at or before it (the prior before any)', [v.elpLinesAt(st, 'solo', 0, now - 1), v.elpLinesAt(st, 'solo', 0, now + 5), v.elpLinesAt(st, 'solo', 0, now + DAY), v.elpLinesAt(st, 'duo', 0, now + DAY), v.elpLinesAt(st, 'solo', 1, now + DAY)],
+    [SOLO, SOLO, [1, 2, 3, 4, 5, 6, 7], ELP.PRIOR.duo, SOLO]);
+  v.elpTabRecord(st, 0, 20261020, now + 20 * DAY, {});
+  eq('[6] tables older than 14 days leave the chain memory', st.elpTab.map((t) => t.day), [20261020]);
+  const det = v.tiercutEncode(1, { solo: { N: 7, pass: SOLO } });
+  eq('[6] carrier v2 = points-plan.js elpTableDetails (39 ints, magic | 2 << 8); decode round trip; v1 / foreign / short = no table', [det.length, det[0], v.tiercutDecode(20261201, det).byFam.solo, v.tiercutDecode(1, [0xEC | 256].concat(det.slice(1))), v.tiercutDecode(1, det.slice(0, 20)), R.TC_VERS],
+    [39, 0xEC | (2 << 8), { N: 7, pass: SOLO }, null, null, [0, 1, 2]]);
+  T('[6] the version registry reading (architecture decision 9): TC_VER 2 = points-plan.js ELP.TC_VER, TC_MAGIC = ELP.TC_MAGIC; v0 / v1 rows are taken (read as no table, never an error)',
+    R.TC_VER === ELP.TC_VER && R.TC_MAGIC === ELP.TC_MAGIC && v.tiercutDecode(1, [0xEC].concat(new Array(29).fill(0))) === null && v.tiercutDecode(1, [0xEC | 256].concat(new Array(29).fill(0))) === null);
   eq('[6] day = UTC calendar day YYYYMMDD', [v.tiercutDay(Date.UTC(2026, 11, 1, 0, 0, 0)), v.tiercutDay(Date.UTC(2026, 11, 1, 23, 59, 59)), v.tiercutDay(Date.UTC(2026, 11, 2))], [20261201, 20261201, 20261202]);
-  const st = { hist: { 'a|solo|0': {}, 'b|duo|1': {}, 'c|solo|2': {}, 'd|quad|3': {} } };
-  eq('[6] prune keeps the current and the previous season', [v.pruneRatingHist(st, 2), Object.keys(st.hist).sort()], [1, ['b|duo|1', 'c|solo|2', 'd|quad|3']]);
-  eq('[6] prune in season 0 keeps everything of season 0', [v.pruneRatingHist({ hist: { 'a|solo|0': {} } }, 0)], [0]);
+  const sp = { hist: { 'a|solo|0': {}, 'b|duo|1': {}, 'c|solo|2': {}, 'd|quad|3': {} } };
+  eq('[6] prune keeps the current and the previous season', [v.pruneRatingHist(sp, 2), Object.keys(sp.hist).sort()], [1, ['b|duo|1', 'c|solo|2', 'd|quad|3']]);
+  const hs = { hist: {} }; played(hs, 'pa', [9, 9, 9, 9, 9], 0); played(hs, 'pb', [9, 9], 0); played(hs, 'pc', [4, 4, 4, 4, 4], 0, 'duo'); v.elpSettleAll(hs, 0, DAY);
+  eq('[6] elpHiddensOf: the placed players of the family this season', v.elpHiddensOf(hs, 'solo', 0), { pa: 900 });
+  eq('[6] tier names of points values (grants / logs)', [0, 599, 600, 2000, 3999, 4000, 6000, 8000, 9999].map((x) => v.ratingTierOf(x)), ['bronze', 'bronze', 'silver', 'gold', 'platinum', 'diamond', 'master', 'grandmaster', 'grandmaster']);
 }
 
 // ---- [7] wiring pins ----
 console.log('-- [7] wiring pins --');
 const SRC = fs.readFileSync(path.join(__dirname, '..', 'validate.js'), 'utf8');
 {
-  T('[7] rating boards + carrier provisioned up-front on the EA app (trusted), after the classic surface', /\[SAVE_BOX_LB_CLASSIC_QUAD, false\],[^\n]*\n\s*\[ENDLESS_RATING_LB_SOLO, true\], \[ENDLESS_RATING_LB_DUO, true\], \[ENDLESS_RATING_LB_TRIO, true\], \[ENDLESS_RATING_LB_QUAD, true\], \[ENDLESS_TIERCUT_LB, true\],\n\s*\[ENDLESS_LB_OVERALL, true\], \[ENDLESS_LB_CLASSIC_OVERALL, true\],[^\n]*\n\s*\[ENDLESS_CUP_LB, true\], \[ENDLESS_CUP_HONOR_LB, true\]\]\) \{/.test(SRC));   // O276 (knife 5.1b): casual / classic composites; O180 (knife 5.1c-1): cup carrier + honor board at the tail
+  T('[7] rating boards + carrier provisioned up-front on the EA app (trusted), after the classic surface', /\[SAVE_BOX_LB_CLASSIC_QUAD, false\],[^\n]*\n\s*\[ENDLESS_RATING_LB_SOLO, true\], \[ENDLESS_RATING_LB_DUO, true\], \[ENDLESS_RATING_LB_TRIO, true\], \[ENDLESS_RATING_LB_QUAD, true\], \[ENDLESS_TIERCUT_LB, true\],\n\s*\[ENDLESS_LB_OVERALL, true\], \[ENDLESS_LB_CLASSIC_OVERALL, true\],[^\n]*\n\s*\[ENDLESS_CUP_LB, true\], \[ENDLESS_CUP_HONOR_LB, true\]\]\) \{/.test(SRC));
   T('[7] the playtest / demo board plan does NOT provision the rating surface (EA only)', !/ratingLb|ENDLESS_RATING_LB|ENDLESS_TIERCUT_LB/.test(SRC.slice(SRC.indexOf('function ptBoardPlan('), SRC.indexOf('return { create, forbidden };'))));
-  T('[7] solo competitive lane feeds the history (EA only, after the ladder block, inside the competitive branch)', /if \(!PT_MODE\) \{ ratingHistUpsert\(soloState, p, 'solo', f\.seasonId, ratingRunId\(key\), f\.endDepth, nowMs\); ratingTouched\.add\(sid\); \}/.test(SRC));
-  T('[7] team competitive lane feeds the history per writer (fam.low = duo / trio / quad; inside the writer loop, after the ladder block)', /if \(!PT_MODE\) \{ ratingHistUpsert\(soloState, pid\(sid\), fam\.low, t\.seasonId, ratingRunId\(key\), f\.endDepth, nowMs\); ratingTouched\.add\(sid\); \}/.test(SRC));
+  T('[7] solo competitive lane feeds the history with the segment flags and the run seed (EA only)', /if \(!PT_MODE\) \{ ratingHistUpsert\(soloState, p, 'solo', f\.seasonId, ratingRunId\(key\), f\.endDepth, nowMs, f\.flags, f\.runSeed\); ratingTouched\.add\(sid\); \}/.test(SRC));
+  T('[7] team competitive lane feeds the history per writer (run seed = d[4] of the group)', /if \(!PT_MODE\) \{ ratingHistUpsert\(soloState, pid\(sid\), fam\.low, t\.seasonId, ratingRunId\(key\), f\.endDepth, nowMs, f\.flags, g\[0\]\.d\[4\] \| 0\); ratingTouched\.add\(sid\); \}/.test(SRC));
+  T('[7] team lane: the team\'s final segment ends the run of a roster member who stopped writing (and touches him)', /if \(!PT_MODE && \(\(f\.flags \| 0\) & attest\.SEG_FINAL\)\) for \(const sidR of rosterSids\) \{ if \(writerSids\.indexOf\(sidR\) >= 0\) continue; if \(ratingHistFinal\(soloState, pid\(sidR\), fam\.low, t\.seasonId, ratingRunId\(key\)\)\) ratingTouched\.add\(sidR\); \}/.test(SRC));
   const lane = SRC.slice(SRC.indexOf("if ((t.flags | 0) & attest.SEG_COMP) {"), SRC.indexOf('// casual co-op: a shared perk build'));
   T('[7] team lane: the history write sits behind the reject-window skip (inside the writer loop, after the `continue`)', lane.indexOf('inside seedcap reject window -- outputs skipped') < lane.indexOf('ratingHistUpsert(soloState, pid(sid), fam.low'));
   T('[7] casual / classic lanes never feed the history (only three upsert sites, all competitive: solo / team / couch)', (SRC.match(/ratingHistUpsert\(soloState,/g) || []).length === 3);
-  T('[7] couch competitive lane feeds the history under duoc (O606: read with duo while merged)', /if \(!PT_MODE\) \{ ratingHistUpsert\(soloState, p, 'duoc', f\.seasonId, ratingRunId\(key\), f\.endDepth, nowMs\); ratingTouched\.add\(sid\); \}/.test(SRC));
-  T('[7] seedcap correction removes the convicted run from the flagged seats (solo: runSeed key; team: roster set key) and marks them touched',
-    /ratingHistRemove\(soloState, pid\(sidC\), famR, tC\.seasonId, ratingRunId\(keyR \|\| soloRunKey\(pid\(sidC\), tC\.seasonId, cg\[0\]\.d\[4\] \| 0\)\)\)/.test(SRC) && /teamRunKey\(Object\.values\(rosterC\)\.map\(String\), tC\.seasonId, cg\[0\]\.d\[4\] \| 0\)/.test(SRC));
-  T('[7] the lane runs on every exit path (two settle-free returns + the main path beside trust, after the state save)', (SRC.match(/const st0 = loadSolo\(\); await maintainRating\(st0, new Set\(\)\);/g) || []).length === 2 && /\n  saveSettled\(true\);\n  await maintainRating\(soloState, ratingTouched\);[^\n]*\n  await maintainTrust\(\);/.test(SRC) && /    if \(xpId\) saveXp\(xpState\);\n  \};/.test(SRC));   // Q334: right after the settle's state is on disk, before the board writes   // O180: the settle-free paths share one loaded chain memory with the cup upkeep
+  T('[7] couch competitive lane feeds the duo history while merged (couchRatingFam), with flags and run seed', /if \(!PT_MODE\) \{ ratingHistUpsert\(soloState, p, couchRatingFam\(\), f\.seasonId, ratingRunId\(key\), f\.endDepth, nowMs, f\.flags, f\.runSeed\); ratingTouched\.add\(sid\); \}/.test(SRC) && /function couchRatingFam\(\) \{ return COUCH_DUO_SPLIT \? 'duoc' : 'duo'; \}/.test(SRC));
+  T('[7] seedcap correction takes the convicted run out of the flagged seats (solo: runSeed key; team: roster set key; couch: the couch family)',
+    /ratingHistRemove\(soloState, pid\(sidC\), famR, tC\.seasonId, ratingRunId\(keyR \|\| soloRunKey\(pid\(sidC\), tC\.seasonId, cg\[0\]\.d\[4\] \| 0\)\)\)/.test(SRC) && /teamRunKey\(Object\.values\(rosterC\)\.map\(String\), tC\.seasonId, cg\[0\]\.d\[4\] \| 0\)/.test(SRC) && /couchCor \? couchRatingFam\(\)/.test(SRC));
+  T('[7] every exit path: the upkeep (settle + table) before the projection; the settle-free returns save when it changed',
+    (SRC.match(/const st0 = loadSolo\(\); const elpCh = await elpUpkeep\(st0\); await maintainRating\(st0, new Set\(\)\); if \(\(await maintainCup\(st0, null\) \|\| elpCh\) && APPLY_MMR\) saveSolo\(st0, nowMs\);/g) || []).length === 2);
+  T('[7] main path: upkeep, then prune, then the state save, then the projection beside trust',
+    /\n  await elpUpkeep\(soloState\);[^\n]*\n  \{ const nPr = pruneRatingHist\(soloState, seasonId\);[^\n]*\n[^\n]*\n  saveSettled\(true\);\n  await maintainRating\(soloState, ratingTouched\);[^\n]*\n  await maintainTrust\(\);/.test(SRC));
+  const up = SRC.slice(SRC.indexOf('const elpUpkeep = async (st) => {'), SRC.indexOf('const maintainRating = async (st, touched) => {'));
+  T('[7] upkeep: EA only; settles the current season; records the table when due, with the bans', /if \(PT_MODE \|\| !st\) return false;/.test(up) && /elpSettleAll\(st, seasonId, nowMs\)/.test(up) && /if \(tiercutDue\(st, seasonId, day\)\) \{/.test(up) && /await banSetOnce\(\)/.test(up) && /elpTabRecord\(st, seasonId, day, nowMs, byFam\)/.test(up));
   const laneSrc = SRC.slice(SRC.indexOf('const maintainRating = async (st, touched) => {'), SRC.indexOf('const persistStartsSide = () => {'));
-  T('[7] lane: EA only (PT_MODE returns first); a read failure skips the family and never deletes; cuts not published when a family was skipped',
-    /^\s*if \(PT_MODE\) return;/m.test(laneSrc) && /skipped this run, nothing deleted/.test(laneSrc) && /skipped this run -> cuts not published'\); return; \}/.test(laneSrc));
-  T('[7] lane: season >= 1 resolves the twin via resolveSeasonBoard, season 0 the base board; rows written with ForceUpdate + 4-int details; deletes via DeleteLeaderboardScore',
+  T('[7] projection: EA only (PT_MODE returns first); a read failure skips the family and never deletes', /^\s*if \(PT_MODE\) return;/m.test(laneSrc) && /skipped this run, nothing deleted/.test(laneSrc));
+  T('[7] projection: season >= 1 resolves the twin, season 0 the base board; ForceUpdate rows with the points details; DeleteLeaderboardScore',
     /seasonId >= 1 \? \(await resolveSeasonBoard\(lr, base, seasonId\)\)\.id : \(byName0\(base\) \|\| await findOrCreateBoard\(base, true\)\)/.test(laneSrc) && /scoremethod: 'ForceUpdate', format: 'json' \}, w\.details\);/.test(laneSrc) && /DeleteLeaderboardScore/.test(laneSrc));
-  T('[7] lane: carrier = TIERCUT_CARRIER_SID, else the row already on the carrier board, else the version_gate carrier; published only when due (day / season)',
-    /let carrier = TIERCUT_CARRIER_SID \|\| carrierOnBoard;/.test(laneSrc) && /byName0\('version_gate'\)/.test(laneSrc) && /if \(!tiercutDue\(published, seasonId, day\)\)/.test(laneSrc));
-  T('[7] history pruned in the main-path tail before the chain memory is saved; summary row present', SRC.indexOf('pruneRatingHist(soloState, seasonId);') > 0 && SRC.indexOf('pruneRatingHist(soloState, seasonId);') < SRC.lastIndexOf('saveSolo(soloState, nowMs);') && /endless rating rows written \/ deleted \/ tier cuts \(O103\)/.test(SRC));
+  T('[7] table: the newest recorded one, published when the carrier row differs; carrier = env, else the row on the board, else version_gate',
+    /const tab = elpTabNewest\(st\);/.test(laneSrc) && /let carrier = TIERCUT_CARRIER_SID \|\| carrierOnBoard;/.test(laneSrc) && /byName0\('version_gate'\)/.test(laneSrc) && /published\.day === \(tab\.day \| 0\) && sameInts\(published\.det, detTc\)/.test(laneSrc));
+  T('[7] summary row present (runs settled / rows / table)', /endless points \(O728\): runs settled \/ rows written \/ deleted \/ pass-line table/.test(SRC) && /s\('elpSettled', 0\)/.test(SRC));
   T('[7] rating writes do not look like endless ladder writes (board-build-details pin counts [w.ts | 0, w.build | 0] writes only)', !/w\.details\]\);/.test(SRC));
   T('[7] loadSolo initialises hist (an older state file reads as empty history)', /st\.hist = st\.hist \|\| \{\}; return st;/.test(SRC) && /\{ runs: \{\}, wait: \{\}, ms: \{\}, held: \{\}, hist: \{\} \}/.test(SRC));
+  T('[7] the O103 rating code is gone (75 / 25 weights, the cut table, the merged couch view)', !/W_BEST|W_AVG|ratingCutsOf|ratingHistView/.test(SRC));
 }
 
 // ---- e2e harness (test/team-comp-ghost-xp.js shape: offline stateless board stub, every *_FILE redirected into a temp cwd) ----
@@ -276,64 +374,81 @@ const postsTo = (r, boardId, kind) => r.posts.filter(x => new RegExp(kind || 'Se
 const field = (w, name) => { const m = new RegExp('(?:^|&)' + name + '=([^&]*)').exec(w.body); return m ? decodeURIComponent(m[1]) : null; };
 const detailsOf = (w) => { const m = /details=((?:%[0-9a-f]{2})+)/.exec(w.body); if (!m) return []; const bytes = m[1].split('%').filter(Boolean).map(h => parseInt(h, 16)); const out = []; for (let i = 0; i + 4 <= bytes.length; i += 4) out.push(bytes[i] | (bytes[i + 1] << 8) | (bytes[i + 2] << 16) | (bytes[i + 3] << 24)); return out; };
 
-// ---- [8] e2e: settle-free tick maintains the ladder + publishes the cuts ----
-console.log('-- [8] e2e: ladder upkeep + carrier on a settle-free tick --');
+// ---- [8] e2e: settle-free tick -- the upkeep settles an idle run, the projection rewrites / deletes rows, the table ----
+console.log('-- [8] e2e: points rows + the pass-line table on a settle-free tick --');
 {
-  // 25 rated solo players (depth i+3 x 5 runs, best = deepest), 2 with three runs, 1 foreign row without history
+  const T0 = Date.now() - 3 * DAY;
   const hist = {};
-  const rated = [], expScore = {};
-  for (let i = 0; i < 25; i++) {
-    const sid = SID(100 + i), st = { hist };
-    for (let k = 0; k < 5; k++) v.ratingHistUpsert(st, P(sid), 'solo', 0, 1000 + i * 10 + k, i + 3 + (k === 4 ? 10 : 0), 1700000000000 + k);
-    rated.push(sid); expScore[sid] = v.ratingScoreOf(hist[P(sid) + '|solo|0']);
-  }
-  for (const sid of [SID(200), SID(201)]) for (let k = 0; k < 3; k++) v.ratingHistUpsert({ hist }, P(sid), 'solo', 0, 2000 + k, 9, 1700000000000 + k);
-  const stale = rated.map(sid => ({ steamID: sid, score: 1, details: [0, 0, 0, 0] }))   // every rated player has a stale row -> rewritten
-    .concat([SID(200), SID(201)].map(sid => ({ steamID: sid, score: 500, details: [9, 900, 3, 0] })))   // three runs -> deleted
-    .concat([{ steamID: SID(300), score: 777, details: [] }]);   // no history -> deleted
+  const placed = [], exp = {};
+  for (let i = 0; i < 25; i++) { const sid = SID(100 + i); played({ hist }, P(sid), [i + 3, i + 3, i + 3, i + 3, i + 13], T0); placed.push(sid); }
+  const sidIdle = SID(150);
+  played({ hist }, P(sidIdle), [9, 9, 9, 9, 9, 9], T0);
+  for (const sid of [SID(200), SID(201)]) played({ hist }, P(sid), [9, 9, 9], T0);
+  v.elpSettleAll({ hist }, 0, T0 + DAY);
+  // the idle one: a seventh run, last seen 25 h ago, never final, no save point
+  v.ratingHistUpsert({ hist }, P(sidIdle), 'solo', 0, 777, 2, Date.now() - 25 * 3600000, 0, 4321);
+  for (const sid of placed) exp[sid] = v.ratingScoreOf(hist[P(sid) + '|solo|0']);
+  const after = JSON.parse(JSON.stringify({ hist }));
+  v.elpSettleAll(after, 0, Date.now());
+  exp[sidIdle] = v.ratingScoreOf(after.hist[P(sidIdle) + '|solo|0']);
+  const stale = placed.concat([sidIdle]).map((sid) => ({ steamID: sid, score: 1, details: [0, 0, 0, 0] }))
+    .concat([SID(200), SID(201)].map((sid) => ({ steamID: sid, score: 500, details: [9, 900, 3, 0] })))   // not placed (three runs): deleted
+    .concat([{ steamID: SID(300), score: 777, details: [] }]);   // no history: deleted
   const solo = { runs: {}, wait: {}, ms: {}, held: {}, hist };
   const r1 = runCron(world([], { solo: stale }), { SOLO_FILE: solo });
   T('[8] run exits 0 (no fresh matches)', r1.code === 0, r1.out.slice(-600));
   const w1 = postsTo(r1, BOARD.rSolo);
   const wrote = {}; for (const w of w1) wrote[field(w, 'steamid')] = { s: Number(field(w, 'score')), det: detailsOf(w) };
-  T('[8] all 25 rated players rewritten with score + [best, mean x 100, runs, 0] details (ForceUpdate)', w1.length === 25 && rated.every(sid => wrote[sid] && wrote[sid].s === expScore[sid].score && JSON.stringify(wrote[sid].det) === JSON.stringify(expScore[sid].details)) && w1.every(w => field(w, 'scoremethod') === 'ForceUpdate'),
-    'writes=' + w1.length + ' sample=' + JSON.stringify(wrote[rated[0]]) + ' exp=' + JSON.stringify(expScore[rated[0]]));
-  const d1 = postsTo(r1, BOARD.rSolo, 'DeleteLeaderboardScore').map(w => field(w, 'steamid')).sort();
-  eq('[8] the three unqualified rows deleted (two with three runs, one without history)', d1, [SID(200), SID(201), SID(300)].sort());
-  T('[8] duo / trio / quad boards read, nothing written (no history)', [BOARD.rDuo, BOARD.rTrio, BOARD.rQuad].every(id => postsTo(r1, id).length === 0 && postsTo(r1, id, 'DeleteLeaderboardScore').length === 0));
+  T('[8] 26 placed players rewritten: score = points, details = the points row (ForceUpdate)', w1.length === 26 && placed.concat([sidIdle]).every((sid) => wrote[sid] && wrote[sid].s === exp[sid].score && JSON.stringify(wrote[sid].det) === JSON.stringify(exp[sid].details)) && w1.every((w) => field(w, 'scoremethod') === 'ForceUpdate'),
+    'writes=' + w1.length + ' sample=' + JSON.stringify(wrote[sidIdle]) + ' exp=' + JSON.stringify(exp[sidIdle]));
+  const hI = ((r1.state.SOLO_FILE || {}).hist || {})[P(sidIdle) + '|solo|0'];
+  T('[8] the idle run (25 h, no save point) settled on the settle-free tick and the chain memory was saved', !!hI && hI.runs.some((r) => r[0] === 777 && r[3] === 1) && hI.ring[0].mh === 4321 && /endless points solo /.test(r1.out), JSON.stringify(hI && hI.runs.slice(-2)));
+  eq('[8] the three rows of no placed player deleted (two with three runs, one without history)', postsTo(r1, BOARD.rSolo, 'DeleteLeaderboardScore').map((w) => field(w, 'steamid')).sort(), [SID(200), SID(201), SID(300)].sort());
+  T('[8] duo / trio / quad boards read, nothing written', [BOARD.rDuo, BOARD.rTrio, BOARD.rQuad].every((id) => postsTo(r1, id).length === 0 && postsTo(r1, id, 'DeleteLeaderboardScore').length === 0));
   const tc1 = postsTo(r1, BOARD.tiercut);
-  T('[8] carrier published once, under the version_gate carrier account, score = UTC day of the (pinned) clock', tc1.length === 1 && field(tc1[0], 'steamid') === CARRIER && Number(field(tc1[0], 'score')) === 20261001, JSON.stringify(tc1.map(w => w.body)));
+  T('[8] table published once, under the version_gate carrier account, score = UTC day of the (pinned) clock', tc1.length === 1 && field(tc1[0], 'steamid') === CARRIER && Number(field(tc1[0], 'score')) === 20261001, JSON.stringify(tc1.map((w) => w.body)));
   if (tc1.length) {
     const dec = v.tiercutDecode(Number(field(tc1[0], 'score')), detailsOf(tc1[0]));
-    const scores = rated.map(sid => expScore[sid].score);
-    const expSolo = v.ratingCutsOf(scores, R.PRIOR.solo);
-    T('[8] solo cuts = blend of prior and the 25 live scores (w = 5/180); duo..quad = pure prior (N 0)', !!dec && dec.season === 0 && dec.byFam.solo.N === 25 && JSON.stringify(dec.byFam.solo.cuts) === JSON.stringify(expSolo.cuts) && Math.abs(expSolo.w - 5 / 180) < 1e-9
-      && dec.byFam.duo.N === 0 && JSON.stringify(dec.byFam.duo.cuts) === JSON.stringify(R.PRIOR.duo.map(x => x * 100)) && JSON.stringify(dec.byFam.quad.cuts) === JSON.stringify(R.PRIOR.quad.map(x => x * 100)), JSON.stringify(dec));
-    T('[8] the summary line reports the field (numbers only)', /rating summary \{"fam":"solo","rated":25,/.test(r1.out) && !new RegExp(SID(100)).test(r1.out.split('rating summary')[1] || ''));
-    // second tick: every row current, carrier of the day on the board -> nothing written
-    const current = rated.map(sid => ({ steamID: sid, score: expScore[sid].score, details: expScore[sid].details }));
+    const hs = Object.values(v.elpHiddensOf(after, 'solo', 0));
+    const want = v.elpLinesOf(hs, SOLO);
+    T('[8] v2 table: solo = the blend over the 26 placed (w = 6/180), duo..quad = the prior with N 0; the rules constants ride along', !!dec && dec.season === 0 && dec.rulesSame && dec.byFam.solo.N === 26 && JSON.stringify(dec.byFam.solo.pass) === JSON.stringify(want.pass) && Math.abs(want.w - 6 / 180) < 1e-9
+      && dec.byFam.duo.N === 0 && JSON.stringify(dec.byFam.duo.pass) === JSON.stringify(ELP.PRIOR.duo) && JSON.stringify(dec.byFam.quad.pass) === JSON.stringify(ELP.PRIOR.quad), JSON.stringify(dec));
+    const tabs = (r1.state.SOLO_FILE || {}).elpTab || [];
+    T('[8] the table is recorded in the chain memory (the settle reads the one in force)', tabs.length === 1 && tabs[0].day === 20261001 && tabs[0].season === 0 && JSON.stringify(tabs[0].byFam.solo.pass) === JSON.stringify(dec.byFam.solo.pass));
+    T('[8] the summary line reports the field (numbers only)', /rating summary \{"fam":"solo","rated":26,/.test(r1.out) && !new RegExp(SID(100)).test(r1.out.split('rating summary')[1] || ''));
+    const current = placed.concat([sidIdle]).map((sid) => ({ steamID: sid, score: exp[sid].score, details: exp[sid].details }));
     const carrierRow = [{ steamID: CARRIER, score: 20261001, details: detailsOf(tc1[0]) }];
-    const r2 = runCron(world([], { solo: current }, carrierRow), { SOLO_FILE: solo });
-    T('[8] second tick, everything current: zero rating writes / deletes, carrier not republished (same day, same season)', r2.code === 0 && postsTo(r2, BOARD.rSolo).length === 0 && postsTo(r2, BOARD.rSolo, 'DeleteLeaderboardScore').length === 0 && postsTo(r2, BOARD.tiercut).length === 0 && /tiercut/.test(r2.out) === false || /current 20261001/.test(r2.out) || postsTo(r2, BOARD.tiercut).length === 0,
-      'posts=' + r2.posts.filter(x => /leaderboardid=(30|41)/.test(x.body)).length);
-    T('[8] second tick: no SetLeaderboardScore to the solo rating board and none to the carrier', postsTo(r2, BOARD.rSolo).length === 0 && postsTo(r2, BOARD.tiercut).length === 0);
-    // next UTC day: republished, rows still untouched
-    const r3 = runCron(world([], { solo: current }, carrierRow), { SOLO_FILE: solo }, { SEASON_NOW: '2026-10-02T00:00:01Z' });
+    const r2 = runCron(world([], { solo: current }, carrierRow), { SOLO_FILE: r1.state.SOLO_FILE });
+    T('[8] second tick, everything current: zero rating writes / deletes, table not republished (same day, same rules)', r2.code === 0 && postsTo(r2, BOARD.rSolo).length === 0 && postsTo(r2, BOARD.rSolo, 'DeleteLeaderboardScore').length === 0 && postsTo(r2, BOARD.tiercut).length === 0 && ((r2.state.SOLO_FILE || {}).elpTab || []).length === 1,
+      r2.out.split('\n').filter((l) => /tiercut|rating|endless points/.test(l)).join(' | '));
+    const r3 = runCron(world([], { solo: current }, carrierRow), { SOLO_FILE: r1.state.SOLO_FILE }, { SEASON_NOW: '2026-10-02T00:00:01Z' });
     const tc3 = postsTo(r3, BOARD.tiercut);
-    T('[8] next UTC day: carrier republished (score 20261002) under the SAME account as the row on the board; rows untouched', r3.code === 0 && tc3.length === 1 && Number(field(tc3[0], 'score')) === 20261002 && field(tc3[0], 'steamid') === CARRIER && postsTo(r3, BOARD.rSolo).length === 0, JSON.stringify(tc3.map(w => w.body)));
-    // the carrier can be pinned by env
-    const r4 = runCron(world([], { solo: current }, []), { SOLO_FILE: solo }, { TIERCUT_CARRIER_SID: SID(555) });
+    T('[8] next UTC day: recorded and republished (score 20261002) under the SAME account as the row on the board; rows untouched', r3.code === 0 && tc3.length === 1 && Number(field(tc3[0], 'score')) === 20261002 && field(tc3[0], 'steamid') === CARRIER && postsTo(r3, BOARD.rSolo).length === 0 && ((r3.state.SOLO_FILE || {}).elpTab || []).length === 2, JSON.stringify(tc3.map((w) => w.body)));
+    // a rules change (the recorded table was made under other rules) the same day: recorded again at once; the board row (an older
+    //   prior's lines) differs -> republished the same day
+    const s6 = JSON.parse(JSON.stringify(r1.state.SOLO_FILE)); s6.elpTab[0].key = 'old rules';
+    const oldDet = detailsOf(tc1[0]).slice(); oldDet[8] += 1;
+    const r6 = runCron(world([], { solo: current }, [{ steamID: CARRIER, score: 20261001, details: oldDet }]), { SOLO_FILE: s6 });
+    const tc6 = postsTo(r6, BOARD.tiercut), tabs6 = (r6.state.SOLO_FILE || {}).elpTab || [];
+    T('[8] rules changed the same day: a new table recorded at once, the carrier row (other lines) republished the same day', r6.code === 0 && tc6.length === 1 && Number(field(tc6[0], 'score')) === 20261001 && tabs6.length === 2 && tabs6[1].key === v.elpTableKey(), JSON.stringify([tc6.length, tabs6.map((t) => t.key.slice(0, 12))]));
+    const r4 = runCron(world([], { solo: current }, []), { SOLO_FILE: r1.state.SOLO_FILE }, { TIERCUT_CARRIER_SID: SID(555) });
     const tc4 = postsTo(r4, BOARD.tiercut);
-    T('[8] TIERCUT_CARRIER_SID pins the carrier account', tc4.length === 1 && field(tc4[0], 'steamid') === SID(555));
-    // no carrier anywhere: not published, run still green
-    const noVg = world([], { solo: current }, []).filter(b => b.name !== 'version_gate');
-    const r5 = runCron(noVg, { SOLO_FILE: solo });
-    T('[8] no carrier account available (no version_gate row, env unset): cuts not published, run green, rows maintained', r5.code === 0 && postsTo(r5, BOARD.tiercut).length === 0 && /no carrier account/.test(r5.out));
+    T('[8] TIERCUT_CARRIER_SID pins the carrier account (an empty carrier board: published)', tc4.length === 1 && field(tc4[0], 'steamid') === SID(555));
+    const noVg = world([], { solo: current }, []).filter((b) => b.name !== 'version_gate');
+    const r5 = runCron(noVg, { SOLO_FILE: r1.state.SOLO_FILE });
+    T('[8] no carrier account available (no version_gate row, env unset): not published, run green, rows maintained', r5.code === 0 && postsTo(r5, BOARD.tiercut).length === 0 && /no carrier account/.test(r5.out));
+    // season 1 (S1 opens 2026-12-01): the season boards, nobody placed yet (placement again), a season-1 table of the prior
+    const r7 = runCron(world([], { solo: current }, carrierRow), { SOLO_FILE: r1.state.SOLO_FILE }, { SEASON_NOW: '2026-12-01T00:10:00Z' });
+    const tc7 = postsTo(r7, BOARD.tiercut), dec7 = tc7.length ? v.tiercutDecode(Number(field(tc7[0], 'score')), detailsOf(tc7[0])) : null;
+    T('[8] season 1: the season-1 points board is resolved, the season-0 rows are not touched, no row written (nobody placed in season 1)', r7.code === 0 && /season board created: endless_rating_solo_s1 /.test(r7.out) && postsTo(r7, BOARD.rSolo).length === 0 && postsTo(r7, BOARD.rSolo, 'DeleteLeaderboardScore').length === 0
+      && Array.from(r7.out.matchAll(/season board created: endless_rating_[a-z]+_s1 id=(\d+)/g)).map((mm) => mm[1]).every((id) => postsTo(r7, id).length === 0 && postsTo(r7, id, 'DeleteLeaderboardScore').length === 0),
+      r7.out.split('\n').filter((l) => /rating|tiercut/.test(l)).join(' | '));
+    T('[8] season 1: a season-1 table of the prior lines (N 0) published on day 20261201', !!dec7 && dec7.season === 1 && dec7.day === 20261201 && dec7.byFam.solo.N === 0 && JSON.stringify(dec7.byFam.solo.pass) === JSON.stringify(SOLO), JSON.stringify(dec7));
   }
 }
 
-// ---- [9] e2e settle: a duo competitive segment enters the history ----
-console.log('-- [9] e2e: settled duo segment -> history --');
+// ---- [9] e2e settle: a duo competitive run over two segments, the second final ----
+console.log('-- [9] e2e: a settled duo run -> history -> placement run 1 --');
 {
   const sidPair = (sid) => { const b = BigInt(sid); return [Number(b & 0xFFFFFFFFn) | 0, Number((b >> 32n) & 0xFFFFFFFFn) | 0]; };
   const SEED = 9;
@@ -354,7 +469,7 @@ console.log('-- [9] e2e: settled duo segment -> history --');
     for (const s of ros) { const p = sidPair(s); d.push(p[0], p[1]); }
     return d;
   }
-  const seg = (hash, ros, sd, ed) => ros.map((sid, i) => ({ sid, d: start7(hash, i, ros) })).concat(ros.map((sid, i) => ({ sid, d: rec7(hash, i, ros, sd, ed, attest.SEG_COMP) })));
+  const seg = (hash, ros, sd, ed, fl) => ros.map((sid, i) => ({ sid, d: start7(hash, i, ros) })).concat(ros.map((sid, i) => ({ sid, d: rec7(hash, i, ros, sd, ed, attest.SEG_COMP | (fl | 0)) })));
   const ros = [SID(1), SID(2)];
   const rows1 = seg(0x4a01, ros, 0, 5);
   const r1 = runCron(world(rows1), null);
@@ -362,31 +477,87 @@ console.log('-- [9] e2e: settled duo segment -> history --');
   const r2 = runCron(world(rows1), advance(r1.state, 10 * 60000));
   const key = v.teamRunKey(ros, 0, SEED), rid = v.ratingRunId(key);
   const hA = ((r2.state.SOLO_FILE || {}).hist || {})[P(SID(1)) + '|duo|0'], hB = ((r2.state.SOLO_FILE || {}).hist || {})[P(SID(2)) + '|duo|0'];
-  T('[9] ten minutes later the segment settles and both writers get a duo run at depth 5 (run id = hash of the roster-set chain key)', r2.code === 0 && /endless-comp settle/.test(r2.out) && hA && hB && hA.runs.length === 1 && hA.runs[0][0] === rid && hA.runs[0][1] === 5 && JSON.stringify(hA.best) === JSON.stringify([rid, 5]) && hB.runs[0][1] === 5,
-    JSON.stringify([hA, hB]) + ' ' + r2.out.split('\n').filter(l => /endless-comp|rating/.test(l)).join(' | '));
-  T('[9] the duo rating board was read for the touched writers; nobody rated (one run) -> no write', /rating summary \{"fam":"duo","rated":0/.test(r2.out) && postsTo(r2, BOARD.rDuo).length === 0);
+  T('[9] ten minutes later the segment settles: both writers get the duo run at depth 5 with the run seed, not final, not settled', r2.code === 0 && /endless-comp settle/.test(r2.out) && hA && hB && hA.runs.length === 1 && hA.runs[0][0] === rid && hA.runs[0][1] === 5 && hA.runs[0][8] === SEED && hA.runs[0][7] === 0 && hA.runs[0][3] === 0 && hB.runs[0][1] === 5,
+    JSON.stringify([hA, hB]) + ' ' + r2.out.split('\n').filter((l) => /endless-comp|rating/.test(l)).join(' | '));
   T('[9] the history has no steamID (pid-keyed, like the chain memory)', !JSON.stringify((r2.state.SOLO_FILE || {}).hist).includes(SID(1)));
-  const rows2 = rows1.concat(seg(0x4a02, ros, 5, 10));
-  const r3 = runCron(world(rows2), advance(r2.state, 10 * 60000));   // the next segment's first sighting (paced)
+  const rows2 = rows1.concat(seg(0x4a02, ros, 5, 10, F));
+  const r3 = runCron(world(rows2), advance(r2.state, 10 * 60000));
   const r4 = runCron(world(rows2), advance(r3.state, 10 * 60000));
-  const hA4 = ((r4.state.SOLO_FILE || {}).hist || {})[P(SID(1)) + '|duo|0'];
-  T('[9] the next segment of the same run (5 -> 10) raises the run in place: still one run, depth 10, best 10', r3.code === 0 && r4.code === 0 && hA4 && hA4.runs.length === 1 && hA4.runs[0][1] === 10 && hA4.best[1] === 10, JSON.stringify(hA4) + ' ' + r4.out.split('\n').filter(l => /endless-comp/.test(l)).join(' | '));
+  const hA4 = ((r4.state.SOLO_FILE || {}).hist || {})[P(SID(1)) + '|duo|0'], hB4 = ((r4.state.SOLO_FILE || {}).hist || {})[P(SID(2)) + '|duo|0'];
+  T('[9] the final segment (5 -> 10) raises the same run and ends it: settled for both as placement run 1 (d 0, a target), a receipt of 0 keyed by the run seed',
+    r3.code === 0 && r4.code === 0 && hA4 && hB4 && hA4.runs.length === 1 && hA4.runs[0][1] === 10 && hA4.runs[0][3] === 1 && hA4.runs[0][4] === 0 && hA4.runs[0][5] >= 1 && hA4.n === 1 && !hA4.placed
+      && hA4.ring.length === 1 && hA4.ring[0].mh === SEED && hA4.ring[0].delta === 0 && hB4.runs[0][3] === 1,
+    JSON.stringify([hA4, hB4]) + ' ' + r4.out.split('\n').filter((l) => /endless-comp|endless points/.test(l)).join(' | '));
+  T('[9] nobody placed after one run -> no duo row written', postsTo(r4, BOARD.rDuo).length === 0);
 }
 
-// ---- [10] mutation self-checks ----
+// ---- [10] mutation self-checks (validate.js copies loaded in-process; main() only runs as the entry module) ----
 console.log('-- [10] mutation self-checks --');
 {
-  const st = { hist: {} }, pA = P(SID(1));
-  for (let i = 0; i < 5; i++) v.ratingHistUpsert(st, pA, 'solo', 0, 300 + i, i === 4 ? 20 : 10, i);
-  const h = st.hist[pA + '|solo|0'];
-  const wb = R.W_BEST, wa = R.W_AVG, mr = R.MIN_RUNS;
-  R.W_BEST = 70; R.W_AVG = 30;
-  T('[10] changing the weights changes the score the [3] fixture pins (1800 -> ' + v.ratingScoreOf(h).score + ')', v.ratingScoreOf(h).score !== 1800);
-  R.W_BEST = wb; R.W_AVG = wa;
-  R.MIN_RUNS = 6;
-  T('[10] raising MIN_RUNS un-rates the five-run fixture', v.ratingScoreOf(h) === null);
-  R.MIN_RUNS = mr;
-  T('[10] restored', v.ratingScoreOf(h).score === 1800);
+  const ROOT = path.join(__dirname, '..').replace(/\\/g, '/');
+  const mutant = (pairs) => {
+    let m = SRC;
+    for (const [good, badS] of pairs) { if (m.indexOf(good) < 0) throw new Error('mutation anchor missing: ' + good.slice(0, 90)); m = m.split(good).join(badS); }
+    m = m.replace(/require\('\.\//g, "require('" + ROOT + '/').replace(/__dirname/g, JSON.stringify(ROOT));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'endless-rating-mut-'));
+    const p = path.join(dir, 'validate.js'); fs.writeFileSync(p, m);
+    try { delete require.cache[p]; return require(p); } finally { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) {} }
+  };
+  const now = 100 * DAY;
+  const scen = {
+    finalSettles: (m) => { const st = { hist: {} }; m.ratingHistUpsert(st, 'x', 'solo', 0, 1, 5, now - 60000, F, 1); return m.elpSettleAll(st, 0, now).length === 1; },
+    saveWaits: (m) => { const st = { hist: {} }; m.ratingHistUpsert(st, 'x', 'solo', 0, 1, 5, now - 3 * DAY, SUS, 1); return m.elpSettleAll(st, 0, now).length === 0; },
+    newerSettles: (m) => { const st = { hist: {} }; m.ratingHistUpsert(st, 'x', 'solo', 0, 1, 5, now - 60000, 0, 1); m.ratingHistUpsert(st, 'x', 'solo', 0, 2, 5, now, 0, 2); return m.elpSettleAll(st, 0, now).length === 1; },
+    bestCandidate: (m) => {
+      const strict = [3, 8, 14, 20, 30, 45, 60], loose = [2, 5, 8, 12, 20, 30, 45];
+      const st = { hist: {}, elpTab: [{ day: 1, season: 0, ms: now - 20 * DAY, key: m.elpTableKey(), byFam: { solo: { N: 300, pass: strict } } }, { day: 2, season: 0, ms: now - DAY / 2, key: m.elpTableKey(), byFam: { solo: { N: 300, pass: loose } } }] };
+      [8, 8, 8, 8, 8].forEach((d, i) => m.ratingHistUpsert(st, 'x', 'solo', 0, 100 + i, d, now - 10 * DAY + i, F, 500 + i)); m.elpSettleAll(st, 0, now - DAY);
+      const lp0 = st.hist['x|solo|0'].lp; m.ratingHistUpsert(st, 'x', 'solo', 0, 400, 9, now - DAY, F, 77); m.elpSettleAll(st, 0, now);
+      const each = [strict, loose].map((ls) => PP.endlessSettle(lp0, 9 >= PP.targetOf(lp0, ls, 77, 800, false), 800, ls, PP.targetOffset(77)).nv);
+      return st.hist['x|solo|0'].lp === Math.max.apply(null, each);
+    },
+    seedOverFive: (m) => { const st = { hist: {} }; [4, 12, 7, 9, 30].forEach((d, i) => m.ratingHistUpsert(st, 'x', 'solo', 0, 100 + i, d, now - DAY + i, F, 500 + i)); m.elpSettleAll(st, 0, now); return st.hist['x|solo|0'].lp === PP.endlessSeedLp(PP.hiddenOf([30, 9, 7, 12, 4]), SOLO); },
+    skillBefore: (m) => {
+      // nine runs 12..28 (skill 2000 = diamond); a platinum player misses with a 0: the skill of the runs before (diamond) protects
+      //   and halves the loss; counting the run itself (1900 = platinum) would not
+      const st = { hist: {} }; [12, 14, 16, 18, 20, 22, 24, 26, 28].forEach((d, i) => m.ratingHistUpsert(st, 'x', 'solo', 0, 100 + i, d, now - 2 * DAY + i, F, 500 + i)); m.elpSettleAll(st, 0, now);
+      const h = st.hist['x|solo|0']; h.lp = 3500; m.ratingHistUpsert(st, 'x', 'solo', 0, 200, 0, now - DAY, F, 900); m.elpSettleAll(st, 0, now);
+      return h.lp === PP.endlessSettle(3500, false, 2000, SOLO, PP.targetOffset(900)).nv && PP.endlessSettle(3500, false, 2000, SOLO, PP.targetOffset(900)).nv !== PP.endlessSettle(3500, false, 1900, SOLO, PP.targetOffset(900)).nv;
+    },
+    receiptBySeed: (m) => { const st = { hist: {} }; m.ratingHistUpsert(st, 'x', 'solo', 0, 1, 5, now - 60000, F, 4321); m.elpSettleAll(st, 0, now); return st.hist['x|solo|0'].ring[0].mh === 4321; },
+    refund: (m) => {
+      const st = { hist: {} }; [10, 10, 10, 10, 10, 30].forEach((d, i) => m.ratingHistUpsert(st, 'x', 'solo', 0, 100 + i, d, now - DAY + i, F, 500 + i)); m.elpSettleAll(st, 0, now);
+      const h = st.hist['x|solo|0'], lp0 = h.lp, d = h.runs[5][4]; m.ratingHistRemove(st, 'x', 'solo', 0, 105); return d !== 0 && h.lp === lp0 - d;
+    },
+    unplace: (m) => { const st = { hist: {} }; [10, 10, 10, 10, 10].forEach((d, i) => m.ratingHistUpsert(st, 'x', 'solo', 0, 100 + i, d, now - DAY + i, F, 500 + i)); m.elpSettleAll(st, 0, now); m.ratingHistRemove(st, 'x', 'solo', 0, 104); return !st.hist['x|solo|0'].placed; },
+    goneRefund: (m) => {
+      // 16 runs: the 6 oldest leave the window, run 105 (the first rated one) among them; its conviction still refunds its points
+      const st = { hist: {} }; for (let i = 0; i < 16; i++) m.ratingHistUpsert(st, 'x', 'solo', 0, 100 + i, 10, now - DAY + i, F, 500 + i); m.elpSettleAll(st, 0, now);
+      const h = st.hist['x|solo|0'], g = (h.gone || []).find((x) => x[0] === 105), lp0 = h.lp;
+      const dd = g ? g[1] : null; m.ratingHistRemove(st, 'x', 'solo', 0, 105);
+      return dd != null && dd !== 0 && h.lp === lp0 - dd;
+    },
+    liveLines: (m) => { const many = []; for (let i = 0; i < 200; i++) many.push((i + 1) * 100); return JSON.stringify(m.elpLinesOf(many, SOLO).pass) === JSON.stringify([41, 106, 146, 171, 187, 196, 202]); },
+  };
+  const cases = [
+    ['a final run waits', 'finalSettles', [['if (!(((r[7] | 0) & 1) || newer ||', 'if (!(newer ||']]],
+    ['an open save point settles at idle', 'saveWaits', [['(idle && !((r[7] | 0) & 2))', 'idle']]],
+    ['a newer run does not settle the one before', 'newerSettles', [['((r[7] | 0) & 1) || newer || (idle', '((r[7] | 0) & 1) || (idle']]],
+    ['the worst line set taken', 'bestCandidate', [['if (!best || sl.nv > best.sl.nv) best = { sl, t };', 'if (!best || sl.nv < best.sl.nv) best = { sl, t };']]],
+    ['the seed without the fifth run', 'seedOverFive', [['const H = pointsPlan.hiddenOf([depth].concat(before));', 'const H = pointsPlan.hiddenOf(before);']]],
+    ['the skill counts the run being settled', 'skillBefore', [['const H = pointsPlan.hiddenOf(before), off', 'const H = pointsPlan.hiddenOf([depth].concat(before)), off']]],
+    ['receipts keyed by the run id', 'receiptBySeed', [['h.ring = receiptPush(h.ring || [], elpRunRk(s, r[8]), d, flags, 0xff);', 'h.ring = receiptPush(h.ring || [], r[0] | 0, d, flags, 0xff);']]],
+    ['a conviction keeps the points', 'refund', [['const nv = Math.max(0, Math.min(LP_MAX, (h.lp | 0) - d));', 'const nv = h.lp | 0;']]],
+    ['a convicted seeding run keeps the placement', 'unplace', [['if (h.placed && (h.seedRun >>> 0) === runId) {', 'if (false) {']]],
+    ['runs out of the window forgotten (no refund)', 'goneRefund', [['(h.gone = h.gone || []).push([g[0] >>> 0, g[4] | 0, g[8] | 0]);', '']]],
+    ['the live lines never used', 'liveLines', [['out.push(Math.round((1 - w) * pr + w * (N ? lv : pr)));', 'out.push(pr);']]],
+  ];
+  for (const k of Object.keys(scen)) T('[10] baseline holds: ' + k, scen[k](v));
+  for (const [name, sk, pairs] of cases) {
+    let red = false;
+    try { red = !scen[sk](mutant(pairs)); } catch (e) { red = /anchor missing/.test(e.message) ? (bad('[10] ' + e.message), false) : true; }
+    T('[10] mutation "' + name + '" turns ' + sk + ' red', red);
+  }
 }
 
 if (failN) { console.log('FAIL (endless-rating) ' + failN); process.exit(1); } else console.log('ALL PASS (endless-rating)');

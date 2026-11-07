@@ -23,7 +23,7 @@
   else if (root) root.POINTS_PLAN = api;
 })(typeof module === 'object' && !!module && typeof exports === 'object' && this === exports, typeof window !== 'undefined' ? window : null, function () {
   const RULES_VER = 1;
-  const FIXTURES_HASH = 'ddd60888a90ea2e6';
+  const FIXTURES_HASH = 'ffffbaaa64dfad47';
   // the knobs configure() can move (production runs these defaults)
   const DEFAULTS = Object.freeze({ RS_THRESHOLD: 400, RS_UPSET_BONUS: 1.0, RS_STRONG_UPSET_LOSS: 0.5, RS_SOLO_VS_TRIO: 0.6, RS_TRIO_WIN: 0.7, LEAVER_LP_PENALTY: 100 });
   const LP_MAX = 9999;
@@ -426,24 +426,35 @@
 
   // ===== O728 endless competitive points (user calls 2026-11-08; companion KNIFE_O728_ENDLESS_LP_PLAN sections 2-3) =====
   // A competitive endless run of a family (solo / duo / trio / quad) settles on the versus points scale 0..LP_MAX with the versus
-  //   tier table LP_SEG. At its start the run gets a target T: the pass line of the player's tier (levels), moved by an offset of
-  //   -SPREAD..+SPREAD drawn from the run seed. A run that passes level T gains points, one that does not loses -- the sign never
-  //   flips; only the size calibrates. The size is the tier's win (or loss) scaled by two per-mille factors, plus the tier's drip:
-  //     gap:   the hidden skill (the trimmed mean depth of the last WINDOW runs) sits in a higher tier than the points -> a pass
-  //            x GAP_UP, a miss x GAP_DOWN; a lower tier -> the reverse; the same tier (or no skill yet) -> 1000;
+  //   tier table LP_SEG, built like a versus match (the user's call 2026-11-08, "the same structure as versus"): versus matches a
+  //   player against his level, so he wins about half; here the target comes from his own level the same way -- the base line is
+  //   TARGET_Q of his hidden skill (the trimmed mean depth of the last WINDOW runs: about half the runs pass it), moved by an offset
+  //   of -SPREAD..+SPREAD drawn from the run seed. A run that passes level T gains points, one that does not loses -- the sign never
+  //   flips. The size is the tier's win (or loss) scaled by two per-mille factors, plus the tier's drip, all x MUL (an endless run
+  //   is several versus matches long), capped at SWING_CAP:
+  //     gap:   the hidden skill tier above the points tier -> a pass x GAP_UP, a miss x GAP_DOWN (a player rated too low climbs
+  //            faster); below it -> the reverse, at master and up only (below master grinding always climbs: the win / loss table
+  //            gains more than it takes, and the drip); the same tier (or no skill yet) -> 1000;
   //     stake: a harder target (offset o > 0) gains more and loses less: a pass 1000 + STAKE_STEP x o, a miss 1000 - STAKE_STEP x o.
   //   The run settles through settleLine (the series clamp: a pass in the promotion band always crosses up, a miss in the relegation
   //   band always crosses down) except under the demotion protection: a miss whose hidden skill tier is at or above the points tier
-  //   skips the clamp and never drops below the floor of the tier. The first MIN_RUNS runs of a season are placement (no points);
-  //   the last one seeds the points from the hidden skill (endlessSeedLp). All pure: the job settles the runs in start order.
-  // ELP.PRIOR: the loose pass lines (levels, bronze .. grandmaster) per family -- the job's prior, blended into the live lines as
-  //   players place, and published every day in the tier-cut table v2 (elpTableDetails) the client reads. Moving a constant of ELP
-  //   other than PRIOR moves settled runs: ELP.VER + 1 in the same change (the table carries it; a client built with other
-  //   constants shows "to be confirmed"). RULES_VER stays the versus rules version.
-  // Invariant (test/endless-lp.js): the largest swing of one run stays under BOUNDARY_MARGIN, so a tier line is crossed in a series
-  //   run only (the largest is a bronze pass: 45 x 1.5 x 1.2 + 5 = 86).
+  //   skips the clamp and never drops below the floor of the tier. The master gate: below GATE_TIER (master) in hidden skill, the
+  //   points of a player under master stop BOUNDARY_MARGIN + 1 under the master line (no master promotion match); a player already
+  //   at master or up is held by the gap factor instead. The first MIN_RUNS runs of a season are placement (no points; their
+  //   target from the runs so far, the silver line before any); the last one seeds the points from the hidden skill
+  //   (endlessSeedLp). All pure: the job settles the runs in start order.
+  // ELP.PRIOR: the loose pass lines (levels, bronze .. grandmaster) per family: what a typical player of each tier reaches. They place
+  //   a player's hidden skill in a tier (the gap factor, the protection, the gate, the placement seed); the job blends them into
+  //   the live lines as players place and publishes them every day in the tier-cut table v2 (elpTableDetails) the client reads.
+  //   Moving a constant of ELP other than PRIOR moves settled runs: ELP.VER + 1 in the same change (the table carries it; a client
+  //   built with other constants shows "to be confirmed"). RULES_VER stays the versus rules version.
+  // MUL / TARGET_Q: tuned by test/endless-lp-sim.js (2026-11-08): about half the runs pass; from placement to diamond about 150 runs
+  //   for a silver-level player, 80 gold, 40 platinum, 20 diamond (the user's table); a grandmaster drifts nowhere (zero-sum top).
+  // Invariant (test/endless-lp.js): one run never moves the points by BOUNDARY_MARGIN or more (SWING_CAP), so a tier line is
+  //   crossed in a series run only.
   const ELP = Object.freeze({
-    WINDOW: 10, MIN_RUNS: 5, TRIM: 1, GAP_UP: 1500, GAP_DOWN: 500, STAKE_STEP: 100, SPREAD: 2, SEED_CAP: 3200, VER: 1,
+    WINDOW: 10, MIN_RUNS: 5, TRIM: 1, GAP_UP: 1500, GAP_DOWN: 500, STAKE_STEP: 100, SPREAD: 2, SEED_CAP: 3200, VER: 2,
+    MUL: Object.freeze([850, 850, 1500, 3100, 2800, 2800, 2800]), TARGET_Q: 990, SWING_CAP: 119, GATE_TIER: 5,
     // 2026-11-08 board read (best run per player; a usual run is about 0.7 of the best): playtest solo n 74 -- top 60 % 7, 35 % 13,
     //   20 % 20, 10 % 30, 4 % 63; trial solo n 318 (capped at 20) -- top 80 % 2, 60 % 7, 35 % 14. Bronze is 2 (0.7 x the top-80 %
     //   best of 2..3); the team lines are solo x 1.6 (trial team bests sit far above them, the lines stay loose).
@@ -482,40 +493,64 @@
   }
   // the target offset of a run, -SPREAD..+SPREAD (> 0 = a harder target), from its run seed (signed or unsigned 32-bit: the same)
   function targetOffset(runSeed) { return (elpHash((runSeed >>> 0) + ':tgt') % (2 * ELP.SPREAD + 1)) - ELP.SPREAD; }
-  // the target T of a run (the run passes when it passes level T). lpBefore = the points before the run; pass = the family's 7 lines;
-  //   placing = a placement run: the tier then comes from placingHidden100 = hiddenOf(this season's runs so far, 1), and with no run
-  //   so far (null) the silver line.
-  function targetOf(lpBefore, pass, runSeed, placingHidden100, placing) {
-    const k = placing ? (placingHidden100 == null ? 1 : tierOfHidden(placingHidden100, pass)) : lpTierIdx(lpBefore);
-    const line = (elpLinesOk(pass) && k != null) ? (pass[k] | 0) : 0;
-    return Math.max(1, line + targetOffset(runSeed));
+  // the skill tier the rules read (0..6, or null without a skill): the tier of the nearest pass line (tierOfHidden), except that
+  //   GATE_TIER (master) and up count only once the skill reached that tier's own line -- the gate: a lucky window of ten runs
+  //   that sits nearer the master line than the diamond one does not open master
+  function skillTierOf(hidden100, pass) {
+    const ht = tierOfHidden(hidden100, pass);
+    if (ht == null || ht < ELP.GATE_TIER) return ht;
+    let at = ELP.GATE_TIER - 1;
+    for (let k = ELP.GATE_TIER; k <= ht; k++) { if ((hidden100 | 0) >= (pass[k] | 0) * 100) at = k; else break; }
+    return at;
   }
-  // the points of one settled run before the series clamp: { d (never 0: a pass >= 1, a miss <= -1), base (the tier's win or -loss),
-  //   gap, stake (per mille), drip, protect (the demotion protection holds: a miss with the hidden skill tier >= the points tier) }
+  // the base line of a run's target, before its offset (the client's dial sits its middle here): TARGET_Q of the hidden skill hidden100
+  //   (a placed run: hiddenOf of the runs before it; a placement run: hiddenOf of the runs so far with minRuns 1), the silver line of
+  //   pass with none yet. lpBefore and placing no longer move it (kept in the signature: version 1 read them).
+  function targetLineOf(lpBefore, pass, hidden100, placing) {
+    void lpBefore; void placing;
+    return hidden100 == null ? (elpLinesOk(pass) ? (pass[1] | 0) : 0) : Math.round((hidden100 | 0) * ELP.TARGET_Q / 100000);
+  }
+  // the target T of a run (the run passes when it passes level T): the base line plus the run's offset, at least 1
+  function targetOf(lpBefore, pass, runSeed, hidden100, placing) {
+    return Math.max(1, targetLineOf(lpBefore, pass, hidden100, placing) + targetOffset(runSeed));
+  }
+  // the points of one settled run before the series clamp: { d (never 0: a pass >= 1, a miss <= -1; |d| <= SWING_CAP), base (the
+  //   tier's win or -loss), gap, stake (per mille), drip, mul (the tier's MUL), st (the skill tier, skillTierOf, or null), protect
+  //   (the demotion protection holds: a miss with the skill tier >= the points tier) }
   function endlessDelta(lpBefore, isPass, hidden100, pass, offset) {
-    const seg = lpSeg(lpBefore | 0), cur = lpTierIdx(lpBefore), ht = tierOfHidden(hidden100, pass);
+    const seg = lpSeg(lpBefore | 0), cur = lpTierIdx(lpBefore), ht = tierOfHidden(hidden100, pass), st = skillTierOf(hidden100, pass);
     const o = Math.max(-ELP.SPREAD, Math.min(ELP.SPREAD, offset | 0));
     const base = isPass ? seg.win : -seg.loss;
-    const gap = (ht == null || ht === cur) ? 1000 : ((ht > cur) === !!isPass ? ELP.GAP_UP : ELP.GAP_DOWN);
-    const stake = isPass ? 1000 + ELP.STAKE_STEP * o : 1000 - ELP.STAKE_STEP * o;
-    let d = Math.round(base * gap * stake / 1000000 + seg.drip);
+    let gap = 1000;
+    if (ht != null && ht > cur) gap = isPass ? ELP.GAP_UP : ELP.GAP_DOWN;                                    // rated too low: climbs faster
+    else if (ht != null && ht < cur && cur >= ELP.GATE_TIER) gap = isPass ? ELP.GAP_DOWN : ELP.GAP_UP;       // master and up only: rated too high
+    const stake = isPass ? 1000 + ELP.STAKE_STEP * o : 1000 - ELP.STAKE_STEP * o, mul = ELP.MUL[cur];
+    let d = Math.round((base * gap * stake / 1000000 + seg.drip) * mul / 1000);
+    d = Math.max(-ELP.SWING_CAP, Math.min(ELP.SWING_CAP, d));
     d = isPass ? Math.max(1, d) : Math.min(-1, d);
-    return { d, base, gap, stake, drip: seg.drip, protect: !isPass && ht != null && ht >= cur };
+    return { d, base, gap, stake, drip: seg.drip, mul, ht, st, protect: !isPass && (cur < ELP.GATE_TIER || (ht != null && ht >= cur)) };
   }
-  // the points line of one settled run: { d0 (endlessDelta's d), d (the change after the clamp / the protection), nv (the new points,
-  //   0..LP_MAX), series (boundaryOf the points before: 'promotion' / 'relegation' / null), clamped (the series clamp moved the delta:
-  //   the receipt's SERIES), protect (the protection moved the result: the clamp skipped and / or the tier floor held -- the receipt's
-  //   PROTECT_RS; a protected miss at the floor changes nothing, d 0), plan (endlessDelta's result) }
+  // the points line of one settled run: { d0 (endlessDelta's d), d (the change after the clamp / the protection / the gate), nv (the new
+  //   points, 0..LP_MAX), series (boundaryOf the points before: 'promotion' / 'relegation' / null), clamped (the series clamp moved
+  //   the delta: the receipt's SERIES), protect (the protection moved the result: the clamp skipped and / or the tier floor held --
+  //   the receipt's PROTECT_RS; a protected miss at the floor changes nothing, d 0), gated (the gate held the points BOUNDARY_MARGIN
+  //   + 1 under the line of a tier the skill does not reach yet, master or grandmaster: no promotion match into it), plan
+  //   (endlessDelta's result) }
   function endlessSettle(lpBefore, isPass, hidden100, pass, offset) {
     const cur = Math.max(0, Math.min(LP_MAX, lpBefore | 0));
     const r = endlessDelta(cur, isPass, hidden100, pass, offset);
     const plain = settleLine(cur, { adjDelta: r.d, flag: 0, won: !!isPass }, 0, 0, false);
-    let nv = plain.nv, protect = false;
+    let nv = plain.nv, protect = false, gated = false;
     if (r.protect) {
       const pv = Math.max(LP_SEG[lpTierIdx(cur)].min, Math.max(0, Math.min(LP_MAX, cur + r.d)));
       if (pv !== plain.nv) { nv = pv; protect = true; }
     }
-    return { d0: r.d, d: nv - cur, nv, series: boundaryOf(cur), clamped: !protect && plain.d !== plain.d0, protect, plan: r };
+    const top = Math.max(ELP.GATE_TIER - 1, r.st == null ? 0 : r.st, lpTierIdx(cur));   // the highest tier the points may reach: the skill's (every tier under master), or the one they are in
+    if (top < LP_SEG.length - 1) {
+      const line = LP_SEG[top + 1].min, cap = line - BOUNDARY_MARGIN - 1;
+      if (cur < line && nv > Math.max(cur, cap)) { nv = Math.max(cur, cap); gated = true; }
+    }
+    return { d0: r.d, d: nv - cur, nv, series: boundaryOf(cur), clamped: !protect && !gated && plain.d !== plain.d0, protect, gated, plan: r };
   }
   // the points a finished placement seeds from the hidden skill: between the pass lines k and k+1 the skill interpolates over the
   //   tier's width, kept out of both series bands (BOUNDARY_MARGIN + 1 from either line; bronze has no relegation band and starts
@@ -533,7 +568,7 @@
   // the points row of an endless family board (endless_rating_<fam>[_test][_s<N>]; the job writes it, the client reads it). score =
   //   the points (no row before the placement ends). details = [ROW_MAGIC | ROW_VER << 8, runs this season, hidden100 (-1 = fewer than
   //   MIN_RUNS runs in the window), points tier 0..6, placed (1), RECEIPT_MAGIC, n, (runId, delta, flags) x n]: the receipt ring of
-  //   receiptPush with mh = the run id (fnv32 of the run's chain key | 0). Receipt flags: RS bits PROTECT_RS on a protected miss,
+  //   receiptPush with mh = the run seed | 0 (the record's d[4]; both sides know it). Receipt flags: RS bits PROTECT_RS on a protected miss,
   //   SERIES when the clamp moved the delta, SEEDED on the placement's last run, VOID on a run refunded after a conviction.
   function elpRowDetails(row, ring) {
     const r = (ring || []).slice(0, RECEIPT_CAP), x = row || {};
@@ -551,7 +586,7 @@
     }
     return { n: det[1] | 0, hidden100: (det[2] | 0) < 0 ? null : (det[2] | 0), tier: det[3] | 0, placed: (det[4] | 0) === 1, ring };
   }
-  // the receipt of run runId on a family row's details, or null
+  // the receipt of a run on a family row's details (runId here = the run seed | 0), or null
   function elpReceiptOf(det, runId) { const r = elpRowOf(det); return r ? (r.ring.find((e) => e.mh === (runId | 0)) || null) : null; }
   // the published pass-line table (tier-cut carrier v2 on endless_tiercut; the job writes it once a UTC day and at once when the
   //   season, a line or a rules constant moves). score = the UTC day YYYYMMDD; details = [TC_MAGIC | TC_VER << 8, season, VER, GAP_UP,
@@ -607,7 +642,7 @@
     RATING_MAGIC, ratingDetails, ratingDetailsOf,
     RECEIPT_MAGIC, RECEIPT_CAP, RS_SLOT, RECEIPT_F, receiptVer, lpDetailsOf, lpDetails, receiptPush, receiptOf,
     PULSE_MAGIC, pulseDetails, pulseOf,
-    ELP, ELP_FAMS, lpTierIdx, hiddenOf, tierOfHidden, targetOffset, targetOf, endlessDelta, endlessSettle, endlessSeedLp,
+    ELP, ELP_FAMS, lpTierIdx, hiddenOf, tierOfHidden, skillTierOf, targetOffset, targetLineOf, targetOf, endlessDelta, endlessSettle, endlessSeedLp,
     elpRowDetails, elpRowOf, elpReceiptOf, elpTableDetails, elpTableOf,
   }, knobs());
   return api;
