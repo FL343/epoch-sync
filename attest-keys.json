@@ -339,6 +339,22 @@
         }
       }
     },
+    "2026110801": {
+      "pubs": [
+        "6eb2d8f529bb2e14e38757475cce413ca6fba34d36aebcfb2a157f78e52429b6",
+        "31bc5b2ee9ebfec3d801537f99e13ea7c01470888629781d60f89b1847a884bd"
+      ],
+      "sealed": true,
+      "at": "2026-11-08T14:10:17.521Z",
+      "pubInfo": {
+        "31bc5b2ee9ebfec3d801537f99e13ea7c01470888629781d60f89b1847a884bd": {
+          "ch": "ea"
+        },
+        "6eb2d8f529bb2e14e38757475cce413ca6fba34d36aebcfb2a157f78e52429b6": {
+          "ch": "demo"
+        }
+      }
+    },
     "dev": {
       "pubs": [
         "f341d48777a90ad4ca0db15deb16824c7162c872fd48fa8c07b9b0458844d835"
