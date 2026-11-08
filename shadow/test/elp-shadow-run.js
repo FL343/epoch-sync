@@ -41,12 +41,17 @@ function season(opt, sub) {
     results.push(res);
     prev = sf;
   }
-  const ids = new Set();
-  for (const k of Object.keys(D[D.length - 1].state.hist)) { ids.add(k.split('|')[0]); ids.add(k); }
+  const ids = new Set(), last = D[D.length - 1].state;
+  for (const f of ['hist', 'runs', 'ms']) for (const k of Object.keys(last[f] || {})) { ids.add(k.split('|')[0]); ids.add(k); }
   return { D, results, ids, hist, dir };
 }
-// any made-up id / history key in a text
-function leaks(text, ids) { const out = []; for (const id of ids) if (text.indexOf(id) >= 0) { out.push(id); if (out.length > 3) break; } return out; }
+// any made-up id / pid-keyed key in a text, or any token shaped like a salted pid (16 hex with a letter)
+const PID_SHAPE = /\b(?=[0-9a-f]*[a-f])[0-9a-f]{16}\b/;
+function leaks(text, ids) {
+  const out = []; for (const id of ids) if (text.indexOf(id) >= 0) { out.push(id); if (out.length > 3) break; }
+  const m = text.match(PID_SHAPE); if (m && out.indexOf(m[0]) < 0) out.push('shape:' + m[0]);
+  return out;
+}
 
 console.log('-- [1] a made-up season, day by day');
 const A = season({ days: 17, arrive: 40, seed: 3 }, 'a');
@@ -86,7 +91,19 @@ console.log('-- [2] privacy');
   T('[2] no id-like field in the history (pid / sid / key / runId / seed / steam)', !/"(pid|sid|key|keys|runId|runIds|seed|seeds|steam\w*)"\s*:/i.test(histText));
   T('[2] no Steam id shape anywhere', !/7656119\d{10}/.test(histText + sumText));
   const planted = sumText + ' ' + [...A.ids][0];
-  T('[2] self-check: a planted id is caught', leaks(planted, A.ids).length === 1);
+  T('[2] self-check: a planted id is caught', leaks(planted, A.ids).length >= 1);
+  T('[2] self-check: a real-shaped key nobody listed is caught by its shape', leaks('{"x":{"9f123b68bebca458|0|SOLO":1}}', new Set()).length === 1);
+  // mutation: the 2026-11-08 slip -- the state's "ms" (an object keyed by salted pids in the real file) copied into the entry
+  const src = fs.readFileSync(path.join(__dirname, '..', 'elp-shadow.js'), 'utf8'), anchor = 'season: s, prevState: !!prevSt,';
+  if (src.indexOf(anchor) < 0) T('[2] mutation anchor present', false, anchor);
+  else {
+    const Module = require('module'), m = new Module(path.join(__dirname, '..', 'elp-shadow.js'), module);
+    m.filename = path.join(__dirname, '..', 'elp-shadow.js'); m.paths = Module._nodeModulePaths(path.dirname(m.filename));
+    m._compile(src.replace(anchor, 'season: s, stateMs: st.ms || null, prevState: !!prevSt,'), m.filename);
+    const lastX = A.D[A.D.length - 1], sf = path.join(A.dir, 'state-' + lastX.day + '.json');
+    const mut = m.exports.run({ state: sf, now: lastX.ms + 3600000 });
+    T('[2] mutation: copying the state\'s pid-keyed "ms" into the entry is caught', leaks(m.exports.histText(mut.hist), A.ids).length > 0);
+  }
 }
 
 console.log('-- [3] the live-shaped state with nobody placed');
@@ -103,7 +120,7 @@ console.log('-- [3] the live-shaped state with nobody placed');
 
 console.log('-- [4] O759 on a large made-up season');
 {
-  const L = season({ days: 13, arrive: 250, seed: 7, families: { solo: 1 } }, 'l');
+  const L = season({ days: 13, arrive: 350, seed: 7, families: { solo: 1 } }, 'l');
   const e = L.results[L.results.length - 1].entry.gm.solo;
   T('[4] solo grandmaster pool ' + e.pool + ', full window ' + e.effective + ', correlation ' + e.corr + ' over ' + e.pairs + ': the gate would open', e.gate.open && e.effective >= S.SHADOW.GM_POOL_MIN && e.corr >= S.SHADOW.GM_CORR_MIN);
   T('[4] the distribution is shown (pool >= 5) and the runs of the last day counted', e.gap && e.ifOn && e.ifOn.runs > 0 && e.ifOn.plus + e.ifOn.minus + e.ifOn.zero === e.ifOn.runs);

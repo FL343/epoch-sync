@@ -8,7 +8,8 @@
 //   lines of the day (validate.js elpLinesOf; no bans here) -- read-only use of the official functions on a made-up state
 //   object, so the state has the shape the reconcile job writes. Climbing to grandmaster takes hundreds of runs; the top
 //   2 % by true level are fast-forwarded once placed (points 8000..9999 by their level), so the O759 pool has members.
-// Ids are random hex ('f' + 12 hex): no real account, no salted pid of anyone.
+// Ids are random hex in the shape of the salted pids (16 hex): no real account, no salted pid of anyone. The other top-level
+//   fields of the real file that are keyed by pids (ms, runs) are filled too, so a test catches any field copied as it is.
 // Usage (a module): fakeDays({ seed, days, start, families, arrive }) -> [{ day, ms, state }] (each state a deep copy)
 //        node shadow/fake-state.js <dir> [days] [arrive]   -> writes <dir>/state-<YYYYMMDD>.json for every day
 // ============================================================
@@ -28,7 +29,7 @@ function dayOf(ms) { const d = new Date(ms); return d.getUTCFullYear() * 10000 +
 function fakeDays(opt) {
   const o = opt || {}, r = B.rng(o.seed || 7), days = o.days || 30, start = o.start || EA_START;
   const fams = o.families || { solo: 1, duo: 0.35 }, arrive = o.arrive == null ? 14 : o.arrive, grow = o.grow == null ? 0.4 : o.grow;
-  const st = { hist: {}, elpTab: [] }, players = [], out = [];
+  const st = { runs: {}, ms: {}, hist: {}, elpTab: [] }, players = [], out = [];
   for (let d = 0; d < days; d++) {
     const t0 = start + d * DAY, season = V.seasonAt(t0);
     const n = Math.round(arrive + grow * d);
@@ -36,7 +37,7 @@ function fakeDays(opt) {
       for (const [fam, share] of Object.entries(fams)) {
         if (r() >= share) continue;
         const scale = fam === 'solo' ? 1 : 1.6;
-        players.push({ pid: 'f' + hex(r, 12), fam, mu: B.MODELS.A.mu(r) * scale, cv: r() < 0.5 ? 0.3 : 0.6, p: 0.3 + 0.6 * r(), ff: -1 });
+        players.push({ pid: hex(r, 16), fam, mu: B.MODELS.A.mu(r) * scale, cv: r() < 0.5 ? 0.3 : 0.6, p: 0.3 + 0.6 * r(), ff: -1 });
       }
     }
     let t = t0;
@@ -48,6 +49,8 @@ function fakeDays(opt) {
         t += 1000 + Math.floor(r() * 60000);
         const seed = (r() * 4294967296) | 0, runId = V.ratingRunId(pl.pid + '|' + season + '|' + seed);
         V.ratingHistUpsert(st, pl.pid, pl.fam, season, runId, B.depthOf(r, pl.mu, pl.cv), t, attest.SEG_FINAL, seed);
+        st.runs[pl.pid + '|' + season + '|' + seed] = { final: 1, t };   // the shape of the real file's pid-keyed fields
+        st.ms[pl.pid + '|' + season + '|' + pl.fam.toUpperCase()] = { ms: 0, t };
       }
     }
     const tEnd = t0 + DAY - 3600000;
@@ -64,7 +67,6 @@ function fakeDays(opt) {
     const byFam = {};
     for (const [fam] of V.RATING_FAMS) byFam[fam] = V.elpLinesOf(Object.values(V.elpHiddensOf(st, fam, season)), PP.ELP.PRIOR[fam]);
     V.elpTabRecord(st, season, dayOf(tEnd), tEnd, byFam);
-    st.ms = tEnd;
     out.push({ day: dayOf(tEnd), ms: tEnd, state: JSON.parse(JSON.stringify(st)) });
   }
   return out;

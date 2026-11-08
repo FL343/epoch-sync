@@ -132,7 +132,8 @@ function run(opt) {
   const hist = (hist0 && hist0.v === SH.VER && Array.isArray(hist0.days)) ? hist0 : { v: SH.VER, days: [], finals: {} };
   hist.finals = hist.finals || {};
   const nowMs = opt.now != null ? +opt.now : Date.now(), s = V.seasonAt(nowMs), day = dayOf(nowMs);
-  const entry = { day, ms: nowMs, season: s, stateMs: st.ms || null, prevStateMs: prevSt ? (prevSt.ms || null) : null, fams: {}, gm: {} };
+  // nothing of the state file is copied as it is (its fields are keyed by salted pids): only what this file computes
+  const entry = { day, ms: nowMs, season: s, prevState: !!prevSt, fams: {}, gm: {} };
   for (const fam of FAMS) { entry.fams[fam] = lineDay(st, fam, s, nowMs, hist); entry.gm[fam] = gmDay(st, prevSt, fam, s, nowMs); }
   hist.days = hist.days.filter((e) => e.day !== day).concat([entry]).sort((a, b) => a.day - b.day).slice(-KEEP_DAYS);
   hist.finals[String(s)] = Object.fromEntries(FAMS.map((f) => [f, entry.fams[f].smooth]));
