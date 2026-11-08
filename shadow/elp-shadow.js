@@ -193,10 +193,18 @@ function argsOf(argv) {
 
 module.exports = { run, render, lineDay, gmDay, gmPool, officialOf, entriesOf, argsOf, dayOf };
 
+// the history file: one compact line per day (a day adds one line to the diff; 400 days stay a few MB)
+function histText(h) {
+  const head = { v: h.v, updated: h.updated, finals: h.finals };
+  return '{' + Object.entries(head).map(([k, v]) => JSON.stringify(k) + ':' + JSON.stringify(v)).join(',') + ',"days":[\n' + h.days.map((d) => JSON.stringify(d)).join(',\n') + '\n]}\n';
+}
+
+module.exports.histText = histText;
+
 if (require.main === module) {
   const o = argsOf(process.argv.slice(2));
   const res = run(o);
-  if (o.out) fs.writeFileSync(o.out, JSON.stringify(res.hist, null, 1) + '\n');
+  if (o.out) fs.writeFileSync(o.out, histText(res.hist));
   if (o.md) fs.writeFileSync(o.md, res.text);
   process.stdout.write(res.text);
 }

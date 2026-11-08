@@ -155,6 +155,12 @@ console.log('-- [6] the CLI');
   const sf = path.join(A.dir, 'state-' + A.D[5].day + '.json'), out = path.join(W, 'cli.json'), md = path.join(W, 'cli.md');
   const r = cp.spawnSync(process.execPath, [path.join(ROOT, 'shadow', 'elp-shadow.js'), '--state', sf, '--out', out, '--md', md, '--now', String(A.D[5].ms + 3600000)], { cwd: ROOT, encoding: 'utf8' });
   T('[6] exit 0, history + summary written, summary printed', r.status === 0 && fs.existsSync(out) && fs.existsSync(md) && /SHADOW ONLY/.test(r.stdout), (r.stderr || '').slice(0, 200));
+  const txt = fs.existsSync(out) ? fs.readFileSync(out, 'utf8') : '', back = (() => { try { return JSON.parse(txt); } catch (e) { return null; } })();
+  T('[6] the history file parses back, one line per day', back && back.v === 1 && back.days.length === 1 && txt.split('\n').filter((l) => /^\{"day":/.test(l)).length === 1);
+  const r2 = cp.spawnSync(process.execPath, [path.join(ROOT, 'shadow', 'elp-shadow.js'), '--state', path.join(A.dir, 'state-' + A.D[6].day + '.json'), '--history', out, '--out', out, '--now', String(A.D[6].ms + 3600000)], { cwd: ROOT, encoding: 'utf8' });
+  const txt2 = fs.readFileSync(out, 'utf8'), back2 = JSON.parse(txt2);
+  T('[6] the next day reads it and adds one line', r2.status === 0 && back2.days.length === 2 && txt2.split('\n').filter((l) => /^\{"day":/.test(l)).length === 2 && back2.days[1].fams.solo.prevDay === back2.days[0].day);
+  T('[6] the first (empty) history of the branch is read as a start', R.run({ state: path.join(A.dir, 'state-' + A.D[6].day + '.json'), history: (() => { const f = path.join(W, 'h0.json'); fs.writeFileSync(f, '{\n "v": 1,\n "days": [],\n "finals": {}\n}\n'); return f; })(), now: A.D[6].ms + 3600000 }).hist.days.length === 1);
   const bad = cp.spawnSync(process.execPath, [path.join(ROOT, 'shadow', 'elp-shadow.js'), '--state', path.join(W, 'missing.json')], { cwd: ROOT, encoding: 'utf8' });
   T('[6] an unreadable state file fails loudly (exit != 0)', bad.status !== 0);
 }
