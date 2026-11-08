@@ -1,0 +1,75 @@
+name: elp-shadow
+# O759 / O760 SHADOW of the endless competitive pass lines and the grandmaster calibration: computes, never writes.
+# Its own workflow, never inside the reconcile tick: it reads the endless-solo.json the reconcile job already committed
+# (and the same file as of a day earlier, for the day-over-day rank correlation), runs shadow/elp-shadow.js, prints the
+# summary, and keeps the history on the branch shadow/elp (elp-shadow.json + latest.md) -- never on main, so it never
+# meets the 5-minute state commits. No Steam call, no secret, no board, no state file of the reconcile job is touched;
+# a red or failed run only loses one day of shadow history. Aggregates only (no account or player id in the log or
+# the history: the repository and its run logs are public). Adopting a part later is its own change in the official
+# job + the client (shadow/README.md).
+# Isolation: no secret at all (the default token only: read the repo, push the history branch), a GitHub-hosted
+# runner, its own concurrency group, and a minute off the reconcile ticks (validate :x0 / demo :x1 / playtest :x3;
+# :x7 shares only the feedback offset).
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '37 1 * * *'
+permissions:
+  contents: write
+concurrency:
+  group: elp-shadow
+  cancel-in-progress: false
+jobs:
+  shadow:
+    if: github.repository == 'FL343/epoch-sync'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.ref_name }}
+      # the shadow's own tests (shadow/test/*.js; the reconcile workflows never run them, and this step is not named
+      # "test" so test/channel-workflows.js does not take it for a reconcile suite)
+      - name: shadow checks
+        run: |
+          unset GITHUB_STEP_SUMMARY
+          t="tests-$(date +%s%N)"; echo "::stop-commands::$t"
+          for f in shadow/test/*.js; do echo "== $f =="; node "$f" || exit 1; done
+          echo "::$t::"
+      - name: state a day ago
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          since=$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ)
+          sha=$(gh api "repos/${GITHUB_REPOSITORY}/commits?sha=${GITHUB_REF_NAME}&path=endless-solo.json&until=${since}&per_page=1" --jq '.[0].sha // empty' || true)
+          if [ -n "$sha" ] && git fetch -q --depth=1 origin "$sha" && git show "$sha:endless-solo.json" > "$RUNNER_TEMP/prev.json"; then
+            echo "state a day ago: $sha"
+          else
+            rm -f "$RUNNER_TEMP/prev.json"; echo "no state from a day ago: the rank correlation stays unmeasured today"
+          fi
+      - name: history branch
+        run: |
+          git fetch -q --depth=1 origin "+refs/heads/shadow/elp:refs/remotes/origin/shadow/elp" || { echo "::error::branch shadow/elp missing (created once by hand, shadow/README.md)"; exit 1; }
+          git worktree add -q -B shadow/elp "$RUNNER_TEMP/hist" origin/shadow/elp
+      - name: run
+        run: |
+          prev=""; if [ -f "$RUNNER_TEMP/prev.json" ]; then prev="--prev $RUNNER_TEMP/prev.json"; fi
+          node shadow/elp-shadow.js --state endless-solo.json $prev --history "$RUNNER_TEMP/hist/elp-shadow.json" --out "$RUNNER_TEMP/hist/elp-shadow.json" --md "$RUNNER_TEMP/hist/latest.md"
+          { echo '```'; cat "$RUNNER_TEMP/hist/latest.md"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - name: keep the history
+        run: |
+          cd "$RUNNER_TEMP/hist"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C . add elp-shadow.json latest.md
+          if git diff --cached --quiet; then echo "nothing new"; exit 0; fi
+          git commit -q -m "shadow: elp $(date -u +%Y%m%d)"
+          # the push-retry loop every workflow here uses (test/workflow-push-retry.js reads the line below as it is);
+          # this branch is not the one the workflow runs on, so the loop's ref name is the history branch
+          GITHUB_REF_NAME=shadow/elp
+          n=0
+          until git pull --rebase origin "${GITHUB_REF_NAME}" && git push; do
+            n=$((n+1))
+            if [ "$n" -ge 3 ]; then echo "::error::shadow history push failed 3 times"; exit 1; fi
+            sleep $((5 * n))
+          done
