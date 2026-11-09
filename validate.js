@@ -7112,14 +7112,14 @@ function cupCarrierDecode(score, det) {
   return { score: score | 0, week: det[1] | 0, thrSolo: det[2] | 0, thrTeam: det[3] | 0, podium: det[4] | 0, n: det.slice(5, 9).map((x) => x | 0), held: det.slice(9, 13).map((x) => x | 0), settled: det[13] | 0 };
 }
 // a conviction of a run with board score `packed` in family pc: the winners among `sids` whose podium entry carries exactly that
-//   score lose the mark (revoked; the place is not re-awarded). Returns the [week, sid] pairs revoked now.
+//   score lose the mark (revoked; the place is not re-awarded). Returns the [week, pid] pairs revoked now (Q392: rv holds pids).
 function cupRevoke(cup, pc, packed, sids) {
-  const out = [], set = new Set((sids || []).map(String));
+  const out = [], set = new Set((sids || []).map(cupId));   // Q392: the stored ids are pids; a raw steamID (the caller's, or a cup written before Q392) compares as its pid
   for (const wk of Object.keys((cup && cup.w) || {})) {
     const v = cup.w[wk];
     for (const [, score, ws] of ((v.pod && v.pod[pc]) || [])) {
       if ((score | 0) !== (packed | 0)) continue;
-      for (const sid0 of ws) { const sid = String(sid0); if (set.has(sid) && (v.rv || []).indexOf(sid) < 0) { (v.rv = v.rv || []).push(sid); out.push([Number(wk), sid]); } }
+      for (const sid0 of ws) { const sid = cupId(sid0); if (set.has(sid) && (v.rv || []).map(cupId).indexOf(sid) < 0) { (v.rv = v.rv || []).push(sid); out.push([Number(wk), sid]); } }
     }
   }
   return out;
@@ -7131,6 +7131,38 @@ function pruneCup(cup, week) {
   for (const wk of Object.keys(cup.w)) if (Number(wk) < floor) { delete cup.w[wk]; n++; }
   for (const wk of Object.keys(cup.wb || {})) if (Number(wk) < floor) delete cup.wb[wk];
   return n;
+}
+// cloud audit Q392 (R3 prep, 2026-11-09): the cup lives in endless-solo.json, which the persist step commits to this PUBLIC repository
+//   every tick (git history keeps it for good) -- so its podium (`pod`), revoked list (`rv`) and written-row memory (`hw.ok`) hold pids
+//   (pid() of the steamID, like every other state file), never a raw steamID. The steamIDs a honor write / delete needs stay in memory:
+//   the week's board rows at the settle, the honor board's own rows, or that week's boards read again when a write is still owed.
+//   cupScrub turns a raw steamID left in a cup (state written before Q392) into its pid: maintainCup runs it first (and saves), saveSolo
+//   runs it on every write (whatever path wrote the cup).
+const CUP_RAW_ID = /^\d{17}$/;
+function cupId(x) { const s = String(x); return CUP_RAW_ID.test(s) ? pid(s) : s; }
+function cupScrub(cup) {
+  if (!cup || typeof cup !== 'object') return false;
+  let n = 0;
+  const conv = (x) => { const p = cupId(x); if (p !== String(x)) n++; return p; };
+  for (const wk of Object.keys(cup.w || {})) {
+    const v = cup.w[wk];
+    if (!v || typeof v !== 'object') continue;
+    for (const pc of Object.keys(v.pod || {})) for (const e of (v.pod[pc] || [])) if (Array.isArray(e) && Array.isArray(e[2])) e[2] = e[2].map(conv);
+    if (Array.isArray(v.rv)) v.rv = v.rv.map(conv);
+  }
+  if (cup.hw && cup.hw.ok && typeof cup.hw.ok === 'object') {
+    const ok = {};
+    for (const k of Object.keys(cup.hw.ok)) ok[conv(k)] = cup.hw.ok[k];
+    cup.hw.ok = ok;
+  }
+  return n > 0;
+}
+// the verdict as stored: its podium ids turned into pids (cupVerdict itself stays on steamIDs -- the standings and the ban skip read
+//   the boards' steamIDs)
+function cupPidVerdict(v) {
+  const pod = {};
+  for (const pc of Object.keys((v && v.pod) || {})) pod[pc] = v.pod[pc].map(([place, score, sids]) => [place, score, (sids || []).map((s) => pid(String(s)))]);
+  return Object.assign({}, v, { pod });
 }
 function loadSolo() { try { const st = JSON.parse(fs.readFileSync(SOLO_FILE, 'utf8')) || {}; st.runs = st.runs || {}; st.wait = st.wait || {}; st.ms = st.ms || {}; st.held = st.held || {}; st.hist = st.hist || {}; return st; } catch (e) { return { runs: {}, wait: {}, ms: {}, held: {}, hist: {} }; } }
 // cloud audit Q327 (R2-A3-01): a run's chain memory went 45 days after its last settled segment, saves included -- but a casual or
@@ -7209,7 +7241,7 @@ function soloRunHasHeld(st, key, m, nowMs) {
   for (const x of Object.keys(h)) if (x !== m && h[x].k === key && nowMs - (h[x].t || 0) <= COMP.CHAIN_WAIT_MS) return true;
   return false;
 }
-function saveSolo(st, nowMs) { pruneSolo(st, nowMs); try { writeStateFile(SOLO_FILE, JSON.stringify(st, null, 0)); } catch (e) { ghWarn('write ' + SOLO_FILE + ' failed: ' + (e && e.message)); } }
+function saveSolo(st, nowMs) { pruneSolo(st, nowMs); if (st && st.cup) cupScrub(st.cup); try { writeStateFile(SOLO_FILE, JSON.stringify(st, null, 0)); } catch (e) { ghWarn('write ' + SOLO_FILE + ' failed: ' + (e && e.message)); } }
 // ---- the signed solo segments this job processed (cloud audit Q144 rework, REVIEW section 9 item 1) ----
 // pruneProcessed drops a key once it was off the shards on two complete reads -- safe for every key whose records only its
 //   own players can write together (they could as well make up a new match), but a guard-signed solo segment is the one
@@ -10958,6 +10990,8 @@ async function main() {
     const cup = st.cup = st.cup || {};
     cup.w = cup.w || {};
     let dirty = false;
+    if (cupScrub(cup)) { dirty = true; console.log('cup: raw steamIDs in the chain memory replaced by pids (Q392)'); }
+    const sidOfP = {};   // Q392: pid -> steamID of the winners, memory only (this run's settle rows, the honor board, a week's boards)
     if (cup.s == null) { cup.s = cupWeekBack(week, 2); dirty = true; }   // first run: the week before this one is settled next
     const bans = await banSetOnce();   // Q338: fully banned accounts (null = not read), for the settle and the honor upkeep below
     while (cup.s < prev) {
@@ -10979,12 +11013,13 @@ async function main() {
             rowsByPc[pc] = br.ents.map((e) => ({ sid: String(e.steamID), score: e.score | 0, det: decodeDetails(e.detailData) }));
           }
         } catch (e) { ghWarn('cup: week ' + wk + ' read failed (' + (e && e.message) + ') -- settled next run'); break; }
-        v = cupVerdict(rowsByPc, { solo: CUP.THR_SOLO, team: CUP.THR_TEAM, podium: CUP.PODIUM }, bans);
+        for (const rows of Object.values(rowsByPc)) for (const r of rows) sidOfP[pid(r.sid)] = r.sid;
+        v = cupPidVerdict(cupVerdict(rowsByPc, { solo: CUP.THR_SOLO, team: CUP.THR_TEAM, podium: CUP.PODIUM }, bans));   // Q392: stored with pids
         if (bans && bans.size) { const nb = Object.values(rowsByPc).reduce((a, rows) => a + rows.filter((r) => bans.has(r.sid)).length, 0); if (nb) console.log('cup: week ' + wk + ': ' + nb + ' row(s) of fully banned accounts left off the podium'); }
       }
       cup.w[wk] = v; cup.s = wk; dirty = true;
       RUN.cup = String(wk);
-      console.log('cup: settled week ' + wk + ' (edition ' + cupEdition(wk) + '): entrants ' + v.n.join('/') + ', held ' + v.h.join('') + Object.keys(v.pod).map((pc) => ' | size ' + pc + ' ' + v.pod[pc].map((e) => '#' + e[0] + ' ' + e[2].map(plog).join('+')).join(' ')).join(''));
+      console.log('cup: settled week ' + wk + ' (edition ' + cupEdition(wk) + '): entrants ' + v.n.join('/') + ', held ' + v.h.join('') + Object.keys(v.pod).map((pc) => ' | size ' + pc + ' ' + v.pod[pc].map((e) => '#' + e[0] + ' ' + e[2].map((p) => String(p).slice(0, 8)).join('+')).join(' ')).join(''));
     }
     if (pruneCup(cup, week)) dirty = true;
     // honor board: the latest settled week's winners (minus revoked marks); older rows deleted
@@ -10995,7 +11030,7 @@ async function main() {
       try {
         const existing = {};
         const br = await readBoardAll(honorId, 'cup honor board');
-        for (const e of br.ents) existing[String(e.steamID)] = { s: e.score | 0, det: decodeDetails(e.detailData) };
+        for (const e of br.ents) { const sid = String(e.steamID), p = pid(sid); existing[p] = { s: e.score | 0, det: decodeDetails(e.detailData) }; sidOfP[p] = sid; }   // Q392: keyed by pid like the verdict
         if (!cup.hw || (cup.hw.w | 0) !== (cup.s | 0)) { cup.hw = { w: cup.s, ok: {} }; dirty = true; }
         const vS = cup.w[cup.s];
         const want = vS ? cupMarksOf(vS, vS.rv) : {};
@@ -11003,19 +11038,33 @@ async function main() {
         //   written, so it is written again should the ban be lifted while this week is still the latest (a row the sanctions job moved
         //   away instead comes back with the unban -- its written flag stays). bans null = not known: the marks as before.
         const banGone = new Set();
-        if (bans) for (const sid of Object.keys(want)) if (bans.has(sid)) { delete want[sid]; if (existing[sid]) banGone.add(sid); }
+        if (bans) { const banP = new Set(Array.from(bans, (s) => pid(String(s)))); for (const p of Object.keys(want)) if (banP.has(p)) { delete want[p]; if (existing[p]) banGone.add(p); } }
         const plan = cupHonorPlan(existing, want, cup.s, cup.hw.ok);
-        for (const sid of plan.keep) if (!cup.hw.ok[sid]) { cup.hw.ok[sid] = 1; dirty = true; }
-        if (plan.writes.length || plan.deletes.length) console.log('cup honor: ' + plan.writes.length + ' writes [' + plan.writes.map((w) => plog(w.sid) + '=' + w.details.slice(2).map((x) => (x >> 8) + ':' + (x & 0xff)).join(',')).join(' ') + '], ' + plan.deletes.length + ' deletes [' + plan.deletes.map(plog).join(' ') + ']');
+        for (const p of plan.keep) if (!cup.hw.ok[p]) { cup.hw.ok[p] = 1; dirty = true; }
+        // Q392: a write needs the winner's steamID -- this run's settle or the honor board knows most; else that week's boards are read again
+        if (plan.writes.some((w) => !sidOfP[w.sid])) {
+          try {
+            for (const [pc, base] of CUP_FAMS) {
+              const bid = ((cup.wb || {})[cup.s] || {})[pc] || byName0(cupWeekBoardName(base, cup.s));
+              if (!bid) continue;
+              const brW = await readBoardAll(bid, 'cup week ' + cup.s + ' size ' + pc + ' (winner steamIDs)');
+              for (const e of brW.ents) sidOfP[pid(String(e.steamID))] = String(e.steamID);
+            }
+          } catch (e) { ghWarn('cup: week ' + cup.s + ' read failed (' + (e && e.message) + ') -- marks still owed are written next run'); }
+        }
+        if (plan.writes.length || plan.deletes.length) console.log('cup honor: ' + plan.writes.length + ' writes [' + plan.writes.map((w) => String(w.sid).slice(0, 8) + '=' + w.details.slice(2).map((x) => (x >> 8) + ':' + (x & 0xff)).join(',')).join(' ') + '], ' + plan.deletes.length + ' deletes [' + plan.deletes.map((p) => String(p).slice(0, 8)).join(' ') + ']');
         if (APPLY_MMR) {
           for (const w of plan.writes) {
-            const r = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: honorId, steamid: w.sid, score: w.score, scoremethod: 'ForceUpdate', format: 'json' }, w.details);
+            const sid = sidOfP[w.sid];   // Q392: w.sid is the pid
+            if (!sid) { ghWarn('cup honor: no steamID for ' + String(w.sid).slice(0, 8) + ' on week ' + cup.s + "'s boards -- not written this run"); continue; }
+            const r = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: honorId, steamid: sid, score: w.score, scoremethod: 'ForceUpdate', format: 'json' }, w.details);
             const okW = r.ok && !(r.json && r.json.result && r.json.result.result && r.json.result.result !== 1);
-            if (okW) { cup.hw.ok[w.sid] = 1; dirty = true; RUN.cupHonorW = (RUN.cupHonorW | 0) + 1; } else ghWarn('cup honor write failed ' + plog(w.sid) + ': HTTP ' + r.status);
+            if (okW) { cup.hw.ok[w.sid] = 1; dirty = true; RUN.cupHonorW = (RUN.cupHonorW | 0) + 1; } else ghWarn('cup honor write failed ' + plog(sid) + ': HTTP ' + r.status);
           }
-          for (const sid of plan.deletes) {
+          for (const p of plan.deletes) {
+            const sid = sidOfP[p];   // a delete is always a row read off the honor board above, so its steamID is known
             const r = await postForm('/ISteamLeaderboards/DeleteLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: honorId, steamid: sid, format: 'json' });
-            if (r.ok) { RUN.cupHonorD = (RUN.cupHonorD | 0) + 1; if (banGone.has(sid) && cup.hw.ok[sid]) { delete cup.hw.ok[sid]; dirty = true; } }
+            if (r.ok) { RUN.cupHonorD = (RUN.cupHonorD | 0) + 1; if (banGone.has(p) && cup.hw.ok[p]) { delete cup.hw.ok[p]; dirty = true; } }
             else ghWarn('cup honor delete failed ' + plog(sid) + ': HTTP ' + r.status);
           }
         }
@@ -14418,7 +14467,7 @@ async function main() {
             else ghWarn('seedcap correction ' + cor.id + ': delete week ' + wk + ' ' + plog(sidC) + ' HTTP ' + resW.status);
           }
         }
-        for (const [wk, sidR] of cupRevoke(soloState.cup, pcC, packedC, sidsC)) console.log('  seedcap correction ' + cor.id + ': cup mark of week ' + wk + ' revoked for ' + plog(sidR) + ' (not re-awarded)');
+        for (const [wk, pidR] of cupRevoke(soloState.cup, pcC, packedC, sidsC)) console.log('  seedcap correction ' + cor.id + ': cup mark of week ' + wk + ' revoked for ' + String(pidR).slice(0, 8) + ' (not re-awarded)');
       }
       markApplied();
       RUN.seedcapFix = (RUN.seedcapFix | 0) + 1;
@@ -14975,7 +15024,7 @@ Object.assign(module.exports, { RATING, RATING_FAMS, ENDLESS_RATING_LB_SOLO, END
   ratingHistUpsert, ratingHistRemove, ratingHistFinal, elpRunRk, ratingScoreOf, ratingPlan, ratingTierOf, tiercutDay, tiercutEncode, tiercutDecode, tiercutDue, pruneRatingHist,
   elpSettledDepths, elpLinesAt, elpCandidates, elpSettleRun, elpTrim, elpSettleAll, elpTeamNote, elpMemberHiddenBefore, elpTeamHidden, elpTeamTrim, elpLinesOf, elpHiddensOf, elpLinesSkipBanned, elpTableKey, elpTabNewest, elpTabRecord });
 Object.assign(module.exports, { CUP, CUP_FAMS, ENDLESS_CUP_LB, ENDLESS_CUP_HONOR_LB, cupWeekId, cupWeekStart, cupWeekBack, cupNextWeek, cupEdition, cupWeekBoardName, teamBlockSids,
-  cupStandings, cupPodium, cupPodiumFor, cupVerdict, cupMarksOf, cupHonorEncode, cupHonorDecode, cupHonorPlan, cupHeldMasks, cupCarrierEncode, cupCarrierDecode, cupRevoke, pruneCup });   // O180 Gold Rush Cup (client knife 5.1c-1; test/endless-cup.js)   // O103 endless competitive rating (client knife 5.1a; test/endless-rating.js)
+  cupStandings, cupPodium, cupPodiumFor, cupVerdict, cupMarksOf, cupHonorEncode, cupHonorDecode, cupHonorPlan, cupHeldMasks, cupCarrierEncode, cupCarrierDecode, cupRevoke, pruneCup, cupId, cupScrub, cupPidVerdict });   // O180 Gold Rush Cup (client knife 5.1c-1; test/endless-cup.js)   // O103 endless competitive rating (client knife 5.1a; test/endless-rating.js)
 Object.assign(module.exports, { BAN_LB, BAN_ACT_MM, banRowFull, fullBanSet, cupSkipBanned, elpLinesSkipBanned, CUP_BAN_WAIT_MS });   // cloud audit Q338 full bans kept off the cup podium / tier cuts / composite ladders (test/ban-skip.js; sanctions.js reads BAN_LB from here)
 Object.assign(module.exports, { lpWriteDetails, mhOfKey, groupSids, prunePendingWrites, PENDING_WRITES_FILE, RECEIPT_HOLD_MS });   // O480 points receipts + backlog (test/receipt-ring.js)
 Object.assign(module.exports, { lpReadStale, lpLastLive, LP_LAST_HOLD_MS });   // O481 the backlog's last write against a lagging read (test/stale-lp-read.js)

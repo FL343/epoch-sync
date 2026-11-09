@@ -19,6 +19,8 @@
 //   [8] e2e settle: a duo competitive segment writes this week's duo board (created on the fly, team block, id kept in the
 //       chain memory) and the carrier counts one team
 //   [9] mutation self-checks
+//   [10] cloud audit Q392: every written state file of the e2e runs is free of raw steamIDs (pod / rv / hw.ok hold pids); a write owed
+//       past the settle run reaches the right steamID; a cup written before Q392 is scrubbed; mutation self-checks over main()
 // Usage: node test/endless-cup.js
 // ============================================================
 const fs = require('fs'), path = require('path');
@@ -122,8 +124,8 @@ console.log('-- [5] carrier + held masks + revoke + prune --');
   T('[5] carrier decode round-trips', dec && dec.week === 202649 && dec.thrSolo === 40 && dec.thrTeam === 15 && dec.podium === 3 && dec.n.join() === '12,2,0,1' && dec.held.join() === '3,1,0,0' && dec.settled === 202648);
   T('[5] carrier decode rejects a short row / another magic', v.cupCarrierDecode(1, det.slice(0, 13)) === null && v.cupCarrierDecode(1, [0xEC].concat(det.slice(1))) === null);
   const cv = { s: 202647, w: { 202647: { h: [1, 1, 0, 0], pod: { 1: [[1, 900, [SID(1)]], [2, 800, [SID(2)]]], 2: [[1, 600, [SID(1), SID(5)]]] } } } };
-  eq('[5] revoke: only the entry carrying exactly the convicted score, only the convicted seats', v.cupRevoke(cv, 1, 900, [SID(1), SID(2)]), [[202647, SID(1)]]);
-  T('[5] revoke: the team mark of the same player (other score) stays; a second revoke is a no-op', JSON.stringify(cv.w[202647].rv) === JSON.stringify([SID(1)]) && v.cupRevoke(cv, 1, 900, [SID(1)]).length === 0);
+  eq('[5] revoke: only the entry carrying exactly the convicted score, only the convicted seats', v.cupRevoke(cv, 1, 900, [SID(1), SID(2)]), [[202647, v.pid(SID(1))]]);   // Q392: rv / the result hold pids
+  T('[5] revoke: the team mark of the same player (other score) stays; a second revoke is a no-op', JSON.stringify(cv.w[202647].rv) === JSON.stringify([v.pid(SID(1))]) && v.cupRevoke(cv, 1, 900, [SID(1)]).length === 0 && v.cupRevoke(cv, 1, 900, [v.pid(SID(1))]).length === 0);
   const pr = { w: { 202630: {}, 202640: {}, 202647: {} }, wb: { 202630: { 1: 5 }, 202647: { 1: 6 } } };
   const nPr = v.pruneCup(pr, 202648);
   T('[5] prune keeps the last KEEP_WEEKS weeks (verdicts + weekly board ids)', nPr === 1 && !pr.w[202630] && pr.w[202640] && pr.w[202647] && !pr.wb[202630] && pr.wb[202647]);
@@ -141,7 +143,7 @@ const SRC = fs.readFileSync(path.join(__dirname, '..', 'validate.js'), 'utf8');
   T('[6] solo competitive lane: the weekly twin right after the season twin (same season gate)', /changedCompSeason\[sid\] = \{ s: packed, ts: f\.score \| 0, build: f\.build >>> 0 \};[^\n]*\n      if \(\(f\.seasonId \| 0\) === \(seasonId \| 0\)\) cupWeekPut\(null, sid, packed, \{ s: packed, ts: f\.score \| 0, build: f\.build >>> 0 \}\);/.test(SRC));
   T('[6] team competitive lane: the weekly twin right after the season twin, carrying the roster (team block)', /fam\.seasonChanged\[sid\] = \{ s: packed, ts: teamT, build: f\.build >>> 0, team: rosterSids \};[^\n]*\n            if \(\(t\.seasonId \| 0\) === \(seasonId \| 0\)\) cupWeekPut\(fam, sid, packed, \{ s: packed, ts: teamT, build: f\.build >>> 0, team: rosterSids \}\);/.test(SRC));
   T('[6] the weekly rows go through ladderDetails (team block like every team row)', /leaderboardid: bid, steamid: sid, score: w\.s, scoremethod: 'ForceUpdate', format: 'json' \}, ladderDetails\(w\)\);\n      const okFlag[^\n]*\n      if \(!okFlag && !wroteGone\(sid, res\)\) ghWarn\('write ' \+ name/.test(SRC));   // O775: a result 27 marks the account, no warning
-  T('[6] a conviction deletes this week\'s row (correction targets) and earlier weeks\' rows, and revokes the mark', /\[compWeekId, compWeekBest, 'solo-comp-week'\]/.test(SRC) && /\[famC\.weekId, famC\.weekBest, famC\.low \+ '-comp-week'\]/.test(SRC) && /for \(const \[wk, sidR\] of cupRevoke\(soloState\.cup, pcC, packedC, sidsC\)\)/.test(SRC));
+  T('[6] a conviction deletes this week\'s row (correction targets) and earlier weeks\' rows, and revokes the mark', /\[compWeekId, compWeekBest, 'solo-comp-week'\]/.test(SRC) && /\[famC\.weekId, famC\.weekBest, famC\.low \+ '-comp-week'\]/.test(SRC) && /for \(const \[wk, pidR\] of cupRevoke\(soloState\.cup, pcC, packedC, sidsC\)\)/.test(SRC));
   T('[6] the weekly board id is kept in the chain memory when the week\'s first write creates it', /\(soloState\.cup\.wb\[cupWeekNow\] = soloState\.cup\.wb\[cupWeekNow\] \|\| \{\}\)\[pc\] = bid;/.test(SRC));
   T('[6] run summary row', /Gold Rush Cup \(O180\): settled \/ honor rows written \/ deleted \/ carrier/.test(SRC));
   T('[6] the threshold override is honoured only with the _test cup boards (local end-to-end)', /if \(\/_test\$\/\.test\(ENDLESS_CUP_LB\) && \/_test\$\/\.test\(ENDLESS_CUP_HONOR_LB\)\) \{\n  if \(process\.env\.CUP_THR_SOLO\)/.test(SRC) && C.THR_SOLO === 40 && C.THR_TEAM === 15);
@@ -170,6 +172,7 @@ const field = (p, name) => { const m = new RegExp('(?:^|&)' + name + '=([^&]*)')
 const rowsAsEntries = (rows) => rows.map((r) => ({ steamID: r.sid, score: r.score, details: r.det || [r.score, 0] }));
 function duoTeams(n) { const out = []; for (let i = 0; i < n; i++) { const a = SID(300 + 2 * i), b = SID(301 + 2 * i); out.push({ sid: a, score: 500 - i, det: [500 - i, 0].concat(v.teamBlock([a, b])) }, { sid: b, score: 500 - i, det: [500 - i, 0].concat(v.teamBlock([a, b])) }); } return out; }
 
+const PRIV = [];   // Q392: every e2e run below, scanned in [10] for raw steamIDs in the written state
 // ---- [7] e2e: settle-free ticks settle the cup ----
 console.log('-- [7] e2e: weekly settle on settle-free ticks --');
 {
@@ -186,7 +189,8 @@ console.log('-- [7] e2e: weekly settle on settle-free ticks --');
   const expW = [SID(100), SID(101), SID(102), SID(300), SID(301), SID(302), SID(303), SID(304), SID(305)];
   T('[7] honor rows: solo top three + the three duo champion / runner-up / third teams (both members), score = the settled week', hw.length === expW.length && expW.every((s) => byS[s] && byS[s].score === wk), JSON.stringify(Object.keys(byS)));
   T('[7] honor details: the solo champion [magic, week, 1:1], the duo third-place pair [.., 2:3]', JSON.stringify(byS[SID(100)] && byS[SID(100)].det) === JSON.stringify(v.cupHonorEncode(wk, [{ pc: 1, place: 1 }])) && JSON.stringify(byS[SID(305)] && byS[SID(305)].det) === JSON.stringify(v.cupHonorEncode(wk, [{ pc: 2, place: 3 }])));
-  T('[7] the written rows are remembered for the week (hw.ok)', cup1.hw && cup1.hw.w === wk && expW.every((s) => cup1.hw.ok[s] === 1));
+  T('[7] the written rows are remembered for the week (hw.ok, by pid -- Q392)', cup1.hw && cup1.hw.w === wk && expW.every((s) => cup1.hw.ok[v.pid(s)] === 1) && Object.keys(cup1.hw.ok).length === expW.length);
+  PRIV.push(['[7] W48 settle', r1]);
   const cw = setTo(r1, BOARD.cup);
   const cdec = cw.length ? v.cupCarrierDecode(Number(field(cw[0], 'score')), S.postDetails(cw[0].body)) : null;
   T('[7] carrier published once on the version_gate account: week W48, thresholds, entrants 0 (no settle this run), held bits for W47, settled W47', cw.length === 1 && field(cw[0], 'steamid') === CARRIER && cdec && cdec.week === 202648 && cdec.thrSolo === C.THR_SOLO && cdec.thrTeam === C.THR_TEAM && cdec.podium === C.PODIUM && cdec.n.join() === '0,0,0,0' && cdec.held.join() === '1,1,0,0' && cdec.settled === wk, JSON.stringify(cdec));
@@ -198,6 +202,7 @@ console.log('-- [7] e2e: weekly settle on settle-free ticks --');
   // the week after: W48 had no boards -> settled not held, W47 marks deleted
   const r3 = run(world([], weekBoards(C.THR_SOLO, C.THR_TEAM).concat(cupBoards(honorNow, carrierNow))), { SOLO_FILE: r2.state.SOLO_FILE || r1.state.SOLO_FILE }, { SEASON_NOW: NOW_W49 });
   const cup3 = (r3.state.SOLO_FILE || {}).cup || {};
+  PRIV.push(['[7] second tick', r2], ['[7] W49', r3]);
   T('[7] W49: week W48 settled not held (no board), every W47 mark deleted, nothing written', r3.code === 0 && cup3.s === 202648 && cup3.w[202648] && cup3.w[202648].h.join('') === '0000' && delTo(r3, BOARD.honor).length === expW.length && setTo(r3, BOARD.honor).length === 0, r3.out.split('\n').filter((l) => /cup/.test(l)).join(' | '));
   const c3 = setTo(r3, BOARD.cup), c3d = c3.length ? v.cupCarrierDecode(Number(field(c3[0], 'score')), S.postDetails(c3[0].body)) : null;
   T('[7] W49 carrier: held bits shift (bit 1 = W47), settled W48', c3d && c3d.week === 202649 && c3d.held.join() === '2,2,0,0' && c3d.settled === 202648, JSON.stringify(c3d));
@@ -207,7 +212,7 @@ console.log('-- [7] e2e: weekly settle on settle-free ticks --');
   T('[7] ' + (C.THR_SOLO - 1) + ' players / ' + (C.THR_TEAM - 1) + ' teams: the edition is not held, no honor row', r4.code === 0 && cup4.w[wk] && cup4.w[wk].h.join('') === '0000' && setTo(r4, BOARD.honor).length === 0);
   // a revoked winner: his row deleted, nobody promoted
   const soloRv = JSON.parse(JSON.stringify(r1.state.SOLO_FILE));
-  soloRv.cup.w[wk].rv = [SID(100)];
+  soloRv.cup.w[wk].rv = [v.pid(SID(100))];
   const r5 = run(world([], weekBoards(C.THR_SOLO, C.THR_TEAM).concat(cupBoards(honorNow, carrierNow))), { SOLO_FILE: soloRv });
   T('[7] a revoked champion: his row deleted, no new row for the fourth (not re-awarded)', r5.code === 0 && delTo(r5, BOARD.honor).map((p) => field(p, 'steamid')).join() === SID(100) && setTo(r5, BOARD.honor).length === 0);
   // channel twin: nothing at all
@@ -250,6 +255,7 @@ console.log('-- [8] e2e: duo segment -> weekly board --');
   const adv = (state, ms) => { const f = S.advance(state, ms); const so = f.SOLO_FILE; if (so && so.wait) for (const k of Object.keys(so.wait)) if (so.wait[k] && so.wait[k].t0) so.wait[k].t0 -= ms; return f; };
   const r2 = run(boards, adv(r1.state, 10 * 60000), { SEASON_NOW: NOW_W47 });
   T('[8] the duo segment settles (paced first, ten minutes later)', r1.code === 0 && r2.code === 0 && /endless-comp settle/.test(r2.out), r2.out.slice(-500));
+  PRIV.push(['[8] duo segment', r1], ['[8] duo segment, ten minutes later', r2]);
   const created = r2.posts.filter((p) => /FindOrCreateLeaderboard/.test(p.url) && /name=endless_comp_duo_w202647(&|$)/.test(p.body));
   T('[8] this week\'s duo board created on the fly (trusted writes)', created.length === 1 && /onlytrustedwrites=1/.test(created[0].body));
   const wbId = (((r2.state.SOLO_FILE || {}).cup || {}).wb || {})[202647];
@@ -279,6 +285,74 @@ console.log('-- [9] mutation self-checks --');
   const wide = v.cupVerdict({ 1: soloRows(C.THR_SOLO) }, { solo: C.THR_SOLO, team: C.THR_TEAM, podium: C.PODIUM });
   T('[9] knob on ([[40, 5]]): a 40-player edition marks the top five', wide.pod[1].length === 5 && wide.pod[1][4][0] === 5);
   C.PODIUM_STEPS = [];
+}
+
+// ---- [10] cloud audit Q392: the cup state carries pids, never a raw steamID ----
+// endless-solo.json is committed to this PUBLIC repository every tick and git history keeps it for good; every other state file holds
+//   pids only (pid() = HMAC of the steamID with the secret salt), the cup podium / revoked list / written-row memory held raw steamIDs.
+console.log('-- [10] Q392: no raw steamID in the written state --');
+const RAW_ID = /(^|[^0-9])\d{17}(?![0-9])/;
+const rawIn = (r) => Object.keys(r.state || {}).filter((k) => RAW_ID.test(JSON.stringify(r.state[k])));
+{
+  T('[10] the scan has runs to scan', PRIV.length >= 5, String(PRIV.length));
+  for (const [label, r] of PRIV) T('[10] ' + label + ': every written state file free of raw steamIDs', rawIn(r).length === 0, rawIn(r).join(','));
+  // unit: the id helpers
+  const p1 = v.pid(SID(1));
+  T('[10] cupId: a raw steamID becomes its pid, a pid stays', v.cupId(SID(1)) === p1 && v.cupId(p1) === p1 && v.cupId(Number.MAX_SAFE_INTEGER) === String(Number.MAX_SAFE_INTEGER));
+  const legacy = { s: 202647, w: { 202647: { n: [40, 0, 0, 0], h: [1, 0, 0, 0], pod: { 1: [[1, 900, [SID(1)]], [2, 800, [SID(2)]]] }, rv: [SID(2)] } }, hw: { w: 202647, ok: { [SID(1)]: 1 } } };
+  T('[10] cupScrub: a cup written before Q392 gets pids in pod / rv / hw.ok and says it changed; a clean cup is left as is', v.cupScrub(legacy) === true && JSON.stringify(legacy.w[202647].pod[1]) === JSON.stringify([[1, 900, [p1]], [2, 800, [v.pid(SID(2))]]]) && JSON.stringify(legacy.w[202647].rv) === JSON.stringify([v.pid(SID(2))]) && legacy.hw.ok[p1] === 1 && Object.keys(legacy.hw.ok).length === 1 && v.cupScrub(legacy) === false);
+  const pv = v.cupPidVerdict({ n: [1, 0, 0, 0], h: [1, 0, 0, 0], pod: { 1: [[1, 5, [SID(1)]]] } });
+  T('[10] cupPidVerdict: the stored verdict names pids, counts and held bits unchanged', JSON.stringify(pv) === JSON.stringify({ n: [1, 0, 0, 0], h: [1, 0, 0, 0], pod: { 1: [[1, 5, [p1]]] } }));
+}
+// e2e: a write owed past the settle run (the honor board refused it) is written next run to the right steamID (that week's boards)
+const wk10 = 202647;
+const weekBoards10 = () => [{ id: BOARD.wSolo, name: 'endless_comp_solo_w' + wk10, entries: rowsAsEntries(soloRows(C.THR_SOLO)) }, { id: BOARD.wDuo, name: 'endless_comp_duo_w' + wk10, entries: rowsAsEntries(duoTeams(C.THR_TEAM)) }];
+const cupBoards10 = (honorRows) => [{ id: BOARD.cup, name: 'endless_cup', entries: [] }, { id: BOARD.honor, name: 'endless_cup_honor', entries: honorRows || [] }];
+const solo10 = () => ({ runs: {}, wait: {}, ms: {}, held: {}, hist: {}, cup: { s: 202646, w: {} } });
+const expW10 = [SID(100), SID(101), SID(102), SID(300), SID(301), SID(302), SID(303), SID(304), SID(305)];
+const sidsSet = (r) => S.setPosts(r, BOARD.honor).map((p) => field(p, 'steamid')).sort();
+{
+  const f1 = run(world([], weekBoards10().concat(cupBoards10())), { SOLO_FILE: solo10() }, { STUB_FAIL_POST: JSON.stringify({ endless_cup_honor: 500 }) });
+  const cupF = ((f1.state.SOLO_FILE || {}).cup || {});
+  T('[10] the honor board refuses every write in the settle run: week settled, nothing remembered as written', f1.code === 0 && cupF.s === wk10 && cupF.hw && Object.keys(cupF.hw.ok).length === 0, f1.out.split('\n').filter((l) => /cup/.test(l)).join(' | '));
+  const f2 = run(world([], weekBoards10().concat(cupBoards10())), { SOLO_FILE: f1.state.SOLO_FILE });
+  const cupF2 = ((f2.state.SOLO_FILE || {}).cup || {});
+  T('[10] next run: the owed rows are written to the winners\' steamIDs (read back off the week\'s boards), remembered by pid', f2.code === 0 && JSON.stringify(sidsSet(f2)) === JSON.stringify(expW10.slice().sort()) && expW10.every((s) => cupF2.hw.ok[v.pid(s)] === 1) && !/cup: settled week/.test(f2.out), f2.out.split('\n').filter((l) => /cup/.test(l)).join(' | '));
+  PRIV.push(['[10] refused writes', f1], ['[10] owed writes', f2]);
+  for (const [label, r] of PRIV.slice(-2)) T('[10] ' + label + ': state free of raw steamIDs', rawIn(r).length === 0, rawIn(r).join(','));
+  // a cup written before Q392 (raw steamIDs in pod / rv / hw.ok): the first run scrubs it, rows current -> nothing rewritten, the
+  //   revoked raw one stays revoked (his row deleted)
+  const r1 = run(world([], weekBoards10().concat(cupBoards10())), { SOLO_FILE: solo10() });
+  const honorNow = S.setPosts(r1, BOARD.honor).map((p) => ({ steamID: field(p, 'steamid'), score: Number(field(p, 'score')), details: S.postDetails(p.body) }));
+  const old = JSON.parse(JSON.stringify(r1.state.SOLO_FILE));
+  const un = {}; for (const s of expW10) un[v.pid(s)] = s;
+  for (const e of old.cup.w[wk10].pod[1].concat(old.cup.w[wk10].pod[2])) e[2] = e[2].map((p) => un[p] || p);
+  old.cup.hw.ok = {}; for (const s of expW10) old.cup.hw.ok[s] = 1;
+  old.cup.w[wk10].rv = [SID(102)];
+  T('[10] the legacy fixture really holds raw steamIDs', RAW_ID.test(JSON.stringify(old.cup)));
+  const l1 = run(world([], weekBoards10().concat(cupBoards10(honorNow))), { SOLO_FILE: old });
+  const cupL = ((l1.state.SOLO_FILE || {}).cup || {});
+  T('[10] legacy cup: scrubbed and saved on the first run (warned once), nothing written, only the revoked third deleted', l1.code === 0 && /raw steamIDs in the chain memory replaced by pids \(Q392\)/.test(l1.out) && S.setPosts(l1, BOARD.honor).length === 0 && delTo(l1, BOARD.honor).map((p) => field(p, 'steamid')).join() === SID(102) && !RAW_ID.test(JSON.stringify(cupL)) && JSON.stringify(cupL.w[wk10].rv) === JSON.stringify([v.pid(SID(102))]), l1.out.split('\n').filter((l) => /cup/.test(l)).join(' | '));
+  // mutation self-checks over the real main(): each removal must turn a check above red
+  const SRCV = fs.readFileSync(path.join(__dirname, '..', 'validate.js'), 'utf8');
+  const mutants = [
+    ['settle stores the raw verdict + saveSolo does not scrub', [['v = cupPidVerdict(cupVerdict(', 'v = (cupVerdict('], ['if (st && st.cup) cupScrub(st.cup); ', '']],
+      (script) => rawIn(S.runCron(world([], weekBoards10().concat(cupBoards10())), { SOLO_FILE: solo10() }, { SEASON_NOW: NOW_W48 }, script, 'endless-cup-mut')).length > 0],
+    ['settle stores the raw verdict (saveSolo still scrubs): this run cannot match its winners', [['v = cupPidVerdict(cupVerdict(', 'v = (cupVerdict(']],
+      (script) => S.setPosts(S.runCron(world([], weekBoards10().concat(cupBoards10())), { SOLO_FILE: solo10() }, { SEASON_NOW: NOW_W48 }, script, 'endless-cup-mut'), BOARD.honor).length !== expW10.length],
+    ['no week-board read for an owed write', [['if (plan.writes.some((w) => !sidOfP[w.sid])) {', 'if (false) {']],
+      (script) => sidsSet(S.runCron(world([], weekBoards10().concat(cupBoards10())), { SOLO_FILE: f1.state.SOLO_FILE }, { SEASON_NOW: NOW_W48 }, script, 'endless-cup-mut')).length === 0],
+    ['maintainCup does not scrub a legacy cup (saveSolo off too)', [["if (cupScrub(cup)) { dirty = true;", "if (false) { dirty = true;"], ['if (st && st.cup) cupScrub(st.cup); ', '']],
+      (script) => { const r = S.runCron(world([], weekBoards10().concat(cupBoards10(honorNow))), { SOLO_FILE: old }, { SEASON_NOW: NOW_W48 }, script, 'endless-cup-mut'); return RAW_ID.test(JSON.stringify(((r.state.SOLO_FILE || {}).cup) || {})); }],
+  ];
+  for (const [label, edits, check] of mutants) {
+    let src = SRCV, okAnchors = true;
+    for (const [from, to] of edits) { if (src.split(from).length !== 2) { okAnchors = false; bad('[10] mutant ' + label + ': anchor not found exactly once: ' + from); break; } src = src.replace(from, to); }
+    if (!okAnchors) continue;
+    const script = path.join(__dirname, '..', '.mutant-endless-cup-q392-' + process.pid + '.js');
+    try { fs.writeFileSync(script, src); T('[10] mutant (' + label + ') is caught', check(script)); }
+    finally { try { fs.unlinkSync(script); } catch (e) {} }
+  }
 }
 
 console.log(failN ? ('FAIL (endless-cup) ' + failN) : 'ALL PASS (endless-cup)');

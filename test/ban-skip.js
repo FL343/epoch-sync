@@ -210,14 +210,14 @@ let E4;
   const r2 = run(world([], weekBoards().concat(cupBoards(honorNow)), { ban: CUP_BAN.concat([banEnt(SID(101))]) }), { SOLO_FILE: r1.state.SOLO_FILE });
   const cup2 = ((r2.state.SOLO_FILE || {}).cup || {});
   T('[4] a winner banned after the settle: his honor row deleted, nothing written, no second settle', r2.code === 0 && sidsOf(delTo(r2, BOARD.honor)).join() === SID(101) && setTo(r2, BOARD.honor).length === 0 && !/cup: settled week/.test(r2.out), r2.out.split('\n').filter((l) => /cup/.test(l)).join(' | '));
-  T('[4] ... and his "row written this week" flag is forgotten (the others keep theirs)', cup2.hw && !cup2.hw.ok[SID(101)] && cup2.hw.ok[SID(102)] === 1);
+  T('[4] ... and his "row written this week" flag is forgotten (the others keep theirs)', cup2.hw && !cup2.hw.ok[v.pid(SID(101))] && cup2.hw.ok[v.pid(SID(102))] === 1);   // Q392: hw.ok by pid
   // the ban is lifted while W47 is still the latest settled week: his row is written again
   const r3 = run(world([], weekBoards().concat(cupBoards(honorNow.filter((e) => e.steamID !== SID(101)))), { ban: CUP_BAN }), { SOLO_FILE: r2.state.SOLO_FILE });
   T('[4] the ban lifted: his mark row is written back (1:1 champion of W47)', r3.code === 0 && sidsOf(setTo(r3, BOARD.honor)).join() === SID(101) && JSON.stringify(S.postDetails(setTo(r3, BOARD.honor)[0].body)) === JSON.stringify(v.cupHonorEncode(WK, [{ pc: 1, place: 1 }])));
   // a row the sanctions job moved away (exiled) stays away: no delete, no rewrite, flag kept (the unban restores it from the shadow)
   const r4 = run(world([], weekBoards().concat(cupBoards(honorNow.filter((e) => e.steamID !== SID(102)))), { ban: CUP_BAN.concat([banEnt(SID(102))]) }), { SOLO_FILE: r1.state.SOLO_FILE });
   const cup4 = ((r4.state.SOLO_FILE || {}).cup || {});
-  T('[4] a banned winner whose row the sanctions job already moved: nothing written or deleted, his written flag kept', r4.code === 0 && setTo(r4, BOARD.honor).length === 0 && delTo(r4, BOARD.honor).length === 0 && cup4.hw && cup4.hw.ok[SID(102)] === 1);
+  T('[4] a banned winner whose row the sanctions job already moved: nothing written or deleted, his written flag kept', r4.code === 0 && setTo(r4, BOARD.honor).length === 0 && delTo(r4, BOARD.honor).length === 0 && cup4.hw && cup4.hw.ok[v.pid(SID(102))] === 1);
   // the ban board read fails 12 h after the week ended: the settle waits, nothing is written
   const r5 = run(world([], weekBoards().concat(cupBoards()), { ban: CUP_BAN }), { SOLO_FILE: solo0() }, { STUB_FAIL: JSON.stringify({ ban_board: 500 }), SEASON_NOW: '2026-11-23T12:00:00Z' });
   const cup5 = ((r5.state.SOLO_FILE || {}).cup || {});
@@ -226,11 +226,11 @@ let E4;
   const r6 = run(world([], weekBoards().concat(cupBoards()), { ban: CUP_BAN }), { SOLO_FILE: solo0() }, { STUB_FAIL: JSON.stringify({ ban_board: 500 }), SEASON_NOW: '2026-11-24T01:00:00Z' });
   const cup6 = ((r6.state.SOLO_FILE || {}).cup || {});
   const old = v.cupVerdict({ 1: soloRows(C.THR_SOLO), 2: duoRows(C.THR_TEAM) }, thr);
-  T('[4] ... still failing 25 h after the week: settled with the verdict before Q338 (banned champion included), warned', r6.code === 0 && cup6.s === WK && JSON.stringify(cup6.w[WK]) === JSON.stringify(old) && /ban board still not read 24 h after week 202647 ended/.test(r6.out), JSON.stringify(cup6.w && cup6.w[WK]).slice(0, 300));
+  T('[4] ... still failing 25 h after the week: settled with the verdict before Q338 (banned champion included), warned', r6.code === 0 && cup6.s === WK && JSON.stringify(cup6.w[WK]) === JSON.stringify(v.cupPidVerdict(old)) && /ban board still not read 24 h after week 202647 ended/.test(r6.out), JSON.stringify(cup6.w && cup6.w[WK]).slice(0, 300));
   // no ban board on the listing (no ban ever written on this app): nobody banned, the verdict before Q338
   const r7 = run(world([], weekBoards().concat(cupBoards())), { SOLO_FILE: solo0() });
   const cup7 = ((r7.state.SOLO_FILE || {}).cup || {});
-  T('[4] no ban board on the app: settled as before Q338, the board is not created', r7.code === 0 && JSON.stringify(cup7.w && cup7.w[WK]) === JSON.stringify(old) && !r7.posts.some((p) => /FindOrCreateLeaderboard/.test(p.url) && field(p, 'name') === 'ban_board'));
+  T('[4] no ban board on the app: settled as before Q338, the board is not created', r7.code === 0 && JSON.stringify(cup7.w && cup7.w[WK]) === JSON.stringify(v.cupPidVerdict(old)) && !r7.posts.some((p) => /FindOrCreateLeaderboard/.test(p.url) && field(p, 'name') === 'ban_board'));
 }
 
 // ---- [5] pass-line table e2e ----
@@ -345,8 +345,8 @@ function mutant(pairs) {
   }
   // e2e mutations: each over the real main() of a mutated copy
   const e2e = [
-    ['the settle ignores the bans (cupVerdict without them)', [['podium: CUP.PODIUM }, bans);', 'podium: CUP.PODIUM });']], (p) => JSON.stringify(cupE2e(p).honor1) !== JSON.stringify(CUP_WIN)],   // the upkeep still keeps SID(100) off, but the honest #4 loses his place
-    ['the honor upkeep writes banned winners', [["if (bans) for (const sid of Object.keys(want)) if (bans.has(sid)) { delete want[sid]; if (existing[sid]) banGone.add(sid); }", '']], (p) => { const r = run(world([], weekBoards().concat(cupBoards()), { ban: [banEnt(SID(101))] }), { SOLO_FILE: Object.assign(solo0(), { cup: { s: WK, w: { [WK]: v.cupVerdict({ 1: soloRows(C.THR_SOLO) }, thr) } } }) }, null, p); return sidsOf(setTo(r, BOARD.honor)).indexOf(SID(101)) >= 0; }],
+    ['the settle ignores the bans (cupVerdict without them)', [['podium: CUP.PODIUM }, bans));', 'podium: CUP.PODIUM }));']], (p) => JSON.stringify(cupE2e(p).honor1) !== JSON.stringify(CUP_WIN)],   // the upkeep still keeps SID(100) off, but the honest #4 loses his place
+    ['the honor upkeep writes banned winners', [["if (bans) { const banP = new Set(Array.from(bans, (s) => pid(String(s)))); for (const p of Object.keys(want)) if (banP.has(p)) { delete want[p]; if (existing[p]) banGone.add(p); } }", '']], (p) => { const r = run(world([], weekBoards().concat(cupBoards()), { ban: [banEnt(SID(101))] }), { SOLO_FILE: Object.assign(solo0(), { cup: { s: WK, w: { [WK]: v.cupPidVerdict(v.cupVerdict({ 1: soloRows(C.THR_SOLO) }, thr)) } } }) }, null, p); return sidsOf(setTo(r, BOARD.honor)).indexOf(SID(101)) >= 0; }],
     ['the settle does not wait for a failed ban read', [["if (seasonNowMs() < cupWeekStart(cupNextWeek(wk)) + CUP_BAN_WAIT_MS) { ghWarn('cup: ban board not read -- week ' + wk + ' settled next run'); break; }", '']], (p) => { const r = run(world([], weekBoards().concat(cupBoards()), { ban: CUP_BAN }), { SOLO_FILE: solo0() }, { STUB_FAIL: JSON.stringify({ ban_board: 500 }) }, p); return ((r.state.SOLO_FILE || {}).cup || {}).s === WK; }],
     ['the pass lines ignore the bans', [['byFam[fam] = elpLinesSkipBanned(elpHiddensOf(st, fam, seasonId), bans, ELP.PRIOR[fam]);', 'byFam[fam] = elpLinesSkipBanned(elpHiddensOf(st, fam, seasonId), null, ELP.PRIOR[fam]);']], (p) => { const d = tcOf(run(world([], [], { rSolo: RW.rows, ban: RBAN }), { SOLO_FILE: RW.st }, null, p)); const all = v.elpLinesOf(Object.values(v.elpHiddensOf(RW.st, 'solo', 0)), require('../points-plan.js').ELP.PRIOR.solo).pass; return !d || d.byFam.solo.pass[6] === all[6]; }],
     ['the composite writer writes banned accounts', [["if (ovBans && ovBans.has(sid)) return false;   // Q338: no composite row for a fully banned account", '']], (p) => sidsOf(setTo(run(world(SEG, [], Object.assign({ ban: OVBAN }, OV)), {}, { SEASON_NOW: '2026-10-01T12:00:00Z' }, p), BOARD.compOverall)).indexOf(X) >= 0],
