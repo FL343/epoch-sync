@@ -117,11 +117,39 @@ const trustLedger = require('./trust-ledger.js');   // O198 v1 (knife 5.5b-1): t
 //     save's: a settling run does not fold a waiting entry past PENDING_W_MAX_MS into its writes (laid ahead, it would start
 //     afresh and never go), so its save drops it, warned; a write this run settles over it starts afresh, warned too (pastFuse /
 //     fuseRestart).
+//   gone: the time (ms) Steam last answered a board write of his with result 27 (O775; Expired = the account no longer owns the
+//     app: a refund, a trial removed from the library -- every board of his answers it, see OV_GONE_MS). Live 2026-11-09 (demo
+//     job): 263 waiting writes of 139 such accounts (113 XP, 67 CP, 83 endless bests) went out on every run and came back 27 every
+//     time, about 75,000 Web API calls and 263 warnings a day on the publisher key the three channels share, for 7 days each.
+//     While the mark is less than GONE_RETRY_MS old (goneHolds) his waiting writes (w / wp / xw / cw / rw / ew) stay here unsent:
+//     not folded into a settling run's writes, not retried by a quiet one -- every reader of those boards still takes them as his
+//     rows, and the fuse (PENDING_W_MAX_MS from the first failure, warned) is unchanged. A fresh settle of his (his rows move this
+//     run: he played again, so he owns the app again) takes the mark away first, and his waiting writes go with that settle's
+//     (main: goneBack); the settle's own writes always go. Past the window they go once more (any run that can name him): a 27
+//     again marks him again (so about one try a day, seven in the fuse, not 2016), a write of his that lands takes the mark away.
+//     (A quiet run's retries go one after another: the first one answered 27 marks him again and holds the rest back -- one
+//     request that day; a settling run decides its writes before any goes out, so all of his go that once.)
+//     One log line per account a run, no warning; RUN.wGone / wHeld / wBack count it. The mark goes with his last waiting write,
+//     or past PENDING_W_MAX_MS (prunePendingWrites). It sits on his entry here rather than in the chain memory's ovGone (O624):
+//     it gates this file's writes only, is saved with them by every run that saves the backlog (quiet runs too), pruned with
+//     them, cleared by a settle, on a one-day window -- ovGone (seven days, composite rows / classic repack) is left as it was.
+//     A file written before O775 has no mark: read as it stands (nobody held) -- the first 27 marks him.
 const PENDING_WRITES_FILE = process.env.PENDING_WRITES_FILE || 'pending-writes.json';
 const CRON_PULSE_LB = process.env.CRON_PULSE_LB || '';   // O480 cron_pulse board name (unset: cron_pulse, cron_pulse_test in a sandbox run; see writePulse)
 const RECEIPT_HOLD_MS = Math.max(0, Number(process.env.RECEIPT_HOLD_MS || 6 * 3600 * 1000));
 const RECEIPT_QUEUE_CAP = 8;   // per player, as many as a ring holds (the newest kept)
 const PENDING_W_MAX_MS = 7 * 86400000;
+// O775: one try a day for the waiting writes of an account Steam answered result 27 (see gone above)
+const GONE_RETRY_MS = 24 * 3600 * 1000;
+const PENDING_W_FIELDS = ['w', 'wp', 'xw', 'cw', 'rw', 'ew'];   // the waiting writes of an entry (what a gone mark holds back)
+// O775 (pure): does backlog entry e's result-27 mark hold his waiting writes back at `now`? (no mark / unreadable / older than the
+//   window: no; a mark ahead of now -- another machine's clock -- no either: tried, and a 27 marks him again at this run's time)
+function goneHolds(e, now) {
+  const t = e && typeof e === 'object' ? Number(e.gone) : NaN;
+  if (!(t > 0)) return false;
+  const age = now - t;
+  return age >= 0 && age < GONE_RETRY_MS;
+}
 const LP_LAST_HOLD_MS = Math.max(0, Number(process.env.LP_LAST_HOLD_MS || 30 * 60000));
 // O481 (pure): is a points row read from the board (row = { score, det } or null: none) behind last = the l of the backlog? The
 //   receipt ring orders the writes: the newest receipt of the last write (its ring head) is on every row written after it --
@@ -147,8 +175,8 @@ function loadPendingWrites() {
   try { const o = JSON.parse(fs.readFileSync(PENDING_WRITES_FILE, 'utf8')); return (o && typeof o === 'object' && !Array.isArray(o)) ? o : {}; } catch (e) { return {}; }
 }
 // pure: drop queued receipts past the hold (and beyond the cap), failed writes past the fuse (points w, Q341's last-season wp,
-//   Q318's XP / CP xw / cw, Q319's endless bests ew), a last write past its hold (quietly: its job is done), then empty entries;
-//   returns { receipts, writes } dropped
+//   Q318's XP / CP xw / cw, Q319's endless bests ew), a last write past its hold (quietly: its job is done), a result-27 mark with
+//   nothing left to hold back or past the fuse (O775, quietly), then empty entries; returns { receipts, writes } dropped
 function prunePendingWrites(s, now) {
   let dropped = 0, droppedW = 0;
   for (const k of Object.keys(s)) {
@@ -195,6 +223,12 @@ function prunePendingWrites(s, now) {
         }
       }
       if (Object.keys(m).length) e.ew = m; else delete e.ew;
+    }
+    // O775: the result-27 mark goes with the last waiting write it holds back (dropped above or landed), past the fuse (no run
+    //   marked him again for a week: none could name him), or unreadable -- quietly: the writes it held were warned for themselves
+    if (e && e.gone != null) {
+      const t = Number(e.gone);
+      if (!(t > 0) || now - t > PENDING_W_MAX_MS || !PENDING_W_FIELDS.some((f) => e[f] != null)) delete e.gone;
     }
     if (e && e.l != null && !lpLastLive(e.l, now)) delete e.l;
     if (!e || typeof e !== 'object' || !Object.keys(e).length) delete s[k];
@@ -4129,6 +4163,7 @@ function writeRunSummary() {
       '| endless best writes that failed, waiting for a later run / waiting writes that landed or were found on the board / dropped, board no longer written (Q319) | ' + s('ebQueued', 0) + ' / ' + s('ebDone', 0) + ' / ' + s('ebDropped', 0) + ' |',
       '| classic ladder rows in the old key rewritten / planned this run / still in the old key after it (O569) | ' + (Array.isArray(RUN.classicRepack) ? RUN.classicRepack.join(' / ') : '-') + ' |',
       '| classic ladder rows in the old key of accounts that no longer own the app (result 27), not rewritten for 7 days (O624) | ' + s('classicRepackGone', 0) + ' |',
+      '| backlog writes answered result 27 (the account no longer owns the app): accounts marked this run / waiting writes not sent (they go a day after the last 27, or with a settle of his) / marks cleared by a settle of his (O775) | ' + s('wGone', 0) + ' / ' + s('wHeld', 0) + ' / ' + s('wBack', 0) + ' |',
       '| solo segments held by the key policy (other channel / retired key; new this run) | ' + s('keyHeld', 0) + ' (' + s('keyHeldNew', 0) + ') |',
       '| duration | ' + ((Date.now() - (RUN.t0 || Date.now())) / 1000).toFixed(1) + 's |',
       '',
@@ -9114,6 +9149,82 @@ async function main() {
     if (!was || typeof was !== 'object' || aheadLive(was)) return;
     console.log('::warning::' + what + ' write of ' + String(k).slice(0, 8) + (on ? ' on ' + on : '') + ' waited past ' + Math.round(PENDING_W_MAX_MS / 86400000) + ' days (' + (was.n | 0) + ' failed tries, value ' + was.v + '): this run\'s settle writes ' + (v | 0) + ' in its place, its fuse starts now (Q334)');
   };
+  // ---- O775: accounts Steam answers result 27 (no longer own the app; the backlog's gone, see PENDING_WRITES_FILE;
+  //   test/pending-writes-gone.js) ----
+  //   Every writer of a backlog board reports its answer here: wroteGone on a failed one (a 27 marks him: one log line per account
+  //   a run, no warning -- the writer's own warning is for failures that may pass), goneClear on one that landed (he owns the app:
+  //   the mark goes). goneHeld is asked before a waiting write goes out (the quiet retries, the settle's folds, ebLay); goneBack
+  //   lets a fresh settle of his take the mark away before those folds. Times are this run's nowMs, as the save prunes with.
+  const res27 = (res) => !!(res && res.json && res.json.result && res.json.result.result === 27);
+  const goneNow = new Set(), goneHeldKeys = new Set();   // pids marked this run (logged once) / pid|write held back this run
+  let goneSaid = 0;
+  const wroteGone = (sid, res) => {
+    if (!res27(res)) return false;
+    const k = pid(String(sid)), e = lpBacklog[k] = lpBacklog[k] || {};
+    e.gone = nowMs; backlogDirty = true;
+    if (!goneNow.has(k)) {
+      goneNow.add(k); RUN.wGone = (RUN.wGone | 0) + 1;
+      console.log('  ' + plog(sid) + ': a board write answered result 27 (no longer owns the app) -- his waiting writes are not sent for ' + Math.round(GONE_RETRY_MS / 3600000) + ' h unless a settle of his comes first (O775)');
+    }
+    return true;
+  };
+  const goneClear = (sid) => {
+    const k = pid(String(sid)), e = lpBacklog[k];
+    if (!e || e.gone == null) return;
+    delete e.gone; if (!Object.keys(e).length) delete lpBacklog[k]; backlogDirty = true;
+    console.log('  ' + plog(sid) + ': a board write of his landed -- no longer held back as not owning the app (O775)');
+  };
+  // his waiting write `what` stays home this run (a 27 within GONE_RETRY_MS); counted once per write (RUN.wHeld), summed up by
+  //   goneReport, no line of its own
+  const goneHeld = (sid, what) => {
+    const k = pid(String(sid));
+    if (!goneHolds(lpBacklog[k], nowMs)) return false;
+    goneHeldKeys.add(k + '|' + what); RUN.wHeld = goneHeldKeys.size;
+    return true;
+  };
+  // the sids of `list` held back on write `what` taken out of it, in place -- not one whose row `moved` (this run's writes of that
+  //   board) has: his write goes, and it carries the waiting value (the settle counted from it)
+  const goneHoldList = (list, what, moved) => {
+    for (let i = list.length - 1; i >= 0; i--) if (!(moved && moved[list[i]] != null) && goneHeld(list[i], what)) list.splice(i, 1);
+    return list;
+  };
+  // endless bests ebLay set aside for an account held back ({ d, k, sid, ent }): his row this run, not in the write pool -- put in
+  //   it by goneBack if a settle of his clears the mark (the pool as without O775: his waiting best, or the better run of this one)
+  const ebHeld = [];
+  const ebLaidEnts = new Set();   // the pool entries ebLay laid (a waiting write, not a settle of his)
+  // O775: the user's call (2026-11-09) -- a player Steam answered 27 who settles again (he played: he owns the app again, a trial
+  //   added back, a purchase) gets his waiting writes sent with that settle, not a day later. moved = this run's settle writes
+  //   (maps sid -> row, before the retries are folded into them) + touched (a Set: career cells moved); a laid waiting best is
+  //   not one. A match of his that is only sighted, held or voided (no row of his moves) does not count: a chain segment can
+  //   sit in the fresh list for days. A last-season write (wp) of his goes with the next run (lpPrevRetry ran ahead of the
+  //   settle). Returns how many accounts it cleared.
+  const goneBack = (moved, touched) => {
+    const sids = new Set(touched || []);
+    for (const m of moved) for (const s of Object.keys(m || {})) if (!(m[s] && ebLaidEnts.has(m[s]))) sids.add(String(s));
+    let n = 0;
+    for (const s of sids) {
+      const k = pid(s), e = lpBacklog[k];
+      if (!e || e.gone == null) continue;
+      delete e.gone; if (!Object.keys(e).length) delete lpBacklog[k]; backlogDirty = true; n++;
+      RUN.wBack = (RUN.wBack | 0) + 1;
+      console.log('  ' + plog(s) + ': settles this run (his result-27 mark cleared) -- his waiting writes go with this run\'s (O775)');
+    }
+    for (const x of ebHeld) {
+      if (goneHolds(lpBacklog[x.k], nowMs) || x.d.pool[x.sid] != null || x.d.best[x.sid] !== x.ent.s) continue;   // still held / a better run of his this run / taken back (seedcap)
+      const e = lpBacklog[x.k], was = e && e.ew && e.ew[x.d.name];
+      if (!was || (was.v | 0) !== x.ent.s) continue;
+      x.d.pool[x.sid] = x.ent; ebLaidEnts.add(x.ent); goneHeldKeys.delete(x.k + '|ew|' + x.d.name); RUN.wHeld = goneHeldKeys.size;
+      console.log('  endless best write of ' + plog(x.sid) + ' on ' + x.d.name + ' waits since an earlier run (' + (was.n | 0) + ' tries): ' + (was.v | 0) + ', written with this run\'s settle of his (Q319, O775)');
+    }
+    return n;
+  };
+  // one line a run for the writes held back so far (the quiet retries' end, the settle's folds)
+  const goneReport = () => {
+    if (goneHeldKeys.size <= goneSaid) return;
+    goneSaid = goneHeldKeys.size;
+    const accts = new Set([...goneHeldKeys].map((x) => x.split('|')[0])).size, h = Math.round(GONE_RETRY_MS / 3600000);
+    console.log('backlog: ' + goneSaid + ' waiting write(s) of ' + accts + ' account(s) not sent -- Steam answered result 27 for them (no longer own the app) less than ' + h + ' h ago; they go ' + h + ' h after that answer, or with a settle of theirs (O775)');
+  };
   // O569: a waiting best write on a classic ladder (Q319 ew) keeps its exact bank (ts): repacked in the new key, so it compares with
   //   the rows read this run (classicRowScore) in one packing. Idempotent.
   for (const k of Object.keys(lpBacklog)) {
@@ -9258,7 +9369,7 @@ async function main() {
     try { res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: lpBoardId, steamid: String(sid), score, scoremethod: 'ForceUpdate', format: 'json' }, det); }
     catch (err) { lpLastDrop(sid); if (opt && opt.retry) lpWaitFailed(sid, score, det); throw err; }   // Q334: cut off, it waits too
     const ok = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
-    if (!ok) lpLastDrop(sid);
+    if (!ok) { lpLastDrop(sid); wroteGone(sid, res); }   // O775: a 27 marks him (his waiting writes stay home a day)
     if (ok) {
       lpWritten[String(sid)] = { score, det };
       delete receipts[String(sid)];
@@ -9270,6 +9381,7 @@ async function main() {
       // O481: a run of the next LP_LAST_HOLD_MS that reads his row without this write takes this instead (lpFresh)
       if (LP_LAST_HOLD_MS > 0) { (lpBacklog[k] = lpBacklog[k] || {}).l = { b: lpCur.name, v: score | 0, d: det, t: Date.now() }; backlogDirty = true; }
       RUN.receipts = (RUN.receipts | 0) + p.n;
+      goneClear(sid);   // O775
     } else if (opt && opt.retry) lpWaitFailed(sid, score, det);
     if (once) once();
     return { ok, res, det, n: p.n, queued: p.queued };
@@ -9298,6 +9410,7 @@ async function main() {
     for (const sid of lpPendingSids([])) {
       const pw = lpWaiting(sid);
       if (!pw) continue;
+      if (goneHeld(sid, 'w')) continue;   // O775: answered 27 less than a day ago
       try { await writeLpRow(sid, pw.v | 0, Array.isArray(pw.d) ? pw.d : [], null, [], { retry: true }); }
       catch (e) { ghWarn('points write retry of ' + plog(sid) + ': ' + (e && e.message)); }
     }
@@ -9317,15 +9430,17 @@ async function main() {
       if (!wp || wp.b !== lpPrevName) continue;
       const sid = byPid.get(k) || sidByPid.get(k) || null;   // (called after sidByPid exists, as lpPendingSids)
       if (!sid || !lpPrevWaiting(sid)) continue;
+      if (goneHeld(sid, 'wp')) continue;   // O775: answered 27 less than a day ago
       const det = Array.isArray(wp.d) ? wp.d : [];
       let ok = false, why = '';
       try {
         const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: prevLpId, steamid: String(sid), score: wp.v | 0, scoremethod: 'ForceUpdate', format: 'json' }, det);
         ok = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
-        if (!ok) why = 'status ' + res.status;
+        if (!ok) why = wroteGone(sid, res) ? 'result 27, no longer owns the app (O775)' : 'status ' + res.status;
       } catch (err) { why = (err && err.message) || 'error'; }
       backlogDirty = true;
       if (ok) {
+        goneClear(sid);   // O775
         lpPrevWritten[String(sid)] = wp.v | 0;
         delete e.wp;
         if (LP_LAST_HOLD_MS > 0 && !lpLast(sid)) e.l = { b: lpPrevName, v: wp.v | 0, d: det, t: Date.now() };
@@ -9392,6 +9507,7 @@ async function main() {
   const rowAfterWrite = (f, sid, score, landed) => {
     const k = pid(String(sid)), e = lpBacklog[k];
     if (landed) {
+      goneClear(sid);   // O775
       rowWrote[f][String(sid)] = score | 0;
       if (!e || !e[f]) return false;
       aheadLanded(f + '|' + k, e[f], '  ' + ROW_NAME[f] + ' write of ' + plog(sid) + ' laid ahead by a run that ended before its outcome was known landed: ' + (score | 0),
@@ -9444,17 +9560,19 @@ async function main() {
         if (!w) continue;
         const rr = f === 'rw' ? ratingRowOf((sk || (sk = loadSkill()))[pid(sid)]) : null;   // Q334: a rating row, from the skill state
         if (f === 'rw' && !rr) { console.log('  rating write of ' + plog(sid) + ': no rating in the skill state -- dropped (Q334)'); rowDrop(f, sid); continue; }
+        if (goneHeld(sid, f)) continue;   // O775: answered 27 less than a day ago
         const score = f === 'cw' ? cpClamp(w.v) : f === 'rw' ? rr.disp : (w.v | 0);
         const det = f === 'xw' ? careerBlockOf((xs || (xs = loadXp()))[pid(sid)]) : f === 'rw' ? rr.det : null;   // the career block, as on every XP write
         let landed = false;
         try {
           const r = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: bid, steamid: sid, score, scoremethod: 'ForceUpdate', format: 'json' }, (det && det.length) ? det : null);
           landed = r.ok && !(r.json && r.json.result && r.json.result.result && r.json.result.result !== 1);
-          if (!landed) ghWarn(ROW_NAME[f] + ' write retry of ' + plog(sid) + ' failed HTTP ' + r.status + ' (Q318)');
+          if (!landed && !wroteGone(sid, r)) ghWarn(ROW_NAME[f] + ' write retry of ' + plog(sid) + ' failed HTTP ' + r.status + ' (Q318)');
         } catch (e) { ghWarn(ROW_NAME[f] + ' write retry of ' + plog(sid) + ': ' + (e && e.message) + ' (Q318)'); }
         rowAfterWrite(f, sid, score, landed);
       }
     }
+    goneReport();   // O775: the quiet run's line (the endless best and points retries ran before this one)
   };
   // ---- Q319: the endless best writes that failed (backlog ew, see PENDING_WRITES_FILE; test/endless-best-owed.js) ----
   //   ebBoards: the boards of this run's settle (filled once their reads are done: name, id, best map, write pool, complete read,
@@ -9510,6 +9628,7 @@ async function main() {
   const ebAfter = (name, sid, w, landed) => {
     const k = pid(String(sid)), e = lpBacklog[k], was = e && e.ew && e.ew[name];
     if (landed) {
+      goneClear(sid);   // O775
       if (!was || (w.s | 0) < (was.v | 0)) return;
       aheadLanded('ew|' + k + '|' + name, was, '  endless best write of ' + plog(sid) + ' on ' + name + ' laid ahead by a run that ended before its outcome was known landed: ' + (w.s | 0),
         () => { RUN.ebDone = (RUN.ebDone | 0) + 1; console.log('  endless best write of ' + plog(sid) + ' on ' + name + ' that failed before (' + (was.n | 0) + ' tries) landed: ' + (w.s | 0) + ' (Q319)'); });
@@ -9554,8 +9673,12 @@ async function main() {
     if (pastFuse('endless best', sid, was)) return;   // Q334: his row stays this run's base (a better run is written over it)
     ebLaid.set(d.name + '|' + sid, { row: row == null ? null : row | 0, team: d.weekTeam ? d.weekTeam[sid] : undefined });
     d.best[sid] = was.v | 0;
-    d.pool[sid] = ebEntry(k, d.name, was);
-    if (d.weekTeam) d.weekTeam[sid] = d.pool[sid].team ? d.pool[sid].team.slice() : null;
+    const ent = ebEntry(k, d.name, was);
+    if (d.weekTeam) d.weekTeam[sid] = ent.team ? ent.team.slice() : null;
+    // O775: answered 27 less than a day ago -- his row for every reader of the board this run, not written (goneBack puts it in
+    //   the pool if a settle of his this run clears the mark)
+    if (goneHeld(sid, 'ew|' + d.name)) { ebHeld.push({ d, k, sid, ent }); return; }
+    d.pool[sid] = ent; ebLaidEnts.add(ent);
     console.log('  endless best write of ' + plog(sid) + ' on ' + d.name + ' waits since an earlier run (' + (was.n | 0) + ' tries): ' + (was.v | 0) + ' over the row ' + (row == null ? '(none)' : row | 0) + ', written with this run (Q319)');
   };
   // a seedcap correction of the run that set a waiting write of his on board d: the wait ends; laid this run (and not beaten by a
@@ -9589,6 +9712,7 @@ async function main() {
         if (!names.has(name)) { RUN.ebDropped = (RUN.ebDropped | 0) + 1; ghWarn('endless best write of ' + k.slice(0, 8) + ' on ' + name + ' dropped: no longer a board this job writes (value ' + ew[name].v + ', ' + (ew[name].n | 0) + ' tries, Q319)'); ebDrop(k, name); continue; }
         const sid = sidByPid.get(k), bid = idOf(name);
         if (!sid || !bid) continue;
+        if (goneHeld(sid, 'ew|' + name)) continue;   // O775: answered 27 less than a day ago (no row read either)
         const was = ew[name];
         let row = null;
         try { const e = await readUserEntry(bid, sid, 'endless best retry'); row = ladderRowScore(name, e); }   // O569: classic rows repacked
@@ -9599,7 +9723,7 @@ async function main() {
         try {
           const r = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: bid, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, ladderDetails(w));
           landed = r.ok && !(r.json && r.json.result && r.json.result.result && r.json.result.result !== 1);
-          if (!landed) ghWarn('endless best write retry of ' + plog(sid) + ' on ' + name + ' failed HTTP ' + r.status + ' (Q319)');
+          if (!landed && !wroteGone(sid, r)) ghWarn('endless best write retry of ' + plog(sid) + ' on ' + name + ' failed HTTP ' + r.status + ' (Q319)');
         } catch (e) { ghWarn('endless best write retry of ' + plog(sid) + ' on ' + name + ': ' + (e && e.message) + ' (Q319)'); }
         ebAfter(name, sid, w, landed);
       }
@@ -14117,6 +14241,10 @@ async function main() {
     if (sigDirty) saveSignals(signals, nowMs);
     if (xpId) saveXp(xpState);
   };
+  // O775: an account Steam answered result 27 less than a day ago keeps his waiting writes home (his rows as read above) -- unless
+  //   this run's settle moves a row of his (goneBack: the mark goes, they go with it). His new writes are in these maps already.
+  goneBack([changedLp, changedXp, changedCp, changed].concat(ebBoards.map((d) => d.pool)), careerTouched);
+  goneHoldList(lpRetrySids, 'w', changedLp); goneHoldList(xpRetrySids, 'xw', changedXp); goneHoldList(cpRetrySids, 'cw', changedCp);
   // O480: the failed points writes of earlier runs go with this run's points writes (cloud audit Q334: not one past the fuse)
   for (const sid of lpRetrySids) { const pw = lpWaiting(sid); if (pw && changedLp[sid] == null && !pastFuse('points', sid, pw)) changedLp[sid] = pw.v | 0; }
   // Q318: the waiting XP / CP writes of earlier runs go with this run's writes (a player this run credits carries his inside)
@@ -14136,12 +14264,13 @@ async function main() {
     return { disp, plan, det: ratingDetails(plan), mu: c.mu, sigma: c.sigma };
   };
   const ratingSids = Object.keys(changed);
-  for (const sid of rowPendingSids('rw', ratingSids)) {
+  for (const sid of goneHoldList(rowPendingSids('rw', ratingSids), 'rw', changed)) {   // O775: not one answered 27 less than a day ago
     if (changed[sid] || pastFuse('rating', sid, rowWaiting('rw', sid))) continue;
     if (ratingRowOf(skill[pid(sid)])) ratingSids.push(sid);
     else { console.log('  rating write of ' + plog(sid) + ': no rating in the skill state -- dropped (Q334)'); rowDrop('rw', sid); }
   }
   for (const sid of ratingSids) rowLayAhead('rw', sid, ratingWriteOf(sid).disp);
+  goneReport();   // O775: the settle's line (every fold of the backlog into this run's writes is behind it)
   // the points writes, each with the details it will carry (its receipts ride it on disk from here); the rest of the receipts
   //   (a void, a player with no points write this run) wait for their player's next points write
   const lpPlanned = {};
@@ -14184,7 +14313,7 @@ async function main() {
     const rw = ratingWriteOf(sid), mu = rw.mu, sigma = rw.sigma, disp = rw.disp, planRating = rw.plan;
     const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: rankedId, steamid: sid, score: disp, scoremethod: 'ForceUpdate', format: 'json' }, rw.det);
     const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
-    if (!okFlag) ghWarn('write rating ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
+    if (!okFlag && !wroteGone(sid, res)) ghWarn('write rating ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
     else console.log('  ok rating ' + plog(sid) + ' = ' + disp + ' (mu=' + mu.toFixed(2) + ' sigma=' + sigma.toFixed(2) + ') plan ' + planRating);
     return okFlag;
   });
@@ -14200,7 +14329,7 @@ async function main() {
     const w = await writeLpRow(sid, changedLp[sid], lpDet[sid], rv, [], { retry: true, planned: lpPlanned[sid] });   // Q334: laid ahead above
     const res = w.res;
     const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
-    if (!okFlag) ghWarn('write points ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
+    if (!okFlag && !wroteGone(sid, res)) ghWarn('write points ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
     else { receiptN += w.n; console.log('  ok points ' + plog(sid) + ' = ' + changedLp[sid] + (rv ? (' [reveal ' + (rv.flag === 1 ? 'UPSET' : 'PROTECTED') + ']') : '') + (w.n ? (' [' + w.n + ' receipt' + (w.n > 1 ? 's' : '') + (w.queued ? ', ' + w.queued + ' queued before' : '') + ']') : '')); }
     return okFlag;
   });
@@ -14212,7 +14341,7 @@ async function main() {
     // whose XP changed through a non-matchmade credit path (a bare write would erase it).
     const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: xpId, steamid: sid, score: changedXp[sid], scoremethod: 'ForceUpdate', format: 'json' }, careerDet[sid] || null);
     const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
-    if (!okFlag) ghWarn('write xp ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
+    if (!okFlag && !wroteGone(sid, res)) ghWarn('write xp ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
     else console.log('  ok xp ' + plog(sid) + ' = ' + changedXp[sid] + (careerDet[sid] ? (' career ' + careerDet[sid][2] + 'g/' + careerDet[sid][3] + 'w/' + careerDet[sid][4] + 'l') : ''));
     return okFlag;
   });
@@ -14224,7 +14353,7 @@ async function main() {
     if (score !== changedCp[sid]) { RUN.cpClamped = (RUN.cpClamped | 0) + 1; ghWarn('write cp ' + plog(sid) + ': ' + changedCp[sid] + ' outside int32 -> clamped to ' + score + ' (Q110)'); }
     const res = await postForm('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: cpId, steamid: sid, score, scoremethod: 'ForceUpdate', format: 'json' });
     const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
-    if (!okFlag) ghWarn('write cp ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
+    if (!okFlag && !wroteGone(sid, res)) ghWarn('write cp ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
     else console.log('  ok cp ' + plog(sid) + ' = ' + score);
     return okFlag;
   });
@@ -14240,7 +14369,7 @@ async function main() {
     const w = changedEndless[sid];
     const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: enId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, ladderDetails(w));
     const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
-    if (!okFlag) ghWarn('write endless ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
+    if (!okFlag && !wroteGone(sid, res)) ghWarn('write endless ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
     else console.log('  ok endless ' + plog(sid) + ' = ' + w.s);
     return okFlag;
   });
@@ -14248,7 +14377,7 @@ async function main() {
     const w = changedEndlessSeason[sid];
     const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: enSeasonId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, ladderDetails(w));
     const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
-    if (!okFlag) ghWarn('write seasonal endless ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
+    if (!okFlag && !wroteGone(sid, res)) ghWarn('write seasonal endless ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
     else console.log('  ok endless season ' + plog(sid) + ' = ' + w.s);
     return okFlag;
   });
@@ -14258,7 +14387,7 @@ async function main() {
     const w = changedEndlessTrio[sid];
     const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: enTrioId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, ladderDetails(w));
     const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
-    if (!okFlag) ghWarn('write trio endless ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
+    if (!okFlag && !wroteGone(sid, res)) ghWarn('write trio endless ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
     else console.log('  ok endless trio ' + plog(sid) + ' = ' + w.s);
     return okFlag;
   });
@@ -14266,7 +14395,7 @@ async function main() {
     const w = changedEndlessTrioSeason[sid];
     const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: enTrioSeasonId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, ladderDetails(w));
     const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
-    if (!okFlag) ghWarn('write seasonal trio endless ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
+    if (!okFlag && !wroteGone(sid, res)) ghWarn('write seasonal trio endless ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
     else console.log('  ok endless trio season ' + plog(sid) + ' = ' + w.s);
     return okFlag;
   });
@@ -14275,7 +14404,7 @@ async function main() {
     const w = changedEndlessQuad[sid];
     const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: enQuadId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, ladderDetails(w));
     const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
-    if (!okFlag) ghWarn('write quad endless ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
+    if (!okFlag && !wroteGone(sid, res)) ghWarn('write quad endless ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
     else console.log('  ok endless quad ' + plog(sid) + ' = ' + w.s);
     return okFlag;
   });
@@ -14283,7 +14412,7 @@ async function main() {
     const w = changedEndlessQuadSeason[sid];
     const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: enQuadSeasonId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, ladderDetails(w));
     const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
-    if (!okFlag) ghWarn('write seasonal quad endless ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
+    if (!okFlag && !wroteGone(sid, res)) ghWarn('write seasonal quad endless ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
     else console.log('  ok endless quad season ' + plog(sid) + ' = ' + w.s);
     return okFlag;
   });
@@ -14307,7 +14436,7 @@ async function main() {
     const w = changedEndlessSolo[sid];
     const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: enSoloId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, ladderDetails(w));
     const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
-    if (!okFlag) ghWarn('write solo casual endless ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
+    if (!okFlag && !wroteGone(sid, res)) ghWarn('write solo casual endless ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
     else console.log('  ok endless solo ' + plog(sid) + ' = ' + w.s);
     return okFlag;
   });
@@ -14315,7 +14444,7 @@ async function main() {
     const w = changedEndlessSoloSeason[sid];
     const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: enSoloSeasonId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, ladderDetails(w));
     const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
-    if (!okFlag) ghWarn('write seasonal solo casual endless ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
+    if (!okFlag && !wroteGone(sid, res)) ghWarn('write seasonal solo casual endless ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
     else console.log('  ok endless solo season ' + plog(sid) + ' = ' + w.s);
     return okFlag;
   });
@@ -14327,7 +14456,7 @@ async function main() {
     const w = changedEndlessClassicSolo[sid];
     const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: enClassicSoloId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, ladderDetails(w));
     const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
-    if (!okFlag) ghWarn('write classic solo endless ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
+    if (!okFlag && !wroteGone(sid, res)) ghWarn('write classic solo endless ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
     else console.log('  ok endless classic solo ' + plog(sid) + ' = ' + w.s);
     return okFlag;
   });
@@ -14345,7 +14474,7 @@ async function main() {
       const w = F.changed[sid];
       const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: F.id, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, ladderDetails(w));
       const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
-      if (!okFlag) ghWarn('write classic ' + F.low + ' endless ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
+      if (!okFlag && !wroteGone(sid, res)) ghWarn('write classic ' + F.low + ' endless ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
       else console.log('  ok endless classic ' + F.low + ' ' + plog(sid) + ' = ' + w.s);
       return okFlag;
     });
@@ -14365,7 +14494,7 @@ async function main() {
     const w = changedComp[sid];
     const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: compId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, ladderDetails(w));
     const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
-    if (!okFlag) ghWarn('write solo comp ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
+    if (!okFlag && !wroteGone(sid, res)) ghWarn('write solo comp ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
     else console.log('  ok solo comp ' + plog(sid) + ' = ' + w.s);
     return okFlag;
   });
@@ -14373,7 +14502,7 @@ async function main() {
     const w = changedCompSeason[sid];
     const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: compSeasonId, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, ladderDetails(w));
     const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
-    if (!okFlag) ghWarn('write seasonal solo comp ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
+    if (!okFlag && !wroteGone(sid, res)) ghWarn('write seasonal solo comp ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
     else console.log('  ok solo comp season ' + plog(sid) + ' = ' + w.s);
     return okFlag;
   });
@@ -14394,7 +14523,7 @@ async function main() {
         const w = pool[sid];
         const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: bid, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, ladderDetails(w));
         const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
-        if (!okFlag) ghWarn('write ' + label + ' ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
+        if (!okFlag && !wroteGone(sid, res)) ghWarn('write ' + label + ' ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
         else console.log('  ok ' + label + ' ' + plog(sid) + ' = ' + w.s);
         return okFlag;
       });
@@ -14418,7 +14547,7 @@ async function main() {
       const w = pool[sid];
       const res = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: bid, steamid: sid, score: w.s, scoremethod: 'ForceUpdate', format: 'json' }, ladderDetails(w));
       const okFlag = res.ok && !(res.json && res.json.result && res.json.result.result && res.json.result.result !== 1);
-      if (!okFlag) ghWarn('write ' + name + ' ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
+      if (!okFlag && !wroteGone(sid, res)) ghWarn('write ' + name + ' ' + plog(sid) + ' failed HTTP ' + res.status + ' ' + String(res.text).slice(0, 140));
       else console.log('  ok ' + name + ' ' + plog(sid) + ' = ' + w.s);
       return okFlag;
     });
@@ -14646,3 +14775,4 @@ Object.assign(module.exports, { PRIVATE_LONE, privateLoneClaim, privateLoneVerdi
 Object.assign(module.exports, { START_PROOF_ENFORCE, startProof, proofState, proofTable, proofOwnsId, applyStartProof, screenLateStarts, seenNote, startSeenId, startSig });   // O462 matchmade start proof (test/start-proof-step.js)
 Object.assign(module.exports, { LIKE: likePlan.LIKE, LIKES_FILE, LIKE_BOX_LB, LIKE_COUNT_LB, loadLikes, saveLikes });   // O520 likes lane (client knife 5.4d, W79; test/likes-lane.js)
 Object.assign(module.exports, { rankedSeatMaskOf, mtSansSeats, seatAppliesLp, anyAppliesLp, SEAT_MASK_BASES });   // O716 one queue for quick + ranked: the ranked-seat mask (test/seat-mask.js)
+Object.assign(module.exports, { GONE_RETRY_MS, goneHolds, PENDING_W_MAX_MS, PENDING_W_FIELDS });   // O775 waiting writes of accounts answered result 27 (test/pending-writes-gone.js)
