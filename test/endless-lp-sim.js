@@ -12,6 +12,13 @@
 //   [6] (printed) per tier: the pass rate the players had beside the table's balance rate, and where each level ended
 //   [7] mutations: no master gate -> [3] red; the old target (the points tier line) -> [1] red; MUL 1000 -> [2] red; no floor
 //       below master -> [4] red
+//   [8] O781 (client 2026-11-09): the competitive curve has a deep wall now, so nobody averages 60 levels any more (the true levels
+//       stop at 45) and the players near the top die close to their wall: a "wall-hugging" group (mean depth 30..45, coefficient of
+//       variation 0.1) still passes about half its runs (0.42..0.58 overall, 0.40..0.65 at each level); the old target turns that
+//       red. Known (2026-11-09, client roadmap O782): a grandmaster-level wall-hugger drifts UP about +4 points a run (+1307 over 300):
+//       with so little spread the integer depth vs TARGET_Q 990 (the target sits half a level under the mean) passes ~0.57. TARGET_Q
+//       1010 settles that group (-41) but pulls the cv 0.3 / 0.6 top to -341, and TARGET_Q is a rule constant (ELP.VER + 1, settled
+//       runs move) -> tuned at the S1 boundary with EA spread data. Asserted here only as "no worse than +2000" (a guard, not the goal)
 // Required (not run) it exports the simulation, for tuning MUL / TARGET_Q.
 const path = require('path');
 const fs = require('fs');
@@ -46,7 +53,10 @@ function play(M, mu, cv, seed, n, startLp) {
 }
 function crossingsOf(tiers) { let c = 0, back = 0; for (let i = 1; i < tiers.length; i++) { if (tiers[i] === tiers[i - 1]) continue; c++; for (let j = i + 1; j < Math.min(tiers.length, i + 11); j++) if (tiers[j] === tiers[i - 1]) { back++; break; } } return { c, back }; }
 
-const MUS = [3, 5, 8, 12, 18, 25, 35, 45, 60], CVS = [0.3, 0.6], PER = 6, N = 300;
+// O781: the true levels stop at 45 (was 60: before the deep wall a strong player had no wall and averaged anything); the zero-sum top
+//   group plays at 50 (above the grandmaster line 42, below the 0.9-efficiency wall 65)
+const MUS = [3, 5, 8, 12, 18, 25, 35, 45], CVS = [0.3, 0.6], PER = 6, N = 300, GM_MU = 50;
+const WALL_MUS = [30, 35, 40, 45], WALL_CV = 0.1;
 const LEVELS = [['silver', 6], ['gold', 10], ['platinum', 15], ['diamond', 24]], WANT = { silver: 150, gold: 80, platinum: 40, diamond: 20 };
 function simulate(M) {
   const out = { pop: [], toD: {}, gm: [] };
@@ -60,9 +70,23 @@ function simulate(M) {
     for (const cv of CVS) for (let j = 0; j < 10; j++) { const p = play(M, mu, cv, 50000 + mu * 101 + j * 13 + (cv > 0.5 ? 7 : 0), 600, null); runs.push(p.toDiamond == null ? 601 : p.toDiamond); }
     out.toD[name] = { median: median(runs), runs };
   }
-  for (const cv of CVS) for (let j = 0; j < 10; j++) { const p = play(M, 70, cv, 90000 + j * 31 + (cv > 0.5 ? 3 : 0), N, 8600); out.gm.push(p.lp - 8600); }
+  for (const cv of CVS) for (let j = 0; j < 10; j++) { const p = play(M, GM_MU, cv, 90000 + j * 31 + (cv > 0.5 ? 3 : 0), N, 8600); out.gm.push(p.lp - 8600); }
   return out;
 }
+// O781 [8]: the wall-hugging group (true level 30..45, cv 0.1) + a grandmaster-level wall-hugger started at 8600
+function simulateWall(M) {
+  const out = { pop: [], gm: [] };
+  let k = 0;
+  for (const mu of WALL_MUS) for (let j = 0; j < 2 * PER; j++) { const p = play(M, mu, WALL_CV, 120000 + (k++) * 7919, N, null); out.pop.push({ mu, p }); }
+  for (let j = 0; j < 20; j++) { const p = play(M, 45, WALL_CV, 130000 + j * 31, N, 8600); out.gm.push(p.lp - 8600); }
+  return out;
+}
+function wallRates(w) {
+  const all = [], per = {};
+  for (const x of w.pop) for (const [, pass] of x.p.passAt) { all.push(pass ? 1 : 0); (per[x.mu] = per[x.mu] || []).push(pass ? 1 : 0); }
+  return { all: mean(all), per: WALL_MUS.map((mu) => mean(per[mu] || [])) };
+}
+const wallOk = (w) => { const r = wallRates(w); return r.all >= 0.42 && r.all <= 0.58 && r.per.every((x) => x >= 0.40 && x <= 0.65); };
 // the highest points a player held over his runs (the gate check)
 function maxPoints(M, mu, cv, seed) {
   const r = rng(seed), depths = [];
@@ -88,7 +112,7 @@ function loadVariant(pairs) {
   for (const [a, b] of pairs) { if (s.indexOf(a) < 0) throw new Error('mutation anchor missing: ' + a.slice(0, 80)); s = s.split(a).join(b); }
   const win = {}; new Function('window', s)(win); return win.POINTS_PLAN;
 }
-module.exports = { simulate, passRates, gateMax, loadVariant, WANT, LEVELS };
+module.exports = { simulate, passRates, gateMax, loadVariant, simulateWall, wallRates, WANT, LEVELS };
 
 if (require.main === module) {
   let failN = 0;
@@ -138,6 +162,12 @@ if (require.main === module) {
   const noFloor = loadVariant([['protect: !isPass && (cur < ELP.GATE_TIER || (ht != null && ht >= cur))', 'protect: !isPass && ht != null && ht >= cur']]);
   const sF = simulate(noFloor), crF = sF.pop.map((x) => x.cross.c);
   T('[7] without the floor below master the ping-pong comes back (max ' + Math.max.apply(null, crF) + ' crossings) -- [4] red', Math.max.apply(null, crF) > 35);
+  // [8] O781 wall-huggers
+  const W = simulateWall(PP0), wr = wallRates(W);
+  T('[8] wall-huggers (true level ' + WALL_MUS.join('/') + ', cv ' + WALL_CV + ') pass about half: overall ' + wr.all.toFixed(3) + ' (0.42..0.58), per level ' + wr.per.map((x) => x.toFixed(2)).join(' ') + ' (0.40..0.65)', wallOk(W));
+  T('[8] (known drift, O782 at the S1 boundary) a grandmaster-level wall-hugger (level 45, cv ' + WALL_CV + ') from 8600: mean change after 300 runs ' + mean(W.gm).toFixed(0) + ' (guard: no worse than +-2000; the goal is +-200; spread ' + Math.min.apply(null, W.gm) + '..' + Math.max.apply(null, W.gm) + ')', Math.abs(mean(W.gm)) <= 2000);
+  const wO = simulateWall(oldTarget);
+  T('[8] the old target (the points tier line) turns the wall-huggers red too (overall ' + wallRates(wO).all.toFixed(3) + ', per level ' + wallRates(wO).per.map((x) => x.toFixed(2)).join(' ') + ')', !wallOk(wO));
   console.log(failN ? ('endless-lp-sim: ' + failN + ' FAIL') : 'endless-lp-sim: all ok');
   process.exit(failN ? 1 : 0);
 }
