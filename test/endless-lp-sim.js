@@ -19,6 +19,13 @@
 //       with so little spread the integer depth vs TARGET_Q 990 (the target sits half a level under the mean) passes ~0.57. TARGET_Q
 //       1010 settles that group (-41) but pulls the cv 0.3 / 0.6 top to -341, and TARGET_Q is a rule constant (ELP.VER + 1, settled
 //       runs move) -> tuned at the S1 boundary with EA spread data. Asserted here only as "no worse than +2000" (a guard, not the goal)
+//   [9] O803 (2026-11-09, ELP v3): mixed pairs -- two players of different true levels (their duo skills stand at their own
+//       levels: their windows hold runs with partners of their own level) play together; the pair's depth is lognormal around
+//       the MEAN of the two levels. Under the one team target (targetOf with teamHiddenOf([hA, hB])) both sides pass about half
+//       (0.42..0.58 overall, 0.40..0.65 on each side and at each pair), and in every run the two receipts carry one sign (both
+//       gain or both lose, by their own amounts). Mutations: the target read from each one's own skill (the O728 reading) ->
+//       the strong side passes under 0.35 and the weak side over 0.65 -> red; teamHiddenOf as the strongest seat -> both sides
+//       under 0.35 -> red
 // Required (not run) it exports the simulation, for tuning MUL / TARGET_Q.
 const path = require('path');
 const fs = require('fs');
@@ -112,7 +119,40 @@ function loadVariant(pairs) {
   for (const [a, b] of pairs) { if (s.indexOf(a) < 0) throw new Error('mutation anchor missing: ' + a.slice(0, 80)); s = s.split(a).join(b); }
   const win = {}; new Function('window', s)(win); return win.POINTS_PLAN;
 }
-module.exports = { simulate, passRates, gateMax, loadVariant, simulateWall, wallRates, WANT, LEVELS };
+// O803 [9]: a mixed pair -- two true levels (muA strong, muB weak); each keeps a window of ten own-level depths (his duo skill), the
+//   pair's run depth is lognormal around the mean of the two levels. ownTarget = the O728 reading (each seat against his own skill)
+const PAIRS = [[8, 16], [12, 24], [18, 30], [25, 40], [10, 30]], PAIR_CV = 0.3, PAIR_LINES = PP0.ELP.PRIOR.duo, PAIR_N = 200, PAIR_PER = 4;
+function playPair(M, muA, muB, seed, n, ownTarget) {
+  const r = rng(seed), wA = [], wB = [];
+  for (let i = 0; i < M.ELP.WINDOW; i++) { wA.unshift(depthOf(r, muA, PAIR_CV)); wB.unshift(depthOf(r, muB, PAIR_CV)); }
+  let lpA = M.endlessSeedLp(M.hiddenOf(wA), PAIR_LINES), lpB = M.endlessSeedLp(M.hiddenOf(wB), PAIR_LINES);
+  const passA = [], passB = [], signs = [];
+  for (let i = 0; i < n; i++) {
+    const seedRun = (r() * 4294967296) >>> 0, hA = M.hiddenOf(wA), hB = M.hiddenOf(wB), th = M.teamHiddenOf([hA, hB]);
+    const TA = M.targetOf(lpA, PAIR_LINES, seedRun, ownTarget ? hA : th, false), TB = M.targetOf(lpB, PAIR_LINES, seedRun, ownTarget ? hB : th, false);
+    const d = depthOf(r, (muA + muB) / 2, PAIR_CV), off = M.targetOffset(seedRun);
+    const sA = M.endlessSettle(lpA, d >= TA, hA, PAIR_LINES, off), sB = M.endlessSettle(lpB, d >= TB, hB, PAIR_LINES, off);
+    passA.push(d >= TA ? 1 : 0); passB.push(d >= TB ? 1 : 0); signs.push(Math.sign(sA.plan.d) === Math.sign(sB.plan.d) ? 1 : 0);
+    lpA = sA.nv; lpB = sB.nv;
+    // each plays on at his own level in between (his window follows his own level, not the pair's)
+    wA.unshift(depthOf(r, muA, PAIR_CV)); wA.pop(); wB.unshift(depthOf(r, muB, PAIR_CV)); wB.pop();
+  }
+  return { passA, passB, signs };
+}
+function simulatePairs(M, ownTarget) {
+  const out = [];
+  let k = 0;
+  for (const [muB, muA] of PAIRS) for (let j = 0; j < PAIR_PER; j++) out.push({ muA, muB, p: playPair(M, muA, muB, 200000 + (k++) * 7919, PAIR_N, ownTarget) });
+  return out;
+}
+function pairRates(sim) {
+  const strong = [], weak = [], sign = [], perPair = [];
+  for (const x of sim) { strong.push(...x.p.passA); weak.push(...x.p.passB); sign.push(...x.p.signs); }
+  for (const [muB, muA] of PAIRS) { const g = sim.filter((x) => x.muA === muA && x.muB === muB); perPair.push([mean([].concat(...g.map((x) => x.p.passA))), mean([].concat(...g.map((x) => x.p.passB)))]); }
+  return { all: mean(strong.concat(weak)), strong: mean(strong), weak: mean(weak), sameSign: mean(sign), perPair };
+}
+const pairsOk = (sim) => { const r = pairRates(sim); return r.all >= 0.42 && r.all <= 0.58 && [r.strong, r.weak].every((x) => x >= 0.40 && x <= 0.65) && r.perPair.every(([a, b]) => a >= 0.40 && a <= 0.65 && b >= 0.40 && b <= 0.65); };
+module.exports = { simulate, passRates, gateMax, loadVariant, simulateWall, wallRates, simulatePairs, pairRates, WANT, LEVELS, PAIRS };
 
 if (require.main === module) {
   let failN = 0;
@@ -168,6 +208,15 @@ if (require.main === module) {
   T('[8] (known drift, O799 at the S1 boundary) a grandmaster-level wall-hugger (level 45, cv ' + WALL_CV + ') from 8600: mean change after 300 runs ' + mean(W.gm).toFixed(0) + ' (guard: no worse than +-2000; the goal is +-200; spread ' + Math.min.apply(null, W.gm) + '..' + Math.max.apply(null, W.gm) + ')', Math.abs(mean(W.gm)) <= 2000);
   const wO = simulateWall(oldTarget);
   T('[8] the old target (the points tier line) turns the wall-huggers red too (overall ' + wallRates(wO).all.toFixed(3) + ', per level ' + wallRates(wO).per.map((x) => x.toFixed(2)).join(' ') + ')', !wallOk(wO));
+  // [9] O803 mixed pairs: one team target
+  const PS = simulatePairs(PP0, false), prs = pairRates(PS);
+  T('[9] mixed pairs (' + PAIRS.map(([b, a]) => a + '+' + b).join(', ') + ', cv ' + PAIR_CV + ') under the one team target pass about half: overall ' + prs.all.toFixed(3) + ' (0.42..0.58); the strong side ' + prs.strong.toFixed(3) + ', the weak side ' + prs.weak.toFixed(3) + ' (0.40..0.65); per pair ' + prs.perPair.map(([a, b]) => a.toFixed(2) + '/' + b.toFixed(2)).join(' '), pairsOk(PS));
+  T('[9] in every run the two seats\' receipts carry one sign (both gain or both lose, by their own amounts): ' + (100 * prs.sameSign).toFixed(1) + ' %', prs.sameSign === 1);
+  const PO = simulatePairs(PP0, true), pro = pairRates(PO);
+  T('[9] the old reading (each seat against his own skill) turns it red: the strong side ' + pro.strong.toFixed(3) + ' (< 0.35), the weak side ' + pro.weak.toFixed(3) + ' (> 0.65)', !pairsOk(PO) && pro.strong < 0.35 && pro.weak > 0.65);
+  const teamMax = loadVariant([['return Math.round(sum / xs.length) | 0;', 'return Math.max.apply(null, xs) | 0;']]);
+  const PM = simulatePairs(teamMax, false), prm = pairRates(PM);
+  T('[9] teamHiddenOf as the strongest seat turns it red: both sides under 0.35 (' + prm.strong.toFixed(3) + ' / ' + prm.weak.toFixed(3) + ')', !pairsOk(PM) && prm.strong < 0.35 && prm.weak < 0.35);
   console.log(failN ? ('endless-lp-sim: ' + failN + ' FAIL') : 'endless-lp-sim: all ok');
   process.exit(failN ? 1 : 0);
 }

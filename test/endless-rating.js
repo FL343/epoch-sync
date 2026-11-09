@@ -26,6 +26,13 @@
 //   [9] end to end settle: a duo competitive run over two segments (the second final) enters both writers' history and settles as
 //       their first placement run (d 0, a receipt keyed by the run seed)
 //  [10] mutation self-checks on validate.js copies: each rule of [2]-[5] turns red when changed
+//  [11] O803 (ELP v3) the one target of a team run: the lane records the roster by run id (elpTeam), the first settle of the run
+//       freezes teamHiddenOf over every member's skill BEFORE the run (settled runs first seen no later than it; placing = the
+//       plain mean so far; no entry = null) and the later settlers reuse it -- two seats settled a day apart, with a run of the
+//       second seat in between that moves his skill (800 -> 1440), still read the same T (their d differ, their own skill); a placing seat
+//       reads the team level for his target but seeds from his own skill; no roster (solo / couch / an older run) = own skill;
+//       entries older than TAB_DAYS leave once nobody still carries the run. Mutations: the memo dropped (recomputed at each
+//       settle) -> the second seat's T differs -> red; the roster's skills read through the settler's own -> red
 // Usage: node test/endless-rating.js
 // ============================================================
 const { spawnSync } = require('child_process');
@@ -266,6 +273,12 @@ const SRC = fs.readFileSync(path.join(__dirname, '..', 'validate.js'), 'utf8');
   const lane = SRC.slice(SRC.indexOf("if ((t.flags | 0) & attest.SEG_COMP) {"), SRC.indexOf('// casual co-op: a shared perk build'));
   T('[7] team lane: the history write sits behind the reject-window skip (inside the writer loop, after the `continue`)', lane.indexOf('inside seedcap reject window -- outputs skipped') < lane.indexOf('ratingHistUpsert(soloState, pid(sid), fam.low'));
   T('[7] casual / classic lanes never feed the history (only three upsert sites, all competitive: solo / team / couch)', (SRC.match(/ratingHistUpsert\(soloState,/g) || []).length === 3);
+  T('[7] O803: the team lane records the roster by run id (every roster seat, pid-keyed, the family and the season), once per settled segment, EA only; no other lane does',
+    /if \(!PT_MODE\) elpTeamNote\(soloState, ratingRunId\(key\), rosterSids\.map\(\(x\) => pid\(String\(x\)\)\), fam\.low, t\.seasonId, nowMs\);/.test(lane) && (SRC.match(/elpTeamNote\(soloState,/g) || []).length === 1);
+  T('[7] O803: the settle reads the team level into the target only (targetOf th) and the own skill into the points line (endlessSettle H), placing included',
+    /const t = pointsPlan\.targetOf\(cur, p, seed, th, false\), sl = pointsPlan\.endlessSettle\(cur, depth >= t, H, p, off\);/.test(SRC) && /const ph = pointsPlan\.hiddenOf\(before, 1\), th = teamH === undefined \? ph : teamH;/.test(SRC)
+    && /pointsPlan\.targetOf\(0, p, seed, th, true\)/.test(SRC) && /const H = pointsPlan\.hiddenOf\(\[depth\]\.concat\(before\)\);/.test(SRC));
+  T('[7] O803: the table key carries ELP.VER (3): the pass-line table is re-recorded and republished on the first run under the new rule', /function elpTableKey\(\) \{ return JSON\.stringify\(\[ELP\.VER, /.test(SRC) && ELP.VER === 3 && v.elpTableKey().startsWith('[3,'));
   T('[7] couch competitive lane feeds the duo history while merged (couchRatingFam), with flags and run seed', /if \(!PT_MODE\) \{ ratingHistUpsert\(soloState, p, couchRatingFam\(\), f\.seasonId, ratingRunId\(key\), f\.endDepth, nowMs, f\.flags, f\.runSeed\); ratingTouched\.add\(sid\); \}/.test(SRC) && /function couchRatingFam\(\) \{ return COUCH_DUO_SPLIT \? 'duoc' : 'duo'; \}/.test(SRC));
   T('[7] seedcap correction takes the convicted run out of the flagged seats (solo: runSeed key; team: roster set key; couch: the couch family)',
     /ratingHistRemove\(soloState, pid\(sidC\), famR, tC\.seasonId, ratingRunId\(keyR \|\| soloRunKey\(pid\(sidC\), tC\.seasonId, cg\[0\]\.d\[4\] \| 0\)\)\)/.test(SRC) && /teamRunKey\(Object\.values\(rosterC\)\.map\(String\), tC\.seasonId, cg\[0\]\.d\[4\] \| 0\)/.test(SRC) && /couchCor \? couchRatingFam\(\)/.test(SRC));
@@ -489,6 +502,135 @@ console.log('-- [9] e2e: a settled duo run -> history -> placement run 1 --');
       && hA4.ring.length === 1 && hA4.ring[0].mh === SEED && hA4.ring[0].delta === 0 && hB4.runs[0][3] === 1,
     JSON.stringify([hA4, hB4]) + ' ' + r4.out.split('\n').filter((l) => /endless-comp|endless points/.test(l)).join(' | '));
   T('[9] nobody placed after one run -> no duo row written', postsTo(r4, BOARD.rDuo).length === 0);
+  const tm2 = ((r2.state.SOLO_FILE || {}).elpTeam || {})[String(rid)], tm4 = ((r4.state.SOLO_FILE || {}).elpTeam || {})[String(rid)];
+  T('[9] O803: the lane recorded the run\'s roster by run id (both pids, duo, season 0) on the first segment, and the settle froze the team level (nobody with a skill: null, has) -- the entry rides the chain memory',
+    !!tm2 && JSON.stringify(tm2.r) === JSON.stringify([P(SID(1)), P(SID(2))].sort()) && tm2.fam === 'duo' && tm2.s === 0 && !tm2.has && !!tm4 && tm4.has === 1 && tm4.h === null && /team level none/.test(r4.out), JSON.stringify([tm2, tm4]));
+  T('[9] O803: the roster entry has no steamID either', !JSON.stringify((r4.state.SOLO_FILE || {}).elpTeam).includes(SID(1)));
+}
+
+// ---- [11] O803: the one target of a team run (the frozen team level) ----
+console.log('-- [11] O803 team runs: the roster by run id, the frozen team level, one T for every seat --');
+// the pair: A (placed, five duo runs at 20 = skill 2000) and B (placed, five at 8 = 800) share run RID at depth 14; the team level
+//   1400 gives T = targetOf(.., 1400); A settles first, B a day later after two deep runs of his own (his skill moves to 1440)
+const DUO = ELP.PRIOR.duo;
+function teamWorld(m) {
+  const now = 100 * DAY, st = { hist: {} };
+  const play = (p, depths, t0) => depths.forEach((d, i) => m.ratingHistUpsert(st, p, 'duo', 0, 100 + i, d, t0 + i * 60000, F, 500 + i));
+  play('A', [20, 20, 20, 20, 20], now - 5 * DAY); play('B', [8, 8, 8, 8, 8], now - 5 * DAY);
+  m.elpSettleAll(st, 0, now - 4 * DAY);
+  return { st, now };
+}
+// A's record first (t1), B's record of the same run a day later (t3), B's two own runs (t2) in between
+function teamScenario(m, opts) {
+  const { st, now } = teamWorld(m), RID = 9001, t1 = now - 3 * DAY, t2 = now - 2 * DAY, t3 = now - DAY;
+  m.ratingHistUpsert(st, 'A', 'duo', 0, RID, 14, t1, F, 777);
+  if (!(opts && opts.noNote)) m.elpTeamNote(st, RID, ['A', 'B'], 'duo', 0, t1);
+  const d1 = m.elpSettleAll(st, 0, t1 + 60000);
+  m.ratingHistUpsert(st, 'B', 'duo', 0, 300, 40, t2, F, 900); m.ratingHistUpsert(st, 'B', 'duo', 0, 301, 40, t2 + 60000, F, 901);
+  const d2 = m.elpSettleAll(st, 0, t2 + 120000);
+  m.ratingHistUpsert(st, 'B', 'duo', 0, RID, 14, t3, F, 777);
+  if (!(opts && opts.noNote)) m.elpTeamNote(st, RID, ['A', 'B'], 'duo', 0, t3);
+  const d3 = m.elpSettleAll(st, 0, now);
+  return { st, RID, a: d1.find((x) => x.runId === RID && x.k === 'A|duo|0'), b: d3.find((x) => x.runId === RID && x.k === 'B|duo|0'), mid: d2, now };
+}
+{
+  const sc = teamScenario(v), { st, RID, a, b } = sc;
+  const Tw = PP.targetOf(0, DUO, 777, 1400, false);
+  T('[11] A settles first: his target = targetOf(.., teamHiddenOf([2000, 800]) = 1400) = ' + Tw + ' (own skill would give ' + PP.targetOf(0, DUO, 777, 2000, false) + '); the team level is frozen in the entry (h 1400, has)',
+    !!a && a.T === Tw && a.teamH === 1400 && st.elpTeam && st.elpTeam[String(RID)] && st.elpTeam[String(RID)].h === 1400 && st.elpTeam[String(RID)].has === 1, JSON.stringify([a, st.elpTeam]));
+  const hB2 = PP.hiddenOf([40, 40, 8, 8, 8, 8, 8]), th2 = PP.teamHiddenOf([2000, hB2]);
+  T('[11] in between B settles two runs of his own (40 / 40): his skill moves 800 -> ' + hB2 + ' (their targets read his own skill: no roster)', sc.mid.length === 2 && sc.mid.every((x) => x.teamH === undefined) && hB2 === 1440 && st.hist['B|duo|0'].runs.filter((r) => r[3]).length === 8, JSON.stringify(sc.mid));
+  T('[11] B settles the shared run a day later: the SAME target ' + Tw + ' (the frozen level, not teamHiddenOf([2000, ' + hB2 + ']) = ' + th2 + ' -> ' + PP.targetOf(0, DUO, 777, th2, false) + ')', !!b && b.T === Tw && b.teamH === 1400 && b.T === a.T && PP.targetOf(0, DUO, 777, th2, false) !== Tw, JSON.stringify(b));
+  const hA = st.hist['A|duo|0'], hB = st.hist['B|duo|0'], rA = hA.runs.find((r) => r[0] === RID), rB = hB.runs.find((r) => r[0] === RID);
+  T('[11] both passed (14 >= ' + Tw + '): their d differ (own tier / own skill: A ' + rA[4] + ', B ' + rB[4] + ') and keep one sign; receipts keyed by the run seed 777 for both', a.pass && b.pass && rA[4] > 0 && rB[4] > 0 && rA[4] !== rB[4] && rA[5] === Tw && rB[5] === Tw
+    && hA.ring.some((e) => e.mh === 777 && e.delta === rA[4]) && hB.ring.some((e) => e.mh === 777 && e.delta === rB[4]), JSON.stringify([rA, rB]));
+  // a miss for both: the same run at depth 5 (below T) with another seed -> both lose, by different amounts
+  {
+    const { st: s2, now: n2 } = teamWorld(v), RID2 = 9002, t = n2 - DAY;
+    v.ratingHistUpsert(s2, 'A', 'duo', 0, RID2, 5, t, F, 778); v.ratingHistUpsert(s2, 'B', 'duo', 0, RID2, 5, t, F, 778); v.elpTeamNote(s2, RID2, ['A', 'B'], 'duo', 0, t);
+    const dd = v.elpSettleAll(s2, 0, n2), xa = dd.find((x) => x.k === 'A|duo|0'), xb = dd.find((x) => x.k === 'B|duo|0');
+    T('[11] the same run missed by the team (depth 5 < T ' + xa.T + '): both lose (A ' + xa.d + ' / B ' + xb.d + '), one T, different d', xa.T === xb.T && xa.T === PP.targetOf(0, DUO, 778, 1400, false) && !xa.pass && !xb.pass && xa.d < 0 && xb.d < 0 && xa.d !== xb.d, JSON.stringify([xa, xb]));
+  }
+  // a placing seat: C has no duo run yet, D is placed at 2000; the team level = teamHiddenOf([null, 2000]) = 2000 -> C's target reads it,
+  //   C's seed (fifth run) reads his own skill
+  {
+    const now = 100 * DAY, s3 = { hist: {} };
+    [20, 20, 20, 20, 20].forEach((d, i) => v.ratingHistUpsert(s3, 'D', 'duo', 0, 100 + i, d, now - 5 * DAY + i * 60000, F, 500 + i)); v.elpSettleAll(s3, 0, now - 4 * DAY);
+    const t = now - DAY;
+    v.ratingHistUpsert(s3, 'C', 'duo', 0, 9003, 18, t, F, 779); v.ratingHistUpsert(s3, 'D', 'duo', 0, 9003, 18, t, F, 779); v.elpTeamNote(s3, 9003, ['C', 'D'], 'duo', 0, t);
+    const dd = v.elpSettleAll(s3, 0, now), xc = dd.find((x) => x.k === 'C|duo|0'), xd = dd.find((x) => x.k === 'D|duo|0');
+    T('[11] a placing seat (no duo run yet) beside a placed one: the team level is the placed seat\'s (' + xc.teamH + '), both read T ' + xc.T + ' (not the silver line ' + PP.targetOf(0, DUO, 779, null, true) + '); the placing seat moves no points (d 0)',
+      xc.teamH === 2000 && xc.T === xd.T && xc.T === PP.targetOf(0, DUO, 779, 2000, true) && xc.d === 0 && !s3.hist['C|duo|0'].placed, JSON.stringify([xc, xd]));
+    // C plays four more team runs with D (deep, 30): the fifth seeds from C's OWN skill over his five runs, not from the team level
+    let d5 = [];   // one settle per run (as the job sees them): each run's team level reads the runs settled before it
+    for (let i = 0; i < 4; i++) { const rid = 9010 + i, tt = now - DAY + (i + 1) * 3600000; v.ratingHistUpsert(s3, 'C', 'duo', 0, rid, 30, tt, F, 800 + i); v.ratingHistUpsert(s3, 'D', 'duo', 0, rid, 30, tt, F, 800 + i); v.elpTeamNote(s3, rid, ['C', 'D'], 'duo', 0, tt); d5 = v.elpSettleAll(s3, 0, tt + 1); }
+    const hc = s3.hist['C|duo|0'], last = d5.filter((x) => x.k === 'C|duo|0').pop();
+    T('[11] the placing seat\'s fifth run seeds from his own five depths (hiddenOf([30, 30, 30, 30, 18]) = ' + PP.hiddenOf([30, 30, 30, 30, 18]) + '), while its target read the team level ' + last.teamH,
+      last && last.seeded && hc.placed === 1 && hc.lp === Math.max.apply(null, v.elpCandidates(s3, 'duo', 0, now, now + DAY).map((p) => PP.endlessSeedLp(PP.hiddenOf([30, 30, 30, 30, 18]), p))) && last.teamH === PP.teamHiddenOf([PP.hiddenOf([30, 30, 30, 18], 1), PP.hiddenOf([30, 30, 30, 18, 20, 20, 20, 20, 20])]), JSON.stringify([last, hc.lp]));
+  }
+  // nobody with a skill: two new seats -> the team level is null (frozen as null) and the target is the silver line
+  {
+    const now = 100 * DAY, s4 = { hist: {} }, t = now - DAY;
+    v.ratingHistUpsert(s4, 'E', 'duo', 0, 9020, 9, t, F, 790); v.ratingHistUpsert(s4, 'F', 'duo', 0, 9020, 9, t, F, 790); v.elpTeamNote(s4, 9020, ['E', 'F'], 'duo', 0, t);
+    const dd = v.elpSettleAll(s4, 0, now);
+    T('[11] two seats without a run yet: the team level is null (frozen with has), both read the silver line + the offset', dd.length === 2 && dd.every((x) => x.teamH === null && x.T === PP.targetOf(0, DUO, 790, null, true)) && s4.elpTeam['9020'].has === 1 && s4.elpTeam['9020'].h === null, JSON.stringify([dd, s4.elpTeam]));
+  }
+  // no roster recorded = own skill (solo, the couch pair, a run that entered before the rule)
+  {
+    const { st: s5, now: n5 } = teamWorld(v), t = n5 - DAY;
+    v.ratingHistUpsert(s5, 'A', 'duo', 0, 9030, 14, t, F, 791); v.ratingHistUpsert(s5, 'B', 'duo', 0, 9030, 14, t, F, 791);
+    const dd = v.elpSettleAll(s5, 0, n5), xa = dd.find((x) => x.k === 'A|duo|0'), xb = dd.find((x) => x.k === 'B|duo|0');
+    T('[11] no roster recorded for the run: each seat reads his own skill, as before (A ' + xa.T + ' / B ' + xb.T + '), teamH undefined', xa.teamH === undefined && xb.teamH === undefined && xa.T === PP.targetOf(0, DUO, 791, 2000, false) && xb.T === PP.targetOf(0, DUO, 791, 800, false) && xa.T !== xb.T, JSON.stringify([xa, xb]));
+    T('[11] elpTeamNote records team families only, two seats or more, sorted pids; a second note refreshes at and keeps the roster', v.elpTeamNote(s5, 1, ['x'], 'duo', 0, 5) === null && v.elpTeamNote(s5, 1, ['x', 'y'], 'solo', 0, 5) === null && v.elpTeamNote(s5, 1, ['x', 'y'], 'duoc', 0, 5) === null
+      && JSON.stringify(v.elpTeamNote(s5, 2, ['y', 'x'], 'trio', 1, 5)) === JSON.stringify({ r: ['x', 'y'], fam: 'trio', s: 1, at: 5 }) && v.elpTeamNote(s5, 2, ['y', 'x'], 'trio', 1, 9).at === 9 && JSON.stringify(s5.elpTeam['2'].r) === JSON.stringify(['x', 'y']));
+  }
+  // the member reading: settled runs first seen no later than the run, the run itself left out; placed / placing / none
+  {
+    const s6 = { hist: {} }, t0 = 1000;
+    [5, 6, 7, 8, 9].forEach((d, i) => v.ratingHistUpsert(s6, 'G', 'duo', 0, 100 + i, d, t0 + i, F, 500 + i)); v.elpSettleAll(s6, 0, t0 + 10);
+    v.ratingHistUpsert(s6, 'G', 'duo', 0, 200, 50, t0 + 20, F, 600); v.elpSettleAll(s6, 0, t0 + 30);
+    T('[11] elpMemberHiddenBefore: placed -> hiddenOf over the settled runs first seen no later than the run (the run itself left out); later runs do not count',
+      v.elpMemberHiddenBefore(s6, 'G', 'duo', 0, 999, t0 + 15) === PP.hiddenOf([9, 8, 7, 6, 5]) && v.elpMemberHiddenBefore(s6, 'G', 'duo', 0, 200, t0 + 20) === PP.hiddenOf([9, 8, 7, 6, 5]) && v.elpMemberHiddenBefore(s6, 'G', 'duo', 0, 999, t0 + 25) === PP.hiddenOf([50, 9, 8, 7, 6, 5])
+      && v.elpMemberHiddenBefore(s6, 'G', 'duo', 0, 999, t0 + 3) === null && PP.hiddenOf([8, 7, 6, 5]) === null);   // placed, but under five settled before the run = null (as his own settle reads it)
+    const s7 = { hist: {} };
+    [5, 6].forEach((d, i) => v.ratingHistUpsert(s7, 'K', 'duo', 0, 100 + i, d, t0 + i, F, 500 + i)); v.elpSettleAll(s7, 0, t0 + 10);
+    T('[11] elpMemberHiddenBefore: placing -> the plain mean of the runs so far (minRuns 1); none settled yet -> null; no entry -> null',
+      v.elpMemberHiddenBefore(s7, 'K', 'duo', 0, 999, t0 + 15) === 550 && v.elpMemberHiddenBefore(s7, 'K', 'duo', 0, 999, t0 - 1) === null && v.elpMemberHiddenBefore(s7, 'Z', 'duo', 0, 999, t0 + 15) === null);
+  }
+  // expiry
+  {
+    const now = 100 * DAY, s8 = { hist: {} };
+    v.elpTeamNote(s8, 1, ['a', 'b'], 'duo', 0, now - (R.TAB_DAYS + 1) * DAY);   // old, nobody carries it
+    v.elpTeamNote(s8, 2, ['a', 'b'], 'duo', 0, now - (R.TAB_DAYS + 1) * DAY); v.ratingHistUpsert(s8, 'b', 'duo', 0, 2, 3, now - (R.TAB_DAYS + 1) * DAY, SUS, 7);   // old, b still carries it (a save point open)
+    v.elpTeamNote(s8, 3, ['a', 'b'], 'duo', 0, now - DAY);   // fresh
+    v.elpTeamNote(s8, 4, ['a', 'b'], 'duo', 1, now - (R.TAB_DAYS + 1) * DAY); v.ratingHistUpsert(s8, 'b', 'duo', 1, 4, 3, now - (R.TAB_DAYS + 1) * DAY, SUS, 7);   // old, another season (never settles)
+    v.elpSettleAll(s8, 0, now);
+    eq('[11] expiry at the end of elpSettleAll: older than TAB_DAYS and nobody of the current season still carries the run -> gone; still carried -> kept; fresh -> kept; an ended season\'s -> gone', Object.keys(s8.elpTeam).sort(), ['2', '3']);
+    T('[11] elpTeamTrim on a state without the field / an empty pending set', v.elpTeamTrim({}, now) === 0 && v.elpTeamTrim({ elpTeam: { 9: { at: 0 } } }, now) === 1);
+  }
+  // mutations (the loader of [10])
+  {
+    const ROOT = path.join(__dirname, '..').replace(/\\/g, '/');
+    const mutant = (pairs) => {
+      let m = SRC;
+      for (const [good, badS] of pairs) { if (m.indexOf(good) < 0) throw new Error('mutation anchor missing: ' + good.slice(0, 90)); m = m.split(good).join(badS); }
+      m = m.replace(/require\('\.\//g, "require('" + ROOT + '/').replace(/__dirname/g, JSON.stringify(ROOT));
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'endless-rating-o803-'));
+      const p = path.join(dir, 'validate.js'); fs.writeFileSync(p, m);
+      try { delete require.cache[p]; return require(p); } finally { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) {} }
+    };
+    const sameT = (m) => { const r = teamScenario(m); return !!r.a && !!r.b && r.a.T === r.b.T && r.a.T === PP.targetOf(0, DUO, 777, 1400, false); };
+    T('[11] baseline holds: both seats read the frozen team level', sameT(v));
+    let red = false;
+    try { red = !sameT(mutant([['  if (tm.has) return tm.h;', '']])); } catch (e) { red = /anchor missing/.test(e.message) ? (bad('[11] ' + e.message), false) : true; }
+    T('[11] mutation "the memo dropped (the team level recomputed at every settle)" turns the second seat\'s T red (his two deep runs in between would move it)', red);
+    let red2 = false;
+    try { red2 = !sameT(mutant([['tm.h = pointsPlan.teamHiddenOf(tm.r.map((p) => elpMemberHiddenBefore(st, p, fam, s, r[0] >>> 0, at)));', 'tm.h = elpMemberHiddenBefore(st, tm.r[0], fam, s, r[0] >>> 0, at);']])); } catch (e) { red2 = /anchor missing/.test(e.message) ? (bad('[11] ' + e.message), false) : true; }
+    T('[11] mutation "the team level read from one seat" turns the target red', red2);
+    let red3 = false;
+    try { red3 = !sameT(mutant([['const th = teamH === undefined ? H : teamH;   // O803', 'const th = H;   // O803']])); } catch (e) { red3 = /anchor missing/.test(e.message) ? (bad('[11] ' + e.message), false) : true; }
+    T('[11] mutation "the target reads the own skill again" turns it red', red3);
+  }
 }
 
 // ---- [10] mutation self-checks (validate.js copies loaded in-process; main() only runs as the entry module) ----

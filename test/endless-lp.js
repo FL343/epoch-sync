@@ -15,6 +15,11 @@
 //   [7] the placement seed: outside both series bands, at most SEED_CAP, never lower for a higher skill
 //   [8] the family row and the published table round-trip; a v1 table / another row layout read as none
 //   [9] mutations: each guard above turns red on the change it guards against
+//  [10] O803 (ELP v3) the one target of a team run: teamHiddenOf = the equal-weight mean of the seats that have a skill (the
+//       nulls leave, nobody = null, one seat = itself, rounded), the six shapes of the golden cases; two seats of one run with
+//       different skills read the SAME target from it (targetOf in the hidden100 position) while their points (endlessDelta /
+//       endlessSettle with their own skill) differ and keep one sign; the fixtures carry the function. Mutations: the mean read
+//       as the maximum -> red; the null filter dropped -> red (a null seat then counts as 0 and nobody-with-a-skill reads 0)
 const path = require('path');
 const fs = require('fs');
 const PP = require(path.join(__dirname, '..', 'points-plan.js'));
@@ -113,6 +118,36 @@ function seedErrors(M) {
       if (M.boundaryOf(s) != null || s > M.ELP.SEED_CAP || s < 0 || s < prev) errs.push([h, s, prev]);
       prev = s;
     }
+  }
+  return errs;
+}
+
+// O803 [10]: the shapes every teamHiddenOf copy must give (the golden cases pin the same six; the mutations below rerun this)
+function teamErrors(M) {
+  const errs = [];
+  const want = [[[], null], [[null], null], [[null, null, null], null], [[1200], 1200], [[1200, 800], 1000], [[1200, null, 801], 1001], [[0, 0], 0], [[950, 1200, 400, 1050], 900], [[300, 301], 301], [[null, 7], 7], [[800, 1200], 1000]];
+  for (const [list, out] of want) if (M.teamHiddenOf(list) !== out) errs.push([J(list), M.teamHiddenOf(list), out]);
+  if (M.teamHiddenOf(null) !== null || M.teamHiddenOf(undefined) !== null) errs.push(['no list', M.teamHiddenOf(null)]);
+  // one seat = its own skill, whatever it is (the solo / couch reading)
+  for (const h of [0, 1, 650, 2400, 12345]) if (M.teamHiddenOf([h]) !== h) errs.push(['one seat', h, M.teamHiddenOf([h])]);
+  return errs;
+}
+// O803 [10]: a pair of one run (same lines, same seed) with different skills: one target from the team level, their own points
+function pairErrors(M) {
+  const errs = [];
+  for (const lines of [SOLO, DUO]) for (const [lpA, hA, lpB, hB] of [[2500, 2000, 429, 800], [1000, 600, 4500, 2400], [6500, 3800, 300, 150], [9000, 5500, 2200, 1000]]) {
+    let differ = false;
+    for (let s = 0; s < 25; s++) {
+      const th = M.teamHiddenOf([hA, hB]), TA = M.targetOf(lpA, lines, s, th, false), TB = M.targetOf(lpB, lines, s, th, false);
+      if (TA !== TB) errs.push(['T', lpA, hA, lpB, hB, s, TA, TB]);
+      const o = M.targetOffset(s);
+      for (const pass of [true, false]) {
+        const dA = M.endlessDelta(lpA, pass, hA, lines, o).d, dB = M.endlessDelta(lpB, pass, hB, lines, o).d;
+        if (Math.sign(dA) !== Math.sign(dB)) errs.push(['sign', lpA, hA, lpB, hB, s, pass, dA, dB]);
+        if (dA !== dB) differ = true;
+      }
+    }
+    if (!differ) errs.push(['same d everywhere', lpA, hA, lpB, hB]);   // the points read each seat's own numbers (a coincidence at one seed is fine)
   }
   return errs;
 }
@@ -245,6 +280,37 @@ console.log('=== O728 endless points (points-plan.js ELP v' + PP.ELP.VER + ') ==
   T('[9] the seed allowed on the relegation band edge turns [7] red', sb && seedErrors(sb).length > 0);
   const sc = mut('SEED_CAP 4100', [['SEED_CAP: 3200', 'SEED_CAP: 4100']]);
   T('[9] a seed cap inside diamond turns [7] red', sc && seedErrors(sc).length > 0);
+}
+
+// [10] O803: the one target of a team run
+{
+  T('[10] ELP.VER is 3 (O803: the team run rule moved; the table carries it, an older client reads rulesSame false)', PP.ELP.VER === 3, String(PP.ELP.VER));
+  const e = teamErrors(PP);
+  T('[10] teamHiddenOf: the nulls leave, the rest average equally and round; nobody = null; one seat = itself ([] / [null] / [1200] / [1200, 800] = 1000 / [1200, null, 801] = 1001 / [0, 0] = 0)', !e.length, J(e.slice(0, 3)));
+  const pe = pairErrors(PP);
+  T('[10] two seats of one run with different skills (4 pairs x 25 seeds x 2 line sets): the same target from the team level; their points differ and keep one sign (both gain on a pass, both lose on a miss)', !pe.length, J(pe.slice(0, 3)));
+  const th = PP.teamHiddenOf([2000, 800]);
+  T('[10] the pair 2000 / 800 reads the team level 1400: target = targetOf(.., 1400) for both, not either own line (' + PP.targetOf(2500, DUO, 7, th, false) + ' vs own ' + PP.targetOf(2500, DUO, 7, 2000, false) + ' / ' + PP.targetOf(429, DUO, 7, 800, false) + ')',
+    th === 1400 && PP.targetOf(2500, DUO, 7, th, false) === PP.targetOf(429, DUO, 7, th, false) && PP.targetOf(2500, DUO, 7, th, false) !== PP.targetOf(2500, DUO, 7, 2000, false) && PP.targetOf(429, DUO, 7, th, false) !== PP.targetOf(429, DUO, 7, 800, false));
+  T('[10] nobody with a skill: the silver line (as a first placement run); undefined seats count as nulls', PP.targetLineOf(0, DUO, PP.teamHiddenOf([null, null]), false) === DUO[1] && PP.teamHiddenOf([undefined, 900]) === 900);
+  const doc = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'fixtures', 'points-plan', 'cases.json'), 'utf8'));
+  const cases = doc.cases.filter((c) => c.kind === 'endless' && c.in.fn === 'teamHiddenOf');
+  T('[10] the golden cases carry teamHiddenOf (6 at least) and replay (the client vendor replays the same file)', cases.length >= 6 && cases.every((c) => PP.teamHiddenOf.apply(null, c.in.args) === c.out), cases.length + ' cases');
+  // mutations (the loader of [9])
+  const SRC2 = fs.readFileSync(path.join(__dirname, '..', 'points-plan.js'), 'utf8');
+  const mut2 = (label, pairs) => {
+    let s = SRC2;
+    for (const [from, to] of pairs) { if (s.indexOf(from) < 0) { bad('[10] mutation anchor missing: ' + label + ' (' + from.slice(0, 60) + ')'); return null; } s = s.split(from).join(to); }
+    const win = {};
+    try { new Function('window', s)(win); } catch (e2) { bad('[10] mutation ' + label + ' does not load: ' + e2.message); return null; }
+    return win.POINTS_PLAN;
+  };
+  const mx = mut2('the maximum instead of the mean', [['return Math.round(sum / xs.length) | 0;', 'return Math.max.apply(null, xs) | 0;']]);
+  T('[10] the team level read as the strongest seat turns the shapes red (1200 / 800 would read 1200)', mx && teamErrors(mx).length > 0 && mx.teamHiddenOf([1200, 800]) === 1200);
+  const nn = mut2('no null filter', [['.filter((x) => x != null).map((x) => x | 0);', '.map((x) => x | 0);']]);
+  T('[10] the null filter dropped turns the shapes red (a seat without a skill counts as 0; nobody-with-a-skill reads 0, not null)', nn && teamErrors(nn).length > 0 && nn.teamHiddenOf([1200, null, 801]) !== 1001 && nn.teamHiddenOf([null]) !== null);
+  const pr = mut2('pairs read their own skill', [['const xs = (Array.isArray(list) ? list : []).filter((x) => x != null).map((x) => x | 0);', 'const xs = (Array.isArray(list) ? list : []).filter((x) => x != null).map((x) => x | 0).slice(0, 1);']]);
+  T('[10] the team level read from the first seat only turns the shapes red (and the pair check: the second seat keeps its own line)', pr && teamErrors(pr).length > 0);
 }
 
 console.log(failN ? ('endless-lp: ' + failN + ' FAIL') : 'endless-lp: all ok');
