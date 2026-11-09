@@ -204,9 +204,14 @@ const SIDA = '76561198000000001', SIDB = '76561198000000002', SIDX = '7656119800
 // ---- [6] pruneState bounds ----
 {
   const st = { audited: {}, chain: {}, suspects: {}, veto: { old: { t: 0 }, fresh: { t: 999999 } }, corrections: [{ id: 'a', m: 'x' }, { id: 'b', m: 'y' }] };
-  for (let i = 0; i < sc.AUDITED_KEEP + 50; i++) st.audited['m' + i] = { t: i };
-  sc.pruneState(st, new Set(['a']), 999999 + 1);
-  ok('[6] audited bounded to AUDITED_KEEP, oldest dropped', Object.keys(st.audited).length === sc.AUDITED_KEEP && !st.audited.m0 && !!st.audited['m' + (sc.AUDITED_KEEP + 49)]);
+  // O784: no count bound -- a group stays remembered while a complete shard read still holds it (m1..m49 left the shards);
+  //   an old honest audit folds into a st.seen token (test/seedcap-shard-prune.js covers the rest)
+  for (let i = 0; i < 100; i++) st.audited['m' + i] = { t: i };
+  const onShards = {}; for (let i = 50; i < 100; i++) onShards['m' + i] = [];
+  onShards.m0 = [];
+  const pa = sc.pruneState(st, new Set(['a']), 999999 + 1, { keys: onShards, complete: true });
+  ok('[6] audits of groups gone from the shards dropped, the rest remembered (folded into st.seen tokens)',
+    pa.gone === 49 && pa.folded === 51 && Object.keys(st.audited).length === 0 && sc.knownAudit(st, 'm0') && sc.knownAudit(st, 'm99') && !sc.knownAudit(st, 'm1') && !sc.knownAudit(st, 'm49'), JSON.stringify(pa));
   ok('[6] veto expires after VETO_KEEP_MIN, fresh kept', !st.veto.old && !!st.veto.fresh);
   ok('[6] applied corrections pruned, pending kept', st.corrections.length === 1 && st.corrections[0].id === 'b');
 }
@@ -476,7 +481,7 @@ const SIDA = '76561198000000001', SIDB = '76561198000000002', SIDX = '7656119800
   ok('[14] coreForBuildNum: registered package -> its core; unknown / pre-core package -> null', sc.coreForBuildNum(live, 'demo', 2026093001) === 'bbbbbbbbbbbb' && sc.coreForBuildNum(live, 'demo', 2026090703) === 'aaaaaaaaaaaa' && sc.coreForBuildNum(live, 'demo', 2026070100) === null && sc.coreForBuildNum(live, 'demo', 1) === null && sc.coreForBuildNum(live, 'nope', 2026093001) === null && sc.coreForBuildNum(null, 'demo', 2026093001) === null);
   const src = require('fs').readFileSync(path.join(__dirname, '..', 'seedcap.js'), 'utf8');
   ok('[14] auditPending routes solo records to the core of the package that signed them (keyId -> live window -> disk), exact verdict replaces window/overlap', /const c = coreForBuildNum\(live, channel, x\.keyId\);/.test(src) && /res\.map\[k\] = Object\.assign\(\{\}, r3\.map\[k\], \{ via: 'exact:' \+ ex\.label \}\)/.test(src) && /if \(!\(x\.keyId > 0\) \|\| !live \|\| !channel\) return;/.test(src));
-  ok('[14] main(): readGroups -> takeSkips(pickAuditable) -> auditPending -> applyAudit (shared with tools/seedcap-reaudit.js)', /const picked = takeSkips\(st, pickAuditable\(st, groups\), nowMin\(\)\);/.test(src) && /audited = auditPending\(picked\.pending, \{ cores, live: cf\.live, channel: SEEDCAP_CHANNEL, distDir: SEEDCAP_DIST_DIR \}\);/.test(src) && /stats = applyAudit\(st, audited\.pending, audited\.map, processed, nowMin\(\), \{ primary: primaryHash, obsOf: observationOf\(st, cf\.live, SEEDCAP_CHANNEL, nowMin\(\)\) \}\);/.test(src));
+  ok('[14] main(): readGroups -> takeSkips(pickAuditable) -> auditPending -> applyAudit (shared with tools/seedcap-reaudit.js)', /const picked = takeSkips\(st, pickAuditable\(st, groups, \{ re: !!loss \}\), nowMin\(\)\);/.test(src) && /audited = auditPending\(picked\.pending, \{ cores, live: cf\.live, channel: SEEDCAP_CHANNEL, distDir: SEEDCAP_DIST_DIR \}\);/.test(src) && /stats = applyAudit\(st, audited\.pending, audited\.map, processed, nowMin\(\), \{ primary: primaryHash, obsOf: observationOf\(st, cf\.live, SEEDCAP_CHANNEL, nowMin\(\)\) \}\);/.test(src));
   ok('[14] reaudit tool exists, is read-only (no saveState / writeOffense / sendAlertMail) and shares the audit routine', (() => { let t = ''; try { t = require('fs').readFileSync(path.join(__dirname, '..', 'tools', 'seedcap-reaudit.js'), 'utf8'); } catch (e) { return false; } return /sc\.readGroups\(\)/.test(t) && /sc\.auditPending\(/.test(t) && /sc\.applyAudit\(/.test(t) && !/saveState\(/.test(t) && !/writeOffense\(/.test(t) && !/sendAlertMail\(/.test(t); })());
 }
 // ---- [15] debt-pact cash replay + fee= / rv= tokens (client knife 5.10b) ----

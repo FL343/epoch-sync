@@ -1,7 +1,8 @@
 'use strict';
 // Cloud audit Q374 (2026-11-03, the B143 final review's residual 5): a conviction the O198 replay reversed is not convicted again.
 // Before: a match whose conviction the replay reversed (the seat's account keeps it in fpm) had its veto age out
-//   (VETO_KEEP_MIN), the count bound then took its audit (AUDITED_KEEP; the demo channel fills it every run) and
+//   (VETO_KEEP_MIN), the count bound then took its audit (AUDITED_KEEP; the demo channel fills it every run -- O784 replaced
+//   the bound: now the audit goes only when the group's records leave the shards, so this path needs them to come back) and
 //   pickAuditable read the group again. A core that is not the run's primary -- in practice the core of the package that
 //   signed a solo record -- still read the score over its cap: applyAudit's `again` (Q367) asked convictedFor, which is
 //   false for a reversed match, so the seat was convicted afresh (n + 1, the reject window re-opened from that minute, the
@@ -73,12 +74,13 @@ function reversedThenPruned(S, x, processed) {
   quiet(() => S.applyAudit(st, [x], { m0: { cap: 5500 } }, new Set(), 1000, { primary: H1 }));
   quiet(() => S.applyReplay(st, [x], FIXED, H2, 1100));
   const afterReplay = { n: su(st, P).n, fp: su(st, P).fp | 0, ne: v.seedcapNEff(su(st, P)) };
+  // O784: the count bound is gone; an audit is forgotten once a complete shard read no longer holds the group (here its records
+  //   leave the shards after the veto aged out, and come back for step (4))
   let t = 1000 + S.VETO_KEEP_MIN + 10;
-  quiet(() => S.pruneState(st, new Set(), t));
-  for (let i = 0; i < S.AUDITED_KEEP + 10; i++) st.audited['f' + i] = { c: 1, o: 0, k: H2, t: t + 1 };
+  quiet(() => S.pruneState(st, new Set(), t, { keys: { [x.m]: [] }, complete: true }));
   t += 10;
-  quiet(() => S.pruneState(st, new Set(), t));
-  const gone = !st.audited[x.m] && !st.veto[x.m];
+  quiet(() => S.pruneState(st, new Set(), t, { keys: {}, complete: true }));
+  const gone = !S.knownAudit(st, x.m) && !st.veto[x.m];
   return { st, t, afterReplay, gone, processed: processed || new Set() };
 }
 

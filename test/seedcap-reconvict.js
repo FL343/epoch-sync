@@ -7,7 +7,10 @@
 //   the offense board count +1). Already-settled over-cap matches the same. A fixed core's O198 replay then reversed the
 //   match once, so an honest account kept the extra convictions and their window.
 // Now:
-//   - the count bound skips audits of keys with a live veto (they stay while the veto does; VETO_KEEP_MIN still ends it)
+//   - the count bound skips audits of keys with a live veto (they stay while the veto does; VETO_KEEP_MIN still ends it).
+//     O784 (2026-11-09) took the count bound away: an audit stays while a complete shard read holds its group, so a group
+//     still on the shards is never read again at all; the live-veto rule now covers a group whose records leave the shards
+//     for a read and come back (sections [2], [3] flicker, [5] (b) / (c))
 //   - applyAudit `again`: a self-written over seat whose account already stands convicted for this match is vetoed, not
 //     convicted again (a reversed conviction -- fpm -- is not standing)
 // Sections:
@@ -44,8 +47,8 @@ function scMutant(pairs) {
   m._compile(src, file);
   return m.exports;
 }
-const PRUNE_FROM = 'const audKeys = Object.keys(st.audited).filter((k) => !st.veto[k]);';
-const PRUNE_TO = 'const audKeys = Object.keys(st.audited);';
+const PRUNE_FROM = '    if (st.veto[m]) continue;\n';
+const PRUNE_TO = '\n';
 const AGAIN_FROM = 'const blamed = obs ? [] : selfOver.filter(s2 => again.indexOf(s2) < 0);';
 const AGAIN_TO = 'const blamed = obs ? [] : selfOver;';
 
@@ -99,18 +102,17 @@ T('[1] two self-written over seats audited twice: each account convicted once', 
 {
   const st = st0();
   st.veto.vv = { t: 150, seats: [0] }; st.audited.vv = { t: -1 };
-  for (let i = 0; i < sc.AUDITED_KEEP + 20; i++) st.audited['a' + i] = { t: i };
-  sc.pruneState(st, new Set(), 200);
-  T('[2] the count bound takes AUDITED_KEEP of the others, never a vetoed key\'s audit (even the oldest)',
-    !!st.audited.vv && Object.keys(st.audited).length === sc.AUDITED_KEEP + 1 && !st.audited.a19 && !!st.audited.a20, Object.keys(st.audited).length);
+  for (let i = 0; i < 20; i++) st.audited['a' + i] = { t: i };
+  sc.pruneState(st, new Set(), 200, { keys: {}, complete: true });   // O784: a complete read holds none of these groups any more
+  T('[2] groups gone from the shards lose their audits, never a vetoed key\'s (even the oldest)',
+    !!st.audited.vv && Object.keys(st.audited).length === 1, Object.keys(st.audited).length);
   T('[2] the veto itself stays bounded by its age as before', !!st.veto.vv);
   const st2 = st0();
   st2.veto.old = { t: 0, seats: [0] }; st2.audited.old = { t: -1 };
-  for (let i = 0; i < sc.AUDITED_KEEP + 5; i++) st2.audited['a' + i] = { t: i };
-  sc.pruneState(st2, new Set(), sc.VETO_KEEP_MIN + 1);
-  T('[2] a veto past VETO_KEEP_MIN still goes (same run keeps its audit: the bound ran first)', !st2.veto.old && !!st2.audited.old);
-  sc.pruneState(st2, new Set(), sc.VETO_KEEP_MIN + 2);
-  T('[2] ... and on the next run its audit joins the bound again (oldest goes)', !st2.audited.old && Object.keys(st2.audited).length === sc.AUDITED_KEEP);
+  sc.pruneState(st2, new Set(), sc.VETO_KEEP_MIN + 1, { keys: { old: [] }, complete: true });
+  T('[2] a veto past VETO_KEEP_MIN still goes; its group still on the shards stays remembered (folded)', !st2.veto.old && !st2.audited.old && sc.knownAudit(st2, 'old'));
+  sc.pruneState(st2, new Set(), sc.VETO_KEEP_MIN + 2, { keys: {}, complete: true });
+  T('[2] ... and forgotten once a complete read no longer holds it', !sc.knownAudit(st2, 'old'));
 }
 
 // ---- [3] the churn the demo state showed (real records: pickAuditable / pendingOfGroup) ----
@@ -119,7 +121,8 @@ function matchRecs(hash, ros, scores) {
   return { R, key: hash + '_1234_2' };
 }
 const groupOf = (mm) => ({ [mm.key]: mm.R.map((x) => ({ d: x.d.slice(), roster: v.decodeRoster(x.d), w: x.sid })) });
-function churn(S, processedKey) {
+// flicker (O784): every busy interval's complete read misses the match's records (they are back on the next read)
+function churn(S, processedKey, flicker) {
   const mm = matchRecs(0x3670a, [P, Q], [6000, 5000]);
   const groups = groupOf(mm);
   const st = st0();
@@ -128,9 +131,11 @@ function churn(S, processedKey) {
   quiet(() => S.applyAudit(st, first, { m0: { cap: 5500 } }, processed, 100, { primary: PRI }));
   const t1 = st.veto[mm.key] && st.veto[mm.key].t;
   let again = [];
-  for (let round = 0; round < 3; round++) {   // three busy demo intervals: AUDITED_KEEP newer audits each time
-    for (let i = 0; i < S.AUDITED_KEEP + 10; i++) st.audited['busy' + round + '_' + i] = { t: 200 + round * 10000 + i };
-    S.pruneState(st, new Set(), 300 + round * 20);
+  for (let round = 0; round < 3; round++) {   // three busy demo intervals: many newer audits each time
+    const onShards = Object.assign({}, groups);
+    for (let i = 0; i < 4010; i++) { const k = 'busy' + round + '_' + i; st.audited[k] = { t: 200 + round * 10000 + i }; onShards[k] = []; }
+    if (flicker) delete onShards[mm.key];
+    S.pruneState(st, new Set(), 300 + round * 20, { keys: onShards, complete: true });
     const a = S.pickAuditable(st, groups);
     again = again.concat(a);
     if (a.length) quiet(() => S.applyAudit(st, a, { m0: { cap: 5500 } }, processed, 400 + round * 20, { primary: PRI }));
@@ -144,6 +149,9 @@ T('[3] three busy intervals later: the vetoed key is not read again (n stays 1, 
   CH.again === 0 && CH.n === 1 && CH.cv === 1 && CH.t2 === CH.t1, J({ again: CH.again, n: CH.n, t1: CH.t1, t2: CH.t2 }));
 const CHP = churn(sc, true);
 T('[3] the same for an already-settled over-cap match (settled first, audited after)', CHP.again === 0 && CHP.n === 1 && CHP.t2 === CHP.t1, J({ again: CHP.again, n: CHP.n }));
+const CHF = churn(sc, false, true);
+T('[3] O784: the match\'s records missing from a complete read and back on the next: not read again (the live veto keeps its audit)',
+  CHF.again === 0 && CHF.n === 1 && CHF.t2 === CHF.t1, J({ again: CHF.again, n: CHF.n, t1: CHF.t1, t2: CHF.t2 }));
 
 // ---- [4] a fixed core's O198 replay takes the whole conviction back ----
 function replayAfterReread(S) {
@@ -170,16 +178,16 @@ T('[4] re-read anyway: still one conviction; the fixed core\'s replay reverses i
   T('[5] mutant (no `again` guard): the standing match convicts again -> caught by [1]', !!a && a.standing.n === 2, a ? J(a.standing) : 'mutant did not apply');
   const rpA = mA ? replayAfterReread(mA) : null;
   T('[5] ... and the replay leaves a conviction and its window (the review probe\'s result) -> caught by [4]', !!rpA && rpA.nEff === 1 && rpA.active === true, J(rpA));
-  // (b) the count bound takes vetoed keys' audits again: [3] turns red (the group read again, the veto clock refreshed)
+  // (b) the prune forgets a vetoed key's audit with the others: [3] flicker turns red (the group read again, the veto clock refreshed)
   const mB = scMutant([[PRUNE_FROM, PRUNE_TO]]);
-  const chB = mB ? churn(mB) : null;
-  T('[5] mutant (the count bound takes a vetoed key\'s audit): read again, the veto clock refreshed -> caught by [3]',
+  const chB = mB ? churn(mB, false, true) : null;
+  T('[5] mutant (the prune forgets a vetoed key\'s audit): read again, the veto clock refreshed -> caught by [3] flicker',
     !!chB && chB.again === 3 && chB.t2 !== chB.t1, chB ? J({ again: chB.again, t1: chB.t1, t2: chB.t2 }) : 'mutant did not apply');
   T('[5] (b) keeps one conviction through the `again` guard', !!chB && chB.n === 1 && chB.cv === 1, chB ? J({ n: chB.n }) : '');
-  // (c) both out = today's main: the same match convicted on every re-read (the demo churn)
+  // (c) both out: the same match convicted on every re-read (the demo churn before Q367)
   const mBC = scMutant([[PRUNE_FROM, PRUNE_TO], [AGAIN_FROM, AGAIN_TO]]);
-  const chBC = mBC ? churn(mBC) : null;
-  T('[5] mutant (both out = before the fix): the same match convicted four times in four reads', !!chBC && chBC.n === 4 && chBC.cv === 4, chBC ? J({ n: chBC.n }) : 'mutant did not apply');
+  const chBC = mBC ? churn(mBC, false, true) : null;
+  T('[5] mutant (both out): the same match convicted four times in four reads', !!chBC && chBC.n === 4 && chBC.cv === 4, chBC ? J({ n: chBC.n }) : 'mutant did not apply');
 }
 
 try { fs.unlinkSync(process.env.SC_STATE_FILE); } catch (err) {}

@@ -70,9 +70,24 @@
 //   - capability probes read the CLI's "V" answer (no more cap-rise probe with a hard-coded build word)
 // Failure discipline: a CLI ERR is "cannot cap" -> log and step aside
 // (fail-open); flags only ever come from a computed cap the score exceeds.
+// O784 (2026-11-09, EA gap audit 2 X-01): what was audited is remembered for as long as the group's records sit on the
+//   shards. Before, st.audited was cut to the 4000 newest by audit time; the shards never shed a row (a client overwrites
+//   its own rows only when it has written to all of them), so once more than 4000 groups sat there every run read the cut
+//   ones again as new (the demo channel: 4000+ re-audits every 10 minutes, all 4000 kept audits from one minute). Each
+//   re-audit counted as an honest audit of the run's primary core, so a new core left its observation window (O285 (1):
+//   72 h or 200 honest audits) in its first run, and a new core re-judged every unsigned old match on the shards -- a
+//   simulated core with a cap bug convicted 1,127 accounts within 20 minutes, mostly for old, long settled matches.
+//   Now: an audit is dropped only when a COMPLETE shard read no longer holds the group (pruneAudits); an honest audit
+//   past SC_FOLD_MIN folds into st.seen (a salted 8-char token; the full entry stays while a veto lives or while it is an
+//   O198 replay candidate); the bound is a byte fuse on st.seen (SC_SEEN_MAX_BYTES: shorter tokens first -- a collision
+//   only lets a new group go unaudited, fail-open -- and only past the narrowest width are the oldest dropped). And a
+//   re-audit (a run after memory was lost: the old cut state, a salt change, a fuse drop) is audited and judged as
+//   before but not counted in its core's honest audits / hourly over-cap rate (x.re): a smaller count only keeps a new
+//   core under observation longer (architecture decision 10).
 // ============================================================
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { spawnSync } = require('child_process');
 const v = require('./validate.js');
 const attest = require('./attest.js');
@@ -107,7 +122,13 @@ const SEEDCAP_CHANNEL = process.env.SEEDCAP_CHANNEL || '';
 const PERK_CH = SEEDCAP_CHANNEL || 'playtest';
 const OVERLAP_GRACE_MS = 12 * 3600 * 1000;
 const OVERLAP_MAX_MS = 7 * 86400 * 1000;
-const AUDITED_KEEP = Math.max(500, Number(process.env.SC_AUDITED_KEEP || 4000));
+// O784: the old count bound on st.audited, no longer applied -- kept to recognise a state it cut (no st.seen, this many audits)
+const LEGACY_AUDITED_KEEP = Math.max(500, Number(process.env.SC_AUDITED_KEEP || 4000));
+// O784: an honest / error audit older than this folds into st.seen (the full entry is only for reading a recent verdict)
+const FOLD_MIN = Math.max(0, Number(process.env.SC_FOLD_MIN != null ? process.env.SC_FOLD_MIN : 1440));
+const SEEN_W = 8;       // st.seen token width: base64url chars of HMAC(STATE_SALT, key) = 48 bits (no practical collision below ~10^6 keys)
+const SEEN_W_MIN = 5;   // the fuse narrows tokens down to this (30 bits) before it drops anything
+const SEEN_MAX_BYTES = Math.max(4096, Number(process.env.SC_SEEN_MAX_BYTES || 8 * 1024 * 1024));   // ~1M groups at 8 chars
 const VETO_KEEP_MIN = Math.max(1440, Number(process.env.SC_VETO_KEEP_MIN || 43200));   // 30d
 const SUSPECT_MATCH_KEEP = 8;
 // Permanent offense ledger + mass-anomaly alert (2026-09-01): the flag moment also
@@ -504,12 +525,52 @@ function pendingOfGroup(st, m, g) {
       couch: !!(tail && pc >= 2 && ((tail.flags | 0) & attest.SEG_COUCH)) };   // O606: judged like an observed core (SC_COUCH_CONVICT)
   }
 }
-function pickAuditable(st, groups) {
+// ---- O784: the remembered audits (st.audited in full + st.seen tokens) ----
+// st.seen = { v: 1, w: token width, s: salt tag, h: the tokens concatenated (oldest fold first) }. A token is a salted HMAC of the
+//   match key: the repo is public and a client makes up its own match keys, so an unsalted token could be ground offline to
+//   collide with an old honest key and skip its own audit. The salt tag (4 chars of another HMAC) tells a state written under
+//   another salt: its tokens mean nothing here, so the run reads as one after memory was lost (auditLossOf).
+const SEEN_SALT = String(process.env.STATE_SALT || '');
+const SEEN_TAG = crypto.createHmac('sha256', SEEN_SALT).update('seedcap seen v1 salt check').digest('base64url').slice(0, 4);
+const seenTokMemo = new Map();
+function seenToken(m, w) {
+  let t = seenTokMemo.get(m);
+  if (t == null) { t = crypto.createHmac('sha256', SEEN_SALT).update('seedcap seen v1 ' + m).digest('base64url').slice(0, SEEN_W); seenTokMemo.set(m, t); }
+  return t.slice(0, w || SEEN_W);
+}
+function seenValid(st) { const sn = st && st.seen; return !!sn && typeof sn.h === 'string' && (sn.w | 0) >= 1 && sn.s === SEEN_TAG; }
+const seenSetMemo = new WeakMap();
+function seenSetOf(st) {
+  if (!seenValid(st)) return null;
+  const sn = st.seen, w = sn.w | 0, c = seenSetMemo.get(st);
+  if (c && c.h === sn.h && c.w === w) return c.set;
+  const set = new Set();
+  for (let i = 0; i + w <= sn.h.length; i += w) set.add(sn.h.slice(i, i + w));
+  seenSetMemo.set(st, { h: sn.h, w, set });
+  return set;
+}
+// audited before and still remembered: a full entry, or a token in st.seen
+function knownAudit(st, m) {
+  if (st.audited[m]) return true;
+  const s = seenSetOf(st);
+  return !!s && s.has(seenToken(m, st.seen.w | 0));
+}
+// why this run cannot tell a re-audit from a first audit (null = it can): the groups the state forgot are picked again with the
+//   new ones, so every pick of the run is taken as a re-audit (counted nowhere; a new group of that one run is judged as ever)
+function auditLossOf(st) {
+  if (st && st.seenCut) return 'fuse-drop';                        // the last prune dropped remembered groups still on the shards
+  if (st && st.seen && !seenValid(st)) return 'seen-salt';          // tokens written under another salt
+  if (st && !st.seen && Object.keys(st.audited || {}).length >= LEGACY_AUDITED_KEEP) return 'legacy-cut';   // the old count bound cut it
+  return null;
+}
+// opt.re (O784): the picked groups are re-audits (auditLossOf); applyAudit leaves them out of the core counts
+function pickAuditable(st, groups, opt) {
+  const re = !!(opt && opt.re);
   const pending = [];
   for (const m of Object.keys(groups)) {
-    if (st.audited[m]) continue;
+    if (knownAudit(st, m)) continue;
     const x = pendingOfGroup(st, m, groups[m]);
-    if (x) pending.push(x);
+    if (x) { if (re) x.re = 1; pending.push(x); }
   }
   return pending;
 }
@@ -642,7 +703,10 @@ function applyAudit(st, pending, cliMap, processed, t, opt) {
     const k = coreOfVerdict(r, primary), ov = r.via === 'overlap';   // O198 v1: which world answered (k) + overlap max
     st.audited[x.m] = { c: capEff, s: Math.max.apply(null, x.scores), o: overSeats.length ? 1 : 0, t, k };
     if (ov) st.audited[x.m].ov = 1;
-    coreStat(st, k, t, overSeats.length > 0);
+    // O784: only a first audit counts toward the core's honest audits (the O285 (1) observation exit) and its hourly over-cap
+    //   rate (the O198 alert): a re-audit of a group the state forgot would fill a new core's window with old matches
+    if (x.re) st.audited[x.m].re = 1;
+    else coreStat(st, k, t, overSeats.length > 0);
     if (overSeats.length) {
       over++;
       // the veto (no settlement) and the correction (reverse a settled gain) stay on every over-cap seat; a
@@ -877,16 +941,66 @@ async function sendAlertMail(reasons, flags, totals, windows, more) {
 }
 
 // ---- prune (state stays bounded) ----
-function pruneState(st, applied, tNow) {
-  // Q367: the count bound takes only audits without a live veto. A vetoed key's audit pruned here was read again on the next
-  //   run (pickAuditable): a fresh veto clock and, for a self-written over seat, a second conviction for the same match. The
-  //   veto map stays bounded by its age (VETO_KEEP_MIN, below); once a veto ages out its audit joins the bound again.
-  const audKeys = Object.keys(st.audited).filter((k) => !st.veto[k]);
-  if (audKeys.length > AUDITED_KEEP) {
-    audKeys.sort((a, b) => (st.audited[a].t | 0) - (st.audited[b].t | 0));
-    for (const k of audKeys.slice(0, audKeys.length - AUDITED_KEEP)) delete st.audited[k];
+// O784: the remembered audits. shards = { keys: the group keys this run read (object or Set), complete: every shard read to its
+//   end } -- absent or incomplete = presence unknown: nothing is dropped for being gone (a short read would have every group it
+//   missed audited again next run). Pure; returns what it did (the caller logs it).
+function pruneAudits(st, tNow, shards) {
+  const out = { gone: 0, folded: 0, goneTok: 0, w: SEEN_W, n: 0, narrowed: 0, dropped: 0 };
+  let keys = null;
+  if (shards && shards.complete && shards.keys) keys = (shards.keys instanceof Set) ? shards.keys : new Set(Object.keys(shards.keys));
+  let w = seenValid(st) ? (st.seen.w | 0) : SEEN_W;
+  const old = seenSetOf(st);
+  let toks = [];
+  if (old) {
+    const h = st.seen.h;
+    for (let i = 0; i + w <= h.length; i += w) toks.push(h.slice(i, i + w));
   }
+  if (keys) {
+    // a token whose group no complete read holds any more: forgotten (a token of a narrowed width may stand for a gone key and a
+    //   key still there at once -- kept, it only keeps a group remembered)
+    const live = new Set();
+    for (const m of keys) live.add(seenToken(m, w));
+    const n0 = toks.length;
+    toks = toks.filter((x) => live.has(x));
+    out.goneTok = n0 - toks.length;
+  }
+  const have = new Set(toks);
+  for (const m of Object.keys(st.audited)) {
+    // Q367: a live veto keeps its audit in full (the veto map stays bounded by its age, VETO_KEEP_MIN): read again it would
+    //   take a fresh veto clock and, for a self-written over seat, a second conviction for the same match
+    if (st.veto[m]) continue;
+    const a = st.audited[m] || {};
+    if (keys && !keys.has(m)) { delete st.audited[m]; out.gone++; continue; }   // its records left every shard: nothing to read again
+    const age = (tNow | 0) - (a.t | 0);
+    if (a.o === 1 && a.e == null && age <= REPLAY_DAYS * 1440) continue;     // an O198 replay candidate keeps its verdict in full
+    if (age < FOLD_MIN) continue;
+    const tk = seenToken(m, w);
+    if (!have.has(tk)) { have.add(tk); toks.push(tk); }
+    delete st.audited[m];
+    out.folded++;
+  }
+  // the byte fuse: narrower tokens first (a collision lets a new group pass unaudited = fail-open, never a re-judged old match),
+  //   then the oldest go -- those still on the shards are audited again next run as re-audits (auditLossOf 'fuse-drop')
+  while (toks.length * w > SEEN_MAX_BYTES && w > SEEN_W_MIN) {
+    w--;
+    const seen1 = new Set(), next = [];
+    for (const x of toks) { const y = x.slice(0, w); if (!seen1.has(y)) { seen1.add(y); next.push(y); } }
+    toks = next;
+    out.narrowed++;
+  }
+  if (toks.length * w > SEEN_MAX_BYTES) {
+    const keep = Math.floor(SEEN_MAX_BYTES / w);
+    out.dropped = toks.length - keep;
+    toks = toks.slice(out.dropped);
+  }
+  if (out.dropped) st.seenCut = tNow | 0; else delete st.seenCut;
+  st.seen = { v: 1, w, s: SEEN_TAG, h: toks.join('') };
+  out.w = w; out.n = toks.length;
+  return out;
+}
+function pruneState(st, applied, tNow, shards) {
   for (const m of Object.keys(st.veto)) if (tNow - (st.veto[m].t | 0) > VETO_KEEP_MIN) delete st.veto[m];
+  const pa = pruneAudits(st, tNow, shards);
   st.corrections = st.corrections.filter(c => !applied.has(c.id));
   // O198 v1 (S2): per-core hourly buckets keep a week
   if (st.cores) {
@@ -907,6 +1021,7 @@ function pruneState(st, applied, tNow) {
       else if (tNow - (st.chainLegacyT | 0) > CHAIN_LEGACY_KEEP_MIN) { for (const k of Object.keys(st.chain)) if (k.split(':').length === 2) delete st.chain[k]; delete st.chainLegacyT; }
     } else if (st.chainLegacyT) delete st.chainLegacyT;
   }
+  return pa;
 }
 // ---- shard read + CLI routing (shared by main() and tools/seedcap-reaudit.js; no state writes here) ----
 async function readGroups() {
@@ -928,8 +1043,12 @@ async function readGroups() {
   // always read EVERY shard -- listing entry counts lag and lie (2026-08-21 lesson)
   const groups = {};
   let records = 0;
+  // O784: complete = every shard read to its end (a PAGE_CAP-cut board is not) -- only then may pruneState forget a group for
+  //   being gone. A run without one board's rows still exits on its HTTP error (readBoardAll throws), so no partial set gets here.
+  let complete = true;
   for (const s of shardIds) {
     const rr = await v.readBoardAll(s.id, s.name);
+    if (!rr.complete) complete = false;
     for (const e of rr.ents) {
       const d = v.decodeDetails(e.detailData);
       if (!d || d.length < 10 || d[0] !== 0xB1) continue;   // settle records only
@@ -954,8 +1073,9 @@ async function readGroups() {
       (groups[m] = groups[m] || []).push({ d: r.d, roster: r.roster, w: String(r.steamID || '') });
     }
     console.log('seedcap: recover ' + kept + ' solo segment(s) from ' + rows.length + ' pool rows');
+    complete = false;   // O784: the pool read reports no completeness -- nothing is forgotten for being gone while the recovery runs
   }
-  return { groups, shards: shardIds.length, records };
+  return { groups, shards: shardIds.length, records, complete };
 }
 // which compiled world(s) answer this run: live.json channel window -> primary + overlap cores (root CLI when unregistered)
 function coresForNow(distDir, channel, nowMs) {
@@ -1080,7 +1200,10 @@ async function main() {
     (cores.length > 1 ? ' overlap=' + cores.slice(1).map(c => c.label).join(',') : '') + ' (' + sel.why + ')');
 
   const primaryHash = coreHashOf(cores[0].exe) || cores[0].label;   // O198 v1 (S2): the world core every verdict of this run is filed under
-  const picked = takeSkips(st, pickAuditable(st, groups), nowMin());
+  // O784: a run after memory was lost reads the forgotten groups again with the new ones -- every pick is taken as a re-audit
+  const loss = auditLossOf(st);
+  if (loss) console.log('seedcap: audit memory lost (' + loss + ') -- every audit of this run is a re-audit: judged as ever, not counted in the core honest audits / over-cap rate');
+  const picked = takeSkips(st, pickAuditable(st, groups, { re: !!loss }), nowMin());
   let stats = { over: 0, okN: 0, errN: 0, flags: [] };
   let audited = { pending: [], map: {}, deferred: 0, exact: 0, head: '' };
   if (picked.pending.length) {
@@ -1120,7 +1243,11 @@ async function main() {
     for (const o of oa) if (st.cores[o.k]) st.cores[o.k].mo = Math.floor(nowMin() / 1440);   // an observed core: once a day
     console.log('seedcap: anomaly mail sent (' + md.reasons.join(' + ') + ')');
   }
-  pruneState(st, applied, nowMin());
+  const pa = pruneState(st, applied, nowMin(), { keys: groups, complete: !!rg.complete });
+  console.log('seedcap: remembered audits full=' + Object.keys(st.audited).length + ' tokens=' + pa.n + ' (width ' + pa.w + ', ' + (pa.n * pa.w) + ' B)' +
+    ' folded=' + pa.folded + ' gone=' + pa.gone + '+' + pa.goneTok + (rg.complete ? '' : ' (shard read incomplete: nothing forgotten for being gone)'));
+  if (pa.narrowed || pa.w < SEEN_W) v.ghWarn('seedcap: remembered-audit fuse (' + SEEN_MAX_BYTES + ' B) holds tokens at width ' + pa.w + ' (of ' + SEEN_W + ') -- a new group colliding with an old token goes unaudited; raise SC_SEEN_MAX_BYTES');
+  if (pa.dropped) v.ghWarn('seedcap: remembered-audit fuse dropped the ' + pa.dropped + ' oldest token(s) at the narrowest width -- groups still on the shards are re-audited next run (not counted)');
   { // O198 v1: drop the queued events the reconcile already took (its cursor in trust.json; unreadable = keep them all)
     const tl = loadJsonObj(TRUST_FILE);
     const qp = trustLedger.queuePrune(st, tl && tl.taken && tl.taken.seedcap);
@@ -1132,9 +1259,10 @@ async function main() {
     ' suspects=' + Object.keys(st.suspects).length + ' corrections=' + st.corrections.length);
 }
 
-module.exports = { coreFirstSeen, honestSince, observationOf, observedAlerts, SC_OBS_H, SC_OBS_N, pendingOfGroup, coreOfVerdict, coreStat, coreRate24, coreAlerts, standingT1, convictedFor, replayCandidates, applyReplay, headHashOf, coreHashOf,
+module.exports = { LEGACY_AUDITED_KEEP, FOLD_MIN, SEEN_W, SEEN_W_MIN, SEEN_MAX_BYTES, seenToken, seenValid, knownAudit, auditLossOf, pruneAudits,
+  coreFirstSeen, honestSince, observationOf, observedAlerts, SC_OBS_H, SC_OBS_N, pendingOfGroup, coreOfVerdict, coreStat, coreRate24, coreAlerts, standingT1, convictedFor, replayCandidates, applyReplay, headHashOf, coreHashOf,
   REPLAY_DAYS, REPLAY_MAX, CONVICTION_KEEP, SC_RATE_PERMIL, SC_RATE_MIN_OVER, CORE_HOURS_KEEP,
-  reversedFor, selectCores, resolveCores, mergeCaps, corePathOf, OVERLAP_GRACE_MS, OVERLAP_MAX_MS, cliSupportsRerolls, cliSupportsClassic, cliSupportsBuilds, cliSupportsFee, cliSupportsRv, capParamsOf, cliLineOf, cliSupportsBuild, chainKey, chainStartBank, tailOf, coreForBuildNum, selfSeatsOf, pickAuditable, takeSkips, applyAudit, pruneState, readGroups, coresForNow, auditPending, runCli, loadState, saveState, SC_STATE_FILE, AUDITED_KEEP, VETO_KEEP_MIN, CHAIN_LEGACY_KEEP_MIN, CHAIN_KEEP_MIN, offensePlanOf, writeOffense, mailDecision, sendAlertMail, alertMailText, rejectWindowsOf, OFFENSE_LB, OFFENSE_MAGIC, SC_MAIL_MIN_OVER, SC_MAIL_SUS_MIN };
+  reversedFor, selectCores, resolveCores, mergeCaps, corePathOf, OVERLAP_GRACE_MS, OVERLAP_MAX_MS, cliSupportsRerolls, cliSupportsClassic, cliSupportsBuilds, cliSupportsFee, cliSupportsRv, capParamsOf, cliLineOf, cliSupportsBuild, chainKey, chainStartBank, tailOf, coreForBuildNum, selfSeatsOf, pickAuditable, takeSkips, applyAudit, pruneState, readGroups, coresForNow, auditPending, runCli, loadState, saveState, SC_STATE_FILE, VETO_KEEP_MIN, CHAIN_LEGACY_KEEP_MIN, CHAIN_KEEP_MIN, offensePlanOf, writeOffense, mailDecision, sendAlertMail, alertMailText, rejectWindowsOf, OFFENSE_LB, OFFENSE_MAGIC, SC_MAIL_MIN_OVER, SC_MAIL_SUS_MIN };
 if (require.main === module) {
   main().catch(e => { console.log('::error::seedcap run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
