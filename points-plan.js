@@ -23,7 +23,7 @@
   else if (root) root.POINTS_PLAN = api;
 })(typeof module === 'object' && !!module && typeof exports === 'object' && this === exports, typeof window !== 'undefined' ? window : null, function () {
   const RULES_VER = 1;
-  const FIXTURES_HASH = '64e1671831165575';
+  const FIXTURES_HASH = 'a41cf8f2bcadca33';
   // the knobs configure() can move (production runs these defaults)
   const DEFAULTS = Object.freeze({ RS_THRESHOLD: 400, RS_UPSET_BONUS: 1.0, RS_STRONG_UPSET_LOSS: 0.5, RS_SOLO_VS_TRIO: 0.6, RS_TRIO_WIN: 0.7, LEAVER_LP_PENALTY: 100 });
   const LP_MAX = 9999;
@@ -143,6 +143,12 @@
   function isTeamMt(mt) { const b = baseMt(mt); return b === 3 || b === 4 || b === 5 || b === 6 || b === 8 || b === 9; }
   // clamp-aware authoritative leaver deduction (never below 0)
   function leaverLpPenalty(cur, pen) { return Math.max(0, (cur | 0) - (pen | 0)); }
+  // O774 (2026-11-09, the user: "add the other modifiers so the client can make its best guess"): every plan row also
+  //   carries why: the rules that shaped its delta, in the order applied -- 'upset' (weak side placed up), 'mismatch' (weak
+  //   side's loss compressed), 'expected' (strong side's win compressed by the tier's rs), 'upset_loss' (strong side lost:
+  //   the loss is cut to RS_STRONG_UPSET_LOSS), 'solo_shield' (a solo's loss against a live trio), 'trio_tax' (a trio's win
+  //   in that match), 'teammate_left' (a shielded team loser). Labels only: the settle never reads them and no number moves,
+  //   so RULES_VER stays; the golden cases carry them (FIXTURES_HASH moves with the case file).
   // ===== mismatch compensation (the matchmaking-fairness layer): compress the strong side's swing, protect/reward the
   //   weak side. authoritative -- the client shows a flat optimistic delta (it can't see opponents' ratings); this is the
   //   only place the real adjusted delta + UPSET/PROTECTED tag is computed, revealed back to the client via board details. =====
@@ -203,20 +209,23 @@
       const base = prog >= 0.5 ? seg.win * (2 * prog - 1) : -seg.loss * (1 - 2 * prog);
       const normalDelta = Math.round(base + seg.drip);
       let factor = 1, flag = 0;
+      const why = [];   // O774: which rule shaped this delta (labels only, never read by the settle; see whyOf below)
       if (mismatch && uMmr < mean) {                             // weak side
-        if (base > 0) { factor = RS_UPSET_BONUS; flag = 1; }     //   placed up = upset (full/super, not compressed)
-        else { factor = seg.rs; if (normalDelta < 0) flag = 2; } //   placed down = protected (loss compressed; reveal only on a real net loss)
+        if (base > 0) { factor = RS_UPSET_BONUS; flag = 1; why.push('upset'); }     //   placed up = upset (full/super, not compressed)
+        else { factor = seg.rs; if (normalDelta < 0) flag = 2; if (base < 0) why.push('mismatch'); } //   placed down = protected (loss compressed; reveal only on a real net loss)
       } else if (mismatch && uMmr > mean) {                      // strong side (no client reveal)
-        if (base >= 0) factor = seg.rs;                           //   won as expected = gain compressed
-        else factor = RS_STRONG_UPSET_LOSS;                       //   lost an upset = mild penalty
+        if (base >= 0) { factor = seg.rs; if (base > 0) why.push('expected'); }   //   won as expected = gain compressed
+        else { factor = RS_STRONG_UPSET_LOSS; why.push('upset_loss'); }          //   lost an upset = mild penalty
       }
       // O82 solo-tilt (min-composed, see RS_SOLO_VS_TRIO note): solo losing vs a live trio gets the
       // escort shield (PROTECTED reveal on a real net loss); the trio's winning delta takes the
       // convoy tax silently (strong-side precedent).
       if (trioLive && u.length === 1 && base < 0) {
+        if (RS_SOLO_VS_TRIO < factor) why.push('solo_shield');
         factor = Math.min(factor, RS_SOLO_VS_TRIO);
         if (flag === 0 && normalDelta < 0) flag = 2;
       } else if (trioLive && u.length === 3 && base > 0) {
+        if (RS_TRIO_WIN < factor) why.push('trio_tax');
         factor = Math.min(factor, RS_TRIO_WIN);
       }
       const adjDelta = Math.round(base * factor + seg.drip);
@@ -224,7 +233,7 @@
       // consumed by the series clamp (crosslineDelta) at settle time. Q160 layer 5 (cloud audit): one delta for the whole
       // unit, its strong member's expected win included (see teamLpPlan: held at his own tier, the honest grandmaster in a
       // pair with a gold friend gained nothing; a premade carry of zero-points accounts stays a known residual).
-      for (const p of u) out[p.steamID] = { adjDelta, flag, normalDelta, won: prog >= 0.5 };
+      for (const p of u) out[p.steamID] = { adjDelta, flag, normalDelta, won: prog >= 0.5, why: why.slice() };
     }
     return out;
   }
@@ -289,10 +298,12 @@
       const tSeg = lpSeg(tAvgLp), ownSeg = lpSeg(p.lp | 0);
       const base = won ? tSeg.win : -tSeg.loss;
       let factor = 1, flag = 0, protectedLoss = false;
+      const why = [];   // O774: which rule shaped this delta (labels only, never read by the settle)
       if (mismatch && tAvgMmr < mean) {                          // weak team
-        if (won) { factor = RS_UPSET_BONUS; flag = 1; }
-        else { factor = tSeg.rs; protectedLoss = true; }
+        if (won) { factor = RS_UPSET_BONUS; flag = 1; why.push('upset'); }
+        else { factor = tSeg.rs; protectedLoss = true; why.push('mismatch'); }
       } else if ((mismatch && tAvgMmr > mean) || (won && mismatchA && tAvgMmr > meanA)) {   // strong team (Q167: or the weak team left)
+        why.push(won ? 'expected' : 'upset_loss');
         // Q160 layer 5 (cloud audit): an expected win compresses at the TEAM-average tier for every member, the strong one
         // included. Holding him at his own tier instead (the rework's fourth layer) cut a grandmaster carrying zero-points
         // accounts, but cut the honest grandmaster queued with lower-tier friends as hard (a gold friend, 6 wins in 8: -12
@@ -308,7 +319,7 @@
         // and a loss keep the present-only reading (a leaver's rating says nothing about how the players who stayed did).
         factor = won ? tSeg.rs : RS_STRONG_UPSET_LOSS;
       }
-      if (!won && shielded.has(p.steamID)) { factor = Math.min(factor, ownSeg.rs); protectedLoss = true; }
+      if (!won && shielded.has(p.steamID)) { factor = Math.min(factor, ownSeg.rs); protectedLoss = true; why.push('teammate_left'); }
       let normalDelta = Math.round(base / 2 + ownSeg.drip);
       let adjDelta = Math.round(base * factor / 2 + ownSeg.drip);
       // Q183 (cloud audit): the shielded loser also gets the full-team reading -- his team's convicted leavers counted at their
@@ -333,7 +344,7 @@
         if (fAdj > adjDelta) { adjDelta = fAdj; normalDelta = Math.round(-fSeg.loss / 2 + ownSeg.drip); }
       }
       if (protectedLoss && normalDelta < 0 && flag === 0) flag = 2;
-      out[p.steamID] = { adjDelta, flag, normalDelta, won };   // won feeds the series clamp at settle
+      out[p.steamID] = { adjDelta, flag, normalDelta, won, why };   // won feeds the series clamp at settle; why = O774 labels
     }
     return out;
   }
