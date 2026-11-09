@@ -23,7 +23,7 @@
   else if (root) root.POINTS_PLAN = api;
 })(typeof module === 'object' && !!module && typeof exports === 'object' && this === exports, typeof window !== 'undefined' ? window : null, function () {
   const RULES_VER = 1;
-  const FIXTURES_HASH = 'a41cf8f2bcadca33';
+  const FIXTURES_HASH = 'ba9858dc4c9a5cef';
   // the knobs configure() can move (production runs these defaults)
   const DEFAULTS = Object.freeze({ RS_THRESHOLD: 400, RS_UPSET_BONUS: 1.0, RS_STRONG_UPSET_LOSS: 0.5, RS_SOLO_VS_TRIO: 0.6, RS_TRIO_WIN: 0.7, LEAVER_LP_PENALTY: 100 });
   const LP_MAX = 9999;
@@ -463,8 +463,12 @@
   //   for a silver-level player, 80 gold, 40 platinum, 20 diamond (the user's table); a grandmaster drifts nowhere (zero-sum top).
   // Invariant (test/endless-lp.js): one run never moves the points by BOUNDARY_MARGIN or more (SWING_CAP), so a tier line is
   //   crossed in a series run only.
+  // O803 (2026-11-09, VER 3): a team run (duo / trio / quad) has ONE target for every seat, read from the team's usual level
+  //   teamHiddenOf(the hidden skills of the roster) in the hidden100 position of targetLineOf / targetOf; the points of each seat
+  //   (endlessDelta / endlessSettle: the gap factor, the protection, the gate), the placement seed and the skill tier keep reading
+  //   his own skill. Solo (and the couch pair, one account) are unchanged: the roster is the player alone, teamHiddenOf([h]) = h.
   const ELP = Object.freeze({
-    WINDOW: 10, MIN_RUNS: 5, TRIM: 1, GAP_UP: 1500, GAP_DOWN: 500, STAKE_STEP: 100, SPREAD: 2, SEED_CAP: 3200, VER: 2,
+    WINDOW: 10, MIN_RUNS: 5, TRIM: 1, GAP_UP: 1500, GAP_DOWN: 500, STAKE_STEP: 100, SPREAD: 2, SEED_CAP: 3200, VER: 3,
     MUL: Object.freeze([850, 850, 1500, 3100, 2800, 2800, 2800]), TARGET_Q: 990, SWING_CAP: 119, GATE_TIER: 5,
     // 2026-11-08 board read (best run per player; a usual run is about 0.7 of the best): playtest solo n 74 -- top 60 % 7, 35 % 13,
     //   20 % 20, 10 % 30, 4 % 63; trial solo n 318 (capped at 20) -- top 80 % 2, 60 % 7, 35 % 14. Bronze is 2 (0.7 x the top-80 %
@@ -503,6 +507,15 @@
     let sum = 0; for (const x of use) sum += x;
     return Math.round(sum * 100 / use.length);
   }
+  // O803: the usual level of a team: list = the hidden skill (hidden100, or null = no run of the family this season) of every
+  //   seat of the roster, in any order. The nulls leave; the rest average with equal weights, rounded to the nearest integer;
+  //   nobody with a skill = null (the target then falls to the silver line, as a first placement run). One account = its own skill.
+  function teamHiddenOf(list) {
+    const xs = (Array.isArray(list) ? list : []).filter((x) => x != null).map((x) => x | 0);
+    if (!xs.length) return null;
+    let sum = 0; for (const x of xs) sum += x;
+    return Math.round(sum / xs.length) | 0;
+  }
   // the tier (0..6) a hidden skill sits in: the pass line nearest to it, the lower tier on a tie. No skill (or no lines) = null.
   function tierOfHidden(hidden100, pass) {
     if (hidden100 == null || !elpLinesOk(pass)) return null;
@@ -523,8 +536,9 @@
     return at;
   }
   // the base line of a run's target, before its offset (the client's dial sits its middle here): TARGET_Q of the hidden skill hidden100
-  //   (a placed run: hiddenOf of the runs before it; a placement run: hiddenOf of the runs so far with minRuns 1), the silver line of
-  //   pass with none yet. lpBefore and placing no longer move it (kept in the signature: version 1 read them).
+  //   (a placed run: hiddenOf of the runs before it; a placement run: hiddenOf of the runs so far with minRuns 1; a team run, O803:
+  //   teamHiddenOf over the roster), the silver line of pass with none yet. lpBefore and placing no longer move it (kept in the
+  //   signature: version 1 read them).
   function targetLineOf(lpBefore, pass, hidden100, placing) {
     void lpBefore; void placing;
     return hidden100 == null ? (elpLinesOk(pass) ? (pass[1] | 0) : 0) : Math.round((hidden100 | 0) * ELP.TARGET_Q / 100000);
@@ -661,7 +675,7 @@
     RATING_MAGIC, ratingDetails, ratingDetailsOf,
     RECEIPT_MAGIC, RECEIPT_CAP, RS_SLOT, RECEIPT_F, receiptVer, lpDetailsOf, lpDetails, receiptPush, receiptOf,
     PULSE_MAGIC, pulseDetails, pulseOf,
-    ELP, ELP_FAMS, lpTierIdx, hiddenOf, tierOfHidden, skillTierOf, targetOffset, targetLineOf, targetOf, endlessDelta, endlessSettle, endlessSeedLp,
+    ELP, ELP_FAMS, lpTierIdx, hiddenOf, teamHiddenOf, tierOfHidden, skillTierOf, targetOffset, targetLineOf, targetOf, endlessDelta, endlessSettle, endlessSeedLp,
     elpRowDetails, elpRowOf, elpReceiptOf, elpTableDetails, elpTableOf,
   }, knobs());
   return api;

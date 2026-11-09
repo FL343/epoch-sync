@@ -22,8 +22,8 @@
 //   seat: { mt } -> which seats of the code move points (O716 one queue: the ranked-seat mask in bits 11-16; no mask = the old
 //     whole-table rule): { mask, sans: the code without the mask, base, any: anyAppliesLp, seats: seatAppliesLp of seats 0..5 }.
 //     A case added here moves no settled delta (no RULES_VER bump): it pins the reading both sides share.
-//   endless: { fn, args } -> PP[fn](...args), one O728 endless points function (hiddenOf / tierOfHidden / skillTierOf / targetOffset / targetLineOf / targetOf /
-//     endlessDelta / endlessSettle / endlessSeedLp / elpRowDetails / elpRowOf / elpTableDetails / elpTableOf) at fixed inputs. The
+//   endless: { fn, args } -> PP[fn](...args), one O728 endless points function (hiddenOf / teamHiddenOf (O803) / tierOfHidden / skillTierOf / targetOffset /
+//     targetLineOf / targetOf / endlessDelta / endlessSettle / endlessSeedLp / elpRowDetails / elpRowOf / elpTableDetails / elpTableOf) at fixed inputs. The
 //     endless rules carry their own version (ELP.VER on the published table), not RULES_VER: an endless case that moves bumps ELP.VER.
 // ============================================================
 const fs = require('fs');
@@ -156,6 +156,16 @@ function endlessCases() {
     E('hidden, 12 runs (the newest 10 count)', 'hiddenOf', [[5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 90, 90]]),
     E('hidden, a rounding mean (x100 to the nearest)', 'hiddenOf', [[3, 4, 4, 5, 9, 1]]),
     E('hidden, a negative depth counts as 0', 'hiddenOf', [[-3, 2, 2, 2, 2]]),
+    // O803: the team's usual level (the one target of a team run): the equal-weight mean of the seats that have a skill
+    E('team level, no seat', 'teamHiddenOf', [[]]),
+    E('team level, one seat without a skill = null', 'teamHiddenOf', [[null]]),
+    E('team level, nobody with a skill (three seats) = null', 'teamHiddenOf', [[null, null, null]]),
+    E('team level, one seat = its own skill', 'teamHiddenOf', [[1200]]),
+    E('team level, two seats 1200 / 800 = 1000', 'teamHiddenOf', [[1200, 800]]),
+    E('team level, a seat without a skill leaves (1200 / null / 801 = 1001, rounded)', 'teamHiddenOf', [[1200, null, 801]]),
+    E('team level, two seats at 0 = 0', 'teamHiddenOf', [[0, 0]]),
+    E('team level, four seats, order free (950 / 1200 / 400 / 1050 = 900)', 'teamHiddenOf', [[950, 1200, 400, 1050]]),
+    E('team level, a half rounds up (300 / 301 = 301)', 'teamHiddenOf', [[300, 301]]),
     // the tier of a hidden skill (nearest line, the lower tier on a tie)
     E('skill tier, 950 = gold (line 10 nearer than 6)', 'tierOfHidden', [950, SOLO]),
     E('skill tier, 400 = bronze (a tie between 2 and 6)', 'tierOfHidden', [400, SOLO]),

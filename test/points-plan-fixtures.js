@@ -55,9 +55,15 @@ T('[3] the settle composes its plan and its points line through the module (matc
   const kinds = new Set(doc.cases.map((c) => c.kind));
   T('[4] all six kinds present', ['match', 'seed', 'leave', 'boundary', 'seat', 'endless'].every((k) => kinds.has(k)), [...kinds].join(','));
   // O728: the endless cases call the endless functions only (the replay is PP[fn]), each of them, and the settle shapes the rules name
-  const ELP_FNS = ['hiddenOf', 'tierOfHidden', 'skillTierOf', 'targetOffset', 'targetLineOf', 'targetOf', 'endlessDelta', 'endlessSettle', 'endlessSeedLp', 'elpRowDetails', 'elpRowOf', 'elpTableDetails', 'elpTableOf'];
+  const ELP_FNS = ['hiddenOf', 'teamHiddenOf', 'tierOfHidden', 'skillTierOf', 'targetOffset', 'targetLineOf', 'targetOf', 'endlessDelta', 'endlessSettle', 'endlessSeedLp', 'elpRowDetails', 'elpRowOf', 'elpTableDetails', 'elpTableOf'];
   const en = doc.cases.filter((c) => c.kind === 'endless');
   T('[4] endless (O728): every endless function has a case, no other function is called', ELP_FNS.every((f) => en.some((c) => c.in.fn === f)) && en.every((c) => ELP_FNS.includes(c.in.fn)));
+  // O803: the team level cases the two repos must agree on (the client reads the one team target from the same function)
+  const th = en.filter((c) => c.in.fn === 'teamHiddenOf');
+  T('[4] endless (O803): teamHiddenOf has 6 cases at least -- no seat, a null seat, one seat, a pair, a null among three, zeros',
+    th.length >= 6 && th.some((c) => c.in.args[0].length === 0 && c.out === null) && th.some((c) => c.in.args[0].length === 1 && c.in.args[0][0] === null && c.out === null)
+    && th.some((c) => c.in.args[0].length === 1 && c.out === c.in.args[0][0] && c.out != null) && th.some((c) => c.in.args[0].length === 2 && c.in.args[0].every((x) => x != null) && c.out === Math.round((c.in.args[0][0] + c.in.args[0][1]) / 2))
+    && th.some((c) => c.in.args[0].length === 3 && c.in.args[0].some((x) => x === null) && c.out != null) && th.some((c) => c.in.args[0].every((x) => x === 0) && c.out === 0), th.length + ' cases');
   const es = en.filter((c) => c.in.fn === 'endlessSettle').map((c) => c.out);
   T('[4] endless: a protected miss, a protected miss at the floor (d 0), a forced drop, a forced crossing up, both board bounds',
     es.some((o) => o.protect && o.d < 0) && es.some((o) => o.protect && o.d === 0) && es.some((o) => o.clamped && o.d < o.d0) && es.some((o) => o.clamped && o.d > o.d0)
