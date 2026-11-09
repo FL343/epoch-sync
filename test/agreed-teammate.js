@@ -298,12 +298,12 @@ const HIGH = { mu: 30, sigma: 2 };   // display 1960; a fresh account (no row) r
 // ---- [6] the teammate seen agreeing has no points yet this season: read at the placement seed the settle would give him ----
 {
   const sk0 = {}; for (const s0 of [X, Y, Z0, Z1]) sk0[v.pid(s0)] = { mu: HIGH.mu, sigma: HIGH.sigma };   // all level: no mismatch
-  const pts = { [X]: 3500, [Y]: 3500, [Z0]: 3500 };   // Z1 has no row: the normal finish seeds him (display 1960 -> 3200)
+  const pts = { [X]: 3500, [Y]: 3500, [Z0]: 3500 };   // Z1 has no row: the normal finish seeds him (display 1960 -> 2840; 3200 before O786 BASE 1250)
   const ros = [X, Y, Z0, Z1];
   const m = match(0xE189, ros, pts, sk0, overwrite(Z1));
   const n = match(0xE18A, ros, pts, sk0, null);
-  T('[6] both settle; the normal finish seeds Z1 at 3200, the overwrite writes nothing for him', m.rs.every(r => r.code === 0) && n.rs.every(r => r.code === 0)
-    && writesTo(n.rs, POINTS, Z1).slice(-1)[0] != null && writesTo(m.rs, POINTS, Z1).length === 0 && /first settle this season, display 1960 -> pts 3200/.test(n.out), n.out.slice(-1500));
+  T('[6] both settle; the normal finish seeds Z1 at 2840, the overwrite writes nothing for him', m.rs.every(r => r.code === 0) && n.rs.every(r => r.code === 0)
+    && writesTo(n.rs, POINTS, Z1).slice(-1)[0] != null && writesTo(m.rs, POINTS, Z1).length === 0 && /first settle this season, display 1960 -> pts 2840/.test(n.out), n.out.slice(-1500));
   T('[6] the loser who stayed takes the normal-finish points (team average platinum: -9; read at 0 points it would be silver)', lastPts(m, Z0) === lastPts(n, Z0) && lastPts(n, Z0) === 3500 + Math.round(-22 / 2 + 2),
     JSON.stringify([lastPts(m, Z0), lastPts(n, Z0)]));
 }
@@ -370,7 +370,7 @@ const HIGH = { mu: 30, sigma: 2 };   // display 1960; a fresh account (no row) r
   T('[9] the loser who stayed takes the normal-finish points (-1; read on the fined points: -2)', lastPts(n, Z0) === 1999 && lastPts(m, Z0) === lastPts(n, Z0), JSON.stringify([lastPts(m, Z0), lastPts(n, Z0)]));
 }
 // ---- [10] (Q207) a gold loser's teammate with no points row quits with a confession: the confession path seeds him
-//   (display 1775 -> 3100) and fines him 100 (written: 3000), but this season's board still shows no row for him at the
+//   (display 2025 -> 3100; O786 BASE 1250: his rating moved up by the same 250 display so the seed and every number below stay) and fines him 100 (written: 3000), but this season's board still shows no row for him at the
 //   settle six minutes later (the stub keeps no writes and the step passes none: a copy of the board behind the fine).
 //   O481: the settle takes the fine this job wrote as his row ([stale-read]) and adds it back as in [9]: 3100, his points as
 //   at his leave, team average 2975 (gold), -2 as in the normal finish; it no longer seeds him again and writes that seed
@@ -378,7 +378,7 @@ const HIGH = { mu: 30, sigma: 2 };   // display 1960; a fresh account (no row) r
 //   3100, read as it stands: the same plan. Adding the recorded fine on top of the seed would read 3200 (team average 3025,
 //   platinum) and give -1 ----
 {
-  const W = { mu: 31, sigma: 2 }, L = { mu: 16, sigma: 2 }, F = { mu: 25.375, sigma: 2 };   // displays 2000 / 1400 / 1775
+  const W = { mu: 31, sigma: 2 }, L = { mu: 16, sigma: 2 }, F = { mu: 31.625, sigma: 2 };   // displays 2000 / 1400 / 2025
   const sk0 = { [v.pid(X)]: W, [v.pid(Y)]: W, [v.pid(Z0)]: L, [v.pid(Z1)]: F };
   const pts0 = { [X]: 0, [Y]: 0, [Z0]: 2850 };   // Z1: no row, before and after his fine
   const ros = [X, Y, Z0, Z1], mt = 6, hash = 0xE1A0;
@@ -396,7 +396,7 @@ const HIGH = { mu: 30, sigma: 2 };   // display 1960; a fresh account (no row) r
     && JSON.stringify(writesTo(m.rs, POINTS, Z1)) === '[3000]' && /already confessed -- consensus conviction skipped/.test(m.out), m.out.slice(-1500));
   T('[10] the hold off (the job before O481): seeded again at the settle (3100, written over his fine), not convicted again',
     o.rs.every(r => r.code === 0) && processedOf(o.last).has(keyOf(S[0].d)) && leavesOf(o.last, Z1) === 1 && !/\[stale-read\]/.test(o.out)
-    && /leaver, first settle this season, display 1775 -> pts 3100/.test(o.out) && JSON.stringify(writesTo(o.rs, POINTS, Z1)) === '[3000,3100]'
+    && /leaver, first settle this season, display 2025 -> pts 3100/.test(o.out) && JSON.stringify(writesTo(o.rs, POINTS, Z1)) === '[3000,3100]'
     && /already confessed -- consensus conviction skipped/.test(o.out), o.out.slice(-1500));
   T('[10] the loser who stayed takes the normal-finish points, hold on or off (-2; the fine added on top of the seed: -1)',
     lastPts(n, Z0) === 2848 && lastPts(m, Z0) === lastPts(n, Z0) && lastPts(o, Z0) === lastPts(n, Z0), JSON.stringify([lastPts(m, Z0), lastPts(o, Z0), lastPts(n, Z0)]));

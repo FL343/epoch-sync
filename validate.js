@@ -10999,7 +10999,7 @@ async function main() {
         if (e) cur = e.score | 0;
         else {
           const pe = prevLpId ? await prevLpEntryOf(sid, 'prev points') : null;
-          cur = seasonSeedLp(pe ? (pe.score | 0) : null, mmr); seeded = true;
+          cur = seasonSeedLp(pe ? (pe.score | 0) : null, mmr, seasonId >= 1); seeded = true;
         }
         const was = cur;
         const evs = [];   // O480: one receipt per payment (its match key; a claim queued before O480 carries none)
@@ -11047,7 +11047,9 @@ async function main() {
         const sid = c ? errSids.get(p) : null;
         return sid ? { steamID: sid, note: c.note } : null;
       },
-      seedFor: (sid) => { const sk = skill0[pid(sid)] || ts.DEFAULTS; return seedLp(ts.displayRating(sk.mu, sk.sigma)); },
+      // O786: no row this season and none on the previous board -> the same seed a settle would give him (seasonSeedLp: from
+      //   season 1 on a soft reset of his display seed, the one ruler new and returning players share)
+      seedFor: (sid) => { const sk = skill0[pid(sid)] || ts.DEFAULTS; return seasonSeedLp(null, ts.displayRating(sk.mu, sk.sigma), seasonId >= 1); },
       readLp: lpId0 ? (async (sid) => {
         const e = await lpRowOf(sid, 'points');   // O480: a row this run already wrote reads as written
         if (e) return { score: e.score | 0, details: e.det };
@@ -14513,7 +14515,7 @@ async function main() {
             catch (err) { ghErr('prev-season base read failed for ' + plog(sid) + ' -- abort run, do NOT seed blind: ' + (err && err.message)); process.exit(1); }
           }
           const disp = ts.displayRating(mu, sigma);
-          lp[sid] = seasonSeedLp(prevE ? (prevE.score | 0) : null, disp);
+          lp[sid] = seasonSeedLp(prevE ? (prevE.score | 0) : null, disp, seasonId >= 1);
           changedLp[sid] = lp[sid]; seededNow.add(sid);
           console.log('  seed ' + c.m + ': ' + plog(sid) + ' ' + tag +
             (prevE ? (', soft-reset from ' + (prevE.score | 0)) : (', display ' + disp)) + ' -> pts ' + lp[sid]);
@@ -14706,7 +14708,7 @@ async function main() {
         if (lpx == null && lpId && anyLp) {
           let prevE = null;
           if (prevLpId) { try { prevE = await prevLpEntryOf(x.steamID, 'prev points'); } catch (err) { ghWarn('prev-season base read failed for ' + plog(x.steamID) + ' (plan only, nothing written): ' + (err && err.message)); } }
-          lpx = seasonSeedLp(prevE ? (prevE.score | 0) : null, ts.displayRating(sk.mu, sk.sigma));
+          lpx = seasonSeedLp(prevE ? (prevE.score | 0) : null, ts.displayRating(sk.mu, sk.sigma), seasonId >= 1);
         }
         return { seat: x.seat | 0, mmr: ts.displayRating(r.mu, r.sigma), lp: lpx == null ? 0 : lpx };
       };

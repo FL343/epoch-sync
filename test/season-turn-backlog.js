@@ -3,7 +3,7 @@
 // A settle's points write that fails waits in the points-row backlog (w, O480) and the next run writes it again. When the next
 // run was already in the new season, the turn dropped it (warned, "dropped: this season writes ..."): last season's board never
 // got that match, and the player's first settle of the new season soft-reset from his row before it -- the winner lost the points
-// of the season's last match (silver and below keep their points through the soft reset), the loser kept the points he lost.
+// of the season's last match (bronze keeps its points through the soft reset), the loser kept the points he lost.
 // Now the new season's runs move such a write aside (wp), write it to last season's board -- where the match belongs -- until it
 // lands, and take it as his row there for every soft-reset read until then.
 //   [1] the turn with Steam back: the first run of season 1 writes both waiting values to last season's board (the match's
@@ -89,11 +89,12 @@ const seedLine = (out, sid) => (new RegExp('seed [^\\n]*' + plog(sid) + ' first 
 const ringOf = (det) => PP.lpDetailsOf(det || []).ring;
 const FAILP = { points: 500 };
 
-// the preseason part every case shares: A (1500) beats B (1400) at 23:50 the night before season 1, every points write answered
-//   500: both values wait (A 1500 + 44, B 1400 - 13: silver keeps its points through the soft reset, so a lost match shows)
+// the preseason part every case shares: A (300) beats B (250) at 23:50 the night before season 1, every points write answered
+//   500: both values wait (A 300 + 50, B 250 - 10: bronze keeps its points through the soft reset, so a lost match shows; O786
+//   2026-11-09: silver drops a tier at the turn now -- every silver value lands on 540 -- so the case moved to bronze)
 const pre = (A, B, hash) => {
   const m1 = match(2, hash, [A, B]);
-  const a = run([[0, m1.S, PRE], [5 * MIN, m1.all, fail(PRE, FAILP)]], { points: { [A]: { score: 1500 }, [B]: { score: 1400 } }, s1: {} });
+  const a = run([[0, m1.S, PRE], [5 * MIN, m1.all, fail(PRE, FAILP)]], { points: { [A]: { score: 300 }, [B]: { score: 250 } }, s1: {} });
   return { m1, a };
 };
 
@@ -110,21 +111,21 @@ console.log('=== a points write that failed in the season\'s last runs goes on t
   };
   const { t, m2, b } = go();
   const wa = entryOf(t.a.last, A).w, wb = entryOf(t.a.last, B).w;
-  T('[1] (23:50: both points writes fail, both values wait for the preseason board: A 1544, B 1387)', t.a.okAll && wa && wb && wa.b === 'points' && wa.v === 1544 && wb.v === 1387
-    && PP.receiptOf(wa.d, t.m1.mh) && PP.receiptOf(wa.d, t.m1.mh).delta === 44, J(t.a.last.state.PENDING_WRITES_FILE));
+  T('[1] (23:50: both points writes fail, both values wait for the preseason board: A 350, B 240)', t.a.okAll && wa && wb && wa.b === 'points' && wa.v === 350 && wb.v === 240
+    && PP.receiptOf(wa.d, t.m1.mh) && PP.receiptOf(wa.d, t.m1.mh).delta === 50, J(t.a.last.state.PENDING_WRITES_FILE));
   const pa = posts(b.rs[0], POINTS, A), pb = posts(b.rs[0], POINTS, B);
   T('[1] the first run of season 1 (nothing fresh) writes both values to last season\'s board, the match\'s receipt on them', b.okAll && /no fresh matches|no consistent matches/.test(b.rs[0].out)
-    && J(pa.map((x) => x.score)) === '[1544]' && J(pb.map((x) => x.score)) === '[1387]' && PP.receiptOf(pa[0].details, t.m1.mh).delta === 44 && PP.receiptOf(pb[0].details, t.m1.mh).delta === -13,
+    && J(pa.map((x) => x.score)) === '[350]' && J(pb.map((x) => x.score)) === '[240]' && PP.receiptOf(pa[0].details, t.m1.mh).delta === 50 && PP.receiptOf(pb[0].details, t.m1.mh).delta === -10,
     J(pa) + ' ' + J(pb) + ' ' + b.rs[0].out.slice(-900));
-  T('[1] ... logged: kept at the turn (not dropped), then landed', new RegExp('points write of ' + plog(A) + ' for last season\'s board points \\(value 1544, 1 tries\\) waits on for that board, not dropped at the turn \\(Q341\\)').test(b.rs[0].out)
-    && new RegExp('points write of ' + plog(A) + ' for last season\'s board points that failed before \\(1 tries\\) landed: 1544 \\(Q341\\)').test(b.rs[0].out)
+  T('[1] ... logged: kept at the turn (not dropped), then landed', new RegExp('points write of ' + plog(A) + ' for last season\'s board points \\(value 350, 1 tries\\) waits on for that board, not dropped at the turn \\(Q341\\)').test(b.rs[0].out)
+    && new RegExp('points write of ' + plog(A) + ' for last season\'s board points that failed before \\(1 tries\\) landed: 350 \\(Q341\\)').test(b.rs[0].out)
     && !/dropped: this season writes/.test(b.out), b.rs[0].out.slice(-900));
   const ea = entryOf(b.rs[0], A);
   T('[1] ... the backlog holds no write of theirs any more, A\'s landed write is his kept write of that board (O481)', !ea.w && !ea.wp && !entryOf(b.rs[0], B).w && !entryOf(b.rs[0], B).wp
-    && ea.l && ea.l.b === 'points' && ea.l.v === 1544, J(b.rs[0].state.PENDING_WRITES_FILE));
+    && ea.l && ea.l.b === 'points' && ea.l.v === 350, J(b.rs[0].state.PENDING_WRITES_FILE));
   const sa = posts(b.rs[2], S1B, A), sb = posts(b.rs[2], S1B, B);
-  T('[1] the first settle of season 1 soft-resets from 1544 / 1387 (not 1500 / 1400): A 1544 + 44 = 1588, B 1387 - 13 = 1374', J(seedLine(b.rs[2].out, A)) === '[1544,1544]' && J(seedLine(b.rs[2].out, B)) === '[1387,1387]'
-    && J(sa.map((x) => x.score)) === '[1588]' && J(sb.map((x) => x.score)) === '[1374]' && PP.receiptOf(sa[0].details, m2.mh) && !PP.receiptOf(sa[0].details, t.m1.mh), J(sa) + ' ' + J(sb) + ' ' + b.rs[2].out.slice(-900));
+  T('[1] the first settle of season 1 soft-resets from 350 / 240 (not 300 / 250): A 350 + 50 = 400, B 240 - 10 = 230', J(seedLine(b.rs[2].out, A)) === '[350,350]' && J(seedLine(b.rs[2].out, B)) === '[240,240]'
+    && J(sa.map((x) => x.score)) === '[400]' && J(sb.map((x) => x.score)) === '[230]' && PP.receiptOf(sa[0].details, m2.mh) && !PP.receiptOf(sa[0].details, t.m1.mh), J(sa) + ' ' + J(sb) + ' ' + b.rs[2].out.slice(-900));
   T('[1] ... nothing more written to last season\'s board, no [stale-read]', tried(b.rs[1], POINTS, A).length + tried(b.rs[2], POINTS, A).length + tried(b.rs[1], POINTS, B).length + tried(b.rs[2], POINTS, B).length === 0
     && staleN(b.out) === 0, b.out.slice(-600));
   const o = go(HOLD_OFF);
@@ -140,17 +141,17 @@ console.log('=== a points write that failed in the season\'s last runs goes on t
   const SF = fail(S1, FAILP);   // the base board -- last season's from season 1 on -- answers 500, points_s1 takes writes
   const b = run([[10 * MIN, t.m1.all, SF], [5 * MIN, t.m1.all.concat(m2.S), SF], [5 * MIN, t.m1.all.concat(m2.all), SF], [5 * MIN, t.m1.all.concat(m2.all), S1]], t.a.rows, t.a.last.state);
   const n = [0, 1, 2].map((i) => (entryOf(b.rs[i], A).wp || {}).n);
-  T('[2] last season\'s board answers 500: tried every run of season 1, the tries counted, the value waits (wp)', b.okAll && [0, 1, 2].every((i) => tried(b.rs[i], POINTS, A).length === 1 && tried(b.rs[i], POINTS, A)[0].score === 1544)
-    && J(n) === '[2,3,4]' && entryOf(b.rs[2], A).wp.v === 1544 && entryOf(b.rs[2], A).wp.b === 'points' && !entryOf(b.rs[2], A).w
-    && /points write of [0-9a-f]{8} for last season's board points failed again \(status 500\) -- 1544 waits for the next run \(try 2, Q341\)/.test(b.rs[0].out), J(n) + ' ' + b.rs[0].out.slice(-700));
+  T('[2] last season\'s board answers 500: tried every run of season 1, the tries counted, the value waits (wp)', b.okAll && [0, 1, 2].every((i) => tried(b.rs[i], POINTS, A).length === 1 && tried(b.rs[i], POINTS, A)[0].score === 350)
+    && J(n) === '[2,3,4]' && entryOf(b.rs[2], A).wp.v === 350 && entryOf(b.rs[2], A).wp.b === 'points' && !entryOf(b.rs[2], A).w
+    && /points write of [0-9a-f]{8} for last season's board points failed again \(status 500\) -- 350 waits for the next run \(try 2, Q341\)/.test(b.rs[0].out), J(n) + ' ' + b.rs[0].out.slice(-700));
   const sa = posts(b.rs[2], S1B, A);
-  T('[2] the first settle of season 1 soft-resets from the waiting 1544 (the board still shows 1500): 1588, no [stale-read]', J(seedLine(b.rs[2].out, A)) === '[1544,1544]'
-    && J(sa.map((x) => x.score)) === '[1588]' && J(seedLine(b.rs[2].out, B)) === '[1387,1387]' && staleN(b.out) === 0, J(sa) + ' ' + b.rs[2].out.slice(-900));
+  T('[2] the first settle of season 1 soft-resets from the waiting 350 (the board still shows 300): 400, no [stale-read]', J(seedLine(b.rs[2].out, A)) === '[350,350]'
+    && J(sa.map((x) => x.score)) === '[400]' && J(seedLine(b.rs[2].out, B)) === '[240,240]' && staleN(b.out) === 0, J(sa) + ' ' + b.rs[2].out.slice(-900));
   T('[2] ... the season-1 write that landed leaves last season\'s write waiting (another board: it supersedes nothing there)', entryOf(b.rs[2], A).wp && entryOf(b.rs[2], A).l
-    && entryOf(b.rs[2], A).l.b === 'points_s1' && entryOf(b.rs[2], A).l.v === 1588, J(entryOf(b.rs[2], A)));
+    && entryOf(b.rs[2], A).l.b === 'points_s1' && entryOf(b.rs[2], A).l.v === 400, J(entryOf(b.rs[2], A)));
   const pa = posts(b.rs[3], POINTS, A);
-  T('[2] Steam back: the next run writes 1544 to last season\'s board, the wait ends, his kept write stays the season-1 one', J(pa.map((x) => x.score)) === '[1544]'
-    && PP.receiptOf(pa[0].details, t.m1.mh).delta === 44 && !entryOf(b.rs[3], A).wp && entryOf(b.rs[3], A).l && entryOf(b.rs[3], A).l.b === 'points_s1' && entryOf(b.rs[3], A).l.v === 1588
+  T('[2] Steam back: the next run writes 350 to last season\'s board, the wait ends, his kept write stays the season-1 one', J(pa.map((x) => x.score)) === '[350]'
+    && PP.receiptOf(pa[0].details, t.m1.mh).delta === 50 && !entryOf(b.rs[3], A).wp && entryOf(b.rs[3], A).l && entryOf(b.rs[3], A).l.b === 'points_s1' && entryOf(b.rs[3], A).l.v === 400
     && tried(b.rs[3], S1B, A).length === 0, J(pa) + ' ' + J(entryOf(b.rs[3], A)) + ' ' + b.rs[3].out.slice(-600));
 }
 // ---- [3] both boards failing ----
@@ -162,25 +163,25 @@ console.log('=== a points write that failed in the season\'s last runs goes on t
   const all = t.m1.all.concat(m2.all);
   const b = run([[10 * MIN, t.m1.all, SFF], [5 * MIN, t.m1.all.concat(m2.S), SFF], [5 * MIN, all, SFF], [5 * MIN, all, fail(S1, FAILP)], [5 * MIN, all, S1]], t.a.rows, t.a.last.state);
   const e2 = entryOf(b.rs[2], A), e3 = entryOf(b.rs[3], A);
-  T('[3] both boards answer 500: the season-1 write (1588) waits (w) next to last season\'s (wp, 1544)', b.okAll && e2.w && e2.w.b === 'points_s1' && e2.w.v === 1588
-    && e2.wp && e2.wp.b === 'points' && e2.wp.v === 1544, J(e2));
-  T('[3] points_s1 back first: its waiting write lands there (1588), last season\'s still waits (it supersedes nothing on another board)', J(posts(b.rs[3], S1B, A).map((x) => x.score)) === '[1588]'
-    && J(tried(b.rs[3], POINTS, A).map((x) => x.score)) === '[1544]' && !e3.w && e3.wp && e3.wp.v === 1544 && e3.wp.n === e2.wp.n + 1, J(e3) + ' ' + b.rs[3].out.slice(-700));
-  T('[3] then last season\'s board: written there (1544 / 1387), the backlog empties', J(posts(b.rs[4], POINTS, A).map((x) => x.score)) === '[1544]' && J(posts(b.rs[4], POINTS, B).map((x) => x.score)) === '[1387]'
-    && J(posts(b.rs[3], S1B, B).map((x) => x.score)) === '[1374]' && tried(b.rs[4], S1B, A).length === 0 && !entryOf(b.rs[4], A).w && !entryOf(b.rs[4], A).wp && !entryOf(b.rs[4], B).wp,
+  T('[3] both boards answer 500: the season-1 write (400) waits (w) next to last season\'s (wp, 350)', b.okAll && e2.w && e2.w.b === 'points_s1' && e2.w.v === 400
+    && e2.wp && e2.wp.b === 'points' && e2.wp.v === 350, J(e2));
+  T('[3] points_s1 back first: its waiting write lands there (400), last season\'s still waits (it supersedes nothing on another board)', J(posts(b.rs[3], S1B, A).map((x) => x.score)) === '[400]'
+    && J(tried(b.rs[3], POINTS, A).map((x) => x.score)) === '[350]' && !e3.w && e3.wp && e3.wp.v === 350 && e3.wp.n === e2.wp.n + 1, J(e3) + ' ' + b.rs[3].out.slice(-700));
+  T('[3] then last season\'s board: written there (350 / 240), the backlog empties', J(posts(b.rs[4], POINTS, A).map((x) => x.score)) === '[350]' && J(posts(b.rs[4], POINTS, B).map((x) => x.score)) === '[240]'
+    && J(posts(b.rs[3], S1B, B).map((x) => x.score)) === '[230]' && tried(b.rs[4], S1B, A).length === 0 && !entryOf(b.rs[4], A).w && !entryOf(b.rs[4], A).wp && !entryOf(b.rs[4], B).wp,
     J(entryOf(b.rs[4], A)) + ' ' + b.rs[4].out.slice(-700));
 }
 // ---- [4] a copy of last season's board behind the write that landed ----
 {
   const A = H.SID(5131), B = H.SID(5132);
-  const lag = { [A]: { score: 1500, details: [] } };   // A's row before the season's last match
+  const lag = { [A]: { score: 300, details: [] } };   // A's row before the season's last match
   {
     const t = pre(A, B, 0x4B131);
     const m2 = match(2, 0x4B132, [A, B]);
     const b = run([[10 * MIN, t.m1.all, S1], [5 * MIN, t.m1.all.concat(m2.S), S1, lag], [5 * MIN, t.m1.all.concat(m2.all), S1, lag]], t.a.rows, t.a.last.state);
-    T('[4] the retry landed at 00:00, the soft-reset read at 00:10 is a copy behind it: his kept write of that board is taken (1544), one [stale-read]', b.okAll
-      && J(posts(b.rs[0], POINTS, A).map((x) => x.score)) === '[1544]' && J(seedLine(b.rs[2].out, A)) === '[1544,1544]' && J(posts(b.rs[2], S1B, A).map((x) => x.score)) === '[1588]'
-      && staleN(b.out) === 1 && new RegExp('\\[stale-read\\] points ' + plog(A) + ' \\(prev points, points\\): read 1500 without').test(b.out), b.out.slice(-900));
+    T('[4] the retry landed at 00:00, the soft-reset read at 00:10 is a copy behind it: his kept write of that board is taken (350), one [stale-read]', b.okAll
+      && J(posts(b.rs[0], POINTS, A).map((x) => x.score)) === '[350]' && J(seedLine(b.rs[2].out, A)) === '[350,350]' && J(posts(b.rs[2], S1B, A).map((x) => x.score)) === '[400]'
+      && staleN(b.out) === 1 && new RegExp('\\[stale-read\\] points ' + plog(A) + ' \\(prev points, points\\): read 300 without').test(b.out), b.out.slice(-900));
   }
   {
     // a match across the turn: starts 23:55 (the retry fails again), settles in the first run of season 1 -- the retry lands
@@ -188,8 +189,8 @@ console.log('=== a points write that failed in the season\'s last runs goes on t
     const t = pre(A, B, 0x4B133);
     const m2 = match(2, 0x4B134, [A, B]);
     const b = run([[5 * MIN, t.m1.all.concat(m2.S), fail(PRE, FAILP)], [10 * MIN, t.m1.all.concat(m2.all), Object.assign({}, S1, HOLD_OFF), lag]], t.a.rows, t.a.last.state);
-    T('[4] a match across the turn: the first run of season 1 lands last season\'s write and soft-resets from it in the same run (copy behind, hold off): 1588', b.okAll
-      && J(posts(b.rs[1], POINTS, A).map((x) => x.score)) === '[1544]' && J(seedLine(b.rs[1].out, A)) === '[1544,1544]' && J(posts(b.rs[1], S1B, A).map((x) => x.score)) === '[1588]'
+    T('[4] a match across the turn: the first run of season 1 lands last season\'s write and soft-resets from it in the same run (copy behind, hold off): 400', b.okAll
+      && J(posts(b.rs[1], POINTS, A).map((x) => x.score)) === '[350]' && J(seedLine(b.rs[1].out, A)) === '[350,350]' && J(posts(b.rs[1], S1B, A).map((x) => x.score)) === '[400]'
       && (entryOf(b.rs[0], A).w || {}).n === 2, J(posts(b.rs[1], S1B, A)) + ' ' + b.rs[1].out.slice(-900));
   }
 }
@@ -202,8 +203,8 @@ console.log('=== a points write that failed in the season\'s last runs goes on t
   const conf = { sid: A, d: H.rec(0xB5, 2, h3, 0, 0, false, ros, sc, 5) };
   const c = run([[10 * MIN, t.m1.all.concat(S3, [conf]), fail(S1, FAILP)]], t.a.rows, t.a.last.state);
   const wc = posts(c.last, S1B, A);
-  T('[5] A quits his first match of season 1 (last season\'s board still failing): the fine comes off the soft reset of the waiting 1544 -> 1444', c.okAll
-    && J(wc.map((x) => x.score)) === '[1444]' && entryOf(c.last, A).wp && entryOf(c.last, A).wp.v === 1544, J(wc) + ' ' + c.out.slice(-700));
+  T('[5] A quits his first match of season 1 (last season\'s board still failing): the fine comes off the soft reset of the waiting 350 -> 250', c.okAll
+    && J(wc.map((x) => x.score)) === '[250]' && entryOf(c.last, A).wp && entryOf(c.last, A).wp.v === 350, J(wc) + ' ' + c.out.slice(-700));
 }
 // ---- [6] older seasons, a player this run cannot name ----
 {
@@ -266,21 +267,21 @@ console.log('=== a points write that failed in the season\'s last runs goes on t
     const { A, B, b } = go(n, took);
     const tag = took ? 'right after its write (Steam took it)' : 'right before its write (Steam never got it)';
     const pa = posts(b.rs[0], POINTS, A), pb = posts(b.rs[0], POINTS, B);
-    T('[9] killed ' + tag + ': the first run of season 1 writes both laid-ahead values to last season\'s board (1544 / 1387)', b.okAll
-      && J(pa.map((x) => x.score)) === '[1544]' && J(pb.map((x) => x.score)) === '[1387]' && J(b.rows.points[A].score) === '1544' && J(b.rows.points[B].score) === '1387',
+    T('[9] killed ' + tag + ': the first run of season 1 writes both laid-ahead values to last season\'s board (350 / 240)', b.okAll
+      && J(pa.map((x) => x.score)) === '[350]' && J(pb.map((x) => x.score)) === '[240]' && J(b.rows.points[A].score) === '350' && J(b.rows.points[B].score) === '240',
       J(pa) + ' ' + J(pb) + ' ' + b.rs[0].out.slice(-900));
-    T('[9] ... logged as laid ahead by a run that ended (moved a and all, then landed), not as a failed write', new RegExp('points write of ' + plog(A) + ' for last season\'s board points \\(value 1544, 0 tries, laid ahead by a run that ended before its outcome was known\\) waits on for that board, not dropped at the turn \\(Q341\\)').test(b.rs[0].out)
-      && new RegExp('points write of ' + plog(A) + ' for last season\'s board points laid ahead by a run that ended before its outcome was known landed: 1544 \\(Q334, Q341\\)').test(b.rs[0].out)
+    T('[9] ... logged as laid ahead by a run that ended (moved a and all, then landed), not as a failed write', new RegExp('points write of ' + plog(A) + ' for last season\'s board points \\(value 350, 0 tries, laid ahead by a run that ended before its outcome was known\\) waits on for that board, not dropped at the turn \\(Q341\\)').test(b.rs[0].out)
+      && new RegExp('points write of ' + plog(A) + ' for last season\'s board points laid ahead by a run that ended before its outcome was known landed: 350 \\(Q334, Q341\\)').test(b.rs[0].out)
       && !new RegExp(plog(A) + ' for last season\'s board points that failed before').test(b.rs[0].out) && !/dropped: this season writes/.test(b.out), b.rs[0].out.slice(-900));
-    T('[9] ... the backlog holds no write of theirs, and the first settle of season 1 soft-resets from them: 1588 / 1374', !entryOf(b.rs[0], A).wp && !entryOf(b.rs[0], A).w && !entryOf(b.rs[0], B).wp
-      && J(seedLine(b.rs[2].out, A)) === '[1544,1544]' && J(seedLine(b.rs[2].out, B)) === '[1387,1387]'
-      && J(posts(b.rs[2], S1B, A).map((x) => x.score)) === '[1588]' && J(posts(b.rs[2], S1B, B).map((x) => x.score)) === '[1374]', b.rs[2].out.slice(-900));
+    T('[9] ... the backlog holds no write of theirs, and the first settle of season 1 soft-resets from them: 400 / 230', !entryOf(b.rs[0], A).wp && !entryOf(b.rs[0], A).w && !entryOf(b.rs[0], B).wp
+      && J(seedLine(b.rs[2].out, A)) === '[350,350]' && J(seedLine(b.rs[2].out, B)) === '[240,240]'
+      && J(posts(b.rs[2], S1B, A).map((x) => x.score)) === '[400]' && J(posts(b.rs[2], S1B, B).map((x) => x.score)) === '[230]', b.rs[2].out.slice(-900));
   }
   const f = go(2, false, fail(S1, FAILP));
   const wa = entryOf(f.b.rs[0], f.A).wp;
-  T('[9] laid ahead, and last season\'s board still failing in season 1: it waits as a failed one (a gone, try 1), the soft reset counts from it', wa && wa.v === 1544 && !wa.a && wa.n === 1
-    && new RegExp('points write of ' + plog(f.A) + ' for last season\'s board points failed again \\([^)]*\\) -- 1544 waits for the next run \\(try 1, Q341\\)').test(f.b.rs[0].out)
-    && J(seedLine(f.b.rs[2].out, f.A)) === '[1544,1544]' && J(posts(f.b.rs[2], S1B, f.A).map((x) => x.score)) === '[1588]', J(wa) + ' ' + f.b.rs[0].out.slice(-900));
+  T('[9] laid ahead, and last season\'s board still failing in season 1: it waits as a failed one (a gone, try 1), the soft reset counts from it', wa && wa.v === 350 && !wa.a && wa.n === 1
+    && new RegExp('points write of ' + plog(f.A) + ' for last season\'s board points failed again \\([^)]*\\) -- 350 waits for the next run \\(try 1, Q341\\)').test(f.b.rs[0].out)
+    && J(seedLine(f.b.rs[2].out, f.A)) === '[350,350]' && J(posts(f.b.rs[2], S1B, f.A).map((x) => x.score)) === '[400]', J(wa) + ' ' + f.b.rs[0].out.slice(-900));
 }
 
 // ---- [10] - [12] the first review's blocks (review/extra-blocks.js [R1] - [R3]) ----
@@ -298,11 +299,11 @@ console.log('=== a points write that failed in the season\'s last runs goes on t
   const A = H.SID(5171), B = H.SID(5172);
   const t = pre(A, B, 0x4B171);
   const m2 = match(2, 0x4B172, [A, B]);
-  const lag = { [A]: { score: 1500, details: [] } };
+  const lag = { [A]: { score: 300, details: [] } };
   const SF = fail(S1, FAILP);
   const b = run([[10 * MIN, t.m1.all, SF], [20 * MIN, t.m1.all, SF], [20 * MIN, t.m1.all, S1], [5 * MIN, t.m1.all.concat(m2.S), S1, lag], [5 * MIN, t.m1.all.concat(m2.all), S1, lag]], t.a.rows, t.a.last.state);
-  T('[11] landed 40 min after the turn, a lagging copy 10 min later: soft reset from 1544 (kept write), one [stale-read]', b.okAll
-    && J(posts(b.rs[2], POINTS, A).map((x) => x.score)) === '[1544]' && J(seedLine(b.rs[4].out, A)) === '[1544,1544]' && staleN(b.out) === 1, J(seedLine(b.rs[4].out, A)) + ' ' + b.out.slice(-700));
+  T('[11] landed 40 min after the turn, a lagging copy 10 min later: soft reset from 350 (kept write), one [stale-read]', b.okAll
+    && J(posts(b.rs[2], POINTS, A).map((x) => x.score)) === '[350]' && J(seedLine(b.rs[4].out, A)) === '[350,350]' && staleN(b.out) === 1, J(seedLine(b.rs[4].out, A)) + ' ' + b.out.slice(-700));
 }
 // [12] preseason runs with a waiting w of the preseason board: not moved aside (the preseason has no last season)
 {
@@ -310,7 +311,7 @@ console.log('=== a points write that failed in the season\'s last runs goes on t
   const t = pre(A, B, 0x4B181);
   const b = run([[5 * MIN, t.m1.all, PRE]], t.a.rows, t.a.last.state);
   const e = entryOf(b.last, A);
-  T('[12] preseason retry: the w lands on the preseason board as before, never a wp', b.okAll && !e.wp && !e.w && J(posts(b.last, POINTS, A).map((x) => x.score)) === '[1544]', J(e) + ' ' + b.out.slice(-500));
+  T('[12] preseason retry: the w lands on the preseason board as before, never a wp', b.okAll && !e.wp && !e.w && J(posts(b.last, POINTS, A).map((x) => x.score)) === '[350]', J(e) + ' ' + b.out.slice(-500));
 }
 
 console.log(failN ? ('season-turn-backlog: ' + failN + ' FAIL') : 'season-turn-backlog: all ok');

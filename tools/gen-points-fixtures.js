@@ -16,7 +16,8 @@
 //     null) and the points line (settleLine: d0 / d / won / nv). O716: a mixed table (a ranked-seat mask on the code) rates
 //     every seat in the plan (the mismatch reads the whole table, D11; a quick team member at his row or his unwritten
 //     placement seed, D8) and settles its ranked seats only: a quick seat's out is null (no points line).
-//   seed: { prev, display } -> seasonSeedLp (prev null = no row on the previous season's board).
+//   seed: { prev, display, hasPrev } -> seasonSeedLp (prev null = no row on the previous season's board; hasPrev = the season
+//     has a previous one, season 1 and later -- O786: a player with no row then soft-resets his display seed; absent = preseason).
 //   leave: { cur } -> the points after the leaver fine (LEAVER_LP_PENALTY).
 //   boundary: { lp } -> boundaryOf (the client's series banner reads the same).
 //   seat: { mt } -> which seats of the code move points (O716 one queue: the ranked-seat mask in bits 11-16; no mask = the old
@@ -77,8 +78,8 @@ const CASES = [
   { name: 'team 2v2 (mt 6) shielded loser, the leaver had more points (Q183 full-team reading)', kind: 'match', mt: 6, parts: [P('a0', 0, 1500, 1, 2100), P('a1', 1, 1500, 2, 2200), P('b2', 2, 1500, 3, 1900)],
     team: { scores: [400, 300, 200, 0], leaverSeats: [3], winTeam: 0, absent: [{ seat: 3, mmr: 1700, lp: 4100 }] } },
   // ---- the promotion / relegation series ----
-  { name: 'series: promotion zone, top half (forced up to min + 10)', kind: 'match', mt: 2, parts: [P('a', 0, 1300, 1, 1960), P('b', 1, 1300, 2, 1500), P('c', 2, 1300, 3, 1500), P('d', 3, 1300, 4, 1500)] },
-  { name: 'series: relegation zone, bottom half (forced down to min - 15)', kind: 'match', mt: 2, parts: [P('a', 0, 1300, 1, 2600), P('b', 1, 1300, 2, 2600), P('c', 2, 1300, 3, 2600), P('d', 3, 1300, 4, 2050)] },
+  { name: 'series: promotion zone, top half (forced up to min + 150, O785)', kind: 'match', mt: 2, parts: [P('a', 0, 1300, 1, 1960), P('b', 1, 1300, 2, 1500), P('c', 2, 1300, 3, 1500), P('d', 3, 1300, 4, 1500)] },
+  { name: 'series: relegation zone, bottom half (forced down to min - 150, O785)', kind: 'match', mt: 2, parts: [P('a', 0, 1300, 1, 2600), P('b', 1, 1300, 2, 2600), P('c', 2, 1300, 3, 2600), P('d', 3, 1300, 4, 2050)] },
   { name: 'series: relegation zone, PROTECTED loss keeps its compressed delta', kind: 'match', mt: 2, parts: [P('s', 0, 1900, 1, 2600), P('w', 1, 1300, 2, 2050)] },
   { name: 'series: promotion zone, natural delta already past the line is kept', kind: 'match', mt: 2, parts: [P('a', 0, 1300, 1, 595), P('b', 1, 1300, 2, 400)] },
   { name: 'series: relegation zone, the strong side upset is still forced down (PROTECTED is the weak side only)', kind: 'match', mt: 2, parts: [P('s', 0, 1900, 3, 4100), P('w1', 1, 1300, 1, 1500), P('w2', 2, 1350, 2, 1600)] },
@@ -93,12 +94,18 @@ const CASES = [
   { name: 'seed: no previous season, display 1300', kind: 'seed', prev: null, display: 1300 },
   { name: 'seed: no previous season, display 1720 (promotion zone)', kind: 'seed', prev: null, display: 1720 },
   { name: 'seed: no previous season, display 2500 (cap)', kind: 'seed', prev: null, display: 2500 },
-  { name: 'seed: previous season bronze 500 (kept)', kind: 'seed', prev: 500, display: 2000 },
-  { name: 'seed: previous season silver 1900 (kept)', kind: 'seed', prev: 1900, display: 1000 },
-  { name: 'seed: previous season gold 2500 (soft reset)', kind: 'seed', prev: 2500, display: 1000 },
-  { name: 'seed: previous season diamond 4500 (soft reset)', kind: 'seed', prev: 4500, display: 1000 },
-  { name: 'seed: previous season grandmaster 9000 (soft reset)', kind: 'seed', prev: 9000, display: 1000 },
-  { name: 'seed: previous season row at 0', kind: 'seed', prev: 0, display: 2500 },
+  { name: 'seed: previous season bronze 500 (kept)', kind: 'seed', prev: 500, display: 2000, hasPrev: true },
+  { name: 'seed: previous season bronze 590 (kept, but not above the silver landing 540)', kind: 'seed', prev: 590, display: 2000, hasPrev: true },
+  { name: 'seed: previous season silver 1900 (one tier down: bronze 540)', kind: 'seed', prev: 1900, display: 1000, hasPrev: true },
+  { name: 'seed: previous season gold 2500 (one tier down: silver 1940)', kind: 'seed', prev: 2500, display: 1000, hasPrev: true },
+  { name: 'seed: previous season diamond 4500 (one tier down: platinum 3940)', kind: 'seed', prev: 4500, display: 1000, hasPrev: true },
+  { name: 'seed: previous season master 7000 (one tier down: diamond 5940)', kind: 'seed', prev: 7000, display: 1000, hasPrev: true },
+  { name: 'seed: previous season grandmaster 9000 (reveal at most diamond: 5940)', kind: 'seed', prev: 9000, display: 1000, hasPrev: true },
+  { name: 'seed: previous season row at 0', kind: 'seed', prev: 0, display: 2500, hasPrev: true },
+  { name: 'seed: season 1, no previous row, display 1650 (O786 same ruler: the display seed 1600 soft-resets to 540)', kind: 'seed', prev: null, display: 1650, hasPrev: true },
+  { name: 'seed: season 1, no previous row, display 1900 (seed 2600 -> 1940)', kind: 'seed', prev: null, display: 1900, hasPrev: true },
+  { name: 'seed: season 1, no previous row, display 2500 (seed cap 3200 -> 2940)', kind: 'seed', prev: null, display: 2500, hasPrev: true },
+  { name: 'seed: season 1, no previous row, display 1000 (seed 0 stays 0)', kind: 'seed', prev: null, display: 1000, hasPrev: true },
   // ---- the leaver fine ----
   { name: 'leave: 250 points', kind: 'leave', cur: 250 },
   { name: 'leave: 60 points (floor)', kind: 'leave', cur: 60 },
@@ -218,18 +225,18 @@ function endlessCases() {
     // the points line (series clamp, demotion protection, the board bounds)
     E('settle, gold 2500 pass', 'endlessSettle', [2500, true, 1000, SOLO, 0]),
     E('settle, gold 2500 miss, skill gold (protection holds but moves nothing)', 'endlessSettle', [2500, false, 1000, SOLO, 0]),
-    E('settle, promotion band silver 1950 pass (forced up to 2010)', 'endlessSettle', [1950, true, 600, SOLO, 0]),
+    E('settle, promotion band silver 1950 pass (forced up to 2150)', 'endlessSettle', [1950, true, 600, SOLO, 0]),
     E('settle, promotion band silver 1950 miss', 'endlessSettle', [1950, false, 600, SOLO, 0]),
-    E('settle, relegation band gold 2050 miss, skill silver (below master: no forced drop)', 'endlessSettle', [2050, false, 600, SOLO, 0]),
+    E('settle, relegation band gold 2050 miss, skill silver (rated above his skill: forced down to 1850, O785)', 'endlessSettle', [2050, false, 600, SOLO, 0]),
     E('settle, relegation band gold 2050 miss, skill gold (protected: no forced drop)', 'endlessSettle', [2050, false, 1000, SOLO, 0]),
-    E('settle, relegation band gold 2010 miss, skill silver, offset -2 (held at the floor)', 'endlessSettle', [2010, false, 600, SOLO, -2]),
+    E('settle, relegation band gold 2010 miss, skill silver, offset -2 (forced down to 1850; held at the floor before O785)', 'endlessSettle', [2010, false, 600, SOLO, -2]),
     E('settle, gold floor 2000 miss, skill gold (protected: d 0)', 'endlessSettle', [2000, false, 1000, SOLO, -2]),
     E('settle, relegation band gold 2050 pass', 'endlessSettle', [2050, true, 600, SOLO, 0]),
     E('settle, diamond 5850 pass, skill 3700 (the master gate: held at 5879)', 'endlessSettle', [5850, true, 3700, SOLO, 2]),
     E('settle, diamond 5850 pass, skill 3800 (the master gate open)', 'endlessSettle', [5850, true, 3800, SOLO, 2]),
     E('settle, diamond 5950 pass, skill 3800 (forced up into master)', 'endlessSettle', [5950, true, 3800, SOLO, 0]),
     E('settle, master 6050 miss, skill 3000 (master: the strict factor, forced down)', 'endlessSettle', [6050, false, 3000, SOLO, 0]),
-    E('settle, master 6100 miss, skill 3000, offset +2 (forced down to 5985)', 'endlessSettle', [6100, false, 3000, SOLO, 2]),
+    E('settle, master 6100 miss, skill 3000, offset +2 (forced down to 5850)', 'endlessSettle', [6100, false, 3000, SOLO, 2]),
     E('settle, master 6500 pass, skill 3000 (master: a pass still gains, smaller)', 'endlessSettle', [6500, true, 3000, SOLO, 0]),
     E('settle, master 7850 pass, skill 5000 (the grandmaster gate: held at 7879)', 'endlessSettle', [7850, true, 5000, SOLO, 2]),
     E('settle, master 7950 pass, skill 5500 (forced up into grandmaster)', 'endlessSettle', [7950, true, 5500, SOLO, -2]),
@@ -359,7 +366,7 @@ function onePointsCases(E, SOLO, DUO, TRIO, QUAD, LINES) {
 
 // the out of one case, from a points-plan module (this repo's file, or the client's vendored copy)
 function replay(PP, c) {
-  if (c.kind === 'seed') return PP.seasonSeedLp(c.prev, c.display);
+  if (c.kind === 'seed') return PP.seasonSeedLp(c.prev, c.display, c.hasPrev === true);
   if (c.kind === 'leave') return PP.leaverLpPenalty(c.cur, PP.LEAVER_LP_PENALTY);
   if (c.kind === 'boundary') return PP.boundaryOf(c.lp);
   if (c.kind === 'seat') return { mask: PP.rankedSeatMaskOf(c.mt), sans: PP.mtSansSeats(c.mt), base: PP.baseMt(c.mt), any: PP.anyAppliesLp(c.mt), seats: [0, 1, 2, 3, 4, 5].map((s) => PP.seatAppliesLp(c.mt, s)) };

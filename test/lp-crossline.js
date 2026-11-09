@@ -3,6 +3,9 @@
 //   - boundaryOf mirrors the client RatingStore.boundaryState (same MARGIN semantics)
 //   - crosslineDelta: promotion match won -> forced cross UP (lands next.min+PROMO_LAND unless the
 //     natural delta already crossed); relegation match lost -> forced cross DOWN (min-RELEG_LAND);
+//     O785 (2026-11-09): the landings are 150 / 150 -- outside both bands of the tier landed in (test/lp-landing.js), so a natural
+//     swing (<= 50) never reaches past a landing any more: every won promotion match lands exactly min + 150 and every lost
+//     relegation match exactly min - 150 (the old "keep the natural delta past the landing" cases now read the forced one)
 //     everything else untouched. Composes as a clamp AFTER reduced-stakes / team halving.
 //   - plan outputs carry `won` (unit average rank top-half / team outcome) for the settle pass.
 const path = require('path');
@@ -16,8 +19,8 @@ const eq = (label, got, exp) => { const a = JSON.stringify(got), b = JSON.string
 
 console.log('=== constants (client lockstep values) ===');
 eq('BOUNDARY_MARGIN', BOUNDARY_MARGIN, 120);
-eq('PROMO_LAND', PROMO_LAND, 10);
-eq('RELEG_LAND', RELEG_LAND, 15);
+eq('PROMO_LAND', PROMO_LAND, 150);
+eq('RELEG_LAND', RELEG_LAND, 150);
 
 console.log('=== boundaryOf (mirror of client boundaryState probes) ===');
 eq('bronze 0 (lowest tier: no relegation)', boundaryOf(0), null);
@@ -31,10 +34,11 @@ eq('grandmaster 9990 (top tier: no promotion)', boundaryOf(9990), null);
 
 console.log('=== crosslineDelta: promotion series ===');
 // natural swing too small to cross -> forced to next.min+PROMO_LAND
-eq('1880 won +50 -> forced +130 (lands 2010)', crosslineDelta(1880, 50, true), 130);
-eq('1950 won +20 (2nd place) -> forced +60 (lands 2010)', crosslineDelta(1950, 20, true), 60);
+eq('1880 won +50 -> forced +270 (lands 2150)', crosslineDelta(1880, 50, true), 270);
+eq('1950 won +20 (2nd place) -> forced +200 (lands 2150)', crosslineDelta(1950, 20, true), 200);
 // natural delta already past the line -> natural value kept (no double bump)
-eq('1990 won +50 (lands 2040 > 2010) -> keep 50', crosslineDelta(1990, 50, true), 50);
+eq('1990 won +50 (lands 2040, over the line but under the landing) -> forced +160 (lands 2150)', crosslineDelta(1990, 50, true), 160);
+eq('a natural delta past the landing is kept (1990 +200 -> 200)', crosslineDelta(1990, 200, true), 200);
 // promotion match LOST -> untouched
 eq('1880 lost -5 -> keep -5', crosslineDelta(1880, -5, true && false), -5);
 // outside the band -> untouched even on a max win
@@ -42,10 +46,11 @@ eq('1700 won +50 -> keep 50 (outside band)', crosslineDelta(1700, 50, true), 50)
 
 console.log('=== crosslineDelta: relegation series ===');
 // losing a relegation match always drops below the line
-eq('gold 2120 lost -17 -> forced -135 (lands 1985)', crosslineDelta(2120, -17, false), -135);
-eq('gold 2005 lost -17 -> forced -20 (lands 1985)', crosslineDelta(2005, -17, false), -20);
+eq('gold 2120 lost -17 -> forced -270 (lands 1850)', crosslineDelta(2120, -17, false), -270);
+eq('gold 2005 lost -17 -> forced -155 (lands 1850)', crosslineDelta(2005, -17, false), -155);
 // natural delta already below the floor stays (leaver-adjacent big losses)
-eq('gold 2010 lost -40 (lands 1970 < 1985) -> keep -40', crosslineDelta(2010, -40, false), -40);
+eq('gold 2010 lost -40 (lands 1970, under the line but over the landing) -> forced -160 (lands 1850)', crosslineDelta(2010, -40, false), -160);
+eq('a natural delta past the landing is kept (2010 -200 -> -200)', crosslineDelta(2010, -200, false), -200);
 // relegation match WON -> untouched (escape with the natural gain)
 eq('gold 2120 won +38 -> keep 38', crosslineDelta(2120, 38, true), 38);
 // bottom tier can never be relegated
@@ -85,7 +90,7 @@ ok('team relegation member: adj ' + dA + ' -> series ' + dA2 + ' (lands ' + (212
 if (!(2120 + dA2 < 2000)) bad('team relegation member must land below 2000');
 // team member in promotion band, team won: forced cross up
 const dC = tplan.c.adjDelta, dC2 = crosslineDelta(1880, dC, tplan.c.won);
-if (!(1880 + dC2 >= 2000 + PROMO_LAND)) bad('team promotion member must land at/above 2010');
+if (!(1880 + dC2 >= 2000 + PROMO_LAND)) bad('team promotion member must land at/above 2000 + PROMO_LAND');
 else ok('team promotion member: adj ' + dC + ' -> series ' + dC2 + ' (lands ' + (1880 + dC2) + ')');
 // margin invariant: natural single-match swing never crosses a line from OUTSIDE the band
 const maxWin = Math.max.apply(null, LP_SEG.map(s => s.win + s.drip));

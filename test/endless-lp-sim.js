@@ -7,11 +7,15 @@
 //   [2] below master grinding climbs: runs from the placement to diamond (the median of a group) for a silver / gold / platinum /
 //       diamond-level player within 30 % of 150 / 80 / 40 / 20 (the user's table)
 //   [3] the master gate: a player whose hidden skill is below master never reaches master in 300 runs
-//   [4] promotion / relegation ping-pong: tier-line crossings a player in 300 runs <= 35 (and the share crossed back in 10 runs)
+//   [4] promotion / relegation ping-pong: tier-line crossings a player in 300 runs <= 20 (and the share crossed back in 10 runs);
+//       O785 (2026-11-09): was <= 35 while a floor held every miss under master; the floor is gone (normal promotion and
+//       relegation, the user's call) and the series landings moved to +-150, so a promotion sticks: max 14 here
 //   [5] the zero-sum top: grandmaster-level players started at 8600 drift nowhere in 300 runs (mean change within +-200 points)
 //   [6] (printed) per tier: the pass rate the players had beside the table's balance rate, and where each level ended
-//   [7] mutations: no master gate -> [3] red; the old target (the points tier line) -> [1] red; MUL 1000 -> [2] red; no floor
-//       below master -> [4] red
+//   [7] mutations: no master gate -> [3] red; the old target (the points tier line) -> [1] red; MUL 1000 -> [2] red; the series
+//       landings back to +10 / -15 -> [4] red (O785); "rated above the skill: gain less, lose more" below master too -> [9] red
+//   [9] O785 (user 2026-11-09 "I meant that grinding gets you to diamond in the end"): with normal promotion and relegation a
+//       bronze-level grinder (mean depth 3) still reaches diamond -- all 20 within 600 runs, median <= 250 (about 145 now)
 //   [8] O781 (client 2026-11-09): the competitive curve has a deep wall now, so nobody averages 60 levels any more (the true levels
 //       stop at 45) and the players near the top die close to their wall: a "wall-hugging" group (mean depth 30..45, coefficient of
 //       variation 0.1) still passes about half its runs (0.42..0.58 overall, 0.40..0.65 at each level); the old target turns that
@@ -108,6 +112,12 @@ function maxPoints(M, mu, cv, seed) {
   }
   return mx;
 }
+// O785 [9]: runs from the placement to diamond of a bronze-level grinder (mean depth 3), 10 players at each luck spread, 600 runs
+function grindToDiamond(M) {
+  const runs = [];
+  for (const cv of CVS) for (let j = 0; j < 10; j++) { const p = play(M, 3, cv, 140000 + j * 17 + (cv > 0.5 ? 5 : 0), 600, null); runs.push(p.toDiamond == null ? 601 : p.toDiamond); }
+  return { runs, got: runs.filter((x) => x <= 600).length, median: median(runs) };
+}
 function gateMax(M) { let mx = 0; for (const mu of [3, 5, 8, 12, 18, 25]) for (const cv of CVS) for (let j = 0; j < 10; j++) mx = Math.max(mx, maxPoints(M, mu, cv, 70000 + mu * 37 + j * 11 + (cv > 0.5 ? 5 : 0))); return mx; }
 function passRates(sim) {
   const all = [], byCv = {};
@@ -152,7 +162,7 @@ function pairRates(sim) {
   return { all: mean(strong.concat(weak)), strong: mean(strong), weak: mean(weak), sameSign: mean(sign), perPair };
 }
 const pairsOk = (sim) => { const r = pairRates(sim); return r.all >= 0.42 && r.all <= 0.58 && [r.strong, r.weak].every((x) => x >= 0.40 && x <= 0.65) && r.perPair.every(([a, b]) => a >= 0.40 && a <= 0.65 && b >= 0.40 && b <= 0.65); };
-module.exports = { simulate, passRates, gateMax, loadVariant, simulateWall, wallRates, simulatePairs, pairRates, WANT, LEVELS, PAIRS };
+module.exports = { simulate, passRates, gateMax, grindToDiamond, loadVariant, simulateWall, wallRates, simulatePairs, pairRates, WANT, LEVELS, PAIRS };
 
 if (require.main === module) {
   let failN = 0;
@@ -178,7 +188,10 @@ if (require.main === module) {
   T('[3] master gate: players below master in hidden skill (mean depth 3..25) never reach master in 300 runs (highest ' + gm + ')', gm < PP0.LP_SEG[5].min);
   // [4]
   const cr = S.pop.map((x) => x.cross.c), back = S.pop.reduce((s, x) => s + x.cross.back, 0), tot = cr.reduce((s, x) => s + x, 0);
-  T('[4] ping-pong: tier-line crossings a player in 300 runs: mean ' + mean(cr).toFixed(1) + ', max ' + Math.max.apply(null, cr) + ' (<= 35); crossed back within 10 runs ' + (tot ? (100 * back / tot).toFixed(1) : '0') + ' %', Math.max.apply(null, cr) <= 35);
+  T('[4] ping-pong: tier-line crossings a player in 300 runs: mean ' + mean(cr).toFixed(1) + ', max ' + Math.max.apply(null, cr) + ' (<= 20); crossed back within 10 runs ' + (tot ? (100 * back / tot).toFixed(1) : '0') + ' %', Math.max.apply(null, cr) <= 20);
+  // [9] O785
+  const gr = grindToDiamond(PP0);
+  T('[9] a bronze-level grinder (mean depth 3) reaches diamond: ' + gr.got + ' / ' + gr.runs.length + ' within 600 runs, median ' + gr.median + ' runs (<= 250)', gr.got === gr.runs.length && gr.median <= 250);
   // [5]
   T('[5] zero-sum top: 20 grandmaster-level players from 8600, mean change after 300 runs ' + mean(S.gm).toFixed(0) + ' (within +-200; spread ' + Math.min.apply(null, S.gm) + '..' + Math.max.apply(null, S.gm) + ')', Math.abs(mean(S.gm)) <= 200);
   // [6]
@@ -199,9 +212,12 @@ if (require.main === module) {
   const mul1 = loadVariant([['MUL: Object.freeze([' + E.MUL.join(', ') + '])', 'MUL: Object.freeze([1000, 1000, 1000, 1000, 1000, 1000, 1000])']]);
   const s1 = simulate(mul1);
   T('[7] MUL all 1000 turns [2] red (' + LEVELS.map(([n]) => n + ' ' + s1.toD[n].median).join(', ') + ' runs)', LEVELS.some(([name]) => !(s1.toD[name].median >= WANT[name] * 0.7 && s1.toD[name].median <= WANT[name] * 1.3)));
-  const noFloor = loadVariant([['protect: !isPass && (cur < ELP.GATE_TIER || (ht != null && ht >= cur))', 'protect: !isPass && ht != null && ht >= cur']]);
-  const sF = simulate(noFloor), crF = sF.pop.map((x) => x.cross.c);
-  T('[7] without the floor below master the ping-pong comes back (max ' + Math.max.apply(null, crF) + ' crossings) -- [4] red', Math.max.apply(null, crF) > 35);
+  const oldLand = loadVariant([['PROMO_LAND = 150, RELEG_LAND = 150', 'PROMO_LAND = 10, RELEG_LAND = 15']]);
+  const sF = simulate(oldLand), crF = sF.pop.map((x) => x.cross.c);
+  T('[7] the series landings back to +10 / -15 bring the ping-pong back (max ' + Math.max.apply(null, crF) + ' crossings) -- [4] red', Math.max.apply(null, crF) > 20);
+  const strictLow = loadVariant([['else if (ht != null && ht < cur && cur >= ELP.GATE_TIER) gap = isPass ? ELP.GAP_DOWN : ELP.GAP_UP;', 'else if (ht != null && ht < cur) gap = isPass ? ELP.GAP_DOWN : ELP.GAP_UP;']]);
+  const gS = grindToDiamond(strictLow);
+  T('[7] "rated above the skill: gain less, lose more" below master too stops the grinder (' + gS.got + ' / ' + gS.runs.length + ' reach diamond, median ' + gS.median + ') -- [9] red', !(gS.got === gS.runs.length && gS.median <= 250));
   // [8] O781 wall-huggers
   const W = simulateWall(PP0), wr = wallRates(W);
   T('[8] wall-huggers (true level ' + WALL_MUS.join('/') + ', cv ' + WALL_CV + ') pass about half: overall ' + wr.all.toFixed(3) + ' (0.42..0.58), per level ' + wr.per.map((x) => x.toFixed(2)).join(' ') + ' (0.40..0.65)', wallOk(W));

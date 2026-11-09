@@ -194,10 +194,10 @@ console.log('-- [4] points --');
   played(s3, r, [3, 3, 3, 3, 3], now - 2 * DAY); v.elpSettleAll(s3, 0, now);
   const hr = C(s3, r); hr.lp = 2050;
   v.ratingHistUpsert(s3, r, 'solo', 0, 300, 0, now - DAY, F, 4242); v.elpSettleAll(s3, 0, now);
-  T('[4] the same miss with the skill at bronze: below master the floor holds too (>= 2000, PROTECT_RS)', hr.lp >= 2000 && (hr.ring[0].flags & PP.RECEIPT_F.RS) === ELP.PROTECT_RS, JSON.stringify([hr.lp, hr.ring[0]]));
+  T('[4] the same miss with the skill at bronze: rated above his skill, he drops like in versus (O785: no floor below master; 2000 - RELEG_LAND, no PROTECT_RS)', hr.lp === 2000 - PP.RELEG_LAND && (hr.ring[0].flags & PP.RECEIPT_F.RS) !== ELP.PROTECT_RS, JSON.stringify([hr.lp, hr.ring[0]]));
   hr.lp = 6100;
   v.ratingHistUpsert(s3, r, 'solo', 0, 301, 0, now - DAY + 60000, F, 4243); v.elpSettleAll(s3, 0, now);
-  T('[4] at master the same miss drops to diamond (the strict factor, the series clamp)', hr.lp <= 5985 && PP.lpTierIdx(hr.lp) === 4, JSON.stringify([hr.lp, hr.ring[0]]));
+  T('[4] at master the same miss drops to diamond (the strict factor, the series clamp to 6000 - RELEG_LAND)', hr.lp <= 6000 - PP.RELEG_LAND && PP.lpTierIdx(hr.lp) === 4, JSON.stringify([hr.lp, hr.ring[0]]));
   // the line sets: the run first seen under a table, a looser table now (or the reverse): the better for the player
   const strict = [3, 8, 14, 20, 30, 45, 60], loose = [2, 5, 8, 12, 20, 30, 45];
   const mk = (tabs) => { const s = { hist: {}, elpTab: tabs }; played(s, P(SID(8)), [8, 8, 8, 8, 8], now - 10 * DAY); return s; };
@@ -311,7 +311,7 @@ const SRC = fs.readFileSync(path.join(__dirname, '..', 'validate.js'), 'utf8');
     /const t = pointsPlan\.targetOf\(cur, tb\[fam\], seed, th, false\), sl = pointsPlan\.endlessSettle\(cur, depth >= t, H, tb\[fam\], off, fam\);/.test(SRC) && /const ths = teamH !== undefined \? \[teamH\] : \(\(H == null && before && before\.length\) \? \[H, pointsPlan\.elpHiddenFor\(fam, before, tb, 1\)\] : \[H\]\);/.test(SRC)
     && /const ph = pointsPlan\.elpHiddenFor\(fam, before, tb, 1\); ts\.push\(pointsPlan\.targetOf\(0, tb\[fam\], seed, teamH === undefined \? ph : teamH, true\)\);/.test(SRC)
     && /pointsPlan\.endlessSeedLp\(pointsPlan\.elpHiddenFor\('solo', five, tb\), tb\.solo\)/.test(SRC));
-  T('[7] O803 / O825: the table key carries ELP.VER (4) and the two team constants: the pass-line table is re-recorded and republished on the first run under the new rules', /function elpTableKey\(\) \{ return JSON\.stringify\(\[ELP\.VER, /.test(SRC) && ELP.VER === 4 && v.elpTableKey().startsWith('[4,') && v.elpTableKey().endsWith(',1300,110]'));
+  T('[7] O803 / O825 / O785: the table key carries ELP.VER (5) and the two team constants: the pass-line table is re-recorded and republished on the first run under the new rules', /function elpTableKey\(\) \{ return JSON\.stringify\(\[ELP\.VER, /.test(SRC) && ELP.VER === 5 && v.elpTableKey().startsWith('[5,') && v.elpTableKey().endsWith(',1300,110]'));
   T('[7] couch competitive lane feeds the duo history while merged (couchRatingFam), with flags and run seed', /if \(!PT_MODE\) \{ ratingHistUpsert\(soloState, p, couchRatingFam\(\), f\.seasonId, ratingRunId\(key\), f\.endDepth, nowMs, f\.flags, f\.runSeed\); ratingTouched\.add\(sid\); \}/.test(SRC) && /function couchRatingFam\(\) \{ return COUCH_DUO_SPLIT \? 'duoc' : 'duo'; \}/.test(SRC));
   T('[7] seedcap correction takes the convicted run out of the flagged seats (solo: runSeed key; team: roster set key; couch: the couch family)',
     /ratingHistRemove\(soloState, pid\(sidC\), famR, tC\.seasonId, ratingRunId\(keyR \|\| soloRunKey\(pid\(sidC\), tC\.seasonId, cg\[0\]\.d\[4\] \| 0\)\)\)/.test(SRC) && /teamRunKey\(Object\.values\(rosterC\)\.map\(String\), tC\.seasonId, cg\[0\]\.d\[4\] \| 0\)/.test(SRC) && /couchCor \? couchRatingFam\(\)/.test(SRC));

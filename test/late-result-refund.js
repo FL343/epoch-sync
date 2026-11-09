@@ -450,7 +450,7 @@ const U = {};
   s = v.lateShadow([row('a', 0, 2), row('b', 1, 3), row('c', 2, 1)], row('x', 3, 4), { a: 3, b: -17, c: 38 }, new Set(), ffa(MT_PAIR), new Set([2]));
   T('[17] the pair (seats 2 / 3) 1st and 4th of 4: w +3 (the pair\'s average place), the partner gained 35', s.w === 3 && JSON.stringify(s.g) === '[["c",35]]', JSON.stringify(s));
   s = v.lateShadow([row('a', 0, 1), row('b', 1, 2)], row('x', 2, 1, 2950), { a: 38, b: -17 }, new Set(), ffa(2), new Set());
-  T('[17] a promotion series (2950, 1st): the clamp lands him over the line (+60 to 3010)', s.w === 3010 - 2950, JSON.stringify(s));
+  T('[17] a promotion series (2950, 1st): the clamp lands him over the line (+200 to 3000 + PROMO_LAND = 3150, O785)', s.w === 3150 - 2950, JSON.stringify(s));
   s = v.lateShadow([row('a', 0, 1), row('b', 1, 2)], row('x', 2, 1, 2950), { a: 38, b: -17 }, new Set(['x']), ffa(2), new Set());
   T('[17] ... seeded this settle: no clamp (+38)', s.w === 38, JSON.stringify(s));
   s = v.lateShadow([row('a', 0, 2), row('b', 1, 3)], row('x', 2, 1, 9990), { a: 3, b: -17 }, new Set(), ffa(2), new Set());

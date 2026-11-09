@@ -255,7 +255,7 @@ const FLOOR = v.SANITY.MIN_START_AGE_MS;
   };
   const hashes = [0x8001, 0x8002, 0x8003];
   const recsFor = (without) => [].concat(...hashes.map(h => ros.filter((s, i) => !(without && without.has(h) && s === without.get(h))).map((s) => ({ sid: s, d: mm3(h, ros.indexOf(s)) }))));
-  const withPts = (recs) => { const b = boardsWith(recs); b.find(x => x.name === 'points').entries.push({ steamID: C, score: 2000 }); return b; };
+  const withPts = (recs) => { const b = boardsWith(recs); b.find(x => x.name === 'points').entries.push({ steamID: C, score: 2200 }); return b; };   // O785: out of both series bands (a relegation-band loss now drops 150, more than the penalty this case tells apart)
   const now = Date.now(), starts = {};
   for (const h of hashes) starts[keyOf(mm3(h, 0))] = { t0: now - FLOOR - 30000, mt: 2, roster: {}, settled: [] };   // all first sighted together (outage)
   const r1 = runCron(withPts(recsFor(null)), { STARTS_FILE: starts });
@@ -274,9 +274,9 @@ const FLOOR = v.SANITY.MIN_START_AGE_MS;
   T('[10] C is never convicted as a leaver (exempt twice, exit-rate untouched)', convicted === 0 && exempt === 2 && lvC === 0, 'convicted=' + convicted + ' exempt=' + exempt + ' leaves=' + lvC);
   const lpC = posts(r, 7).filter(p => /steamid=76561198000000003(&|$)/.test(p.body));
   // Q185: C is read back in at his agreed 3rd place (as if his record were still there): one points write, his loss as 3rd of
-  //   3 from 2000, never the leaver penalty (2000 - 100)
+  //   3 from 2200, never the leaver penalty (2200 - 100)
   const lpCv = lpC.map((p) => Number(/score=(-?[0-9]+)/.exec(p.body)[1]));
-  T('[10] C\'s points move by his 3rd-place loss only (no leaver penalty)', lpCv.length === 1 && lpCv[0] < 2000 && lpCv[0] > 2000 - 100, 'writes=' + JSON.stringify(lpCv));
+  T('[10] C\'s points move by his 3rd-place loss only (no leaver penalty)', lpCv.length === 1 && lpCv[0] < 2200 && lpCv[0] > 2200 - 100, 'writes=' + JSON.stringify(lpCv));
 }
 
 // ---- [11] per-day settle signal: a drained bot match counts once ----

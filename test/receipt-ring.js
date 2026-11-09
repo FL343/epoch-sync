@@ -156,10 +156,10 @@ const A = H.SID(4811), B = H.SID(4812), C = H.SID(4813), D = H.SID(4814), E = H.
 // ---- [7] seeded first settle ----
 {
   const mm = match(2, 0x48A03, [E, F2], [0, 1]);
-  const m = run(SETTLE(mm), { [F2]: { score: 1700 } }, { [v.pid(E)]: { mu: 30, sigma: 3 } });   // E: no row, display 1840 -> seed 3360 capped 3200
+  const m = run(SETTLE(mm), { [F2]: { score: 1700 } }, { [v.pid(E)]: { mu: 30, sigma: 3 } });   // E: no row, display 1840 -> seed 2360 (O786 BASE 1250; 3200 capped before)
   const re = lastRing(m, E), we = writes(m, E);
   T('[7] a player seeded by this settle: SEEDED, delta counted from the seed', settled(m, mm.key) && re && (low(re[0]) & F.SEEDED) === F.SEEDED
-    && re[0].delta === we[0].score - PP.seedLp(1840) && PP.seedLp(1840) === 3200, J(we));
+    && re[0].delta === we[0].score - PP.seedLp(1840) && PP.seedLp(1840) === 2360, J(we));
   T('[7] the other player: no SEEDED', (low(lastRing(m, F2)[0]) & F.SEEDED) === 0);
 }
 const G = H.SID(4817), Hh = H.SID(4818), I = H.SID(4819);
@@ -168,7 +168,7 @@ const G = H.SID(4817), Hh = H.SID(4818), I = H.SID(4819);
   const mm = match(2, 0x48A04, [G, Hh], [0, 1]);
   const m = run(SETTLE(mm), { [G]: { score: 1960 }, [Hh]: { score: 1500 } });
   const rg = lastRing(m, G), wg = writes(m, G);
-  T('[8] a promotion forced by the series clamp: SERIES, delta to min + 10', settled(m, mm.key) && wg[0].score === 2010 && rg[0].delta === 50 && (low(rg[0]) & F.SERIES) === F.SERIES, J(wg));
+  T('[8] a promotion forced by the series clamp: SERIES, delta to min + PROMO_LAND (2150, O785)', settled(m, mm.key) && wg[0].score === 2150 && rg[0].delta === 190 && (low(rg[0]) & F.SERIES) === F.SERIES, J(wg));
 }
 // ---- [9] a convicted leaver ----
 {

@@ -4,9 +4,9 @@
 // ============================================================
 // Covers: seasonAt table lookup (preseason 0 / exact boundary / between rows /
 // past the last row), seasonBoardName (id 0 and 1+ shapes), softResetLp landing
-// table (per-tier targets, keep-in-place bottom tiers, the min() guard, band
+// table (per-tier targets: one tier down, 60 under the line -- O786 2026-11-09; the min() guard, band
 // safety of every landing target), seasonSeedLp priority (previous-season entry
-// beats the display seed; absent -> display seed identity), and table-shape
+// beats the display seed; absent -> the display seed, soft-reset from season 1 on), and table-shape
 // invariants that future season appends must keep.
 // Usage: node test/season.js
 // ============================================================
@@ -47,18 +47,21 @@ eq('test-env base derives the same way', seasonBoardName('x_test', 2), 'x_test_s
 
 console.log('=== soft reset landing table ===');
 eq('one target per tier', SOFT_RESET.length, LP_SEG.length);
-eq('targets', SOFT_RESET, [null, null, 1200, 2000, 3000, 4000, 5000]);
+// O786 (user calls 2026-11-09, A72 + "reveal at most diamond"): one tier down, 60 under the line of the tier finished in (the
+//   promotion band of the tier below); bronze kept but never above the silver landing; grandmaster with master (diamond)
+eq('targets', SOFT_RESET, [540, 540, 1940, 2940, 3940, 5940, 5940]);
 eq('bronze 300 keeps', softResetLp(300), 300);
-eq('silver 1000 keeps', softResetLp(1000), 1000);
-eq('silver top 1999 keeps', softResetLp(1999), 1999);
-eq('gold floor 2000 -> 1200', softResetLp(2000), 1200);
-eq('gold top 2999 -> 1200', softResetLp(2999), 1200);
-eq('platinum 3200 -> 2000', softResetLp(3200), 2000);
-eq('diamond 4700 -> 3000', softResetLp(4700), 3000);
-eq('diamond top 5999 -> 3000', softResetLp(5999), 3000);
-eq('master 6500 -> 4000', softResetLp(6500), 4000);
-eq('grandmaster 8500 -> 5000', softResetLp(8500), 5000);
-eq('ceiling 9999 -> 5000', softResetLp(9999), 5000);
+eq('bronze 590 -> 540 (never above the silver landing)', softResetLp(590), 540);
+eq('silver 1000 -> 540', softResetLp(1000), 540);
+eq('silver top 1999 -> 540', softResetLp(1999), 540);
+eq('gold floor 2000 -> 1940', softResetLp(2000), 1940);
+eq('gold top 2999 -> 1940', softResetLp(2999), 1940);
+eq('platinum 3200 -> 2940', softResetLp(3200), 2940);
+eq('diamond 4700 -> 3940', softResetLp(4700), 3940);
+eq('diamond top 5999 -> 3940', softResetLp(5999), 3940);
+eq('master 6500 -> 5940', softResetLp(6500), 5940);
+eq('grandmaster 8500 -> 5940 (reveal at most diamond)', softResetLp(8500), 5940);
+eq('ceiling 9999 -> 5940', softResetLp(9999), 5940);
 // the min() guard: a target can never RAISE points (protects against a mis-edited table)
 eq('guard: value below its target stays (min)', softResetLp(0), 0);
 {
@@ -66,29 +69,25 @@ eq('guard: value below its target stays (min)', softResetLp(0), 0);
   let drops = true;
   for (let i = 0; i < LP_SEG.length; i++) {
     const target = SOFT_RESET[i];
-    if (target == null) continue;
+    if (target == null || i === 0) continue;   // bronze: kept (the target only caps it under the silver landing)
     if (target >= LP_SEG[i].min) drops = false;
   }
-  t('every non-null target lands below its own tier floor', drops);
+  t('every target past bronze lands below its own tier floor', drops);
 }
 
 console.log('=== seeding priority (lazy season seed) ===');
-eq('previous entry wins: prev 8500 -> 5000 (display ignored)', seasonSeedLp(8500, 2000), 5000);
-eq('previous entry wins: prev 1000 keeps in place', seasonSeedLp(1000, 1740), 1000);
-eq('prev 0 is still an entry (not null) -> 0', seasonSeedLp(0, 1740), 0);
-eq('no previous entry -> display seed identity', seasonSeedLp(null, 1500), seedLp(1500));
-eq('no previous entry, weak display -> 0', seasonSeedLp(null, 900), 0);
+eq('previous entry wins: prev 8500 -> 5940 (display ignored)', seasonSeedLp(8500, 2000, true), 5940);
+eq('previous entry wins: prev 1000 -> 540', seasonSeedLp(1000, 1740, true), 540);
+eq('prev 0 is still an entry (not null) -> 0', seasonSeedLp(0, 1740, true), 0);
+eq('preseason, no previous entry -> display seed identity', seasonSeedLp(null, 1500, false), seedLp(1500));
+eq('season 1+, no previous entry -> the display seed soft-reset (O786 one ruler)', seasonSeedLp(null, 1900, true), softResetLp(seedLp(1900)));
+eq('no previous entry, weak display -> 0', seasonSeedLp(null, 900, true), 0);
 
 console.log('=== landing targets vs decisive-series bands (crossline skip is REQUIRED) ===');
-// Three targets land exactly on tier floors = inside the relegation band. That is by design
-// (the §-table wants "tier start"), and it is exactly why a soft-reset seed settle must skip
-// the crossline clamp (seededNow) -- this test documents the dependency so a future edit that
-// removes the skip trips over it consciously.
-eq('1200 band-free', boundaryOf(1200), null);
-eq('5000 band-free', boundaryOf(5000), null);
-eq('2000 lands in a relegation band (skip required)', boundaryOf(2000), 'relegation');
-eq('3000 lands in a relegation band (skip required)', boundaryOf(3000), 'relegation');
-eq('4000 lands in a relegation band (skip required)', boundaryOf(4000), 'relegation');
+// O786: every landing past bronze sits in the PROMOTION band of the tier below (the first match of the season is a promotion
+// match, A72); none in a relegation band any more (the old 2000 / 3000 / 4000 landings were, and a first-match loss dropped a
+// tier). The seeded settle still skips the clamp (seededNow) until the placement-match rules (O717) say otherwise.
+for (const x of [540, 1940, 2940, 3940, 5940]) eq(x + ' lands in a promotion band', boundaryOf(x), 'promotion');
 
 console.log('');
 if (failN) { console.log('FAIL x ' + failN); process.exit(1); }

@@ -4,9 +4,10 @@
 //   [1] the sign never flips: every pass gains (d >= 1 before the clamp; the points never go down), every miss loses (d <= -1;
 //       the points never go up) -- over every tier, skill, offset and the board bounds
 //   [2] one run never moves the points by BOUNDARY_MARGIN or more (SWING_CAP binds): outside a series band the tier holds
-//   [3] series, floor, gate: a promotion-band pass crosses up (where the skill lets it); below master a miss never leaves the tier
-//       (the floor); at master and up a relegation-band miss crosses down unless the skill tier is at or above the points tier; the
-//       gate keeps the points BOUNDARY_MARGIN + 1 under the master line (grandmaster line) until the skill reaches that line
+//   [3] series, protection, gate: a promotion-band pass crosses up (where the skill lets it); a relegation-band miss crosses down
+//       at ANY tier unless the skill tier is at or above the points tier (then it never leaves the tier) -- O785 (user 2026-11-09
+//       "below master it should go up and down normally"): the floor that held every miss under master is gone; the gate keeps the
+//       points BOUNDARY_MARGIN + 1 under the master line (grandmaster line) until the skill reaches that line
 //   [4] the factors: a skill tier above the points gains more / loses less (any tier); below it: the same as the same tier below
 //       master, stricter at master and up; a harder target never costs points; the per-tier multiplier
 //   [5] the hidden skill (the newest WINDOW runs, trimmed from MIN_RUNS) and the two tier readings (nearest line / the gate's)
@@ -22,7 +23,9 @@
 //       as the maximum -> red; the null filter dropped -> red (a null seat then counts as 0 and nobody-with-a-skill reads 0)
 //  [11] O825 (ELP v4) one points value over the four families:
 //       - the family left out (or named solo) gives every value of version 3: fixtures/points-plan/elp-v3-solo.json (the 208 rule
-//         cases of version 3, frozen) replays; [1]-[3] hold for the team families too (sign, swing cap, series / floor / gate)
+//         cases of version 3, frozen) replays; [1]-[3] hold for the team families too (sign, swing cap, series / floor / gate).
+//         O785 (VER 5) moves two solo rules on purpose (no floor for every miss under master, series landings +-150): the frozen
+//         cases replay on the code with those two put back, the cases that move on the code as it is are points lines only
 //       - elpConvert: a line lands on the same line, the same table is the identity, never lower for a deeper run, there and back
 //         within a few hundredths of a level, an independent reading agrees
 //       - elpHiddenFor: with MIN_RUNS own runs it IS hiddenOf of them (a one-family player reads what version 3 read, the
@@ -84,8 +87,7 @@ function seriesErrors(M, fam) {
     if (cur + 1 > allowed && cur < 6 && up.nv > Math.max(lp, M.LP_SEG[cur + 1].min - M.BOUNDARY_MARGIN - 1)) errs.push(['gate', lp, h, o, up.nv]);
     if (cur < 6 && cur + 1 > allowed && M.lpTierIdx(up.nv) > cur) errs.push(['gate-tier', lp, h, o, up.nv]);
     const dn = M.endlessSettle(lp, false, h, lines, o, fam);
-    if (cur < GATE(M) && M.lpTierIdx(dn.nv) !== cur) errs.push(['floor', lp, h, o, dn.nv]);
-    const guarded = cur < GATE(M) || (ht != null && ht >= cur);
+    const guarded = ht != null && ht >= cur;   // O785: the demotion protection only (no floor for every miss under master)
     if (guarded && M.lpTierIdx(dn.nv) !== cur) errs.push(['protect', lp, h, o, dn.nv]);
     if (b === 'relegation' && !guarded && dn.nv > M.LP_SEG[cur].min - M.RELEG_LAND) errs.push(['releg', lp, h, o, dn.nv]);   // forced down (a natural drop past it is kept)
     if (dn.protect && !guarded) errs.push(['flag', lp, h, o]);
@@ -182,16 +184,17 @@ console.log('=== O728 endless points (points-plan.js ELP v' + PP.ELP.VER + ') ==
 // [3]
 {
   const e = seriesErrors(PP);
-  T('[3] series / floor / gate over every case (promotion where the skill lets it, no drop below master, forced drop at master and up unless protected, the gate)', !e.length, J(e.slice(0, 4)));
-  const a = PP.endlessSettle(2050, false, 600, SOLO, 0), b = PP.endlessSettle(2010, false, 600, SOLO, -2);
-  T('[3] below master a miss never leaves the tier, whatever the skill: 2050 gold miss (skill silver) -> ' + a.nv + '; 2010 miss -> held at 2000', a.nv >= 2000 && b.nv === 2000 && b.protect, J([a, b]));
+  T('[3] series / protection / gate over every case (promotion where the skill lets it, a forced drop at any tier unless protected, the gate)', !e.length, J(e.slice(0, 4)));
+  const a = PP.endlessSettle(2050, false, 600, SOLO, 0), b = PP.endlessSettle(2010, false, 600, SOLO, -2), a2 = PP.endlessSettle(2050, false, 1000, SOLO, 0);
+  T('[3] O785 below master a relegation miss rated above the skill drops like in versus: 2050 gold miss (skill silver) -> ' + a.nv + '; 2010 miss -> ' + b.nv + ' (both 2000 - RELEG_LAND); with the skill at gold it is protected (' + a2.nv + ')',
+    a.nv === 2000 - PP.RELEG_LAND && b.nv === 2000 - PP.RELEG_LAND && !a.protect && !b.protect && a2.nv >= 2000, J([a, b, a2]));
   const c = PP.endlessSettle(8050, false, 3800, SOLO, 0), d = PP.endlessSettle(8050, false, 5500, SOLO, 0);
-  T('[3] grandmaster line 8050: a miss with the skill at master drops to master (forced to 7985, or further by itself); with the skill at grandmaster it is protected', c.nv <= 7985 && PP.lpTierIdx(c.nv) === 5 && d.nv >= 8000 && d.protect, J([c, d]));
+  T('[3] grandmaster line 8050: a miss with the skill at master drops to master (forced to 8000 - RELEG_LAND, or further by itself); with the skill at grandmaster it is protected', c.nv <= 8000 - PP.RELEG_LAND && PP.lpTierIdx(c.nv) === 5 && d.nv >= 8000 && d.protect, J([c, d]));
   const g = PP.endlessSettle(5850, true, 3700, SOLO, 2), g2 = PP.endlessSettle(5850, true, 3800, SOLO, 2), g3 = PP.endlessSettle(5870, true, 3700, SOLO, 0);
   T('[3] the master gate: skill 3700 (nearer the master line, not on it) stops at 5879; skill 3800 enters the band and the promotion', g.nv === 5879 && g.gated && g2.nv > 5879 && !g2.gated && g3.nv === 5879, J([g, g2, g3]));
   const h = PP.endlessSettle(7850, true, 5000, SOLO, 2), h2 = PP.endlessSettle(7950, true, 5500, SOLO, 0);
   const h3 = PP.endlessSettle(7950, true, 5500, SOLO, -2);
-  T('[3] the grandmaster gate: skill 5000 stops at 7879; skill 5500 is promoted (to 8010 at least)', h.nv === 7879 && h.gated && h2.nv >= 8010 && PP.lpTierIdx(h2.nv) === 6 && h3.nv >= 8010, J([h, h2, h3]));
+  T('[3] the grandmaster gate: skill 5000 stops at 7879; skill 5500 is promoted (to 8000 + PROMO_LAND at least)', h.nv === 7879 && h.gated && h2.nv >= 8000 + PP.PROMO_LAND && PP.lpTierIdx(h2.nv) === 6 && h3.nv >= 8000 + PP.PROMO_LAND, J([h, h2, h3]));
   const k = PP.endlessSettle(6500, true, 3000, SOLO, 0);
   T('[3] already at master: the gate never pushes the points down (a pass still gains, held by the strict factor instead)', k.nv > 6500 && !k.gated, J(k));
   const f = PP.endlessSettle(2500, false, 1000, SOLO, 0);
@@ -278,8 +281,10 @@ console.log('=== O728 endless points (points-plan.js ELP v' + PP.ELP.VER + ') ==
   T('[9] ... and with the floor kept [1] stays green (the floor is what holds)', kept && signErrors(kept).length === 0);
   const nc = mut('no swing cap', [['d = Math.max(-ELP.SWING_CAP, Math.min(ELP.SWING_CAP, d));', '']]);
   T('[9] the swing cap removed turns [2] red', nc && swingErrors(nc).errs.length > 0);
-  const nf = mut('no floor below master', [['protect: !isPass && (cur < ELP.GATE_TIER || (ht != null && ht >= cur))', 'protect: !isPass && ht != null && ht >= cur']]);
-  T('[9] the floor below master removed turns [3] red', nf && seriesErrors(nf).length > 0);
+  const nf = mut('the floor below master back (O785 E3)', [['protect: !isPass && ht != null && ht >= cur', 'protect: !isPass && (cur < ELP.GATE_TIER || (ht != null && ht >= cur))']]);
+  T('[9] the floor below master put back turns [3] red (O785: a player rated above his skill below master must drop on a relegation miss)', nf && seriesErrors(nf).length > 0);
+  const np = mut('no demotion protection', [['protect: !isPass && ht != null && ht >= cur', 'protect: false']]);
+  T('[9] the demotion protection removed turns [3] red', np && seriesErrors(np).length > 0);
   const ng = mut('no gate', [['if (cur < line && nv > Math.max(cur, cap))', 'if (false)']]);
   T('[9] the gate removed turns [3] red', ng && seriesErrors(ng).length > 0);
   const gn = mut('the gate on the nearest line', [['    if (ht == null || ht < ELP.GATE_TIER) return ht;', '    return ht;']]);
@@ -452,9 +457,36 @@ function teamGateErrors(M) {
 // [11]
 {
   const E = PP.ELP;
-  T('[11] ELP v4: VER 4, ROW_VER 2, TEAM_GAIN 1300, TEAM_GATE 110 (the table keeps TC_VER 2 and carries the version)', E.VER === 4 && E.ROW_VER === 2 && E.TEAM_GAIN === 1300 && E.TEAM_GATE === 110 && E.TC_VER === 2 && PP.elpTableDetails(0, {})[2] === 4, J([E.VER, E.ROW_VER, E.TEAM_GAIN, E.TEAM_GATE]));
-  const fe = frozenErrors(PP);
-  T('[11] the family left out or named solo gives every value of version 3 (' + FROZEN.cases.length + ' frozen cases: hidden skill, tiers, the gate, targets, deltas, settles, seeds)', FROZEN.cases.length >= 200 && FROZEN.elpVer === 3 && !fe.length, J(fe.slice(0, 3)));
+  // the loader of the mutations below (also the version 3 rules put back)
+  const SRC3 = fs.readFileSync(path.join(__dirname, '..', 'points-plan.js'), 'utf8');
+  const mut3 = (label, pairs) => {
+    let s = SRC3;
+    for (const [from, to] of pairs) { if (s.indexOf(from) < 0) { bad('[11] mutation anchor missing: ' + label + ' (' + from.slice(0, 60) + ')'); return null; } s = s.split(from).join(to); }
+    const win = {};
+    try { new Function('window', s)(win); } catch (e3) { bad('[11] mutation ' + label + ' does not load: ' + e3.message); return null; }
+    return win.POINTS_PLAN;
+  };
+  // O785 (VER 5) moved two solo rules on purpose: the floor that held every miss under master is gone and the series landings
+  //   moved to +-150. With those two put back the frozen version 3 values must replay: the family reading of O825 still moves
+  //   none of them. On the code as it is, a case that moved must be a points line (endlessDelta / endlessSettle), and naming solo
+  //   still gives what leaving the family out gives.
+  const V3_BACK = [
+    ['protect: !isPass && ht != null && ht >= cur, team', 'protect: !isPass && (cur < ELP.GATE_TIER || (ht != null && ht >= cur)), team'],
+    ['BOUNDARY_MARGIN = 120, PROMO_LAND = 150, RELEG_LAND = 150', 'BOUNDARY_MARGIN = 120, PROMO_LAND = 10, RELEG_LAND = 15'],
+  ];
+  T('[11] ELP v5 (O825 v4 + O785): VER 5, ROW_VER 2, TEAM_GAIN 1300, TEAM_GATE 110 (the table keeps TC_VER 2 and carries the version)', E.VER === 5 && E.ROW_VER === 2 && E.TEAM_GAIN === 1300 && E.TEAM_GATE === 110 && E.TC_VER === 2 && PP.elpTableDetails(0, {})[2] === 5, J([E.VER, E.ROW_VER, E.TEAM_GAIN, E.TEAM_GATE]));
+  const v3 = mut3('the version 3 rules put back', V3_BACK);
+  const fe = v3 ? frozenErrors(v3) : ['no v3'];
+  T('[11] the family left out or named solo gives every value of version 3 with the two O785 rules put back (' + FROZEN.cases.length + ' frozen cases: hidden skill, tiers, the gate, targets, deltas, settles, seeds)', FROZEN.cases.length >= 200 && FROZEN.elpVer === 3 && !fe.length, J(fe.slice(0, 3)));
+  const moved = FROZEN.cases.filter((c) => J(dropTeam(PP[c.fn].apply(null, c.args))) !== J(c.out));
+  const FAM_AT0 = { skillTierOf: 2, endlessDelta: 5, endlessSettle: 5 };
+  const soloOff = FROZEN.cases.filter((c) => {
+    if (FAM_AT0[c.fn] == null) return false;
+    const args = c.args.slice(); while (args.length < FAM_AT0[c.fn]) args.push(undefined); args[FAM_AT0[c.fn]] = 'solo';
+    return J(dropTeam(PP[c.fn].apply(null, args))) !== J(dropTeam(PP[c.fn].apply(null, c.args)));
+  });
+  T('[11] O785 moved only points lines of the frozen cases (' + moved.length + ' moved, all endlessDelta / endlessSettle) and naming solo still reads as leaving the family out',
+    moved.length > 0 && moved.every((c) => c.fn === 'endlessDelta' || c.fn === 'endlessSettle') && !soloOff.length, J([moved.filter((c) => c.fn !== 'endlessDelta' && c.fn !== 'endlessSettle').map((c) => c.name).slice(0, 3), soloOff.map((c) => c.name).slice(0, 3)]));
   for (const fam of TEAM_FAMS) {
     const se = signErrors(PP, fam), sw = swingErrors(PP, fam), sr = seriesErrors(PP, fam);
     T('[11] a ' + fam + ' run keeps [1]-[3]: every pass gains / every miss loses, the largest change ' + sw.max + ' stays under BOUNDARY_MARGIN, series / floor / gate', !se.length && !sw.errs.length && sw.max === E.SWING_CAP && !sr.length, J([se.slice(0, 2), sw.errs.slice(0, 2), sr.slice(0, 2)]));
@@ -478,15 +510,7 @@ function teamGateErrors(M) {
     && [0, 1, 2, 3, 4, 5, 6].every((t) => [true, false].every((p) => has('endlessDelta', 1, (c) => PP.elpIsTeam(c.in.args[5]) && PP.lpTierIdx(c.in.args[0]) === t && c.in.args[1] === p)))
     && has('endlessSettle', 10, (c) => PP.elpIsTeam(c.in.args[5])) && has('endlessSettle', 1, (c) => PP.elpIsTeam(c.in.args[5]) && c.out.gated) && has('endlessDelta', 1, (c) => c.out.team === true) && has('endlessDelta', 20, (c) => c.out.team === false)
     && has('elpRowDetails', 2, (c) => (c.out[0] >>> 8) === 2) && has('elpRowOf', 1, (c) => c.out && c.out.h) && has('elpRowOf', 1, (c) => (c.in.args[0][0] >>> 8) === 1 && c.out === null));
-  // mutations
-  const SRC3 = fs.readFileSync(path.join(__dirname, '..', 'points-plan.js'), 'utf8');
-  const mut3 = (label, pairs) => {
-    let s = SRC3;
-    for (const [from, to] of pairs) { if (s.indexOf(from) < 0) { bad('[11] mutation anchor missing: ' + label + ' (' + from.slice(0, 60) + ')'); return null; } s = s.split(from).join(to); }
-    const win = {};
-    try { new Function('window', s)(win); } catch (e3) { bad('[11] mutation ' + label + ' does not load: ' + e3.message); return null; }
-    return win.POINTS_PLAN;
-  };
+  // mutations (mut3 above)
   const MUL_LINE = 'const mul = team ? Math.round(isPass ? ELP.MUL[cur] * ELP.TEAM_GAIN / 1000 : ELP.MUL[cur] * 1000 / ELP.TEAM_GAIN) : ELP.MUL[cur];';
   const g1 = mut3('TEAM_GAIN 1000', [['TEAM_GAIN: 1300', 'TEAM_GAIN: 1000']]);
   T('[11] TEAM_GAIN 1000 (no length factor) turns the factor check red', g1 && teamFactorErrors(g1).length > 0);
@@ -496,8 +520,10 @@ function teamGateErrors(M) {
   T('[11] the factor at master and up turns the factor check red (the zero-sum top would pay teams more than it takes)', g3 && teamFactorErrors(g3).some((e) => e[0] === 'master and up' || e[0] === 'flag'));
   const g4 = mut3('TEAM_GATE 100', [['TEAM_GATE: 110', 'TEAM_GATE: 100']]);
   T('[11] TEAM_GATE 100 (the solo gate for teams) turns the gate check red', g4 && teamGateErrors(g4).length > 0);
-  const g5 = mut3('a team family by default', [["function elpIsTeam(fam) { return fam === 'duo' || fam === 'trio' || fam === 'quad'; }", "function elpIsTeam(fam) { return fam !== 'solo'; }"]]);
-  T('[11] a call without a family read as a team run turns the frozen version 3 cases red', g5 && frozenErrors(g5).length > 0);
+  const g5 = mut3('a team family by default', V3_BACK.concat([["function elpIsTeam(fam) { return fam === 'duo' || fam === 'trio' || fam === 'quad'; }", "function elpIsTeam(fam) { return fam !== 'solo'; }"]]));
+  T('[11] a call without a family read as a team run turns the frozen version 3 cases red (on the version 3 rules put back)', g5 && frozenErrors(g5).length > 0);
+  const g5b = mut3('O785 half put back (the floor only)', [V3_BACK[0]]);
+  T('[11] with only one of the two O785 rules put back the frozen version 3 cases stay red (both rules are needed to replay them: the put-back is not a no-op)', g5b && frozenErrors(g5b).length > 0);
   const g6 = mut3('no borrowed runs', [['if (elpLinesOk(to)) {', 'if (false) {']]);
   T('[11] no borrowed runs (a new party size starts from nothing again) turns the hidden skill check red', g6 && hiddenForErrors(g6).length > 0 && g6.elpHiddenFor('duo', [['solo', 10], ['solo', 10], ['solo', 10], ['solo', 10], ['solo', 10]], LINES4) === null);
   const g7 = mut3('borrowed runs not converted', [['all.push(elpConvert(Math.max(0, r[1] | 0) * 100, lines[r[0]], to));', 'all.push(Math.max(0, r[1] | 0) * 100);']]);

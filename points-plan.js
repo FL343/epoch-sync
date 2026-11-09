@@ -22,8 +22,8 @@
   if (cjs) module.exports = api;
   else if (root) root.POINTS_PLAN = api;
 })(typeof module === 'object' && !!module && typeof exports === 'object' && this === exports, typeof window !== 'undefined' ? window : null, function () {
-  const RULES_VER = 1;
-  const FIXTURES_HASH = '591661a1e9707744';
+  const RULES_VER = 2;
+  const FIXTURES_HASH = 'ae19d6309de4aff9';
   // the knobs configure() can move (production runs these defaults)
   const DEFAULTS = Object.freeze({ RS_THRESHOLD: 400, RS_UPSET_BONUS: 1.0, RS_STRONG_UPSET_LOSS: 0.5, RS_SOLO_VS_TRIO: 0.6, RS_TRIO_WIN: 0.7, LEAVER_LP_PENALTY: 100 });
   const LP_MAX = 9999;
@@ -55,11 +55,25 @@
   //   platinum -- diamond+ must be climbed, and 3200 sits outside both boundary bands (3000+120 /
   //   4000-120). New/weak players (display <= 1000) seed 0 = the old everyone-starts-bronze behavior.
   //   The client mirrors this formula optimistically on its first ranked game (read-back corrects).
-  const LP_SEED = { BASE: 1000, SLOPE: 4, CAP: 3200 };
+  // O786 (companion KNIFE_O785 section 3.5, user call 2026-11-09 "one tier lower overall"): BASE 1000 -> 1250. By the unlock
+  //   (15 quick matches) sigma is already ~2.3, so with BASE 1000 an average player's display (~1650) seeded mid-gold and
+  //   only ~1 % started in bronze (the design: weak -> bronze, average -> silver, good -> gold). With 1250 the season
+  //   simulation (real trueskill.js) seeds weak / below average / average / above average / top players at a median of
+  //   700 / 1300 / 1620 / 1890 / 2300 (average 88 % silver, top 76 % gold); playing many quick matches before ranked still
+  //   seeds higher (sigma keeps shrinking), by at most about one tier.
+  const LP_SEED = { BASE: 1250, SLOPE: 4, CAP: 3200 };
   function seedLp(display) { return Math.max(0, Math.min(LP_SEED.CAP, Math.round(((display | 0) - LP_SEED.BASE) * LP_SEED.SLOPE))); }
-  // Soft-reset landing per tier index (design-locked): null = keep in place (bottom tiers),
-  // else land at the target (min() guards against a mis-edited table ever RAISING points).
-  const SOFT_RESET = [null, null, 1200, 2000, 3000, 4000, 5000];
+  // Soft-reset landing per tier index: null = keep in place, else land at the target (min() guards against a mis-edited
+  // table ever RAISING points).
+  // O786 (companion KNIFE_O785 section 3.3; user calls 2026-11-09, A72 + "reveal at most diamond"): a new season drops every
+  //   player ONE tier and lands him RESET_UNDER (60) under the line of the tier he finished in -- the middle of the promotion
+  //   band of the tier below, so his first match of the season is a promotion match ("the system thinks he may well be back
+  //   up"). Bronze stays where it is, but never above silver's landing (540). Grandmaster lands with master, at the diamond
+  //   landing (the reveal is at most diamond; the placement cap itself is a placement-match rule). The old table
+  //   [keep, keep, 1200, 2000, 3000, 4000, 5000] was not monotone (a gold finish landed under a kept silver one) and landed
+  //   platinum / diamond / master right ON a line, inside the relegation band. Invariants (test/lp-landing.js): monotone
+  //   non-decreasing over 0..LP_MAX, never raises, every landing past bronze sits in a promotion band.
+  const SOFT_RESET = [540, 540, 1940, 2940, 3940, 5940, 5940];
   function softResetLp(lp) {
     let i = 0; for (let k = 0; k < LP_SEG.length; k++) if ((lp | 0) >= LP_SEG[k].min) i = k;
     const t = SOFT_RESET[i];
@@ -69,8 +83,15 @@
   // (soft reset of last season's finish); absent there = sat the season out (or brand new) ->
   // fall back to the display-derived placement seed. Applied at a player's first settle of the
   // new season -- no boundary-time bulk migration ever runs.
-  function seasonSeedLp(prevScore, display) {
-    return prevScore != null ? softResetLp(prevScore | 0) : seedLp(display);
+  // O786 (user call 2026-11-09 "new players drop a tier too"): hasPrevSeason = this season has a previous one (season 1 and
+  //   later; the job passes !!prevLpId, the client "season id >= 1"). Then a player with no entry on the previous board (brand
+  //   new to ranked, or back after sitting a season out) is measured with the same ruler as one who played: his display seed
+  //   counts as his finish and soft-resets like one. Before, he seeded straight from his display while a player of the same
+  //   level who had played last season soft-reset far under him (S1 start 700-1400 lower), so skipping a season paid.
+  //   Required argument (test/lp-landing.js scans every call site): a missing one reads as the preseason (no reset).
+  function seasonSeedLp(prevScore, display, hasPrevSeason) {
+    if (prevScore != null) return softResetLp(prevScore | 0);
+    return hasPrevSeason === true ? softResetLp(seedLp(display)) : seedLp(display);
   }
   function lpDelta(lp, rank, pc) {
     const seg = lpSeg(lp);
@@ -90,7 +111,13 @@
   // series match -- this clamp adds the reverse guarantee (series win/loss is always decisive).
   // PROTECTED ends (flag 2: mismatch weak side / abandoned-teammate shield, design line 7) keep their
   // compressed natural loss instead of the forced drop. The leaver -100 penalty path stays independent.
-  const BOUNDARY_MARGIN = 120, PROMO_LAND = 10, RELEG_LAND = 15;
+  // O785 (companion KNIFE_O785 section 3.1, user call 2026-11-09 "land outside the bands, 150"): the landings sit OUTSIDE both
+  //   bands of the tier landed in (were +10 / -15: a promotion landed inside the new tier's relegation band, so the next
+  //   bottom-half finish sent the player straight back -- in a whole-season simulation 64 % of promotions were undone within
+  //   3 matches, 21-28 tier changes per 100 matches at an even level). At 150 / 150: 0-12 % undone, under 2 changes per 100.
+  //   A series match now moves up to 270 points (from the bottom of the promotion band to the line + 150). Invariant
+  //   (test/lp-landing.js): min + PROMO_LAND and min - RELEG_LAND of every tier past bronze are in no band.
+  const BOUNDARY_MARGIN = 120, PROMO_LAND = 150, RELEG_LAND = 150;
   function boundaryOf(lp) {
     let i = 0; for (let k = 0; k < LP_SEG.length; k++) if (lp >= LP_SEG[k].min) i = k;
     if (i > 0 && lp - LP_SEG[i].min <= BOUNDARY_MARGIN) return 'relegation';
@@ -449,7 +476,10 @@
   //     stake: a harder target (offset o > 0) gains more and loses less: a pass 1000 + STAKE_STEP x o, a miss 1000 - STAKE_STEP x o.
   //   The run settles through settleLine (the series clamp: a pass in the promotion band always crosses up, a miss in the relegation
   //   band always crosses down) except under the demotion protection: a miss whose hidden skill tier is at or above the points tier
-  //   skips the clamp and never drops below the floor of the tier. The master gate: below GATE_TIER (master) in hidden skill, the
+  //   skips the clamp and never drops below the floor of the tier (O785, user call 2026-11-09 "below master it should go up and
+  //   down normally; I meant that grinding gets you to diamond in the end": the floor that also held EVERY miss under master is
+  //   gone -- a player rated above his skill below master drops on a relegation miss like in versus; the positive table still
+  //   carries a grinder of any level to diamond, about 140-150 runs from the placement in test/endless-lp-sim.js). The master gate: below GATE_TIER (master) in hidden skill, the
   //   points of a player under master stop BOUNDARY_MARGIN + 1 under the master line (no master promotion match); a player already
   //   at master or up is held by the gap factor instead. The first MIN_RUNS runs of a season are placement (no points; their
   //   target from the runs so far, the silver line before any); the last one seeds the points from the hidden skill
@@ -479,8 +509,11 @@
   //     - the master / grandmaster gate of a team family asks the skill to reach the line x TEAM_GATE / 100 (skillTierOf, fam);
   //     - the placement seeds from the five runs read on the solo scale: endlessSeedLp(elpHiddenFor('solo', runs, lines), solo lines).
   //   A call that leaves fam out reads as solo: every value of version 3 stays (test/endless-lp.js holds the version 3 cases).
+  // O785 (2026-11-09, VER 5; written as VER 3 before O803 / O825 took 3 and 4, replayed after them): the demotion protection lost
+  //   its "every miss under master" half and the series landings moved to +-150 (BOUNDARY_MARGIN block above): settled runs of
+  //   every family move.
   const ELP = Object.freeze({
-    WINDOW: 10, MIN_RUNS: 5, TRIM: 1, GAP_UP: 1500, GAP_DOWN: 500, STAKE_STEP: 100, SPREAD: 2, SEED_CAP: 3200, VER: 4,
+    WINDOW: 10, MIN_RUNS: 5, TRIM: 1, GAP_UP: 1500, GAP_DOWN: 500, STAKE_STEP: 100, SPREAD: 2, SEED_CAP: 3200, VER: 5,
     MUL: Object.freeze([850, 850, 1500, 3100, 2800, 2800, 2800]), TARGET_Q: 990, SWING_CAP: 119, GATE_TIER: 5,
     TEAM_GAIN: 1300,               // O825: per mille; a team run below master: a pass x TEAM_GAIN / 1000, a miss x 1000 / TEAM_GAIN
     TEAM_GATE: 110,                // O825: per cent of the master / grandmaster line a team family's skill must reach (solo: 100)
@@ -621,7 +654,7 @@
     let d = Math.round((base * gap * stake / 1000000 + seg.drip) * mul / 1000);
     d = Math.max(-ELP.SWING_CAP, Math.min(ELP.SWING_CAP, d));
     d = isPass ? Math.max(1, d) : Math.min(-1, d);
-    return { d, base, gap, stake, drip: seg.drip, mul, ht, st, protect: !isPass && (cur < ELP.GATE_TIER || (ht != null && ht >= cur)), team };
+    return { d, base, gap, stake, drip: seg.drip, mul, ht, st, protect: !isPass && ht != null && ht >= cur, team };
   }
   // the points line of one settled run: { d0 (endlessDelta's d), d (the change after the clamp / the protection / the gate), nv (the new
   //   points, 0..LP_MAX), series (boundaryOf the points before: 'promotion' / 'relegation' / null), clamped (the series clamp moved
