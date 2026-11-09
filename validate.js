@@ -6579,6 +6579,13 @@ function overallDominant(bests) {
 //   - the pass lines (they place the hidden skill in a tier: the factor, the floor, the gate, the seed): the tables in force a day
 //     before the job first saw the run, at that moment, and now (the client may have held any of them); the settle takes the one
 //     that leaves the player the most points (architecture decision 10).
+//   - O803 team runs (duo / trio / quad, 2026-11-09): the lane records the roster by run id (elpTeam[runId] = { r: [pid], fam, s,
+//     at }); the first settle of the run reads every member's hidden skill as it stood before it (his settled runs first seen no
+//     later than this run, the placement reading under five) and freezes points-plan.js teamHiddenOf over them in that entry (h,
+//     has; null too): every seat reads the SAME target from it (the hidden100 position of targetOf), the later settlers reuse it.
+//     The points, the seed, the gap, the protection and the gate keep each member's own skill. No roster recorded (a run that
+//     entered before this rule, the couch pair, solo) = his own skill, as before. An entry older than TAB_DAYS leaves once no
+//     member of the current season still carries the run unsettled.
 //   - placement (each season): the first ELP.MIN_RUNS runs move no points (d 0, a receipt each); the last seeds the points from the
 //     hidden skill over them (SEEDED receipt). No row until then.
 //   - a seedcap conviction (corrections, next tick) takes the run out; a settled run's points go back as recorded (a VOID receipt
@@ -6655,6 +6662,50 @@ function ratingHistFinal(st, p, fam, seasonId, runId) {
 function elpRunRk(seasonId, runSeed) { return runSeed | 0; }
 // the depths of the settled runs of an entry, newest first (skip = a run left out)
 function elpSettledDepths(h, skip) { return ((h && h.runs) || []).filter((r) => r[3] && r !== skip).map((r) => r[1] | 0).reverse(); }
+// O803: remember the roster of team run runId (family fam, season s) by run id in the chain memory, elpTeam[runId] = { r: [pid],
+//   fam, s, at (the newest segment) }: the settle reads the members' skills for the one team target. Team families only (two seats
+//   or more); solo and the couch pair record nothing. Returns the entry (or null).
+function elpTeamNote(st, runId, pids, fam, s, nowMs) {
+  if (!st || fam === 'solo' || !ELP.PRIOR[fam] || !Array.isArray(pids) || pids.length < 2) return null;
+  st.elpTeam = st.elpTeam || {};
+  const k = String(runId >>> 0), e = st.elpTeam[k];
+  if (e) { e.at = nowMs; return e; }
+  return (st.elpTeam[k] = { r: pids.map(String).slice().sort(), fam, s: s | 0, at: nowMs });
+}
+// O803: member p's hidden skill as it stood before run runId (first seen at firstSeen) of family fam, season s: over his runs settled
+//   already that were first seen no later than it (the run itself left out; newest first, hiddenOf takes the window), placed =
+//   hiddenOf (null under MIN_RUNS, as his own settle reads it), placing = the plain mean of the runs so far (minRuns 1), none settled
+//   yet / no entry = null. For the settler himself this is the skill his own settle reads (the settled runs are a prefix of the list).
+function elpMemberHiddenBefore(st, p, fam, s, runId, firstSeen) {
+  const hm = st && st.hist && st.hist[ratingHistKey(p, fam, s)];
+  if (!hm || !Array.isArray(hm.runs)) return null;
+  const before = hm.runs.filter((x) => x[3] && (x[0] >>> 0) !== (runId >>> 0) && (x[2] || 0) <= firstSeen).map((x) => x[1] | 0).reverse();
+  if (hm.placed) return pointsPlan.hiddenOf(before);
+  return before.length ? pointsPlan.hiddenOf(before, 1) : null;
+}
+// O803: the team's usual level for run r of family fam (duo / trio / quad): undefined when no roster is recorded for the run (solo, the
+//   couch pair, a run that entered before this rule: the caller reads the player's own skill); else the frozen value of the run's team
+//   entry -- computed at the FIRST settle of the run from every member's skill before it (elpMemberHiddenBefore) and kept (null too:
+//   has), so every seat of the run reads the same target whatever order they settle in and whatever a member plays in between
+function elpTeamHidden(st, r, fam, s, nowMs) {
+  if (fam === 'solo' || !ELP.PRIOR[fam]) return undefined;
+  const tm = st && st.elpTeam && st.elpTeam[String(r[0] >>> 0)];
+  if (!tm || !Array.isArray(tm.r)) return undefined;
+  if (tm.has) return tm.h;
+  const at = r[2] ? r[2] : nowMs;
+  tm.h = pointsPlan.teamHiddenOf(tm.r.map((p) => elpMemberHiddenBefore(st, p, fam, s, r[0] >>> 0, at)));
+  tm.has = 1;
+  return tm.h;
+}
+// O803: team entries older than TAB_DAYS leave once no member of the current season still carries the run unsettled (pending = the
+//   set of those run ids, as strings); an ended season's runs never settle, so theirs leave on age alone. Returns the count removed.
+function elpTeamTrim(st, nowMs, pending) {
+  const tm = st && st.elpTeam;
+  if (!tm) return 0;
+  let n = 0;
+  for (const k of Object.keys(tm)) { const e = tm[k]; if (!e || (nowMs - (e.at || 0) > RATING.TAB_DAYS * 86400000 && !(pending && pending.has(k)))) { delete tm[k]; n++; } }
+  return n;
+}
 // the pass lines of family fam (7 levels) in force at instant t of season s: the newest recorded table at or before t, else the prior
 function elpLinesAt(st, fam, s, t) {
   let at = null;
@@ -6668,14 +6719,16 @@ function elpCandidates(st, fam, s, firstSeen, nowMs) {
   for (const t of [firstSeen - 86400000, firstSeen, nowMs]) { const p = elpLinesAt(st, fam, s, t); const key = p.join(','); if (!seen.has(key)) { seen.add(key); out.push(p); } }
   return out;
 }
-// settle run r of entry h (family fam, season s): placement or points. Pure on the entry. Returns { d, T, pass, seeded }.
+// settle run r of entry h (family fam, season s): placement or points. Pure on the entry (O803: and on the run's team entry, where
+//   the first settle of a team run freezes the team level). Returns { d, T, pass, seeded, teamH (undefined = the player's own skill) }.
 function elpSettleRun(st, h, r, fam, s, nowMs) {
   const cands = elpCandidates(st, fam, s, r[2] ? r[2] : nowMs, nowMs);
   const depth = r[1] | 0, seed = r[8] | 0, before = elpSettledDepths(h, r);
+  const teamH = elpTeamHidden(st, r, fam, s, nowMs);   // O803: the team's usual level (a team run with a roster), else undefined = own
   let d = 0, T = 0, pass = false, flags = 0, seeded = false;
   if (!h.placed) {
-    const ph = pointsPlan.hiddenOf(before, 1);
-    T = Math.min.apply(null, cands.map((p) => pointsPlan.targetOf(0, p, seed, ph, true)));
+    const ph = pointsPlan.hiddenOf(before, 1), th = teamH === undefined ? ph : teamH;
+    T = Math.min.apply(null, cands.map((p) => pointsPlan.targetOf(0, p, seed, th, true)));
     pass = depth >= T;
     if (((h.n | 0) + 1) >= ELP.MIN_RUNS) {
       const H = pointsPlan.hiddenOf([depth].concat(before));
@@ -6684,9 +6737,10 @@ function elpSettleRun(st, h, r, fam, s, nowMs) {
     }
   } else {
     const H = pointsPlan.hiddenOf(before), off = pointsPlan.targetOffset(seed), cur = Math.max(0, Math.min(LP_MAX, h.lp | 0));
+    const th = teamH === undefined ? H : teamH;   // O803: the target reads the team level; the settle (gap / protection / gate) his own skill
     let best = null;
     for (const p of cands) {
-      const t = pointsPlan.targetOf(cur, p, seed, H, false), sl = pointsPlan.endlessSettle(cur, depth >= t, H, p, off);
+      const t = pointsPlan.targetOf(cur, p, seed, th, false), sl = pointsPlan.endlessSettle(cur, depth >= t, H, p, off);
       if (!best || sl.nv > best.sl.nv) best = { sl, t };
     }
     T = best.t; pass = depth >= T; h.lp = best.sl.nv; d = best.sl.nv - cur;
@@ -6695,7 +6749,7 @@ function elpSettleRun(st, h, r, fam, s, nowMs) {
   r[3] = 1; r[4] = d; r[5] = T;
   h.n = (h.n | 0) + 1;
   h.ring = receiptPush(h.ring || [], elpRunRk(s, r[8]), d, flags, 0xff);   // keyed by the run seed (the client knows it)
-  return { d, T, pass, seeded };
+  return { d, T, pass, seeded, teamH };
 }
 // settled runs past the window leave it (their points stay refundable in gone)
 function elpTrim(h) {
@@ -6708,7 +6762,7 @@ function elpTrim(h) {
 // settle every settleable run of the current season's competitive histories, each entry in start order. Returns the settles
 //   ([{ k, runId, d, T, pass, seeded }]) for the logs.
 function elpSettleAll(st, seasonNow, nowMs) {
-  const out = [];
+  const out = [], pending = new Set();
   for (const k of Object.keys((st && st.hist) || {})) {
     const at = k.lastIndexOf('|'), s = Number(k.slice(at + 1)), head = k.slice(0, at), fam = head.slice(head.lastIndexOf('|') + 1);
     if (s !== (seasonNow | 0) || !ELP.PRIOR[fam]) continue;   // an ended season stays as it is; 'duoc' (split couch) settles no points
@@ -6722,8 +6776,10 @@ function elpSettleAll(st, seasonNow, nowMs) {
       const x = elpSettleRun(st, h, r, fam, s, nowMs);
       out.push(Object.assign({ k, runId: r[0] >>> 0 }, x));
     }
+    if (fam !== 'solo') for (const r of h.runs) if (!r[3]) pending.add(String(r[0] >>> 0));   // O803: a team run still to settle keeps its roster
     elpTrim(h);
   }
+  elpTeamTrim(st, nowMs, pending);
   return out;
 }
 // a convicted run leaves the history; a settled one's points go back as recorded (VOID receipt, the opposite change); the run that
@@ -10776,7 +10832,7 @@ async function main() {
   const elpUpkeep = async (st) => {
     if (PT_MODE || !st) return false;
     const done = elpSettleAll(st, seasonId, nowMs);
-    for (const x of done) console.log('  endless points ' + x.k.split('|')[1] + ' ' + x.k.slice(0, 8) + ': run ' + (x.runId >>> 0).toString(16) + ' target ' + x.T + (x.pass ? ' passed' : ' missed') + ' -> ' + (x.d >= 0 ? '+' : '') + x.d + (x.seeded ? ' (placement done: seeded)' : ''));
+    for (const x of done) console.log('  endless points ' + x.k.split('|')[1] + ' ' + x.k.slice(0, 8) + ': run ' + (x.runId >>> 0).toString(16) + ' target ' + x.T + (x.pass ? ' passed' : ' missed') + ' -> ' + (x.d >= 0 ? '+' : '') + x.d + (x.seeded ? ' (placement done: seeded)' : '') + (x.teamH !== undefined ? ' (team level ' + (x.teamH == null ? 'none' : x.teamH) + ')' : ''));
     RUN.elpSettled = (RUN.elpSettled | 0) + done.length;
     let ch = done.length > 0;
     const day = tiercutDay(seasonNowMs());
@@ -13090,6 +13146,8 @@ async function main() {
           // O103 rating history (client knife 5.1a): each writer's run in the family history (depth reached; a catch-up only for the writers behind)
           if (!PT_MODE) { ratingHistUpsert(soloState, pid(sid), fam.low, t.seasonId, ratingRunId(key), f.endDepth, nowMs, f.flags, g[0].d[4] | 0); ratingTouched.add(sid); }
         }
+        // O803: the run's roster by run id (team families): the first settle of the run reads every member's skill for the one team target
+        if (!PT_MODE) elpTeamNote(soloState, ratingRunId(key), rosterSids.map((x) => pid(String(x))), fam.low, t.seasonId, nowMs);
         // O728: the team's final segment ends the run for every roster member, a member who dropped too (he settles at the depth he wrote with the team)
         if (!PT_MODE && ((f.flags | 0) & attest.SEG_FINAL)) for (const sidR of rosterSids) { if (writerSids.indexOf(sidR) >= 0) continue; if (ratingHistFinal(soloState, pid(sidR), fam.low, t.seasonId, ratingRunId(key))) ratingTouched.add(sidR); }
         // audit B-F2: an overlap credits new depth only -- Q237: from each writer's own floor (teamXpStarts), never less than that rule
@@ -14873,7 +14931,7 @@ Object.assign(module.exports, { lone1v1Spoiled, lone1v1VoidClaims });   // cloud
 Object.assign(module.exports, { teamXpFloor, teamXpStarts, teamXpMark, teamRollbackPlan });   // cloud audit Q237 team competitive XP floors (test/team-comp-ghost-xp.js)
 Object.assign(module.exports, { RATING, RATING_FAMS, ENDLESS_RATING_LB_SOLO, ENDLESS_RATING_LB_DUO, ENDLESS_RATING_LB_TRIO, ENDLESS_RATING_LB_QUAD, ENDLESS_TIERCUT_LB, ratingFamOf, fnv32, ratingRunId, ratingHistKey,
   ratingHistUpsert, ratingHistRemove, ratingHistFinal, elpRunRk, ratingScoreOf, ratingPlan, ratingTierOf, tiercutDay, tiercutEncode, tiercutDecode, tiercutDue, pruneRatingHist,
-  elpSettledDepths, elpLinesAt, elpCandidates, elpSettleRun, elpTrim, elpSettleAll, elpLinesOf, elpHiddensOf, elpLinesSkipBanned, elpTableKey, elpTabNewest, elpTabRecord });
+  elpSettledDepths, elpLinesAt, elpCandidates, elpSettleRun, elpTrim, elpSettleAll, elpTeamNote, elpMemberHiddenBefore, elpTeamHidden, elpTeamTrim, elpLinesOf, elpHiddensOf, elpLinesSkipBanned, elpTableKey, elpTabNewest, elpTabRecord });
 Object.assign(module.exports, { CUP, CUP_FAMS, ENDLESS_CUP_LB, ENDLESS_CUP_HONOR_LB, cupWeekId, cupWeekStart, cupWeekBack, cupNextWeek, cupEdition, cupWeekBoardName, teamBlockSids,
   cupStandings, cupPodium, cupPodiumFor, cupVerdict, cupMarksOf, cupHonorEncode, cupHonorDecode, cupHonorPlan, cupHeldMasks, cupCarrierEncode, cupCarrierDecode, cupRevoke, pruneCup });   // O180 Gold Rush Cup (client knife 5.1c-1; test/endless-cup.js)   // O103 endless competitive rating (client knife 5.1a; test/endless-rating.js)
 Object.assign(module.exports, { BAN_LB, BAN_ACT_MM, banRowFull, fullBanSet, cupSkipBanned, elpLinesSkipBanned, CUP_BAN_WAIT_MS });   // cloud audit Q338 full bans kept off the cup podium / tier cuts / composite ladders (test/ban-skip.js; sanctions.js reads BAN_LB from here)
