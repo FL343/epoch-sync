@@ -142,6 +142,48 @@ const PENDING_W_MAX_MS = 7 * 86400000;
 // O775: one try a day for the waiting writes of an account Steam answered result 27 (see gone above)
 const GONE_RETRY_MS = 24 * 3600 * 1000;
 const PENDING_W_FIELDS = ['w', 'wp', 'xw', 'cw', 'rw', 'ew'];   // the waiting writes of an entry (what a gone mark holds back)
+// O807 (2026-11-09): this file is committed to the public repo, and its entries name boards (w / wp / l / xw / cw / rw .b, the keys
+//   of ew) whose names are kept out of it. At the file boundary each name is sealed: '~' + base64url(iv | AES-256-CTR(name)), iv =
+//   HMAC(mac key, name) cut to 16 bytes, both keys derived from STATE_SALT -- deterministic (a save that changed nothing writes the
+//   same bytes) and checked on the way back (a seal made under another salt is left as it is, so it matches no board and ages out,
+//   warned, like a write for a board this job no longer writes). In memory -- every reader below -- the entries carry the real
+//   names. A name read in clear (a file saved before this change) is taken as is; the next save seals it.
+//   test/pending-writes-no-names.js
+const PW_SEAL = '~';
+const PW_NAMED = ['w', 'wp', 'l', 'xw', 'cw', 'rw'];   // the entry fields { b: board, ... }; ew is keyed by board
+function pwKeys(salt) {
+  const s = String(salt == null ? (process.env.STATE_SALT || '') : salt);
+  return { enc: crypto.createHash('sha256').update('pw-board-enc|' + s).digest(), mac: crypto.createHash('sha256').update('pw-board-mac|' + s).digest() };
+}
+function pwSealName(name, K) {
+  if (typeof name !== 'string' || !name || name[0] === PW_SEAL) return name;
+  const iv = crypto.createHmac('sha256', K.mac).update(name, 'utf8').digest().subarray(0, 16);
+  const c = crypto.createCipheriv('aes-256-ctr', K.enc, iv);
+  return PW_SEAL + Buffer.concat([iv, c.update(name, 'utf8'), c.final()]).toString('base64url');
+}
+function pwOpenName(s, K) {
+  if (typeof s !== 'string' || s[0] !== PW_SEAL) return s;
+  try {
+    const raw = Buffer.from(s.slice(1), 'base64url');
+    if (raw.length < 17) return s;
+    const iv = raw.subarray(0, 16), d = crypto.createDecipheriv('aes-256-ctr', K.enc, iv);
+    const name = Buffer.concat([d.update(raw.subarray(16)), d.final()]).toString('utf8');
+    return crypto.createHmac('sha256', K.mac).update(name, 'utf8').digest().subarray(0, 16).equals(iv) ? name : s;
+  } catch (e) { return s; }
+}
+// pure: a copy of backlog s with every board name it carries passed through fn (pwSealName / pwOpenName); salt: default STATE_SALT
+function pwMapNames(s, fn, salt) {
+  const K = pwKeys(salt), out = {};
+  for (const k of Object.keys(s || {})) {
+    const e = s[k];
+    if (!e || typeof e !== 'object' || Array.isArray(e)) { out[k] = e; continue; }
+    const o = Object.assign({}, e);
+    for (const f of PW_NAMED) if (o[f] && typeof o[f] === 'object' && typeof o[f].b === 'string') o[f] = Object.assign({}, o[f], { b: fn(o[f].b, K) });
+    if (o.ew && typeof o.ew === 'object' && !Array.isArray(o.ew)) { const m = {}; for (const b of Object.keys(o.ew)) m[fn(b, K)] = o.ew[b]; o.ew = m; }
+    out[k] = o;
+  }
+  return out;
+}
 // O775 (pure): does backlog entry e's result-27 mark hold his waiting writes back at `now`? (no mark / unreadable / older than the
 //   window: no; a mark ahead of now -- another machine's clock -- no either: tried, and a 27 marks him again at this run's time)
 function goneHolds(e, now) {
@@ -172,7 +214,7 @@ function lpLastLive(l, now) {
   return LP_LAST_HOLD_MS > 0 && Math.abs(now - (Number(l.t) || 0)) <= LP_LAST_HOLD_MS;
 }
 function loadPendingWrites() {
-  try { const o = JSON.parse(fs.readFileSync(PENDING_WRITES_FILE, 'utf8')); return (o && typeof o === 'object' && !Array.isArray(o)) ? o : {}; } catch (e) { return {}; }
+  try { const o = JSON.parse(fs.readFileSync(PENDING_WRITES_FILE, 'utf8')); return (o && typeof o === 'object' && !Array.isArray(o)) ? pwMapNames(o, pwOpenName) : {}; } catch (e) { return {}; }
 }
 // pure: drop queued receipts past the hold (and beyond the cap), failed writes past the fuse (points w, Q341's last-season wp,
 //   Q318's XP / CP xw / cw, Q319's endless bests ew), a last write past its hold (quietly: its job is done), a result-27 mark with
@@ -239,7 +281,7 @@ function savePendingWrites(s, now, quiet) {
   const dropped = prunePendingWrites(s, now).receipts;
   if (dropped && !quiet) console.log('receipts: ' + dropped + ' queued receipt(s) dropped (older than ' + Math.round(RECEIPT_HOLD_MS / 3600000) + ' h: the client has rolled those matches back)');
   if (!Object.keys(s).length && !fs.existsSync(PENDING_WRITES_FILE)) return;   // nothing queued on a channel that never queued: no file
-  try { writeStateFile(PENDING_WRITES_FILE, JSON.stringify(s, null, 0)); } catch (e) { ghWarn('write ' + PENDING_WRITES_FILE + ' failed: ' + (e && e.message)); }
+  try { writeStateFile(PENDING_WRITES_FILE, JSON.stringify(pwMapNames(s, pwSealName), null, 0)); } catch (e) { ghWarn('write ' + PENDING_WRITES_FILE + ' failed: ' + (e && e.message)); }   // O807: names sealed
 }
 // the accounts of a settle group: every writer and every roster seat its records name
 function groupSids(g) {
@@ -14946,4 +14988,5 @@ Object.assign(module.exports, { PRIVATE_LONE, privateLoneClaim, privateLoneVerdi
 Object.assign(module.exports, { START_PROOF_ENFORCE, startProof, proofState, proofTable, proofOwnsId, applyStartProof, screenLateStarts, seenNote, startSeenId, startSig });   // O462 matchmade start proof (test/start-proof-step.js)
 Object.assign(module.exports, { LIKE: likePlan.LIKE, LIKES_FILE, LIKE_BOX_LB, LIKE_COUNT_LB, loadLikes, saveLikes });   // O520 likes lane (client knife 5.4d, W79; test/likes-lane.js)
 Object.assign(module.exports, { rankedSeatMaskOf, mtSansSeats, seatAppliesLp, anyAppliesLp, SEAT_MASK_BASES });   // O716 one queue for quick + ranked: the ranked-seat mask (test/seat-mask.js)
+Object.assign(module.exports, { pwSealName, pwOpenName, pwMapNames, pwKeys });   // O807 (test/pending-writes-no-names.js; the test harnesses open the file with pwMapNames)
 Object.assign(module.exports, { GONE_RETRY_MS, goneHolds, PENDING_W_MAX_MS, PENDING_W_FIELDS });   // O775 waiting writes of accounts answered result 27 (test/pending-writes-gone.js)

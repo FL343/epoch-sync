@@ -99,6 +99,7 @@ function runCron(boards, files, env, script) {
     const posts = fs.readFileSync(logPath, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l));
     const state = {};
     for (const k of FILE_VARS) { try { state[k] = JSON.parse(fs.readFileSync(stateEnv[k], 'utf8')); } catch (err) {} }
+    if (state.PENDING_WRITES_FILE) { const V807 = require(path.join(__dirname, '..', 'validate.js')); state.PENDING_WRITES_FILE = V807.pwMapNames(state.PENDING_WRITES_FILE, V807.pwOpenName, e.STATE_SALT); }   // O807: board names are sealed on disk
     return { code: r.status, out: (r.stdout || '') + (r.stderr || ''), posts, state, summary: fs.readFileSync(sumPath, 'utf8') };
   } finally { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (err) {} }
 }
