@@ -15,7 +15,7 @@
 //   [8] O781 (client 2026-11-09): the competitive curve has a deep wall now, so nobody averages 60 levels any more (the true levels
 //       stop at 45) and the players near the top die close to their wall: a "wall-hugging" group (mean depth 30..45, coefficient of
 //       variation 0.1) still passes about half its runs (0.42..0.58 overall, 0.40..0.65 at each level); the old target turns that
-//       red. Known (2026-11-09, client roadmap O782): a grandmaster-level wall-hugger drifts UP about +4 points a run (+1307 over 300):
+//       red. Known (2026-11-09, client roadmap O799): a grandmaster-level wall-hugger drifts UP about +4 points a run (+1307 over 300):
 //       with so little spread the integer depth vs TARGET_Q 990 (the target sits half a level under the mean) passes ~0.57. TARGET_Q
 //       1010 settles that group (-41) but pulls the cv 0.3 / 0.6 top to -341, and TARGET_Q is a rule constant (ELP.VER + 1, settled
 //       runs move) -> tuned at the S1 boundary with EA spread data. Asserted here only as "no worse than +2000" (a guard, not the goal)
@@ -165,7 +165,7 @@ if (require.main === module) {
   // [8] O781 wall-huggers
   const W = simulateWall(PP0), wr = wallRates(W);
   T('[8] wall-huggers (true level ' + WALL_MUS.join('/') + ', cv ' + WALL_CV + ') pass about half: overall ' + wr.all.toFixed(3) + ' (0.42..0.58), per level ' + wr.per.map((x) => x.toFixed(2)).join(' ') + ' (0.40..0.65)', wallOk(W));
-  T('[8] (known drift, O782 at the S1 boundary) a grandmaster-level wall-hugger (level 45, cv ' + WALL_CV + ') from 8600: mean change after 300 runs ' + mean(W.gm).toFixed(0) + ' (guard: no worse than +-2000; the goal is +-200; spread ' + Math.min.apply(null, W.gm) + '..' + Math.max.apply(null, W.gm) + ')', Math.abs(mean(W.gm)) <= 2000);
+  T('[8] (known drift, O799 at the S1 boundary) a grandmaster-level wall-hugger (level 45, cv ' + WALL_CV + ') from 8600: mean change after 300 runs ' + mean(W.gm).toFixed(0) + ' (guard: no worse than +-2000; the goal is +-200; spread ' + Math.min.apply(null, W.gm) + '..' + Math.max.apply(null, W.gm) + ')', Math.abs(mean(W.gm)) <= 2000);
   const wO = simulateWall(oldTarget);
   T('[8] the old target (the points tier line) turns the wall-huggers red too (overall ' + wallRates(wO).all.toFixed(3) + ', per level ' + wallRates(wO).per.map((x) => x.toFixed(2)).join(' ') + ')', !wallOk(wO));
   console.log(failN ? ('endless-lp-sim: ' + failN + ' FAIL') : 'endless-lp-sim: all ok');
