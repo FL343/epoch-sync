@@ -1,21 +1,24 @@
 'use strict';
 // M194 / W57 (2026-10-15, user ruling under architecture decision 10): through the Steam Next Fest the DEMO channel records
-// leaves but does not discount XP for them -- LEAVER_XP_RECORD_ONLY_UNTIL (demo.yml only) pins the leaver factor at 1.0
-// until that instant. This test pins:
-//   [1] the switch itself (leaverXpRecordOnlyUntil): demo channel only, strict ISO-8601 UTC, before the instant only,
-//       at most LEAVER_XP_RECORD_ONLY_MAX_MS ahead; anything else = 0 = the normal discount
+// leaves but does not discount XP for them -- LEAVER_XP_RECORD_ONLY_UNTIL (demo.yml; O777 2026-11-09: and validate.yml, the
+// full game's launch week) pins the leaver factor at 1.0 until that instant. This test pins:
+//   [1] the switch itself (leaverXpRecordOnlyUntil): demo and (O777) main channel only, strict ISO-8601 UTC, before the
+//       instant only, at most LEAVER_XP_RECORD_ONLY_MAX_MS ahead; anything else = 0 = the normal discount. Never playtest.
 //   [2] end to end over the REAL validate.js main() against an offline board stub, per channel x switch state
 //       (on / unset / expired x demo / playtest / main): a 3-player quick match where A (two earlier leaves = factor 0.5)
-//       and B finish and C starts but never finishes. Switch on (demo only): A is credited exactly as if he had no leaves,
-//       B is unchanged, C's leave is still counted and A's earlier leaves stay -- the only difference a before/after
-//       replay may show is "a demo account with leaves on record gets more XP". Every other cell: A is discounted as before.
-//   [3] mutation self-check: the factor pin removed from creditXp -> the demo "on" cell goes red
+//       and B finish and C starts but never finishes. Switch on (demo, main): A is credited exactly as if he had no leaves,
+//       B is unchanged, C's leave is still counted (O777: and marked as a window leave) and A's earlier leaves stay -- the
+//       only difference a before/after replay may show is "an account with leaves on record gets more XP". Every other
+//       cell: A is discounted as before, C's leave unmarked.
+//   [3] mutation self-check: the factor pin removed from creditXp -> the demo "on" cell goes red; the main channel taken off
+//       the switch again -> the main "on" cell goes red
+//   (the rest of O777 -- the marked leaves after the window, the launch-week ranked fine -- is test/channel-launch-week.js)
 const { spawnSync } = require('child_process');
 const crypto = require('crypto');
 const fs = require('fs'), path = require('path'), os = require('os');
 const SCRUB = ['PT_MODE', 'STRICT_BOARDS', 'APPLY_MMR', 'ALLOW_TEST', 'DEMO_APPID', 'RANKED_LB', 'LP_LB', 'XP_LB', 'STARTS_MATURITY_MS', 'CONFESS_PRUNE_MS',
   'SEEDCAP_ENFORCE', 'SEEDCAP_REJECT', 'GITHUB_STEP_SUMMARY', 'LEDGER_SHARDS', 'PT_SHARD_COUNT', 'ABSENT_GRACE_MS', 'READ_RETRY_MS', 'SANITY_MIN_START_AGE_MS', 'BOT_PACE_FRAC',
-  'SHARD_STRICT_BODY', 'LEAVER_XP_RECORD_ONLY_UNTIL', 'LEAVE_CONFIRM_MS'];
+  'SHARD_STRICT_BODY', 'LEAVER_XP_RECORD_ONLY_UNTIL', 'LEAVER_LP_EASY', 'LEAVER_LP_EASY_UNTIL', 'LEAVE_CONFIRM_MS'];
 for (const k of SCRUB) delete process.env[k];
 const VALIDATE = path.join(__dirname, '..', 'validate.js');
 const SRC = fs.readFileSync(VALIDATE, 'utf8');
@@ -44,7 +47,8 @@ console.log('-- [1] leaverXpRecordOnlyUntil --');
   eq('demo, exactly the cap ahead -> honored; past the cap (a typo\'d year) -> 0',
     [f('demo', new Date(NOW + MAX).toISOString(), NOW), f('demo', new Date(NOW + MAX + 1000).toISOString(), NOW), f('demo', '2027-10-27T00:00:00Z', NOW)], [NOW + MAX, 0, 0]);
   eq('cap = 31 days', MAX, 31 * 24 * 3600 * 1000);
-  eq('main (ea) / playtest / unknown channel -> 0', [f('ea', '2026-10-27T00:00:00Z', NOW), f('playtest', '2026-10-27T00:00:00Z', NOW), f(null, '2026-10-27T00:00:00Z', NOW)], [0, 0, 0]);
+  eq('O777: main (ea) honored like demo (same format / cap / expiry)', [f('ea', '2026-10-27T00:00:00Z', NOW), f('ea', '2026-10-27T00:00:00Z', END), f('ea', '2027-10-27T00:00:00Z', NOW), f('ea', '2026-10-27', NOW)], [END, 0, 0, 0]);
+  eq('playtest / unknown channel / any other name -> 0', [f('playtest', '2026-10-27T00:00:00Z', NOW), f(null, '2026-10-27T00:00:00Z', NOW), f('main', '2026-10-27T00:00:00Z', NOW), f('EA', '2026-10-27T00:00:00Z', NOW)], [0, 0, 0, 0]);
   eq('this test process (no switch set) -> off', v.LEAVER_XP_RECORD_ONLY, 0);
   eq('effectiveLeaverFactor untouched (client lockstep mirror): 2 leaves / 0 games', v.effectiveLeaverFactor(2, 0), 0.5);
 }
@@ -176,7 +180,7 @@ function cell(ch, until, priorLeavesA, script) {
   };
   let leavers = {}; try { leavers = JSON.parse(r2.left[names.LEAVERS_FILE] || '{}'); } catch (e) {}
   const leavesOf = (sid) => (leavers[SALTED(sid)] && leavers[SALTED(sid)].leaves) | 0;
-  return { r1, r2, xpA: xpOf(A), xpB: xpOf(B), leavesA: leavesOf(A), leavesC: leavesOf(C), out: r2.out };
+  return { r1, r2, xpA: xpOf(A), xpB: xpOf(B), leavesA: leavesOf(A), leavesC: leavesOf(C), entryC: leavers[SALTED(C)] || null, out: r2.out };
 }
 const FUTURE = new Date(Date.now() + 24 * 3600 * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z');
 const PAST = new Date(Date.now() - 3600 * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z');
@@ -192,7 +196,7 @@ T('[2] the discounted value is really lower (the fixture reaches the factor)', w
 const CELLS = [
   ['demo', 'on', FUTURE, 'full'], ['demo', 'unset', null, 'half'], ['demo', 'expired', PAST, 'half'],
   ['playtest', 'on', FUTURE, 'half'], ['playtest', 'unset', null, 'half'],
-  ['main', 'on', FUTURE, 'half'], ['main', 'unset', null, 'half'],
+  ['main', 'on', FUTURE, 'full'], ['main', 'unset', null, 'half'], ['main', 'expired', PAST, 'half'],   // O777: the main channel's launch week
 ];
 for (const [ch, state, until, exp] of CELLS) {
   const c = cell(ch, until, 2);
@@ -202,11 +206,15 @@ for (const [ch, state, until, exp] of CELLS) {
   eq(tag + ' B (no leaves) unchanged', c.xpB, base.xpB);
   eq(tag + ' C\'s leave still counted', c.leavesC, 1);
   eq(tag + ' A\'s earlier leaves kept', c.leavesA, 2);
-  const onLine = /leaver xp: record-only on the demo channel until /.test(c.out);
+  const onLine = new RegExp('leaver xp: record-only on the ' + (ch === 'main' ? 'ea' : ch) + ' channel until ').test(c.out);
   T(tag + ' "record-only on" logged only when it is on', onLine === (exp === 'full'));
   if (exp === 'full') T(tag + ' the XP line says what it would have been', /x1 \(record-only, would be x0\.5\)/.test(c.out));
   if (state === 'expired') T(tag + ' "window ended" logged', /leaver xp: record-only window ended at /.test(c.out));
-  if (state === 'on' && ch !== 'demo') T(tag + ' warns: set on a non-demo channel is ignored', /::warning::LEAVER_XP_RECORD_ONLY_UNTIL is set on the [a-z]+ channel -- ignored \(demo only\)/.test(c.out));
+  if (state === 'on' && ch === 'playtest') T(tag + ' warns: set on the playtest channel is ignored', /::warning::LEAVER_XP_RECORD_ONLY_UNTIL is set on the playtest channel -- ignored \(demo and main only\)/.test(c.out));
+  // O777: C's leave is marked as a window leave exactly when the switch is on (the window never counts it: test/channel-launch-week.js)
+  const wC = (c.entryC && Array.isArray(c.entryC.w)) ? c.entryC.w : [];
+  T(tag + ' C\'s leave ' + (exp === 'full' ? 'marked (w [mh, 0, 1], ro 1)' : 'unmarked (w [mh, 0], no ro)'),
+    wC.length === 1 && (exp === 'full' ? (wC[0].length === 3 && wC[0][2] === 1 && c.entryC.ro === 1) : (wC[0].length === 2 && c.entryC.ro === undefined)), JSON.stringify(c.entryC));
 }
 {
   // date only: not strict UTC. Two days ahead of the clock, like FUTURE / PAST above (Q321: the fixed '2026-10-27' turned this
@@ -224,6 +232,15 @@ for (const [ch, state, until, exp] of CELLS) {
   const t = Date.parse(DM.until || '');
   if (t > Date.now()) eq('[2] demo.yml value honored while ahead', v.leaverXpRecordOnlyUntil('demo', DM.until, Date.now()), t);
   else ok('[2] demo.yml value is in the past: the discount is back on (the line can stay or go)');
+  // O777: the value validate.yml carries (the launch week). The instant itself is checked on injected clocks (a day before /
+  //   at / after it); only the last line looks at the real clock, either branch green, so the next-year clock stays green
+  const VM = (() => { const src = fs.readFileSync(path.join(WF, 'validate.yml'), 'utf8'); const m = src.match(/^ {10}LEAVER_XP_RECORD_ONLY_UNTIL:\s*'([^']*)'\s*$/m); return m ? m[1] : null; })();
+  eq('[2] validate.yml carries the launch-week instant', VM, '2026-11-24T03:17:00Z');
+  const tv = Date.parse(VM || '');
+  eq('[2] validate.yml value honored on the main channel a day before it, over at it and after (injected clocks)',
+    [v.leaverXpRecordOnlyUntil('ea', VM, tv - 86400000), v.leaverXpRecordOnlyUntil('ea', VM, tv), v.leaverXpRecordOnlyUntil('ea', VM, tv + 1)], [tv, 0, 0]);
+  if (tv > Date.now()) eq('[2] validate.yml value honored now (still ahead)', v.leaverXpRecordOnlyUntil('ea', VM, Date.now()), tv);
+  else ok('[2] validate.yml value is in the past: the main channel\'s discount is back on (the line can stay or go)');
 }
 
 // ---- [3] mutation self-check ----
@@ -237,6 +254,21 @@ console.log('-- [3] mutation self-check --');
       fs.writeFileSync(script, SRC.replace(from, 'const factor = lf;'));
       const c = cell('demo', FUTURE, 2, script);
       T('[3] pin removed -> the demo "on" cell discounts A again (the [2] demo/on check goes red)', c.r2.code === 0 && c.xpA === want.half, 'xpA=' + c.xpA + ' ' + c.out.slice(-400));
+    } finally { try { fs.unlinkSync(script); } catch (e) {} }
+  }
+}
+{
+  // O777: the main channel taken off the switch again (demo only, as before O777)
+  const from = "const LEAVER_XP_RECORD_ONLY_CHANNELS = ['demo', 'ea'];";
+  if (SRC.split(from).length !== 2) bad('[3] anchor (LEAVER_XP_RECORD_ONLY_CHANNELS) not found exactly once');
+  else {
+    const script = path.join(__dirname, '..', '.mutant-leaver-record-only-main-' + process.pid + '.js');
+    try {
+      fs.writeFileSync(script, SRC.replace(from, "const LEAVER_XP_RECORD_ONLY_CHANNELS = ['demo'];"));
+      const c = cell('main', FUTURE, 2, script);
+      const marked = !!(c.entryC && Array.isArray(c.entryC.w) && c.entryC.w[0] && c.entryC.w[0][2]);
+      T('[3] main channel off the switch -> the main "on" cell discounts A again and leaves C unmarked (the [2] main/on checks go red)',
+        c.r2.code === 0 && c.xpA === want.half && !marked, 'xpA=' + c.xpA + ' ' + JSON.stringify(c.entryC) + ' ' + c.out.slice(-400));
     } finally { try { fs.unlinkSync(script); } catch (e) {} }
   }
 }

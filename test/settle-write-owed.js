@@ -31,7 +31,7 @@ const { spawnSync } = require('child_process');
 const fs = require('fs'), path = require('path'), os = require('os');
 const SCRUB = ['PT_MODE', 'STRICT_BOARDS', 'APPLY_MMR', 'ALLOW_TEST', 'DEMO_APPID', 'RANKED_LB', 'LP_LB', 'XP_LB', 'STARTS_MATURITY_MS', 'CONFESS_PRUNE_MS',
   'SEEDCAP_ENFORCE', 'SEEDCAP_REJECT', 'GITHUB_STEP_SUMMARY', 'LEDGER_SHARDS', 'PT_SHARD_COUNT', 'ABSENT_GRACE_MS', 'READ_RETRY_MS', 'SANITY_MIN_START_AGE_MS',
-  'SHARD_STRICT_BODY', 'CP_LB', 'TRUST_LB', 'REPORT_LB', 'START_CONFIRM_MS', 'SIG_PAIR_WINDOW_MS', 'LEAVER_XP_RECORD_ONLY_UNTIL', 'DISPUTE_FLOOR_DAY_CAP', 'CONSOLATION_XP',
+  'SHARD_STRICT_BODY', 'CP_LB', 'TRUST_LB', 'REPORT_LB', 'START_CONFIRM_MS', 'SIG_PAIR_WINDOW_MS', 'LEAVER_XP_RECORD_ONLY_UNTIL', 'LEAVER_LP_EASY', 'LEAVER_LP_EASY_UNTIL', 'DISPUTE_FLOOR_DAY_CAP', 'CONSOLATION_XP',
   'CONSOLE_OWED_MAX_MS', 'REDEEM_LB', 'GRANT_LB', 'LP_LAST_HOLD_MS'];
 for (const k of SCRUB) delete process.env[k];
 process.env.STATE_SALT = 's';   // same salt as the child runs below, so v.pid() addresses their state rows

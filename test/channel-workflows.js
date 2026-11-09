@@ -58,15 +58,36 @@ console.log('-- reconcile twins --');
   if (ePt && eDm) {
     // deliberate demo-only knobs (each with its pin below); everything else must match the playtest template key for key
     //   M194 / W57 LEAVER_XP_RECORD_ONLY_UNTIL: the Next Fest record-only leaver window (validate.js honors it on the demo
-    //   channel only) -- a strict ISO-8601 UTC instant, and on no other workflow
-    const DEMO_ONLY = { LEAVER_XP_RECORD_ONLY_UNTIL: (v) => /^'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?Z'$/.test(v) };
+    //   and, since O777, the main channel) -- a strict ISO-8601 UTC instant, on the demo twin and validate.yml only (never
+    //   the playtest twin: that channel ignores it). O777 LEAVER_LP_EASY / LEAVER_LP_EASY_UNTIL: the launch week's ranked
+    //   leave fine, main channel only -> validate.yml only.
+    const ISO = (v) => /^'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?Z'$/.test(v);
+    const LEAVER_KNOBS = {
+      LEAVER_XP_RECORD_ONLY_UNTIL: { files: ['demo.yml', 'validate.yml'], valid: ISO },
+      LEAVER_LP_EASY: { files: ['validate.yml'], valid: (v) => /^'\d{1,4}'$/.test(v) && Number(v.slice(1, -1)) <= 100 },
+      LEAVER_LP_EASY_UNTIL: { files: ['validate.yml'], valid: ISO },
+    };
+    const DEMO_ONLY = Object.fromEntries(Object.entries(LEAVER_KNOBS).filter(([, d]) => d.files.indexOf('demo.yml') >= 0));
     const kPt = Object.keys(ePt).sort(), kDm = Object.keys(eDm).filter((k) => !(k in DEMO_ONLY)).sort();
     T('same env key set (demo-only knobs aside)', JSON.stringify(kPt) === JSON.stringify(kDm), 'pt=' + kPt.join(',') + ' dm=' + kDm.join(','));
-    for (const [k, valid] of Object.entries(DEMO_ONLY)) {
-      if (k in eDm) T('demo-only env ' + k + ' is a quoted strict UTC instant', valid(eDm[k]), eDm[k]);
-      const elsewhere = fs.readdirSync(WF).filter((f) => /\.ya?ml$/.test(f) && f !== 'demo.yml' && read(f).indexOf(k) >= 0);
-      T('demo-only env ' + k + ' on no other workflow', elsewhere.length === 0, elsewhere.join(','));
+    const vRun = (() => {   // the validate.js run step of validate.yml (its job has a gate step with its own env before it)
+      const src = read('validate.yml'), at = src.indexOf('\n      - name: run\n'), end = src.indexOf('\n      - name: ', at + 1);
+      const out = {};
+      if (at >= 0) for (const line of src.slice(at, end < 0 ? src.length : end).split('\n')) { const m = line.match(/^          ([A-Z_]+):\s*(.*)$/); if (m) out[m[1]] = m[2].trim(); }
+      return out;
+    })();
+    const ENV_OF = { 'demo.yml': eDm, 'validate.yml': vRun };
+    for (const [k, d] of Object.entries(LEAVER_KNOBS)) {
+      for (const f of d.files) if (k in ENV_OF[f]) T(f + ': leaver knob ' + k + ' well-formed (quoted)', d.valid(ENV_OF[f][k]), ENV_OF[f][k]);
+      // a knob name as a whole word (LEAVER_LP_EASY is a prefix of LEAVER_LP_EASY_UNTIL)
+      const re = new RegExp('\\b' + k + '\\b');
+      const elsewhere = fs.readdirSync(WF).filter((f) => /\.ya?ml$/.test(f) && d.files.indexOf(f) < 0 && re.test(read(f)));
+      T('leaver knob ' + k + ' on no other workflow (allowed: ' + d.files.join(', ') + ')', elsewhere.length === 0, elsewhere.join(','));
     }
+    // O777: the launch week is one window -- the XP pin and the easy fine end at the same instant (both or neither)
+    T('validate.yml: LEAVER_XP_RECORD_ONLY_UNTIL and LEAVER_LP_EASY_UNTIL name the same instant (both or neither)',
+      vRun.LEAVER_XP_RECORD_ONLY_UNTIL === vRun.LEAVER_LP_EASY_UNTIL && (vRun.LEAVER_LP_EASY == null) === (vRun.LEAVER_LP_EASY_UNTIL == null),
+      vRun.LEAVER_XP_RECORD_ONLY_UNTIL + ' / ' + vRun.LEAVER_LP_EASY_UNTIL + ' / ' + vRun.LEAVER_LP_EASY);
     T('APPID secrets: PLAYTEST_APPID / DEMO_APPID', ePt.APPID === SECRET('PLAYTEST_APPID') && eDm.APPID === SECRET('DEMO_APPID'));
     T('both PT_MODE=1 (restricted channel semantics)', ePt.PT_MODE === "'1'" && eDm.PT_MODE === "'1'");
     for (const k of kPt) {

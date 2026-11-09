@@ -4768,7 +4768,7 @@ function disputeFloorAdmit(consoleFloor, signals, now) {
   }
   return res;
 }
-// the XP of one admitted writer: the leaver factor (record-only on the demo's fest window) and the level boost of the
+// the XP of one admitted writer: the leaver factor (record-only in the switch's window: the demo's fest, O777 the main launch week) and the level boost of the
 //   board value before this credit, as creditXp applies them; no supporter, streak or daily first; never below the 50
 function disputeFloorXp(fl, boardXp, leaves, games) {
   const factor = LEAVER_XP_RECORD_ONLY ? 1 : leaverFactorOf(leaves, games | 0);   // O717 N2: leaves = his leavers entry (a bare count: an old caller)
@@ -6111,10 +6111,22 @@ function effectiveLeaverFactor(leaves, games) {
   return LEAVER_XP.tiers[LEAVER_XP.tiers.length - 1].factor;
 }
 // ---- O717 N2: the leave window on the leaver state ----
-// leavers[pid] = { leaves, lastMatch, lf?, w?, o? }
-//   leaves = lifetime convicted leaves, kept as before (the lifetime floor, the logs, and a rolled-back cron reads it unchanged)
+// leavers[pid] = { leaves, lastMatch, lf?, w?, o?, ro? }
+//   leaves = lifetime convicted leaves, kept as before (the logs, an old-format entry's leaves, and a rolled-back cron reads it
+//            unchanged; no factor floor reads it -- the factor is strictly the window, O717 N2. Window leaves are in it too)
 //   w      = [[mh, g], ...] the leaves the window may still see, oldest first: mh = the match hash (what a retraction names),
-//            g = his valid finishes after that leave (up to the next listed one, or now)
+//            g = his valid finishes after that leave (up to the next listed one, or now). O777: [mh, g, 1] = a leave convicted
+//            while the record-only window was on (LEAVER_XP_RECORD_ONLY, see there): kept so a retraction still finds it, but
+//            never counted by the window -- not as a leave and not as an event (as if that match had not happened; its g
+//            finishes are real and count). Rationale: the window exists because a leave in it may not be the player's doing
+//            (the launch week's new anti-cheat chain and graphics drivers had not met real players); discounting him for
+//            it once the window is over would take back what the window gave. Giving it no event slot (instead of counting
+//            it as a finish) keeps the rule simple and a window leave can never dilute the rate of real leaves around it.
+//            A 2-element entry (every entry the cron wrote before O777, and every leave outside the window) reads as before;
+//            only the new form is written (architecture decision 9). A rolled-back cron reads [mh, g, 1] as [mh, g] (counts
+//            it, as before O777).
+//   ro     = O777: how many of his leaves were convicted while the record-only window was on (less the ones retracted
+//            while still listed) -- for reading the window's data, never read by the factor
 //   o      = leaves from before the window was kept (an entry written by the old cron has no w): their order is unknown, so
 //            they count as his OLDEST events, ahead of every finish -- the one reading that never puts more of them inside the
 //            window than the truth would (architecture decision 9: the old format is read, only the new one written; 10: of
@@ -6127,11 +6139,24 @@ function leaverEntry(leavers, p) {
   return e;
 }
 // a convicted leave (start verdict / confession / roster conviction): the lifetime count + a new listed leave
-function noteLeave(leavers, p, m) {
+//   O777: marked [mh, 0, 1] (+ ro) when it is convicted while the record-only window is on. ro = that, given by a unit test; left
+//   out (every caller in this file) = this run's switch, so no conviction site can forget it. Conviction time, not the match's
+//   start: the XP pin works the same way (it applies at the settle), and a leave convicted after the window's end (a match
+//   started up to STARTS_MATURITY_MS before it) counts as before.
+function noteLeave(leavers, p, m, ro) {
   const e = leaverEntry(leavers, p);
   e.leaves = (e.leaves | 0) + 1; e.lastMatch = m;
-  e.w.push([mhOfKey(m), 0]);
-  if (e.w.length > LEAVER_XP.window) { e.w.splice(0, e.w.length - LEAVER_XP.window); delete e.o; }   // window-many later leaves: out for good
+  const mark = ro === undefined ? LEAVER_XP_RECORD_ONLY > 0 : !!ro;
+  e.w.push(mark ? [mhOfKey(m), 0, 1] : [mhOfKey(m), 0]);
+  if (mark) e.ro = (e.ro | 0) + 1;
+  if (e.w.length > LEAVER_XP.window) {   // the list's bound (window-many entries)
+    // O777: a marked leave holds no place in the window: the oldest marked one goes first (its finishes join the entry before
+    //   it, as a retraction's do; a later retraction of it reads as one of an unlisted match, ro stays). None: the oldest --
+    //   window-many later leaves put it out for good
+    const i = e.w.findIndex((x) => !!(x && x[2]));
+    if (i >= 0) { if (i > 0) e.w[i - 1][1] = (e.w[i - 1][1] | 0) + (e.w[i][1] | 0); e.w.splice(i, 1); }
+    else { e.w.splice(0, e.w.length - LEAVER_XP.window); delete e.o; }
+  }
   return e;
 }
 // a leave taken back (a late result / a confirmed game error): the lifetime count, and that match's listed leave -- its finishes
@@ -6144,6 +6169,7 @@ function unnoteLeave(leavers, p, m) {
   const mh = mhOfKey(m);
   for (let i = e.w.length - 1; i >= 0; i--) {
     if (((e.w[i] && e.w[i][0]) | 0) !== mh) continue;
+    if (e.w[i][2] && (e.ro | 0) > 0) { e.ro = (e.ro | 0) - 1; if (!e.ro) delete e.ro; }   // O777: a window leave taken back
     if (i > 0) e.w[i - 1][1] = (e.w[i - 1][1] | 0) + ((e.w[i][1]) | 0);
     e.w.splice(i, 1);
     return true;
@@ -6163,6 +6189,7 @@ function leaverWindowOf(e, games) {
     sumG += g;
     const take = Math.min(g, W - ev); gw += take; ev += take;
     if (ev >= W) break;   // this leave and every older one: outside
+    if (w[j] && w[j][2]) continue;   // O777: a leave of the record-only window -- no leave, no event (its finishes counted above)
     lw++; ev++;
   }
   if (j < 0 && ev < W) {
@@ -6202,23 +6229,69 @@ function noteFinish(leavers, p, games) {
 //   client's lockstep mirror; the client's optimistic value just reads lower until the boot read-back corrects it).
 //   The per-match abandoner class (dispClassOf 5 / 7 = 0 points) stays: a real client never writes a settle record with
 //   those codes (user-quit / kicked go to the menu without one), so only a hand-made record ever carries them.
+// O777 (2026-11-09, user ruling under architecture decision 10): the full game's launch week (EA 2026-11-17, the window to
+//   2026-11-24T03:17:00Z in validate.yml) gets the same switch on the MAIN channel (KEY_CHANNEL 'ea'), quick and ranked alike:
+//   a brand-new anti-cheat chain and the first-boot crash of dual-GPU laptops had not met real players yet, and a hard crash
+//   the player cannot come back from within the hour is convicted as a leave. Two more parts, both O777:
+//   - the leaves convicted while the switch is on are marked on the leaver state (noteLeave, w entries [mh, g, 1]) and the
+//     window never counts them, also after the instant -- the leaves recorded meanwhile no longer bring the discount back;
+//   - the ranked leave fine is LEAVER_LP_EASY (50) instead of LEAVER_LP_PENALTY (100) until LEAVER_LP_EASY_UNTIL (below).
+//   The playtest channel never honors it. The client is frozen: its optimistic leaver discount / -100 (rating-store
+//   LEAVER_XP_MIRROR, RANKED_CONFIG.LEAVER) stay as they are and read harsher than this job settles until the boot
+//   read-back of the boards puts the authoritative values in.
 const LEAVER_XP_RECORD_ONLY_MAX_MS = 31 * 24 * 3600 * 1000;
-// -> the window's end (ms) while the switch is on for this channel at nowMs, else 0
-function leaverXpRecordOnlyUntil(channel, raw, nowMs) {
-  if (channel !== 'demo') return 0;
+const LEAVER_XP_RECORD_ONLY_CHANNELS = ['demo', 'ea'];   // O777: + the main channel
+// a switch's end instant: strict ISO-8601 UTC, still ahead of nowMs, at most LEAVER_XP_RECORD_ONLY_MAX_MS ahead -> ms, else 0
+function leaverSwitchUntil(raw, nowMs) {
   const s = String(raw == null ? '' : raw).trim();
   if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?Z$/.test(s)) return 0;
   const t = Date.parse(s), now = Number(nowMs);
   if (!Number.isFinite(t) || !Number.isFinite(now) || !(t > now) || t - now > LEAVER_XP_RECORD_ONLY_MAX_MS) return 0;
   return t;
 }
+// -> the window's end (ms) while the switch is on for this channel at nowMs, else 0
+function leaverXpRecordOnlyUntil(channel, raw, nowMs) {
+  if (LEAVER_XP_RECORD_ONLY_CHANNELS.indexOf(channel) < 0) return 0;
+  return leaverSwitchUntil(raw, nowMs);
+}
 const LEAVER_XP_RECORD_ONLY = leaverXpRecordOnlyUntil(KEY_CHANNEL, process.env.LEAVER_XP_RECORD_ONLY_UNTIL, Date.now());
 {
   const raw = String(process.env.LEAVER_XP_RECORD_ONLY_UNTIL || '').trim();
-  if (LEAVER_XP_RECORD_ONLY) console.log('leaver xp: record-only on the demo channel until ' + new Date(LEAVER_XP_RECORD_ONLY).toISOString() + ' (leaves counted, XP not discounted)');
-  else if (raw && KEY_CHANNEL !== 'demo') ghWarn('LEAVER_XP_RECORD_ONLY_UNTIL is set on the ' + (KEY_CHANNEL || 'unknown') + ' channel -- ignored (demo only)');
+  if (LEAVER_XP_RECORD_ONLY) console.log('leaver xp: record-only on the ' + KEY_CHANNEL + ' channel until ' + new Date(LEAVER_XP_RECORD_ONLY).toISOString() + ' (leaves counted and marked, XP not discounted)');
+  else if (raw && LEAVER_XP_RECORD_ONLY_CHANNELS.indexOf(KEY_CHANNEL) < 0) ghWarn('LEAVER_XP_RECORD_ONLY_UNTIL is set on the ' + (KEY_CHANNEL || 'unknown') + ' channel -- ignored (demo and main only)');
   else if (raw && !(Date.parse(raw) <= Date.now())) ghWarn('LEAVER_XP_RECORD_ONLY_UNTIL=' + JSON.stringify(raw) + ' not honored (strict ISO-8601 UTC, at most ' + (LEAVER_XP_RECORD_ONLY_MAX_MS / 86400000) + ' days ahead) -- leaver XP discount stays on');
-  else if (raw) console.log('leaver xp: record-only window ended at ' + raw + ' -- leaver XP discount back on');
+  else if (raw) console.log('leaver xp: record-only window ended at ' + raw + ' -- leaver XP discount back on (the leaves marked in the window stay uncounted)');
+}
+// O777: the ranked leave fine of the launch week. LEAVER_LP_EASY = the fine (a whole number, 0 .. LEAVER_LP_PENALTY: never
+//   harsher than the normal one) + LEAVER_LP_EASY_UNTIL = its end (strict ISO-8601 UTC, at most LEAVER_XP_RECORD_ONLY_MAX_MS
+//   ahead), both set in validate.yml; main channel only (the only one with a points board). Before the instant a convicted or
+//   confessed ranked leave is fined LEAVER_LP_EASY; from it on LEAVER_LP_PENALTY again by itself (the workflow lines can stay).
+//   Either one missing or malformed, the instant past or too far ahead, another channel = LEAVER_LP_PENALTY (the status quo).
+//   The fine taken is recorded as before (confState ded = what the write took) and is what a late result or a confirmed game
+//   error gives back: never more than was taken. points-plan.js stays as it is -- its LEAVER_LP_PENALTY knob, RULES_VER, the
+//   golden fixtures and the client's vendored copy: the fine moves no settled delta that file predicts (the client's own -100
+//   at the quit is RANKED_CONFIG.LEAVER, frozen), so the effective value is chosen here and passed where the fine is taken.
+// -> { fine, until }: the fine of a ranked leave at nowMs, and the window's end while LEAVER_LP_EASY applies (else 0)
+function leaverLpFineOf(channel, rawFine, rawUntil, base, nowMs) {
+  const off = { fine: base, until: 0 };
+  if (channel !== 'ea') return off;
+  const until = leaverSwitchUntil(rawUntil, nowMs);
+  if (!until) return off;
+  const s = String(rawFine == null ? '' : rawFine).trim();
+  if (!/^\d{1,4}$/.test(s)) return off;
+  const fine = Number(s);
+  if (!(fine <= Number(base))) return off;
+  return { fine, until };
+}
+const LEAVER_LP_EASY_ON = leaverLpFineOf(KEY_CHANNEL, process.env.LEAVER_LP_EASY, process.env.LEAVER_LP_EASY_UNTIL, LEAVER_LP_PENALTY, Date.now());
+const LEAVER_LP_FINE = LEAVER_LP_EASY_ON.fine;   // the fine every ranked leave conviction / confession of this run takes
+{
+  const rawF = String(process.env.LEAVER_LP_EASY || '').trim(), rawU = String(process.env.LEAVER_LP_EASY_UNTIL || '').trim();
+  if (LEAVER_LP_EASY_ON.until) console.log('leaver points: ranked leave fine ' + LEAVER_LP_FINE + ' (normally ' + LEAVER_LP_PENALTY + ') until ' + new Date(LEAVER_LP_EASY_ON.until).toISOString());
+  else if ((rawF || rawU) && KEY_CHANNEL !== 'ea') ghWarn('LEAVER_LP_EASY / LEAVER_LP_EASY_UNTIL set on the ' + (KEY_CHANNEL || 'unknown') + ' channel -- ignored (main only)');
+  else if ((rawF || rawU) && !(Date.parse(rawU) <= Date.now())) ghWarn('LEAVER_LP_EASY=' + JSON.stringify(rawF) + ' / LEAVER_LP_EASY_UNTIL=' + JSON.stringify(rawU) + ' not honored (a whole number 0..' + LEAVER_LP_PENALTY
+    + ' and a strict ISO-8601 UTC instant at most ' + (LEAVER_XP_RECORD_ONLY_MAX_MS / 86400000) + ' days ahead) -- ranked leave fine stays ' + LEAVER_LP_PENALTY);
+  else if (rawF || rawU) console.log('leaver points: the easy fine ended at ' + rawU + ' -- ranked leave fine ' + LEAVER_LP_PENALTY + ' again');
 }
 // per-record point gain, mirroring the client per-game formula + credit rules. rank0 = 0-based; factor = repeat-leaver discount.
 //   valid = full (rank + money + ranked x + daily-first); innocent = base only; abandoner = 0.
@@ -6276,8 +6349,8 @@ function creditXp(g, matchType, scores, rankOf, xp, changedXp, xpState, leavers,
       if (sr && k === streakPlan.K.WIN && !sr.stale) streakPct = streakPlan.xpPct(sr.at);
       if (sr) skNote = ' streak ' + (sr.stale ? 'stale' : (['f', 'w', 'l', 'b'][k] + sr.at)) + (streakPct ? ' +' + streakPct + '%' : '');
     }
-    const lf = leaverFactorOf(leavers[p] || 0, st.games);   // O717 N2: the last LEAVER_XP.window events (never below the lifetime factor)
-    const factor = LEAVER_XP_RECORD_ONLY ? 1 : lf;   // M194 / W57: demo Next Fest window = leaves recorded, not discounted
+    const lf = leaverFactorOf(leavers[p] || 0, st.games);   // O717 N2: the last LEAVER_XP.window events, strictly (no lifetime floor); O777: window leaves not counted
+    const factor = LEAVER_XP_RECORD_ONLY ? 1 : lf;   // M194 / W57: demo Next Fest window = leaves recorded, not discounted (O777: + the main launch week)
     const rank0 = ((rankOf[sid] || 1) | 0) - 1;   // 0-based for rankBonus index (group rank is 1-based)
     let firstWin = false;
     // daily-first qualification (2026-07-19 audit M7) = the same "won" predicate as the career
@@ -10323,7 +10396,7 @@ async function main() {
     if (!lpId0 && !PT_MODE) strictBoard('points board absent (confession path)');
     const skill0 = loadSkill();   // read-only here (first-ranked leaver seeding base)
     confRes = await reconcileConfessions(confessions, groups, processed, confState, leavers, nowMs, {
-      penalty: LEAVER_LP_PENALTY, lpMax: LP_MAX, maturityMs: STARTS_MATURITY_MS,
+      penalty: LEAVER_LP_FINE, lpMax: LP_MAX, maturityMs: STARTS_MATURITY_MS,   // O777: the launch week's easy fine while it is on
       lateMs: LATE_RESULT_MS, vecTag, lpBoard: lpId0,   // Q228: a conviction's entry (cv)
       appliesLpFn: seatAppliesLp,   // O716: (mt, seat) -- a ranked seat of a mixed table; every seat of an old ranked code
       consistentKeys,   // absolution probe only trusts consistent settle groups (a lone/divergent 0xB1 cancels nothing)
@@ -14099,14 +14172,14 @@ async function main() {
         Object.assign(confState[cvKey], { b: String(lpId), w: sh ? sh.w : 0, g: sh ? sh.g.reduce((a, y) => a + y[1], 0) : 0 });
         lateCv.push([cvKey, String(x.steamID), sh ? sh.g : []]);
       }
-      // authoritative ranked leaver penalty: deduct LEAVER_LP_PENALTY from the points board so a client optimistic deduction survives read-back
+      // authoritative ranked leaver penalty: deduct LEAVER_LP_FINE (LEAVER_LP_PENALTY; O777: the launch week's easy fine while it is on) from the points board so a client optimistic deduction survives read-back
       //   (would otherwise be reverted). Ranked-only; consensus-detected leaver only (single side can't frame); once/match (processed).
       if (lpId && seatAppliesLp(matchType, x.seat)) {   // O716: the leaver's own entry -- a ranked seat -100, a quick seat the exit rate only (D9)
         const cur = lp[x.steamID] == null ? 0 : lp[x.steamID];
-        const nv = leaverLpPenalty(cur, LEAVER_LP_PENALTY);
+        const nv = leaverLpPenalty(cur, LEAVER_LP_FINE);
         if (nv !== cur) { lp[x.steamID] = nv; changedLp[x.steamID] = nv; confState[cvKey].ded = cur - nv; }
         noteReceipt(x.steamID, g[0].d[3] | 0, nv - cur, RECEIPT_F.LEAVE | (seededSet && seededSet.has(x.steamID) ? RECEIPT_F.SEEDED : 0), 0);   // O480
-        console.log('  leaver LP ' + c.m + ': ' + plog(x.steamID) + ' pts ' + cur + '-' + LEAVER_LP_PENALTY + '->' + nv);
+        console.log('  leaver LP ' + c.m + ': ' + plog(x.steamID) + ' pts ' + cur + '-' + LEAVER_LP_FINE + '->' + nv);
       }
     }
     processed.add(c.m); settled++; likeKeys.push(c.m);
@@ -14732,6 +14805,7 @@ Object.assign(module.exports, { endlessDispute });   // cloud audit Q317 endless
 Object.assign(module.exports, { noteOwnStarts, hasOwnStart, OWN_START_CAP });   // cloud audit Q69 own-record evidence for leaver verdicts
 Object.assign(module.exports, { resultRecOf, keptKeys, keptSeal, keptOpen, keptKeep, keptRecords, KEPT_REC_MAX_MS, KEPT_REC_CAP, KEPT_TAG, SETTLE_MAGIC });   // cloud audit Q373 a held group's results kept against shard rotation (test/kept-held-records.js)
 Object.assign(module.exports, { leaverXpRecordOnlyUntil, LEAVER_XP_RECORD_ONLY, LEAVER_XP_RECORD_ONLY_MAX_MS });   // M194 / W57 demo Next Fest: leaves recorded, XP not discounted
+Object.assign(module.exports, { leaverSwitchUntil, LEAVER_XP_RECORD_ONLY_CHANNELS, leaverLpFineOf, LEAVER_LP_EASY_ON, LEAVER_LP_FINE });   // O777 launch week: + the main channel, window leaves marked, ranked leave fine
 Object.assign(module.exports, { leaverEntry, noteLeave, unnoteLeave, leaverWindowOf, leaverFactorOf, noteFinish });   // O717 N2: the leave window
 Object.assign(module.exports, { NL_OPP_CAP, NL_REPEAT });   // cloud audit Q161 named-only losing seats counted on the account
 Object.assign(module.exports, { PAIR_DISPUTE, pairDispute1v1, pairDisputeTable, pairDisputeCount, SANITY_HOST_SLUGS, SANITY_HEADER_SLUGS, sanityHeaderHeld, sanityWriterFaults });   // cloud audit Q289 / Q290 / Q291 / Q292 a key of two voices whose writers disagree

@@ -183,6 +183,15 @@ jobs:
           # campaign endless (Gold Rush) mass-anomaly mail (same inbox as the seedcap alert; unset = warning only)
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           FB_DIGEST_TO: ${{ secrets.FB_DIGEST_TO }}
+          # O777 (2026-11-09, user ruling under architecture decision 10): the full game's launch week (EA 2026-11-17). Until
+          # this instant a leave is recorded (leavers.json, marked as a window leave) but does not discount XP, quick and ranked
+          # alike, and the leaves marked in it stay uncounted afterwards; a ranked leave is fined LEAVER_LP_EASY instead of 100
+          # (validate.js leaverXpRecordOnlyUntil / leaverLpFineOf: strict ISO-8601 UTC, at most 31 days ahead, main channel
+          # only for the fine). After it both come back by themselves -- these lines need no removal. test/channel-workflows.js
+          # allows these keys here (and the XP one on the demo twin) and nowhere else.
+          LEAVER_XP_RECORD_ONLY_UNTIL: '2026-11-24T03:17:00Z'
+          LEAVER_LP_EASY: '50'
+          LEAVER_LP_EASY_UNTIL: '2026-11-24T03:17:00Z'
         run: node validate.js
       - name: persist
         id: persist
