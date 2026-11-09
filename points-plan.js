@@ -459,7 +459,7 @@
     //   20 % 20, 10 % 30, 4 % 63; trial solo n 318 (capped at 20) -- top 80 % 2, 60 % 7, 35 % 14. Bronze is 2 (0.7 x the top-80 %
     //   best of 2..3); the team lines are solo x 1.6 (trial team bests sit far above them, the lines stay loose).
     // O781 (client 2026-11-09, ships with the EA package): the competitive endless curve got a deep wall (past level 30 the goal ratio
-    //   climbs 25 per mille a level up to 1500; teams pay x1.06 / 1.12 / 1.18 for 2 / 3 / 4 seats, phased in over levels 10..30). Before
+    //   climbs 25 per mille a level up to 2000; teams pay x1.06 / 1.12 / 1.18 for 2 / 3 / 4 seats, phased in over levels 10..30). Before
     //   it a player averaging 70 % of the field never hit a wall, so the top lines only measured play time. The lines keep their level
     //   up to platinum (levels 30 and under did not change for one seat) and the diamond / master / grandmaster lines move under the new
     //   wall: each depth the old curve put a constant-efficiency player at maps to that player's wall on the new one (the client's
