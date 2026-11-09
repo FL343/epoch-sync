@@ -291,9 +291,12 @@ if (fine(ref) && L.length === 12) {
   eq('[2] r2-r5: the others as before -- F (500) retried by every settling run, H / J settle (r3 writes H\'s XP / rating / CP)', [[2, 3, 4, 5].map((i) => setTo(L[i], F).length), boardsTo(L[3], H)], [[1, 1, 0, 1], [XP, RT, CP]]);
   eq('[2] r2-r5: the waiting writes stay as they were (value, first failure, tries)', [pk(L[5], G1).xw, pk(L[5], G2).w].map((x) => x && [x.v, x.n]), [[450, 1], [2620, 4]]);
   // r6: G1 owns the app again and settles: his waiting writes go with it and land
-  eq('[2] r6 (G1 settles, owns the app again): the mark cleared, his waiting best (not a board his 1V1 writes) sent with his rating / XP / CP -- XP and CP counted on the waiting 450 / 20',
-    [setTo(L[6], G1), sumO775(L[6]), heldLine(L[6])], [[{ b: RT, s: ref.b[RT][G1].score }, { b: XP, s: 765 }, { b: CP, s: 40 }, { b: EN, s: EW1 }], '0 / 4 / 1', ['4/1']]);
-  eq('[2] r6: everything landed -- his entry gone (mark and writes), the boards hold them', [pend(L[6], G1), ref.b[EN][G1].score, ref.b[XP][G1].score, ref.b[CP][G1].score], [null, EW1, 765, 40]);
+  //   (CP: his first settle in r1 found no wallet row -> the one-shot starter CP (O789 (1), every channel) + 20; that write
+  //   answered 27 and waited as 60 + 20 -- laid back in here, he is not seeded a second time: + 20 = 100)
+  const CP6 = v.PT_SEED_CP + 20 + 20;
+  eq('[2] r6 (G1 settles, owns the app again): the mark cleared, his waiting best (not a board his 1V1 writes) sent with his rating / XP / CP -- XP and CP counted on the waiting 450 / starter ' + v.PT_SEED_CP + ' + 20 (no second seed)',
+    [setTo(L[6], G1), sumO775(L[6]), heldLine(L[6])], [[{ b: RT, s: ref.b[RT][G1].score }, { b: XP, s: 765 }, { b: CP, s: CP6 }, { b: EN, s: EW1 }], '0 / 4 / 1', ['4/1']]);
+  eq('[2] r6: everything landed -- his entry gone (mark and writes), the boards hold them', [pend(L[6], G1), ref.b[EN][G1].score, ref.b[XP][G1].score, ref.b[CP][G1].score], [null, EW1, 765, CP6]);
   // r7-r10: G2, a day after each 27
   eq('[2] r7 (a day later, quiet): G2 tried once -- the first retry answered 27 marks him again, his other waiting writes stay home with it', [setTo(L[7], G2), sumO775(L[7]), !!pk(L[7], G2).gone], [[{ b: PT, s: 2620 }], '1 / 3 / 0', true]);
   eq('[2] r8: held again', [setTo(L[8], G2), sumO775(L[8])], [[], '0 / 4 / 0']);

@@ -289,6 +289,10 @@ const CONCURRENCY = Math.max(1, Number(process.env.CONCURRENCY || 8));
 //  * PT_SEED_CP: one-shot starter wallet for first-seen players. This channel earns CP only
 //    during forced quick windows, but the endless continue economy still needs exercising --
 //    the flat grant funds a couple of continues without touching the live earn rates.
+//    O789 (1) (2026-11-09, EA gap audit 2 E-02; user ruling: give the 60, ship it during S0): the live channel seeds it too
+//    (seedStarterCp, no PT_MODE gate since) -- CP comes only from matchmade games and the competitive endless
+//    milestones, and 95% of the trial's players never played a matchmade game, so the 20 CP resume and the casual
+//    continue stayed grey for them. The name stays PT_SEED_CP (the companion repo's playtest-gate pins this line).
 const PT_MODE = process.env.PT_MODE === '1';
 const PT_MT_ALLOWED = [1, 3, 5, 7, 8, 10, 11];   // lockstep: client MATCHTYPE_CODE quick=1(+team offsets 3/5/8), endless=7 (O82: 8 = quick 3V3), private=10 (O140 friend-room XP), bots=11 (O156 bot-match XP lane)
 const PT_SEED_CP = Math.max(0, Number(process.env.PT_SEED_CP || 60));
@@ -515,7 +519,10 @@ function absenceHold(absent, pend, now, complete, graceMs) {
 // with every level at its longest clock (90 s) and every possible overtime, every shop / slot / gamble barrier at its
 // timeout, two host migrations and a reconnect stays under about 30 min; a 9-level 2V2 friend room the same way, about
 // 41 min; a failed upload retries for up to 2 min more. The job sees a start record no earlier than it was written, so
-// waiting from the first read only adds margin. Hence 60 min, floor 45 min. Seats named by the others only
+// waiting from the first read only adds margin. Hence 60 min, floor 45 min. (O792, 2026-11-09: friends' rooms run up to 30
+// levels since client O772 -- past 60 min a made-up early result there can still settle around a seat still playing, which
+// costs that seat the room's XP only (no leaver lane on a friends' room); left for O772 part 2, the sanity duration bound
+// scales already: durCapOf.) Seats named by the others only
 // (Q69), seats whose record was seen agreeing (pend.agreed, filtered by the caller) and players who confessed are not
 // waited for: none of them can be framed by an early result.
 // The absent seats come from the result's own roster, and the made-up result is written by the framers: they can leave
@@ -2245,7 +2252,7 @@ function rankConflictHeld(g) {
 const SANITY = {
   SCORE_CAP: Number(process.env.SANITY_SCORE_CAP || 450000),     // re-derived 2026-09-16 (client knife 3.9 second-stage wheel): see the NOTE block below
   SCORE_FLOOR: Number(process.env.SANITY_SCORE_FLOOR || -50000), // shop overdraft is legal (classic rule) but bounded by shop prices
-  DUR_CAP: Number(process.env.SANITY_DUR_CAP || 7200),           // a 5-level match is ~10-25 min; forced settles can be short, garbage is huge
+  DUR_CAP: Number(process.env.SANITY_DUR_CAP || 7200),           // a 5-level match is ~10-25 min; forced settles can be short, garbage is huge (a friends' room: durCapOf, O792)
   // minimum REAL time between a match's start attestation being first sighted and its settle
   // group becoming eligible. This is the cron's OWN wall clock (starts.json t0), not any
   // client-reported duration -- a speed hack or a forged durationSec cannot move it. A full
@@ -2253,7 +2260,30 @@ const SANITY = {
   // a fabricated start+settle batch has to sit out the minimum in pending first.
   MIN_START_AGE_MS: Number(process.env.SANITY_MIN_START_AGE_MS || 300000),
   MT_ALLOWED: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],               // quick/ranked x brawl/team1/mode2 + endless co-op + O82 3V3 (8/9 joined with the 6P matchmaking client gate) + O140 private friend rooms (10, XP-only track) + O156 bot matches (11, XP-only track)
+  // O792 (2026-11-09, EA gap audit 2 C-04): a friends' room (mt 10) runs up to PRIVATE_LEVELS_MAX levels since client O772 (was
+  //   3/6/9), and DUR_CAP was derived from 9 of them (a 9-level 2V2 room at every timeout ~41 min, see the leave-confirm note).
+  //   Past the cap a record is dropped AND its writer flagged (a forgery signal) -- an honest 30-level room with migrations and
+  //   reconnects would have been. durCapOf scales the friends' room bound with its levels (below). PRIVATE_LEVEL_S = the worst
+  //   case of one more level, generously: the matchmade 7 levels (~30 min) -> the 9-level 2V2 room (~41 min) adds ~3.7 min a
+  //   level at every clock / overtime / shop / slot / gamble timeout, and 41 min / 9 levels taken flat is ~4.6 min; 6 min leaves
+  //   room for migrations / reconnects late in a long room and the extra gamble rounds it is due to get (O772 part 2). Wider is
+  //   free here (duration pays nothing, see durCapOf), narrower would flag the honest. 30 levels + a sudden-death level:
+  //   31 x 360 s = 186 min (41 min / 9 levels extrapolated flat to 31 levels: ~141 min; test/private-dur-cap.js pins >= 10% margin).
+  PRIVATE_LEVELS_MAX: 30,   // lockstep: client ROOM_LEVEL_OPTS max (private-lobby.js / couch.js), pinned by the companion ledger-schema-lockstep section 12
+  PRIVATE_LEVEL_S: 360,
 };
+// O792: the duration bound of ONE record (sanityFlags / recordSanityFlags). A friends' room's record carries the levels it played
+//   in d[7] >> 1 (client result-reporter: clamped to 4 bits, = PRIVATE_XP.progMax 15 = "15 or more"); 0 (a record from before the
+//   progress field) or the clamp reads as the room maximum. Bound: those levels + 1 (a team room's sudden-death level) at
+//   PRIVATE_LEVEL_S each, never below DUR_CAP. Every other code keeps DUR_CAP (endless takes no cap at all: the callers skip it).
+//   Duration is a sanity signal only -- XP / CP / ladders never read it (career time has its own cap) -- so the wider bound pays
+//   a forger nothing.
+function durCapOf(base, d) {
+  if (base !== PRIVATE_XP.MT) return SANITY.DUR_CAP;
+  const p = ((d && d[7]) | 0) >> 1;
+  const lv = (p >= 1 && p < PRIVATE_XP.progMax) ? p : SANITY.PRIVATE_LEVELS_MAX;
+  return Math.max(SANITY.DUR_CAP, (lv + 1) * SANITY.PRIVATE_LEVEL_S);
+}
 // O716: the bases a ranked-seat mask may ride on = the matchmade quick family (brawl 1, team brawl 3, 2V2 5, 3V3 8); one queue
 //   writes every matchmade table on it, ranked seats in the mask (sanityFlags)
 const SEAT_MASK_BASES = [1, 3, 5, 8];
@@ -2894,6 +2924,9 @@ async function readRecoverRows(cfg, listing) {
 // variants top out lower: x2 / x3 plus a x10 wheel on a 30% stake <= 3.7B). SCORE_FLOOR stays -50k
 // for FFA codes: a losing wager costs at most 2x a 30% stake, so the bank stays >= 0.4B - 10, and the
 // shop overdraft bound is unchanged. Team-scored codes take a scaled floor (see TEAM2).
+// Re-derived 2026-11-09 (O792, client O772: friends' rooms 3..30 levels, was 3/6/9): the friends' room duration bound scales
+// with the record's levels (durCapOf, 31 x 360 s at the most); SCORE_CAP stands (still one mid-run gamble round a match --
+// O772 part 2's extra rounds must re-derive it); MIN_START_AGE only gets safer. The companion lockstep pins ROOM_LEVEL_OPTS max.
 // Mode-2 (5/6) keeps the same duration cap
 // (6 rounds + gamble + at most one sudden-death level is the same order of play time) but takes a
 // x3 score headroom for the gamble round (TEAM2 above). The client repo pins these assumptions in
@@ -3021,7 +3054,7 @@ function sanityFlags(g) {
     const dur = r.d[9] | 0, seat = r.d[5] | 0;
     // endless sessions legitimately run for hours (and resume across days) -- no duration cap
     // there; real elapsed time is enforced by the pacing gate against this job's own clock.
-    if (dur < 0 || (base !== ENDLESS.MT && dur > SANITY.DUR_CAP)) { out.push('duration'); break; }
+    if (dur < 0 || (base !== ENDLESS.MT && dur > durCapOf(base, r.d))) { out.push('duration'); break; }   // O792: a friends' room scales with its levels
     if (seat < 0 || seat >= pc) { out.push('seat'); break; }
     const roster = r.roster || {};
     // the writing account is unforgeable (leaderboard entry owner) -- a roster that puts
@@ -3110,7 +3143,7 @@ function sanityHeaderHeld(g, sane, sp) {
 function recordSanityFlags(r, base, pc) {
   const out = [];
   const dur = r.d[9] | 0, seat = r.d[5] | 0, roster = r.roster || {};
-  if (dur < 0 || (base !== ENDLESS.MT && dur > SANITY.DUR_CAP)) out.push('duration');
+  if (dur < 0 || (base !== ENDLESS.MT && dur > durCapOf(base, r.d))) out.push('duration');   // O792
   if (seat < 0 || seat >= pc) out.push('seat');
   if (roster[seat] != null && String(roster[seat]) !== String(r.steamID)) out.push('self-seat');
   else if (base === BOT_XP.MT && pc >= 2 && pc <= 6 && roster[seat] == null) out.push('self-seat');   // bot lane: the writer must name himself
@@ -8388,17 +8421,22 @@ function eloDeltas(parts, mmr) {
   return delta;
 }
 
-// One-shot starter wallet (playtest channel): a first-seen participant gets a flat CP baseline
-// before any earn/debit applies. "First seen" == no wallet-board entry (cp[sid] == null after the
-// complete/on-demand base reads); once written the entry exists forever (a zero or negative
-// balance keeps its entry), so the grant structurally cannot repeat. Returns seeded count.
-function ptSeedCp(cp, changedCp, sids) {
+// One-shot starter wallet (every channel since O789 (1), 2026-11-09; the playtest / demo jobs had it from the start): a
+// first-seen participant gets a flat CP baseline before any earn/debit applies. "First seen" == no wallet-board entry
+// (cp[sid] == null after the complete/on-demand base reads; a failed read throws, it never reads as "no entry"); once
+// written the entry exists forever (a zero or negative balance keeps its entry; nothing in this job deletes a wallet row),
+// so the grant structurally cannot repeat. A seed write that failed waits in the backlog (cw, Q318) and is laid back in
+// before the next settle (rowPendingSids reaches the account through its records), so it is not seeded twice either.
+// The live launch wipe (companion pre-launch-wipe.js, D16) clears cp_bank with the test accounts' rows: every account is
+// first-seen again at launch and the real players get it once. PT_SEED_CP 0 = off (writes nothing). Returns seeded count.
+function seedStarterCp(cp, changedCp, sids) {
+  if (!(PT_SEED_CP > 0)) return 0;
   let n = 0;
   for (const sid0 of sids) {
     const sid = String(sid0);
     if (cp[sid] != null) continue;
     cp[sid] = PT_SEED_CP; changedCp[sid] = PT_SEED_CP; n++;
-    console.log('  pt starter cp ' + plog(sid) + ' = +' + PT_SEED_CP);
+    console.log('  starter cp ' + plog(sid) + ' = +' + PT_SEED_CP);
   }
   return n;
 }
@@ -12490,7 +12528,7 @@ async function main() {
     // ---- settle ----
     const day = sigDay(signals, nowMs); day.n[p] = (day.n[p] || 0) + 1;
     recordEndlessSignals(signals, [sid], nowMs); sigDirty = true;
-    if (PT_MODE) ptSeedCp(cp, changedCp, [sid]);
+    seedStarterCp(cp, changedCp, [sid]);   // O789 (1): every channel (cpId resolved: the lane returned above without it)
     const run = soloAdvance(soloState, key, f, m, plan, nowMs);
     if (untaggedResume(f)) RUN.resumeUntagged = (RUN.resumeUntagged | 0) + 1;
     if (plan.consume) {
@@ -12607,7 +12645,7 @@ async function main() {
       const pfL = xpProgressFrac(matchProgressOf(g));
       if (xpId) creditXp(gQ, mtL, scL, rankL, xp, changedXp, xpState, leavers, today, pfL, careerDet, spSet, { t0: seqStartMs(seq, c.m, L.t || nowMs), nowMs, absentSeats: new Set() });   // Q346: a class first seen together in his own order
       if (xpId) creditCareerMatch(gQ, mtL, rankL, xpState, careerTouched);
-      if (PT_MODE && cpId) ptSeedCp(cp, changedCp, [L.o]);
+      if (cpId) seedStarterCp(cp, changedCp, [L.o]);   // O789 (1): every channel
       if (cpId) creditCp(gQ, mtL, rankL, cp, changedCp);
       recordMatchSignals(signals, g, partsL, c.void ? null : rankL, mtL, !!c.void, nowMs); sigDirty = true;   // a void consensus as the normal settle records it
       qst.qlPaid = 1;
@@ -13013,7 +13051,7 @@ async function main() {
         //   time, whoever is behind on the chain)
         if (writerPaced(c.m, writerSids, pendT.t0, reqT)) continue;
         const xpFrom = teamXpStarts(runT0, g, f, plan.proven);   // Q237: read before the head moves
-        if (PT_MODE) ptSeedCp(cp, changedCp, [...new Set(ownRosterSids.concat(writerSids))]);
+        seedStarterCp(cp, changedCp, [...new Set(ownRosterSids.concat(writerSids))]);   // O789 (1): every channel (cpId resolved above)
         if (!catchUp) {   // Q237: a catch-up re-counts no run (signals) and leaves the chain as the reject would have
           const dayT = sigDay(signals, nowMs);
           for (const sid of writerSids) dayT.n[pid(sid)] = (dayT.n[pid(sid)] || 0) + 1;
@@ -13116,10 +13154,10 @@ async function main() {
                                                               //   sit on the roster now, endlessRosterHold; an empty vote paired outside accounts)
       sigDirty = true;
       namedOnlyAt('endless');
-      // playtest starter wallet: seed BEFORE the debit replay so a first run with continues
+      // starter wallet (every channel, O789 (1)): seed BEFORE the debit replay so a first run with continues
       // debits from the starter baseline, not into synthetic debt. Roster seats included when
       // they wrote an own record for the run: a debit targets them whether or not they settled.
-      if (PT_MODE) ptSeedCp(cp, changedCp, [...new Set(ownRosterSids.concat(writerSids))]);
+      if (cpId) seedStarterCp(cp, changedCp, [...new Set(ownRosterSids.concat(writerSids))]);
       // CP debit per seat (canonical nibble replay). Targets the consensus ROSTER -- writing no
       // settle record does not dodge a debit both ends witnessed. Debt is kept (no clamp): clamping
       // would forgive a forged continue, and a legit balance can only dip negative transiently
@@ -13565,9 +13603,9 @@ async function main() {
       { t0: seqStartMs(seq, c.m, pend.t0 || nowMs), nowMs, absentSeats: new Set(absentNow.map((x) => x.seat | 0)) }, !!c.quitLone);   // O181: the streak orders by the match's start (Q346: a class first seen together in its players' own order); W103: the quit-lone floor
     if (xpId) creditCareerMatch(g, matchType, rankX, xpState, careerTouched);   // 5.4a career matrix (mode x character; W/L in quick / ranked cells; Q264: rankX, his win as his XP / CP read it)
     // CP (the endless-economy wallet) earns from matchmade records on the same credit classes.
-    // Playtest starter wallet first: writers only (a leaver whose first-ever appearance is the
+    // Starter wallet first (every channel, O789 (1)): writers only (a leaver whose first-ever appearance is the
     // leave itself earns the baseline on their first finished game instead).
-    if (PT_MODE && cpId) ptSeedCp(cp, changedCp, writerSids);
+    if (cpId) seedStarterCp(cp, changedCp, writerSids);
     if (cpId) creditCp(g, matchType, rankX, cp, changedCp);
     if (c.void) {
       recordMatchSignals(signals, g, live, null, matchType, true, nowMs); sigDirty = true;   // co-presence + void counters (dodge-ring history)
@@ -14768,7 +14806,7 @@ async function main() {
 if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
-module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CLASSIC_OWNERS: classicOwners.CLASSIC, CLASSIC_FILE, CHAT_MUTE: chatMute.CHAT_MUTE, CHAT_MUTE_FILE, CHAT_MUTE_LB, CHAT_REPORT_LB, isVoidDisp, voidByConsensus, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, RS_SOLO_VS_TRIO, RS_TRIO_WIN, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, DISPUTE_FLOOR, disputeFloorOf, disputeFloorAdmit, disputeFloorXp, CONSOLE_OWED, owedTag, owedItem, owedItemXp, owedRefund, owedUnsent, consoleOwedTake, consoleOwedPlan, consoleOwedRebase, CONFESS_MAGIC, NOTE_MAGIC, NOTE_DISP, reconcileConfessions, SANITY, sanityFlags, sanitySplit, recordSanityFlags, SANITY_RECORD_SLUGS, SANITY_ROSTER_SLUGS, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, rekeyReports, repKeysReady, REP_KEYS, REP_KEYS_VER, CHAT_KEYS, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, trustIndex, TRUST_T, TRUST_LB, TRUST_REJ_BIT, SHADOW_POOL, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan, postForm, postFormDetails, findOrCreateBoard, isTestBoardName, sandboxOn, ghWarn, ghErr, PT_MODE, PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, ACTIVE_MATCH_LB, ptSeedCp, ptBoardPlan, PRIVATE_XP, isPrivateMt, privateProgressOf, creditXpPrivate, BOT_XP, isBotMt, botTierOf, botTierMult, botSeatSplit, botRanksOf, botRankEffOf, botXpGain, botProgressOf, creditXpBot, DEMO_APPID, ENDLESS_XP, computeXpEndless, creditXpEndless, CAMPAIGN_LB, SEEDCAP_REJECT_LADDER_MIN, seedcapRejectWindowMin, seedcapRejectUntilMin, seedcapRejectActive, seedcapNEff,
+module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CLASSIC_OWNERS: classicOwners.CLASSIC, CLASSIC_FILE, CHAT_MUTE: chatMute.CHAT_MUTE, CHAT_MUTE_FILE, CHAT_MUTE_LB, CHAT_REPORT_LB, isVoidDisp, voidByConsensus, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, RS_SOLO_VS_TRIO, RS_TRIO_WIN, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, DISPUTE_FLOOR, disputeFloorOf, disputeFloorAdmit, disputeFloorXp, CONSOLE_OWED, owedTag, owedItem, owedItemXp, owedRefund, owedUnsent, consoleOwedTake, consoleOwedPlan, consoleOwedRebase, CONFESS_MAGIC, NOTE_MAGIC, NOTE_DISP, reconcileConfessions, SANITY, sanityFlags, sanitySplit, recordSanityFlags, SANITY_RECORD_SLUGS, SANITY_ROSTER_SLUGS, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, rekeyReports, repKeysReady, REP_KEYS, REP_KEYS_VER, CHAT_KEYS, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, trustIndex, TRUST_T, TRUST_LB, TRUST_REJ_BIT, SHADOW_POOL, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan, postForm, postFormDetails, findOrCreateBoard, isTestBoardName, sandboxOn, ghWarn, ghErr, PT_MODE, PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, ACTIVE_MATCH_LB, seedStarterCp, ptBoardPlan, PRIVATE_XP, isPrivateMt, privateProgressOf, creditXpPrivate, BOT_XP, isBotMt, botTierOf, botTierMult, botSeatSplit, botRanksOf, botRankEffOf, botXpGain, botProgressOf, creditXpBot, DEMO_APPID, ENDLESS_XP, computeXpEndless, creditXpEndless, CAMPAIGN_LB, SEEDCAP_REJECT_LADDER_MIN, seedcapRejectWindowMin, seedcapRejectUntilMin, seedcapRejectActive, seedcapNEff,
   ENDLESS_COMP_LB, SAVE_BOX_LB, SOLO_FILE, COMP, soloSanity, soloChainPlan, rerollChain, soloMilestones, soloAdvance, soloRunKey, soloRunKind, soloRunKept, soloRunSeason, seasonEndMs, pruneSolo, soloStartAttested, loadSolo, saveSolo, segOrderOf, segStartOf, freshOrder, freshOrderPaced, freshSeqPlan, seqStartMs, seqKeptLag, seqKeep, seqAddKept, SEQ_KEPT_MAX, writerReadyAt, writerClaim,
   ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, SAVE_BOX_LB_DUO, SAVE_BOX_LB_TRIO, teamRunKey, soloMsSlot, groupRecords, nosumVerdict, DISP_NOSUMMARY, isFinishDisp,
   ENDLESS_COMP_LB_QUAD, SAVE_BOX_LB_QUAD, ENDLESS_LB_QUAD, ENDLESS_MAX_PC, compFamKeyOf,   // client knife 3.7a (O178 four seats)
@@ -14811,6 +14849,7 @@ Object.assign(module.exports, { NL_OPP_CAP, NL_REPEAT });   // cloud audit Q161 
 Object.assign(module.exports, { PAIR_DISPUTE, pairDispute1v1, pairDisputeTable, pairDisputeCount, SANITY_HOST_SLUGS, SANITY_HEADER_SLUGS, sanityHeaderHeld, sanityWriterFaults });   // cloud audit Q289 / Q290 / Q291 / Q292 a key of two voices whose writers disagree
 Object.assign(module.exports, { ffaPlaceOf, ffaLowerHalf });   // cloud audit Q174 named-only lower-half FFA seats counted on the account
 Object.assign(module.exports, { leaveConfirmHold, startRosterGaps, LEAVE_CONFIRM_MS, LEAVE_CONFIRM_MIN_MS });   // cloud audit Q121 leave confirmation
+Object.assign(module.exports, { durCapOf });   // O792 a friends' room's duration bound scales with its levels
 Object.assign(module.exports, { LATE_RESULT_MS, LATE_CAP, lateShadow });   // cloud audit Q228 a convicted leave whose own result comes in late
 Object.assign(module.exports, { rosterContestSeats, applyRosterContest, seatLayout, seatLayoutsDisagree });   // cloud audit Q75 one account per seat per match key (+ Q80 third review seat layout)
 Object.assign(module.exports, { registerStartRosters, startRosterSplit, rosterCanon, startRosterDisagrees, seatGateRoster, seatedOnRoster, applySeatGate });   // cloud audit Q80 seat gate

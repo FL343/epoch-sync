@@ -158,7 +158,10 @@ const HON = [7000, 4000];   // seat 0 won 7000 to 4000, both write it
 // the world: the shard records written so far (they stay up) and the trusted boards as Steam keeps them (score + details),
 //   carried from run to run; redeem wants (client-written) as seeded
 function world(script, seed) {
-  const w = { recs: [], b: { [XP]: {}, [CP]: {}, [GT]: {} }, want: {}, state: null, log: [], script: script || null };
+  // the three players hold an empty wallet row: a first-seen account takes the one-shot starter CP on every channel since
+  //   O789 (1) (test/starter-cp.js; test/pending-writes-gone.js shows a failed seed write waiting and landing once) -- here the
+  //   wallet sums stay the settle's own
+  const w = { recs: [], b: { [XP]: {}, [CP]: { [H]: { score: 0 }, [J]: { score: 0 }, [K]: { score: 0 } }, [GT]: {} }, want: {}, state: null, log: [], script: script || null };
   for (const bid of Object.keys((seed && seed.b) || {})) Object.assign(w.b[bid], seed.b[bid]);
   if (seed && seed.files) w.state = JSON.parse(JSON.stringify(seed.files));
   return w;

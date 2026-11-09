@@ -6,7 +6,7 @@ const path = require('path');
 const fs = require('fs');
 const cp = require('child_process');
 const v = require(path.join(__dirname, '..', 'validate.js'));
-const { PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, ptSeedCp, ptBoardPlan, appliesLp, SANITY } = v;
+const { PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, seedStarterCp, ptBoardPlan, appliesLp, SANITY } = v;
 
 let failN = 0;
 const ok = (m) => console.log('  ok    ' + m);
@@ -41,10 +41,10 @@ T('PT mode flags ranked team (mt=4)', childFlags(4, true).indexOf('mt') >= 0);
 T('PT mode admits quick (mt=1)', childFlags(1, true).indexOf('mt') < 0);
 T('live mode still admits ranked (mt=2) — narrowing is channel-only', childFlags(2, false).indexOf('mt') < 0);
 
-// ---- 3) starter-CP seeding ----
+// ---- 3) starter-CP seeding (every channel since O789 (1); the live-channel half is test/starter-cp.js) ----
 {
   const cpMap = { a: 120, b: 0, c: -40 }, changed = {};
-  const n = ptSeedCp(cpMap, changed, ['a', 'b', 'c', 'd', 'e', 'd']);
+  const n = seedStarterCp(cpMap, changed, ['a', 'b', 'c', 'd', 'e', 'd']);
   eq('seeds only first-seen (null entries)', n, 2);
   eq('new player seeded to the baseline', cpMap.d, PT_SEED_CP);
   eq('seed lands in the write pool', changed.e, PT_SEED_CP);
@@ -100,9 +100,9 @@ pin('points-board strict gate channel-aware', /if \(!lpId && !PT_MODE\) \{ stric
 pin('env: rating/points names optional on the channel', /if \(!RANKED_LB && !PT_MODE\) missing\.push/);
 pin('bootstrap refuses on forbidden boards', /forbidden board\(s\) exist on this app[\s\S]{0,200}?process\.exit\(1\)/);
 pin('bootstrap create failure is fatal (fail-closed provisioning)', /playtest bootstrap: board create failed[\s\S]{0,120}?process\.exit\(1\)/);
-pin('endless starter seed covers the roster seats that can be debited (own record for the run, Q78)', /if \(PT_MODE\) ptSeedCp\(cp, changedCp, \[\.\.\.new Set\(ownRosterSids\.concat\(writerSids\)\)\]\)/);
-T('pin: no starter seed over the bare named roster (a seat only the writers name is never seeded, Q78)', !/ptSeedCp\(cp, changedCp, \[\.\.\.new Set\(rosterSids\.concat/.test(src));
-pin('matchmade starter seed covers writers', /if \(PT_MODE && cpId\) ptSeedCp\(cp, changedCp, writerSids\)/);
+pin('endless starter seed covers the roster seats that can be debited (own record for the run, Q78)', /if \(cpId\) seedStarterCp\(cp, changedCp, \[\.\.\.new Set\(ownRosterSids\.concat\(writerSids\)\)\]\)/);
+T('pin: no starter seed over the bare named roster (a seat only the writers name is never seeded, Q78)', !/seedStarterCp\(cp, changedCp, \[\.\.\.new Set\(rosterSids\.concat/.test(src));
+pin('matchmade starter seed covers writers', /if \(cpId\) seedStarterCp\(cp, changedCp, writerSids\)/);
 
 // ---- 6) workflow pins (the job must actually run the channel it claims) ----
 const wf = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'playtest.yml'), 'utf8');

@@ -303,7 +303,10 @@ way for a board the listing still counts as non-empty), `READ_RETRY_MS` (base ba
 between board read retries, default 8 s; tests set 0),
 `STARTS_FILE` (pending-starts state path, default `starts.json`),
 `SANITY_SCORE_CAP` / `SANITY_SCORE_FLOOR` / `SANITY_DUR_CAP` / `SANITY_MIN_START_AGE_MS`
-(sanity bounds + pacing gate; generous defaults, tighten only with real-traffic data),
+(sanity bounds + pacing gate; generous defaults, tighten only with real-traffic data; a friends'
+room's duration bound scales with the levels its record played, `durCapOf`), `PT_SEED_CP` (the
+one-shot starter wallet of an account the job has never seen on the CP board, every channel,
+default 60, `0` = off),
 `SIGNALS_FILE` / `SIG_PAIR_WINDOW_MS` / `SIG_PLAYER_WINDOW_MS` / `SIG_PAIRS_CAP`
 (signal-collection state path, rolling windows, size fuse),
 `GROUPS_FILE` (repeat-group decay state path, default `groups.json`),

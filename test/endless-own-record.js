@@ -234,7 +234,7 @@ for (const withStarts of [false, true]) {
   const p = play([{ sid: A, d: settle7(h, 0, ros, 0xF00) }, { sid: B, d: settle7(h, 1, ros, 0xF00) }], [], { pt: true, env: PT_ENV });
   T('[6] all runs exit 0', allZero(p), p.last.out.slice(-800));
   T('[6] the frame seeds V nothing and charges him nothing', cpWrites(p, V).length === 0, JSON.stringify(cpWrites(p, V)));
-  T('[6] the writers are still seeded (their own records)', /pt starter cp [0-9a-f]+ = \+60/.test(p.all));
+  T('[6] the writers are still seeded (their own records)', /starter cp [0-9a-f]+ = \+60/.test(p.all));
   const C1 = SID(164), C2 = SID(165), C = SID(166);
   const ros2 = [C1, C2, C], h2 = 0x7808;
   const q = play([{ sid: C1, d: settle7(h2, 0, ros2, 0x200) }, { sid: C2, d: settle7(h2, 1, ros2, 0x200) },

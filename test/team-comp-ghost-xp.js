@@ -272,7 +272,8 @@ console.log('-- [4] the run\'s FINAL on the next level --');
 function caseFinal(script) {
   const ros = TRIO(30), [A, B, C] = ros;
   const S0 = seg(0x2390, ros, 0, 5), G = seg(0x2391, ros, 5, 8, SEG_SUSPENDED, [B, C]), F = seg(0x2392, ros, 5, 8, SEG_FINAL);
-  const p = timeline([S0, S0, S0.concat(G), S0.concat(G), S0.concat(G, F), S0.concat(G, F)], [A], null, script);
+  // all three hold a wallet row: a first-seen seat takes the one-shot starter CP on every channel since O789 (1)
+  const p = timeline([S0, S0, S0.concat(G), S0.concat(G), S0.concat(G, F), S0.concat(G, F)], ros, null, script);
   return { p, ros, A, B, C, m: [keyOf(0x2390), keyOf(0x2391), keyOf(0x2392)] };
 }
 const c4 = caseFinal();
