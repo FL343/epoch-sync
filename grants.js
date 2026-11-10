@@ -83,7 +83,7 @@ function versusRankItems(peak) {
   GRANTS.RANK_TIERS.forEach(([, min], i) => { if ((peak | 0) >= min) out.push(GRANTS.RANK_VERSUS_BASE + i); });
   return out;
 }
-// endless rank items for the best tier key over the families (null = unrated)
+// endless rank items for the best tier key over the rows read (this season's and last season's; null = unrated)
 function endlessRankItems(tier) {
   const at = ENDLESS_TIER_ORDER.indexOf(tier);
   const out = [];
@@ -91,7 +91,8 @@ function endlessRankItems(tier) {
   return out;
 }
 // O728: the endless tier a points row reached -- the tier of the highest points over the receipts still on the row (as the versus
-//   peak); score / det = the row's score and decoded details; a row of another layout (the O103 rating rows) = null (unrated)
+//   peak); score / det = the row's score and decoded details; a row of another layout (the O103 rating rows, the per-family rows
+//   before O825) = null (unrated)
 function endlessTierOf(score, det) {
   const row = pp.elpRowOf(det);
   if (!row || !row.placed) return null;
@@ -270,13 +271,14 @@ async function run(opts) {
   cands = cands.slice(0, GRANTS.MAX_PLAYERS_PER_RUN);
 
   // result sources: this season's points board (+ last season's, its final receipts still count), the level
-  //   board, the four endless points boards (O728: the same scale and tiers as the versus points; this season's + last season's)
+  //   board, the endless points board (O728: the same scale and tiers as the versus points; O825: ONE board, a row a player --
+  //   the four per-family boards are no longer read; this season's + last season's)
   const seasonId = v.seasonAt(nowMs);
   const lpIds = [];
   if (env.LP_LB) for (let s = seasonId; s >= Math.max(0, seasonId - 1); s--) { const id = idOf(v.seasonBoardName(env.LP_LB, s)); if (id) lpIds.push(id); }
   const xpId = env.XP_LB ? idOf(env.XP_LB) : null;
   const famIds = [];
-  for (const [fam, name] of v.RATING_FAMS) for (let s = seasonId; s >= Math.max(0, seasonId - 1); s--) { const id = idOf(v.seasonBoardName(name, s)); if (id) famIds.push([fam, id]); }
+  for (let s = seasonId; s >= Math.max(0, seasonId - 1); s--) { const id = idOf(v.seasonBoardName(v.ENDLESS_RATING_LB, s)); if (id) famIds.push(['all', id]); }
   const bulk = cands.length > 40;          // a big run reads whole boards once; a small one reads the players' own rows
   const rowsOf = async (id) => {
     if (!id) return new Map();

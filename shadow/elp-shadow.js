@@ -69,13 +69,16 @@ function lineDay(st, fam, s, nowMs, hist) {
 }
 
 // ---- O759, one family ----
+// O825: the points are ONE value a player (the entry pid|all|season); the family entry keeps the runs. The pool of a family = the
+//   players at grandmaster points who have a hidden skill in that family (their own runs); a player of two families sits in both.
 function gmPool(st, fam, s) {
   const pool = [];
   for (const { key, h } of entriesOf(st, fam, s)) {
-    if (!h.placed || h.lp == null || (h.lp | 0) < SH.GM_MIN) continue;
+    const c = V.elpAllOf(st, key, s);
+    if (!c || !c.placed || c.lp == null || (c.lp | 0) < SH.GM_MIN) continue;
     const dep = V.elpSettledDepths(h, null), H = PP.hiddenOf(dep);
     if (H == null) continue;
-    pool.push({ key, h, H, lp: h.lp | 0, full: dep.length >= ELP.WINDOW });
+    pool.push({ key, h, H, lp: c.lp | 0, full: dep.length >= ELP.WINDOW });
   }
   const eff = pool.filter((x) => x.full), pct = S.pctRanks(eff.map((x) => x.H));
   eff.forEach((x, i) => { x.pct = pct[i]; x.deserved = S.deservedOf(pct[i]); });
@@ -98,15 +101,16 @@ function gmDay(st, prevSt, fam, s, nowMs) {
   const gate = S.gateOf(eff.length, corr);
   const gaps = eff.map((x) => x.deserved - x.lp);
   // what the calibration would have done to the runs of the last day (points before each run: walked back from the
-  //   current points over the recorded changes, newest first; the deserved points are today's)
+  //   current points over the recorded changes, newest first; the deserved points are today's). O825: the points changed with the
+  //   runs of every family, so the walk goes over all of the player's settled runs (start order); only this family's runs count.
   const ifOn = { runs: 0, plus: 0, minus: 0, zero: 0, sumPlus: 0, sumMinus: 0, hist: { '1..20': 0, '21..40': 0, '41..60': 0, '-1..-10': 0, '-11..-20': 0 } };
   for (const x of eff) {
     let after = x.lp;
-    const runs = (x.h.runs || []).filter((r) => r[3]);
+    const runs = V.elpMergeByStart(V.elpFamEntries(st, x.key, s).map((e) => ({ fam: e.fam, h: e.h, runs: e.h.runs.filter((r) => r[3] === 2) })));
     for (let i = runs.length - 1; i >= 0; i--) {
-      const r = runs[i], d = r[4] | 0, before = after - d;
+      const r = runs[i].r, d = r[4] | 0, before = after - d;
       after = before;
-      if ((r[6] || r[2] || 0) < nowMs - DAY || before < SH.GM_MIN) continue;
+      if (runs[i].fam !== fam || (r[6] || r[2] || 0) < nowMs - DAY || before < SH.GM_MIN) continue;
       const e = S.extraIfOn(before, d, (r[1] | 0) >= (r[5] | 0), x.deserved);
       ifOn.runs++;
       if (e > 0) { ifOn.plus++; ifOn.sumPlus += e; ifOn.hist[e <= 20 ? '1..20' : e <= 40 ? '21..40' : '41..60']++; }

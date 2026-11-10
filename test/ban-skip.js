@@ -153,7 +153,7 @@ console.log('-- [3] pass lines without full bans (pure) --');
 }
 
 // ---- e2e harness (test/endless-cup.js / test/endless-rating.js / test/overall-ladder.js shapes) ----
-const BOARD = { cp: 8, compSolo: 14, compDuo: 16, compTrio: 13, compQuad: 17, compOverall: 18, cup: 50, honor: 51, vgate: 40, wSolo: 60, wDuo: 61, ban: 70, rSolo: 30, rDuo: 31, rTrio: 32, rQuad: 33, tiercut: 41 };
+const BOARD = { cp: 8, compSolo: 14, compDuo: 16, compTrio: 13, compQuad: 17, compOverall: 18, cup: 50, honor: 51, vgate: 40, wSolo: 60, wDuo: 61, ban: 70, rSolo: 30, rDuo: 31, rTrio: 32, rQuad: 33, rAll: 34, tiercut: 41 };
 const CARRIER = SID(777);
 const banEnt = (sid, act, expMin) => ({ steamID: sid, score: 1, details: s.banDetails(expMin | 0, act || s.ACT_FULL, '') });
 function world(recs, extra, opt) {
@@ -166,6 +166,7 @@ function world(recs, extra, opt) {
     { id: BOARD.compSolo, name: 'endless_comp_solo', entries: o.compSolo || [] }, { id: BOARD.compDuo, name: 'endless_comp_duo', entries: [] },
     { id: BOARD.compTrio, name: 'endless_comp_trio', entries: [] }, { id: BOARD.compQuad, name: 'endless_comp_quad', entries: [] },
     { id: BOARD.compOverall, name: 'endless_comp_overall', entries: o.compOverall || [] },
+    { id: BOARD.rAll, name: 'endless_rating_all', entries: o.rAll || [] },   // O825: the one points board (the four below are no longer read or written)
     { id: BOARD.rSolo, name: 'endless_rating_solo', entries: o.rSolo || [] }, { id: BOARD.rDuo, name: 'endless_rating_duo', entries: [] },
     { id: BOARD.rTrio, name: 'endless_rating_trio', entries: [] }, { id: BOARD.rQuad, name: 'endless_rating_quad', entries: [] },
     { id: BOARD.tiercut, name: 'endless_tiercut', entries: o.tiercut || [] },
@@ -244,7 +245,7 @@ function ratingWorld() {
   const rows = [];
   for (let i = 0; i < 223; i++) {
     const sid = i < 220 ? SID(1000 + i) : SID(1500 + i - 220);
-    const sc = v.ratingScoreOf(st.hist[v.ratingHistKey(v.pid(sid), 'solo', 0)]);
+    const sc = v.ratingScoreOf(st, v.pid(sid), 0);
     rows.push({ steamID: sid, score: sc.score, details: sc.details });
   }
   rows.sort((a, b) => b.score - a.score);
@@ -256,15 +257,15 @@ const RBAN = [0, 1, 2].map((i) => banEnt(SID(1500 + i)));
 let E5;
 {
   const prior = require(path.join(__dirname, '..', 'points-plan.js')).ELP.PRIOR.solo;
-  E5 = run(world([], [], { rSolo: RW.rows, ban: RBAN }), { SOLO_FILE: RW.st });
+  E5 = run(world([], [], { rAll: RW.rows, ban: RBAN }), { SOLO_FILE: RW.st });
   const dec = tcOf(E5);
   const hid = v.elpHiddensOf(RW.st, 'solo', 0);
   const all = v.elpLinesOf(Object.values(hid), prior);
-  T('[5] run exits 0, no points row rewritten (history matches the board), table published', E5.code === 0 && setTo(E5, BOARD.rSolo).length === 0 && delTo(E5, BOARD.rSolo).length === 0 && !!dec, E5.out.split('\n').filter((l) => /tiercut|rating|ban/.test(l)).join(' | '));
+  T('[5] run exits 0, no points row rewritten (history matches the board), table published', E5.code === 0 && setTo(E5, BOARD.rAll).length === 0 && delTo(E5, BOARD.rAll).length === 0 && setTo(E5, BOARD.rSolo).length === 0 && !!dec, E5.out.split('\n').filter((l) => /tiercut|rating|ban/.test(l)).join(' | '));
   eq('[5] published solo lines: the lower of with / without the 3 banned, N 223', dec && [dec.byFam.solo.pass, dec.byFam.solo.N], [v.elpLinesSkipBanned(hid, new Set(RBAN.map((e) => e.steamID)), prior).pass, 223]);
   T('[5] every published line <= the line over everyone, and the grandmaster line came down', dec && dec.byFam.solo.pass.every((c, i) => c <= all.pass[i]) && dec.byFam.solo.pass[6] < all.pass[6], JSON.stringify([dec && dec.byFam.solo.pass, all.pass]));
   T('[5] the log says the banned were left out', /tiercut solo: N=223 .*\(3 banned left out/.test(E5.out));
-  const rf = run(world([], [], { rSolo: RW.rows, ban: RBAN }), { SOLO_FILE: RW.st }, { STUB_FAIL: JSON.stringify({ ban_board: 500 }) });
+  const rf = run(world([], [], { rAll: RW.rows, ban: RBAN }), { SOLO_FILE: RW.st }, { STUB_FAIL: JSON.stringify({ ban_board: 500 }) });
   const decF = tcOf(rf);
   eq('[5] ban board read fails: the lines over everyone are published (as before Q338)', decF && decF.byFam.solo.pass, all.pass);
 }
@@ -348,7 +349,7 @@ function mutant(pairs) {
     ['the settle ignores the bans (cupVerdict without them)', [['podium: CUP.PODIUM }, bans));', 'podium: CUP.PODIUM }));']], (p) => JSON.stringify(cupE2e(p).honor1) !== JSON.stringify(CUP_WIN)],   // the upkeep still keeps SID(100) off, but the honest #4 loses his place
     ['the honor upkeep writes banned winners', [["if (bans) { const banP = new Set(Array.from(bans, (s) => pid(String(s)))); for (const p of Object.keys(want)) if (banP.has(p)) { delete want[p]; if (existing[p]) banGone.add(p); } }", '']], (p) => { const r = run(world([], weekBoards().concat(cupBoards()), { ban: [banEnt(SID(101))] }), { SOLO_FILE: Object.assign(solo0(), { cup: { s: WK, w: { [WK]: v.cupPidVerdict(v.cupVerdict({ 1: soloRows(C.THR_SOLO) }, thr)) } } }) }, null, p); return sidsOf(setTo(r, BOARD.honor)).indexOf(SID(101)) >= 0; }],
     ['the settle does not wait for a failed ban read', [["if (seasonNowMs() < cupWeekStart(cupNextWeek(wk)) + CUP_BAN_WAIT_MS) { ghWarn('cup: ban board not read -- week ' + wk + ' settled next run'); break; }", '']], (p) => { const r = run(world([], weekBoards().concat(cupBoards()), { ban: CUP_BAN }), { SOLO_FILE: solo0() }, { STUB_FAIL: JSON.stringify({ ban_board: 500 }) }, p); return ((r.state.SOLO_FILE || {}).cup || {}).s === WK; }],
-    ['the pass lines ignore the bans', [['byFam[fam] = elpLinesSkipBanned(elpHiddensOf(st, fam, seasonId), bans, ELP.PRIOR[fam]);', 'byFam[fam] = elpLinesSkipBanned(elpHiddensOf(st, fam, seasonId), null, ELP.PRIOR[fam]);']], (p) => { const d = tcOf(run(world([], [], { rSolo: RW.rows, ban: RBAN }), { SOLO_FILE: RW.st }, null, p)); const all = v.elpLinesOf(Object.values(v.elpHiddensOf(RW.st, 'solo', 0)), require('../points-plan.js').ELP.PRIOR.solo).pass; return !d || d.byFam.solo.pass[6] === all[6]; }],
+    ['the pass lines ignore the bans', [['byFam[fam] = elpLinesSkipBanned(elpHiddensOf(st, fam, seasonId), bans, ELP.PRIOR[fam]);', 'byFam[fam] = elpLinesSkipBanned(elpHiddensOf(st, fam, seasonId), null, ELP.PRIOR[fam]);']], (p) => { const d = tcOf(run(world([], [], { rAll: RW.rows, ban: RBAN }), { SOLO_FILE: RW.st }, null, p)); const all = v.elpLinesOf(Object.values(v.elpHiddensOf(RW.st, 'solo', 0)), require('../points-plan.js').ELP.PRIOR.solo).pass; return !d || d.byFam.solo.pass[6] === all[6]; }],
     ['the composite writer writes banned accounts', [["if (ovBans && ovBans.has(sid)) return false;   // Q338: no composite row for a fully banned account", '']], (p) => sidsOf(setTo(run(world(SEG, [], Object.assign({ ban: OVBAN }, OV)), {}, { SEASON_NOW: '2026-10-01T12:00:00Z' }, p), BOARD.compOverall)).indexOf(X) >= 0],
     ['the composite writer leaves a banned stray row', [['const strays = ovBans ? Object.keys(cur).filter((sid) => ovBans.has(sid)) : [];', 'const strays = [];']], (p) => delTo(run(world(SEG, [], Object.assign({ ban: OVBAN }, OV)), {}, { SEASON_NOW: '2026-10-01T12:00:00Z' }, p), BOARD.compOverall).length === 0],
   ];

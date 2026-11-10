@@ -124,10 +124,13 @@ function world0() {
       lp_ladder_s1: [lpRow(S1, 3950, [{ mh: 1, delta: -120, flags: 0 }]), lpRow(S2, 8100)],
       lp_ladder: [lpRow(S3, 6100)],     // last season's board (S3 peaked in the pre-season)
       xp_ladder: [{ steamID: S1, score: xpFor(55), detailData: '' }],
-      // O728: endless points rows (the versus scale); last season's board. S3 at 8100 = grandmaster. An O103 rating row (no
-      //   points details) on this season's duo board counts nothing (S1's items stay the versus / level ones)
-      endless_rating_solo: [{ steamID: S3, score: 8100, detailData: v.encodeDetails(pp.elpRowDetails({ n: 20, hidden100: 5600, tier: 6, placed: 1 }, [])) }],
-      endless_rating_duo_s1: [{ steamID: S1, score: 9000, detailData: v.encodeDetails([1200, 950, 6, 0]) }],
+      // O728 / O825: endless points rows (the versus scale) on the ONE board; last season's board. S3 at 8100 = grandmaster. A row of
+      //   another layout on this season's board (a per-family v1 row) counts nothing (S1's items stay the versus / level ones); the
+      //   four per-family boards are no longer read (S1's valid grandmaster row on the old solo board earns nothing: the tripwire
+      //   of that -- read again, S1 would hold the endless rank items)
+      endless_rating_all: [{ steamID: S3, score: 8100, detailData: v.encodeDetails(pp.elpRowDetails({ n: 20, tier: 6, placed: 1, h: { solo: 5600, duo: null, trio: null, quad: null } }, [])) }],
+      endless_rating_all_s1: [{ steamID: S1, score: 9000, detailData: v.encodeDetails([0xEE | 256, 20, 5600, 6, 1, 198, 0]) }],
+      endless_rating_solo_s1: [{ steamID: S1, score: 9000, detailData: v.encodeDetails(pp.elpRowDetails({ n: 20, tier: 6, placed: 1, h: { solo: 5600 } }, [])) }],
     },
     own: {
       4815320: { [S1]: own(S1, '2026-11-20T00:00:00Z'), [S2]: own(S2, '2026-11-20T00:00:00Z', { ownersteamid: S4 }), [S3]: own(S3, '2027-01-15T00:00:00Z') },

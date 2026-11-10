@@ -141,10 +141,11 @@ console.log('=== O606 couch competitive settle (client knife 5c) ===');
   for (let i = 0; i < 2; i++) v.ratingHistUpsert(st, p, v.couchRatingFam(), 1, 200 + i, 20 + i, 2000 + i, A.SEG_FINAL, 60 + i);
   for (let i = 0; i < 3; i++) v.ratingHistUpsert(st, p, 'duoc', 1, 300 + i, 30 + i, 3000 + i, A.SEG_FINAL, 70 + i);   // what a split writes
   const done = v.elpSettleAll(st, 1, 9000);
-  const h = st.hist[v.ratingHistKey(p, 'duo', 1)];
-  eq('[3] the five online + couch runs settle on one duo line: placed (the fifth seeds), the split couch runs settle nothing', [done.length, h.placed, h.n, done.every((x) => x.k.indexOf('|duo|') > 0)], [5, 1, 5, true]);
-  const plan = v.ratingPlan(st, 1, 'duo', {}, [S]);
-  eq('[3] ratingPlan: one duo points row; no family reads the duoc history', [plan.writes.length, plan.writes[0] && plan.writes[0].score === h.lp, v.ratingPlan(st, 1, 'trio', {}, [S]).writes.length], [1, true, 0]);
+  const h = st.hist[v.elpAllKey(p, 1)];   // O825: the account's one points entry
+  eq('[3] the five online + couch runs settle onto the account\'s points (the duo history): placed (the fifth seeds), the split couch runs settle nothing', [done.length, h.placed, h.n, done.every((x) => x.k.indexOf('|duo|') > 0)], [5, 1, 5, true]);
+  const plan = v.ratingPlan(st, 1, {}, [S]);
+  const rowBack = plan.writes[0] ? require(path.join(__dirname, '..', 'points-plan.js')).elpRowOf(plan.writes[0].details) : null;
+  eq('[3] ratingPlan: one points row (five runs, the seed); the duoc history feeds nothing (no run of it counted, no skill from it)', [plan.writes.length, plan.writes[0] && plan.writes[0].score === h.lp, rowBack && rowBack.n, rowBack && rowBack.h.duo === require(path.join(__dirname, '..', 'points-plan.js')).hiddenOf([21, 20, 12, 11, 10])], [1, true, 5, true]);
 }
 
 // ---- main() harness (copied tree + one sealed test key; a stub Steam) ----

@@ -317,10 +317,10 @@ function literalSecretNames(srcs) {
   ok('scanner sees the literal ops boards in ptBoardPlan', lits.has('version_gate') && lits.has('gate_window') && lits.has('pt_master'));
   ok("card_box stays the ptBoardPlan literal (the client repo's playtest-gate test pins add('card_box', 0)) and is classified by that name",
     lits.has('card_box') && s.EXILE_DISPLAY.some(e => e.key === 'card_box') && s.boardNameOf('card_box') === 'card_box');
-  ok('season families resolved, including the competitive loop variable (duo / trio / quad), the `for (const b of [...])` loop and the rating loop over RATING_FAMS',
+  ok('season families resolved, including the competitive loop variable (duo / trio / quad), the `for (const b of [...])` loop and the one endless points board (O825: the four per-family boards are no longer resolved)',
     sf.unresolved.length === 0 && ['LP_LB', 'ENDLESS_LB', 'ENDLESS_LB_SOLO', 'ENDLESS_LB_TRIO', 'ENDLESS_LB_QUAD', 'ENDLESS_COMP_LB',
       'ENDLESS_COMP_LB_DUO', 'ENDLESS_COMP_LB_TRIO', 'ENDLESS_COMP_LB_QUAD', 'ENDLESS_COMP_LB_OVERALL', 'ENDLESS_LB_OVERALL',
-      'ENDLESS_RATING_LB_SOLO', 'ENDLESS_RATING_LB_DUO', 'ENDLESS_RATING_LB_TRIO', 'ENDLESS_RATING_LB_QUAD'].every(f => sf.fams.has(f)));
+      'ENDLESS_RATING_LB'].every(f => sf.fams.has(f)) && !['ENDLESS_RATING_LB_SOLO', 'ENDLESS_RATING_LB_DUO', 'ENDLESS_RATING_LB_TRIO', 'ENDLESS_RATING_LB_QUAD'].some(f => sf.fams.has(f)));
   { const fb = seasonFamilies(VSRC + '\n}\n');   // a source the blanker cannot balance: the scanner falls back, it does not turn red by itself
     ok('scanner fallback: an unbalanced source keeps the nearest-loop rule (same families, nothing unresolved)',
       fb.unresolved.length === 0 && [...sf.fams].every(f => fb.fams.has(f))); }
@@ -375,7 +375,7 @@ function literalSecretNames(srcs) {
   ok('the user-named non-display boards are all on the keep list',
     ['endless_save_box_solo', 'endless_save_box_casual', 'endless_save_box_classic_quad', 'cp_bank', 'redeem_box', 'grant_box', 'campaign_box',
       'trust_tier', 'report_box', 'unmatched_box', 'active_match_box', SECRET_NAMES.RANKED_LB,
-      'trust_ledger', 'like_box', 'endless_rating_solo', 'endless_rating_duo', 'endless_rating_trio', 'endless_rating_quad', 'endless_tiercut', 'endless_cup']
+      'trust_ledger', 'like_box', 'endless_rating_all', 'endless_rating_solo', 'endless_rating_duo', 'endless_rating_trio', 'endless_rating_quad', 'endless_tiercut', 'endless_cup']
       .every(n => keep.has(n)));
   const cp = compositeProblems(s.EXILE_DISPLAY);
   if (cp.length) console.log('    ' + cp.join('\n    '));
@@ -548,7 +548,7 @@ async function scenarioMain(mod) {
   display.forEach((n, i) => st.put(n, SID, 1000 + i, [0xCA, i, -7]));
   st.put('endless_board', OTHER, 5);
   st.put('cp_bank', SID, 300); st.put('endless_save_box_solo', SID, 9, [1, 2, 3]); st.put('trust_tier', SID, 2); st.put('chat_mute', SID, 1);
-  const keep2 = ['trust_ledger', 'like_box', 'endless_rating_solo', 'endless_rating_duo_s1', 'endless_tiercut', 'endless_cup', 'endless_comp_solo_w202648'];   // after 10-09: kept (+ a cup week board, out of reach)
+  const keep2 = ['trust_ledger', 'like_box', 'endless_rating_all', 'endless_rating_all_s1', 'endless_rating_solo', 'endless_rating_duo_s1', 'endless_tiercut', 'endless_cup', 'endless_comp_solo_w202648'];   // after 10-09: kept (+ a cup week board, out of reach)
   keep2.forEach((n, i) => st.put(n, SID, 7 + i));
   st.make('xp_ladder_banned', 1);   // shadow the first cut provisioned
   st.make('endless_board_quad', 1); // present, but the banned account has no row on it

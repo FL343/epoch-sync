@@ -58,7 +58,7 @@ function fakeDays(opt) {
     // fast-forward the top players once placed (a long season in one step): true level at or above the population's
     //   top gmTop share (default 2 %: z 2.05 of model A's spread 0.6) -> grandmaster points by their level
     for (const pl of players) {
-      const h = st.hist[V.ratingHistKey(pl.pid, pl.fam, season)];
+      const h = V.elpAllOf(st, pl.pid, season);   // O825: the points entry (one a player a season)
       const cut = 7 * (pl.fam === 'solo' ? 1 : 1.6) * Math.exp(0.6 * (o.gmZ == null ? 2.05 : o.gmZ));
       if (!h || !h.placed || pl.ff === season || pl.mu < cut) continue;
       h.lp = Math.min(9999, 8000 + Math.round((pl.mu - cut) * 60 + r() * 600));

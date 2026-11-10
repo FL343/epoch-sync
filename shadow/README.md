@@ -40,7 +40,13 @@ curve instead:
 Prior: season 0 = the static preset; season 1 = the season-0 final mixed 50/50 with the preset (S0 is two
 weeks); season 2+ = the previous season's final.
 
-**O759 -- grandmaster calibration (off, opens by itself).** Per family the grandmaster pool (points >= 8000)
+**O759 -- grandmaster calibration (off, opens by itself).** (O825, 2026-11-10: a player has ONE points value a
+season, on the entry `pid|all|season`; the family entries keep the runs. The pool of a family = the players at
+grandmaster points who have a hidden skill in that family from their own runs -- a player of two families sits in
+both pools; the walk back over the recorded changes goes over his runs of every family in start order and counts this
+family's -- an estimate: a run a save point held back settled later than the runs started after it, and a refund
+moves the points without a run.)
+Per family the grandmaster pool (points >= 8000)
 ranked by hidden skill; deserved points = 8000 + percentile x 1999. The switch would open when the effective
 pool (grandmasters with a full window of 10 settled runs) is >= 20 and the ranks of the players in both pools
 correlate >= 0.8 day over day (Spearman; the workflow fetches the state of a day earlier from the git history).

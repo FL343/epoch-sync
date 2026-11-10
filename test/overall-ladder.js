@@ -66,7 +66,7 @@ eq('rollout gate open on the playtest / demo jobs too (flipped 2026-10-27, after
 console.log('== [3] wiring pins (validate.js) ==');
 assert('gate: V51B = !PT_MODE || V51B_PT (one constant; flipped 2026-10-27 = every job runs the new rule)', /const V51B_PT = true;\nconst V51B = !PT_MODE \|\| V51B_PT;/.test(src));
 assert('provisioned up-front with the solo/team ladders (trusted) [+ casual solo ladder / casual save box, client knife 3.7a]', /\[ENDLESS_COMP_LB_OVERALL, true\], \[ENDLESS_LB_SOLO, true\], \[SAVE_BOX_LB_CASUAL, false\],\s*\n\s*\[ENDLESS_LB_CLASSIC_SOLO, true\]/.test(src));   // classic surface continues the list (client knife 3.9b N3)
-assert('O276: the EA list provisions the casual + classic composites at its tail (trusted)', /\[ENDLESS_TIERCUT_LB, true\],\n      \[ENDLESS_LB_OVERALL, true\], \[ENDLESS_LB_CLASSIC_OVERALL, true\],[^\n]*\n      \[ENDLESS_CUP_LB, true\], \[ENDLESS_CUP_HONOR_LB, true\]\]\) \{/.test(src));   // O180 (knife 5.1c-1): the cup boards after them
+assert('O276: the EA list provisions the casual + classic composites at its tail (trusted)', /\[ENDLESS_TIERCUT_LB, true\],[^\n]*\n      \[ENDLESS_LB_OVERALL, true\], \[ENDLESS_LB_CLASSIC_OVERALL, true\],[^\n]*\n      \[ENDLESS_CUP_LB, true\], \[ENDLESS_CUP_HONOR_LB, true\]\]\) \{/.test(src));   // O180 (knife 5.1c-1): the cup boards after them
 assert('playtest board plan adds the overall ladder (trusted); the casual / classic composites only once the gate flips',
   /add\(cfg\.compOverallLb, 1\);/.test(src) && /compOverallLb: ENDLESS_COMP_LB_OVERALL,/.test(src)
   && /casualOverallLb: V51B_PT \? ENDLESS_LB_OVERALL : null, classicOverallLb: V51B_PT \? ENDLESS_LB_CLASSIC_OVERALL : null,/.test(src) && /add\(cfg\.casualOverallLb, 1\); add\(cfg\.classicOverallLb, 1\);/.test(src));
@@ -107,7 +107,7 @@ const ROOT = path.join(__dirname, '..').replace(/\\/g, '/');
 const SCRUB = ['PT_MODE', 'STRICT_BOARDS', 'APPLY_MMR', 'ALLOW_TEST', 'DEMO_APPID', 'RANKED_LB', 'LP_LB', 'XP_LB', 'STARTS_MATURITY_MS', 'CONFESS_PRUNE_MS',
   'SEEDCAP_ENFORCE', 'SEEDCAP_REJECT', 'GITHUB_STEP_SUMMARY', 'LEDGER_SHARDS', 'PT_SHARD_COUNT', 'ABSENT_GRACE_MS', 'READ_RETRY_MS', 'SANITY_MIN_START_AGE_MS', 'BOT_PACE_FRAC',
   'SHARD_STRICT_BODY', 'SEASON_NOW', 'ENDLESS_LB', 'ENDLESS_LB_TRIO', 'ENDLESS_LB_QUAD', 'ENDLESS_LB_SOLO', 'COMP_CHAIN_WAIT_MS', 'ENDLESS_PACE_FRAC', 'CP_LB', 'TRUST_LB', 'REPORT_LB',
-  'ENDLESS_COMP_LB', 'ENDLESS_COMP_LB_DUO', 'ENDLESS_COMP_LB_TRIO', 'ENDLESS_COMP_LB_QUAD', 'ENDLESS_COMP_LB_OVERALL', 'ENDLESS_RATING_LB_SOLO', 'ENDLESS_RATING_LB_DUO',
+  'ENDLESS_COMP_LB', 'ENDLESS_COMP_LB_DUO', 'ENDLESS_COMP_LB_TRIO', 'ENDLESS_COMP_LB_QUAD', 'ENDLESS_COMP_LB_OVERALL', 'ENDLESS_RATING_LB', 'ENDLESS_RATING_LB_SOLO', 'ENDLESS_RATING_LB_DUO',
   'ENDLESS_RATING_LB_TRIO', 'ENDLESS_RATING_LB_QUAD', 'ENDLESS_TIERCUT_LB', 'TIERCUT_CARRIER_SID', 'ENDLESS_LB_OVERALL', 'ENDLESS_LB_CLASSIC_OVERALL',
   'ENDLESS_LB_CLASSIC_SOLO', 'ENDLESS_LB_CLASSIC_DUO', 'ENDLESS_LB_CLASSIC_TRIO', 'ENDLESS_LB_CLASSIC_QUAD'];
 const FILE_VARS = Array.from(new Set(Array.from(src.matchAll(/process\.env\.([A-Z0-9_]+_FILE)\b/g), m => m[1])));
