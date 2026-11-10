@@ -6940,7 +6940,7 @@ function elpLinesSkipBanned(hid, banned, prior) {
 }
 function tiercutDay(nowMs) { const d = new Date(nowMs); return d.getUTCFullYear() * 10000 + (d.getUTCMonth() + 1) * 100 + d.getUTCDate(); }
 // the rules a recorded table was made under (a change records a new table at once)
-function elpTableKey() { return JSON.stringify([ELP.VER, ELP.GAP_UP, ELP.GAP_DOWN, ELP.STAKE_STEP, ELP.SPREAD, ELP.PRIOR, RATING.N_PRIOR_ONLY, RATING.N_FULL]); }
+function elpTableKey() { return JSON.stringify([ELP.VER, ELP.GAP_UP, ELP.GAP_DOWN, ELP.STAKE_STEP, ELP.SPREAD, ELP.PRIOR, RATING.N_PRIOR_ONLY, RATING.N_FULL, ELP.TEAM_GAIN, ELP.TEAM_GATE]); }
 // the newest recorded table of the chain memory (or null)
 function elpTabNewest(st) { let at = null; for (const x of ((st && st.elpTab) || [])) if (!at || x.ms > at.ms) at = x; return at; }
 function tiercutDue(st, seasonId, dayNow) { const t = elpTabNewest(st); return !t || (t.season | 0) !== (seasonId | 0) || (t.day | 0) !== (dayNow | 0) || t.key !== elpTableKey(); }

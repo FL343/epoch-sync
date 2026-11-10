@@ -22,9 +22,11 @@
 //   seat: { mt } -> which seats of the code move points (O716 one queue: the ranked-seat mask in bits 11-16; no mask = the old
 //     whole-table rule): { mask, sans: the code without the mask, base, any: anyAppliesLp, seats: seatAppliesLp of seats 0..5 }.
 //     A case added here moves no settled delta (no RULES_VER bump): it pins the reading both sides share.
-//   endless: { fn, args } -> PP[fn](...args), one O728 endless points function (hiddenOf / teamHiddenOf (O803) / tierOfHidden / skillTierOf / targetOffset /
-//     targetLineOf / targetOf / endlessDelta / endlessSettle / endlessSeedLp / elpRowDetails / elpRowOf / elpTableDetails / elpTableOf) at fixed inputs. The
-//     endless rules carry their own version (ELP.VER on the published table), not RULES_VER: an endless case that moves bumps ELP.VER.
+//   endless: { fn, args } -> PP[fn](...args), one O728 endless points function (hiddenOf / teamHiddenOf (O803) / elpIsTeam / elpConvert / elpHiddenFor (O825) /
+//     tierOfHidden / skillTierOf / targetOffset / targetLineOf / targetOf / endlessDelta / endlessSettle / endlessSeedLp / elpRowDetails / elpRowOf /
+//     elpTableDetails / elpTableOf) at fixed inputs. The endless rules carry their own version (ELP.VER on the published table), not RULES_VER: an endless
+//     case that moves bumps ELP.VER. O825 (ELP v4): the cases of version 3 keep their inputs and their values (endlessDelta's result gained the field team,
+//     false for them; fixtures/points-plan/elp-v3-solo.json freezes them, test/endless-lp.js [11]); the row cases moved to the v2 layout.
 // ============================================================
 const fs = require('fs');
 const path = require('path');
@@ -144,7 +146,8 @@ const CASES = [
 ];
 // the endless cases (O728): fixed pass lines (not ELP.PRIOR, so retuning the prior moves no case)
 function endlessCases() {
-  const SOLO = [2, 6, 10, 15, 24, 38, 55], DUO = [3, 10, 16, 24, 38, 61, 88];
+  const SOLO = [2, 6, 10, 15, 24, 38, 55], DUO = [3, 10, 16, 24, 38, 61, 88], TRIO = [3, 11, 18, 27, 40, 60, 85], QUAD = [4, 12, 20, 30, 44, 66, 90];
+  const LINES = { solo: SOLO, duo: DUO, trio: TRIO, quad: QUAD };
   const E = (name, fn, args) => ({ name: 'endless: ' + name, kind: 'endless', fn, args });
   const out = [
     // the hidden skill (depths newest first)
@@ -251,12 +254,15 @@ function endlessCases() {
     E('seed, above the grandmaster line (the cap)', 'endlessSeedLp', [9000, SOLO]),
     E('seed, duo silver 1400', 'endlessSeedLp', [1400, DUO]),
     // the family row and the published table
-    E('row details, placed silver with two receipts', 'elpRowDetails', [{ n: 7, hidden100: 950, tier: 1, placed: 1 }, [{ mh: -5, delta: 40, flags: 264 }, { mh: 77, delta: -13, flags: 258 }]]),
-    E('row details, the window short of 5 runs (hidden -1)', 'elpRowDetails', [{ n: 9, hidden100: null, tier: 3, placed: 1 }, []]),
-    E('row read', 'elpRowOf', [[494, 7, 950, 1, 1, 198, 2, -5, 40, 264, 77, -13, 258]]),
-    E('row read, hidden -1 = null, a short ring', 'elpRowOf', [[494, 9, -1, 3, 1, 198, 2, 1, 2, 3]]),
-    E('row read, another magic = null', 'elpRowOf', [[0xEF | 256, 7, 950, 1, 1, 198, 0]]),
-    E('row read, version 2 = null', 'elpRowOf', [[0xEE | 512, 7, 950, 1, 1, 198, 0]]),
+    E('row details, placed silver with two receipts (solo and duo skills, no trio / quad run)', 'elpRowDetails', [{ n: 7, tier: 1, placed: 1, h: { solo: 950, duo: 1480, trio: null, quad: null } }, [{ mh: -5, delta: 40, flags: 264 }, { mh: 77, delta: -13, flags: 258 }]]),
+    E('row details, no skill in any family yet (four times -1)', 'elpRowDetails', [{ n: 9, tier: 3, placed: 1 }, []]),
+    E('row details, a skill of 0 is a skill (0, not -1)', 'elpRowDetails', [{ n: 5, tier: 0, placed: 1, h: { solo: 0, duo: 0, trio: 0, quad: 0 } }, []]),
+    E('row read', 'elpRowOf', [[0xEE | 512, 7, 1, 1, 950, 1480, -1, -1, 198, 2, -5, 40, 264, 77, -13, 258]]),
+    E('row read, no skill = null four times, a short ring', 'elpRowOf', [[0xEE | 512, 9, 3, 1, -1, -1, -1, -1, 198, 2, 1, 2, 3]]),
+    E('row read, another magic = null', 'elpRowOf', [[0xEF | 512, 7, 1, 1, 950, 1480, -1, -1, 198, 0]]),
+    E('row read, the version 1 per-family row = null', 'elpRowOf', [[0xEE | 256, 7, 950, 1, 1, 198, 2, -5, 40, 264, 77, -13, 258]]),
+    E('row read, version 3 = null', 'elpRowOf', [[0xEE | 768, 7, 1, 1, 950, 1480, -1, -1, 198, 0]]),
+    E('row read, short of the header = null', 'elpRowOf', [[0xEE | 512, 7, 1, 1, 950, 1480, -1, -1, 198]]),
     E('row read, the O103 rating row = null', 'elpRowOf', [[12, 850, 6, 0]]),
     E('table details, solo live, the rest prior', 'elpTableDetails', [1, { solo: { N: 30, pass: SOLO }, duo: { N: 4, pass: DUO } }]),
     E('table read', 'elpTableOf', [20261201, [0xEC | 512, 1, 1, 1500, 500, 100, 2].concat([30], SOLO, [4], DUO, [0], DUO, [0], DUO)]),
@@ -264,6 +270,89 @@ function endlessCases() {
     E('table read, a v1 cut table = null', 'elpTableOf', [20261108, [0xEC | 256, 0, 0, 6000, 4000, 2800, 2000, 1400, 800].concat(new Array(21).fill(0))]),
     E('table read, a v3 table = null', 'elpTableOf', [20261201, [0xEC | 768, 1, 1, 1500, 500, 100, 2].concat(new Array(32).fill(0))]),
     E('table read, short = null', 'elpTableOf', [20261201, [0xEC | 512, 1, 1, 1500, 500, 100, 2]]),
+  );
+  out.push(...onePointsCases(E, SOLO, DUO, TRIO, QUAD, LINES));
+  return out;
+}
+
+// O825 (ELP v4): one points value over the four families -- the family test, a depth read on another family's scale, the hidden
+//   skill with the borrowed runs, the team gate, the team length factor, and the calls that name solo (= the calls that name none)
+function onePointsCases(E, SOLO, DUO, TRIO, QUAD, LINES) {
+  const out = [
+    E('team family: solo is not', 'elpIsTeam', ['solo']),
+    E('team family: duo', 'elpIsTeam', ['duo']),
+    E('team family: trio', 'elpIsTeam', ['trio']),
+    E('team family: quad', 'elpIsTeam', ['quad']),
+    E('team family: the split couch family duoc is not', 'elpIsTeam', ['duoc']),
+    E('team family: none given is not', 'elpIsTeam', []),
+    // a depth x 100 on another family's scale
+    E('convert, on the gold line (solo 10 -> duo 16)', 'elpConvert', [1000, SOLO, DUO]),
+    E('convert, half way gold to platinum (solo 12.5 -> duo 20)', 'elpConvert', [1250, SOLO, DUO]),
+    E('convert, back (duo 20 -> solo 12.5)', 'elpConvert', [2000, DUO, SOLO]),
+    E('convert, under the bronze line keeps its ratio (solo 1 -> duo 1.5)', 'elpConvert', [100, SOLO, DUO]),
+    E('convert, depth 0 stays 0', 'elpConvert', [0, SOLO, DUO]),
+    E('convert, on the bronze line (solo 2 -> duo 3)', 'elpConvert', [200, SOLO, DUO]),
+    E('convert, on the grandmaster line (solo 55 -> duo 88)', 'elpConvert', [5500, SOLO, DUO]),
+    E('convert, over the grandmaster line keeps its ratio (solo 60 -> duo 96)', 'elpConvert', [6000, SOLO, DUO]),
+    E('convert, a rounding step (solo 7.33 -> duo 12)', 'elpConvert', [733, SOLO, DUO]),
+    E('convert, the same table = the depth itself', 'elpConvert', [1234, SOLO, SOLO]),
+    E('convert, duo -> quad between diamond and master', 'elpConvert', [5000, DUO, QUAD]),
+    E('convert, trio -> solo under silver', 'elpConvert', [700, TRIO, SOLO]),
+    E('convert, a negative depth reads as 0', 'elpConvert', [-300, SOLO, DUO]),
+    E('convert, no table to read from = unchanged', 'elpConvert', [500, null, DUO]),
+    E('convert, a short table to read onto = unchanged', 'elpConvert', [500, SOLO, [3, 10]]),
+    // the hidden skill of a family over the runs of every family (newest first)
+    E('hidden for, no run', 'elpHiddenFor', ['solo', [], LINES]),
+    E('hidden for, five solo runs = hiddenOf of them', 'elpHiddenFor', ['solo', [['solo', 30], ['solo', 9], ['solo', 8], ['solo', 7], ['solo', 0]], LINES]),
+    E('hidden for, five solo runs among duo runs (the duo runs do not count)', 'elpHiddenFor', ['solo', [['duo', 40], ['solo', 30], ['solo', 9], ['duo', 40], ['solo', 8], ['solo', 7], ['solo', 0], ['duo', 40]], LINES]),
+    E('hidden for, twelve solo runs (the newest 10 count)', 'elpHiddenFor', ['solo', [5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 90, 90].map((d) => ['solo', d]), LINES]),
+    E('hidden for, duo with two own runs: the three newest solo runs fill, read on the duo scale', 'elpHiddenFor', ['duo', [['solo', 10], ['duo', 20], ['solo', 15], ['solo', 24], ['duo', 14], ['solo', 2], ['solo', 2]], LINES]),
+    E('hidden for, duo never played: five solo runs read on the duo scale (trimmed)', 'elpHiddenFor', ['duo', [['solo', 10], ['solo', 15], ['solo', 24], ['solo', 6], ['solo', 12], ['solo', 55]], LINES]),
+    E('hidden for, quad never played: runs of three other families fill', 'elpHiddenFor', ['quad', [['trio', 18], ['duo', 16], ['solo', 10], ['solo', 15], ['duo', 24]], LINES]),
+    E('hidden for, three runs in all = null', 'elpHiddenFor', ['duo', [['solo', 10], ['duo', 20], ['solo', 15]], LINES]),
+    E('hidden for, three runs in all read for a placement target (plain mean on the duo scale)', 'elpHiddenFor', ['duo', [['solo', 10], ['duo', 20], ['solo', 15]], LINES, 1]),
+    E('hidden for, four own runs and no other = null', 'elpHiddenFor', ['solo', [['solo', 10], ['solo', 9], ['solo', 8], ['solo', 7]], LINES]),
+    E('hidden for, four own runs read for a placement target = hiddenOf(.., 1)', 'elpHiddenFor', ['solo', [['solo', 10], ['solo', 9], ['solo', 8], ['solo', 7]], LINES, 1]),
+    E('hidden for, one run of another family read for a placement target', 'elpHiddenFor', ['trio', [['solo', 10]], LINES, 1]),
+    E('hidden for, a run of a family without lines (duoc) is left out', 'elpHiddenFor', ['duo', [['duoc', 50], ['solo', 10], ['solo', 10], ['solo', 10], ['solo', 10], ['solo', 10]], LINES]),
+    E('hidden for, no lines for the family itself: its own runs only', 'elpHiddenFor', ['duo', [['duo', 20], ['solo', 10], ['solo', 10], ['solo', 10], ['solo', 10]], { solo: SOLO }, 1]),
+    E('hidden for, a negative depth counts as 0', 'elpHiddenFor', ['solo', [['solo', -3], ['solo', 2], ['solo', 2], ['solo', 2], ['solo', 2]], LINES]),
+    // the gate of a team family: the line x TEAM_GATE / 100
+    E('team gate, duo 6100 = diamond (on the master line 61, short of 67.1)', 'skillTierOf', [6100, DUO, 'duo']),
+    E('team gate, duo 6709 = diamond', 'skillTierOf', [6709, DUO, 'duo']),
+    E('team gate, duo 6710 = master', 'skillTierOf', [6710, DUO, 'duo']),
+    E('team gate, quad 9679 = master (nearest the grandmaster line, short of 96.8)', 'skillTierOf', [9679, DUO, 'quad']),
+    E('team gate, trio 9680 = grandmaster', 'skillTierOf', [9680, DUO, 'trio']),
+    E('team gate, duo 2400 = platinum (below master: the nearest line, no gate)', 'skillTierOf', [2400, DUO, 'duo']),
+    E('team gate, the same skill named solo = master (the line itself)', 'skillTierOf', [6100, DUO, 'solo']),
+    E('team gate, no skill = null', 'skillTierOf', [null, DUO, 'duo']),
+  ];
+  // the team length factor: every tier, pass / miss, the skill at the tier, offset 0 -- below master it moves, from master up it does not
+  const LPS = [300, 1000, 2500, 3500, 5000, 7000, 9000];
+  for (let t = 0; t < 7; t++) for (const isPass of [true, false]) out.push(E('team delta, duo, lp ' + LPS[t] + ' ' + (isPass ? 'pass' : 'miss'), 'endlessDelta', [LPS[t], isPass, DUO[t] * 100, DUO, 0, 'duo']));
+  out.push(
+    E('team delta, trio, gold 2500 pass, skill above, offset +2', 'endlessDelta', [2500, true, 2700, TRIO, 2, 'trio']),
+    E('team delta, quad, gold 2500 miss, skill above, offset -2', 'endlessDelta', [2500, false, 3000, QUAD, -2, 'quad']),
+    E('team delta, duo, platinum 3500 pass at the swing cap (the factor cannot pass it)', 'endlessDelta', [3500, true, 3800, DUO, 2, 'duo']),
+    E('team delta, duo, bronze 0 miss, skill grandmaster, offset +2 (floored at -1)', 'endlessDelta', [0, false, 8800, DUO, 2, 'duo']),
+    E('team delta, duo, no skill yet: neutral gap, the factor still applies', 'endlessDelta', [1000, true, null, DUO, 0, 'duo']),
+    E('delta, the family named solo = none named (gold 2500 pass)', 'endlessDelta', [2500, true, 1000, SOLO, 0, 'solo']),
+    E('delta, the split couch family duoc is not a team family', 'endlessDelta', [2500, true, 1600, DUO, 0, 'duoc']),
+    // the points line of a team run
+    E('team settle, duo, gold 2500 pass', 'endlessSettle', [2500, true, 1600, DUO, 0, 'duo']),
+    E('team settle, duo, gold 2500 miss (the smaller loss)', 'endlessSettle', [2500, false, 1600, DUO, 0, 'duo']),
+    E('team settle, duo, promotion band silver 1950 pass (forced up)', 'endlessSettle', [1950, true, 1000, DUO, 0, 'duo']),
+    E('team settle, duo, relegation band gold 2010 miss, offset -2 (held at the floor)', 'endlessSettle', [2010, false, 1000, DUO, -2, 'duo']),
+    E('team settle, duo, diamond 5850 pass, skill 6100 (on the master line: the team gate holds at 5879)', 'endlessSettle', [5850, true, 6100, DUO, 2, 'duo']),
+    E('team settle, the same run named solo (the gate open)', 'endlessSettle', [5850, true, 6100, DUO, 2, 'solo']),
+    E('team settle, duo, diamond 5850 pass, skill 6710 (the team gate open)', 'endlessSettle', [5850, true, 6710, DUO, 2, 'duo']),
+    E('team settle, duo, diamond 5950 pass, skill 6710 (forced up into master)', 'endlessSettle', [5950, true, 6710, DUO, 0, 'duo']),
+    E('team settle, quad, master 7850 pass, skill 9000 (the team grandmaster gate: held at 7879)', 'endlessSettle', [7850, true, 9000, DUO, 2, 'quad']),
+    E('team settle, quad, master 7950 pass, skill 9680 (forced up into grandmaster)', 'endlessSettle', [7950, true, 9680, DUO, -2, 'quad']),
+    E('team settle, duo, master 6500 pass (master and up: no length factor)', 'endlessSettle', [6500, true, 6710, DUO, 0, 'duo']),
+    E('team settle, duo, master 6050 miss, skill 6100 (the team gate reads diamond; the nearest line still protects)', 'endlessSettle', [6050, false, 6100, DUO, 0, 'duo']),
+    E('team settle, trio, the floor 5 miss (0)', 'endlessSettle', [5, false, 0, TRIO, -2, 'trio']),
+    E('settle, the family named solo = none named (diamond 5850 pass, skill 3800)', 'endlessSettle', [5850, true, 3800, SOLO, 2, 'solo']),
   );
   return out;
 }

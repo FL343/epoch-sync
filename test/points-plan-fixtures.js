@@ -55,7 +55,7 @@ T('[3] the settle composes its plan and its points line through the module (matc
   const kinds = new Set(doc.cases.map((c) => c.kind));
   T('[4] all six kinds present', ['match', 'seed', 'leave', 'boundary', 'seat', 'endless'].every((k) => kinds.has(k)), [...kinds].join(','));
   // O728: the endless cases call the endless functions only (the replay is PP[fn]), each of them, and the settle shapes the rules name
-  const ELP_FNS = ['hiddenOf', 'teamHiddenOf', 'tierOfHidden', 'skillTierOf', 'targetOffset', 'targetLineOf', 'targetOf', 'endlessDelta', 'endlessSettle', 'endlessSeedLp', 'elpRowDetails', 'elpRowOf', 'elpTableDetails', 'elpTableOf'];
+  const ELP_FNS = ['hiddenOf', 'teamHiddenOf', 'elpIsTeam', 'elpConvert', 'elpHiddenFor', 'tierOfHidden', 'skillTierOf', 'targetOffset', 'targetLineOf', 'targetOf', 'endlessDelta', 'endlessSettle', 'endlessSeedLp', 'elpRowDetails', 'elpRowOf', 'elpTableDetails', 'elpTableOf'];
   const en = doc.cases.filter((c) => c.kind === 'endless');
   T('[4] endless (O728): every endless function has a case, no other function is called', ELP_FNS.every((f) => en.some((c) => c.in.fn === f)) && en.every((c) => ELP_FNS.includes(c.in.fn)));
   // O803: the team level cases the two repos must agree on (the client reads the one team target from the same function)
