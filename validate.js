@@ -6610,7 +6610,8 @@ function overallDominant(bests) {
 // The chain memory is the truth, the boards its projection (like O103): maintainRating writes the rows that differ and deletes the
 // rows of players not placed.
 //   - history entry (endless-solo.json hist, pid|fam|season, no steamIDs): runs [[runId, depth, firstSeenMs, settled, d, T,
-//     lastSeenMs, fl, runSeed]] in first-seen order (fl 1 = its final segment came, 2 = its newest segment left a save point; d / T
+//     lastSeenMs, fl, runSeed, saves?]] in first-seen order (fl 1 = its final segment came, 2 = its newest segment left a save point; saves =
+//     its save points, [depth, seen at, gone on at (0 while it stands parked)] x n, only on a run that was ever parked: RC2-02; d / T
 //     = what the settle gave), old (ids that left: never re-enter), gone ([runId, d, runSeed] of settled runs out of the window: a conviction
 //     still refunds them), lp (null until placed), placed, seedRun (the run that seeded), n (runs settled this season), ring
 //     (points receipts, mh = the run seed | 0: the client knows it, the chain key holds the salted pid), best [runId, depth] (kept for the logs), t. A run is its chain key hashed (solo: runSeed;
@@ -6640,7 +6641,7 @@ function overallDominant(bests) {
 //     (points-plan.js elpTableDetails; the carrier account as before).
 // O825 (2026-11-10, ELP v4; companion KNIFE_O825_ENDLESS_ONE_LP_PLAN): ONE points value a player a season. The family entries keep
 //   the runs (and their windows / old / gone); the points, the placement, the receipt ring and the settled-run count moved to one
-//   entry a player a season, pid|all|season = { lp (null until placed), placed, seedRun [fam, runId], n, ring, h, t }. Runs of every
+//   entry a player a season, pid|all|season = { lp (null until placed), placed, seedRun [fam, runId], n, ring, h, ht, t }. Runs of every
 //   family settle onto it: the hidden skill, the pass lines, the target and the team level stay the run's family's (a family short
 //   of MIN_RUNS runs borrows the other families' runs: points-plan.js elpHiddenFor), the points line takes the family (the team
 //   length factor, the team gate). The placement is the season's first MIN_RUNS settled runs of any family; the last one seeds from
@@ -6659,6 +6660,28 @@ function overallDominant(bests) {
 //       pass that settled a run of his, a conviction) under the lines of that moment and KEPT on the entry: a row moves only with
 //       its player. Read fresh at every projection they would move with the table -- a borrowed run is read through two line
 //       tables -- and one line moving a level would rewrite the row of every placed player in one run;
+//     - RC2-02 / RC2-03 (cloud audit 2026-11-11): a family short of MIN_RUNS own runs borrows, so "which runs came before" and "under
+//       which lines" move the target -- and the client fixes the target when the run STARTS, from what it holds then. What it may
+//       hold that the job's own reading does not: a run of another family first seen in the same pass (the job orders the two
+//       by run id, the player played them in one order); a run of another family parked at a save point (the client counts it at
+//       its save depth, the job has not settled it), or one that never ended (a crash after a checkpoint, a seat that left its
+//       team: the client noted it at the checkpoint); the parked run finished since (the job counts its final depth); and the four
+//       skills of his row (computed at his last settle pass under the lines of that day, read by the client while no run of his
+//       waits for its receipt). The settle reads every one of them (elpBeforeLists, elpRowSkill) beside its own and takes what
+//       leaves the player the most, as it already does with the line tables (architecture decision 10); a team run freezes the
+//       lowest target line the members' readings give (elpTeamPick). The job's own reading comes first and wins a tie, so a run
+//       none of this touches settles exactly as before; the lists never move a family the player has MIN_RUNS own runs in (its
+//       skill reads his own runs only). The row's skill is a reading only when the row carried it by the run's first tick and no
+//       run of his that ENDED and that this pass settles surely came first (elpRowSkill: one pass = several passes); for a
+//       family with MIN_RUNS own runs it differs from the own reading only across a run of the family that never ended.
+//       What it costs: shallow runs of the other families lower a borrowed skill -- that is the borrowing rule itself (a
+//       shallow run played to its end counts in the job's own reading too). New here: a run PARKED shallow counts without
+//       being finished, for the runs first seen while it stands parked (his client's dial already showed him that lower
+//       target; once it went on it counts at what it reached), and a run first seen in the same pass counts in either
+//       order. One shallow value takes the trimmed place (the target moves by a third of his own spread at most),
+//       two or three at once reach the mean. Bounded by the first MIN_RUNS - 1 runs of a family a season and by the master
+//       gate (a low skill never opens master). Closing it for good is the client's to do (count finished runs only, or send
+//       the target it showed in the signed record): then these readings can go.
 //     - elpUpkeep runs under a guard: a throw inside the settle or the table restores the three parts of the chain memory it
 //       owns (hist / elpTeam / elpTab), warns and skips the lane for this run -- it never stops the reconcile.
 // EA app id only (PT_MODE: no history, no boards). Companion repo mirror: points-plan.js vendored (the rules), the board names and
@@ -6720,12 +6743,20 @@ function ratingHistUpsert(st, p, fam, seasonId, runId, depth, nowMs, segFlags, r
       r[1] = depth;
       // O825: a late segment raised a run that is settled already (an idle settle, then the client came back): his hidden skills
       //   moved, so the skills kept for his row are read again (the points of the run stay as settled)
-      if (r[3] && ELP.PRIOR[fam]) { const c = elpAllOf(st, p, seasonId); if (c) c.h = elpSkillsOf(st, p, seasonId, nowMs); }
+      if (r[3] && ELP.PRIOR[fam]) { const c = elpAllOf(st, p, seasonId); if (c) { c.h = elpSkillsOf(st, p, seasonId, nowMs); c.ht = nowMs; } }
+    }
+    // RC2-02: its save points, [depth, seen at, gone on at (0 while it stands parked)] x n -- his client counted the run at that
+    //   depth while it stood parked. A parked segment adds one (the same depth again = the same save point), any other segment
+    //   closes the open one; nothing moves once the final segment came
+    if (!((r[7] | 0) & 1)) {
+      const sv = Array.isArray(r[9]) ? r[9] : null, open = !!sv && sv.length >= 3 && !sv[sv.length - 1];
+      if (!sus) { if (open) sv[sv.length - 1] = nowMs; }
+      else if (!open || (sv[sv.length - 3] | 0) !== (r[1] | 0)) { if (open) sv[sv.length - 1] = nowMs; (r[9] = sv || []).push(r[1] | 0, nowMs, 0); }
     }
     r[6] = nowMs; r[7] = ((r[7] | 0) & 1) | fin | (((r[7] | 0) & 1) ? 0 : sus);
     if (r[8] == null && runSeed != null) r[8] = runSeed | 0;
   } else if (h.old.indexOf(runId) < 0 && !(h.gone || []).some((g) => (g[0] >>> 0) === runId)) {
-    h.runs.push([runId, depth, nowMs, 0, 0, 0, nowMs, fin | sus, runSeed | 0]);   // first-seen order (nowMs never runs back within a job)
+    h.runs.push(sus ? [runId, depth, nowMs, 0, 0, 0, nowMs, fin | sus, runSeed | 0, [depth, nowMs, 0]] : [runId, depth, nowMs, 0, 0, 0, nowMs, fin | sus, runSeed | 0]);   // first-seen order (nowMs never runs back within a job); a run that enters parked carries its save point (RC2-02)
   }
   if (depth > (h.best[1] | 0)) h.best = [runId, depth];
   return h;
@@ -6823,18 +6854,107 @@ function elpSettledRuns(st, p, s) {
 //   before runId -- every one of them first seen no later than it when runId is not in his pass order. Returns { runs: [[fam,
 //   depth], ..] newest first, pend: how many of them this pass still has to settle }.
 function elpRunsBefore(st, p, s, fam, runId, at, order) {
-  const rid = runId >>> 0, soon = new Map();
-  let ix = -1, pend = 0;
+  const items = elpBeforeItems(st, p, s, fam, runId, at, order);
+  return { runs: elpListOf(items.filter((it) => it.base), false), pend: items.filter((it) => it.pend).length };
+}
+// RC2-02: the depth run x stood parked at when a run first seen at `at` started, or null: its newest save point seen no later than
+//   `at`, when it had not gone on from it before `at` (still parked, or the next segment came at `at` or later). A run that was
+//   parked and went on BEFORE the other run was first seen counts at what it reached, like any run.
+function elpSaveAt(x, at) {
+  const sv = x && x[9];
+  if (!Array.isArray(sv)) return null;
+  for (let i = sv.length - 3; i >= 0; i -= 3) {
+    if (!(Number(sv[i + 1]) <= at)) continue;   // a save point seen after it: not what the client held then
+    return (!sv[i + 2] || Number(sv[i + 2]) >= at) ? Math.max(0, sv[i] | 0) : null;
+  }
+  return null;
+}
+// RC2-02: the depth an unfinished run x of another family stood at for his client when a run first seen at `at` started, or null:
+//   parked at a save point then (elpSaveAt); or never ended -- no final segment, not parked, nothing of it seen after `at` (a crash
+//   after a checkpoint, a seat that left its team: the client noted the run at its last checkpoint) -- at the depth the job holds
+function elpOpenAt(x, at) {
+  const sd = elpSaveAt(x, at);
+  if (sd != null) return sd;
+  return (!elpRunEnded(x) && !elpRunParked(x) && !((x[6] || 0) > at)) ? Math.max(0, x[1] | 0) : null;
+}
+// the flags of a history run as the readings ask them (what settles when is elpRunReady's alone): its final segment came / it
+//   stands parked at a save point
+function elpRunEnded(r) { return !!((r[7] | 0) & 1); }
+function elpRunParked(r) { return !!((r[7] | 0) & 2); }
+// his runs of season s first seen no later than `at`, the run itself left out, each with what the readings below need: base (it
+//   counts in the job's own reading: settled, or this pass settles it before runId -- the ONE place that rule is written), pend (the
+//   second case), other (a run of another family), tie (of another family and first seen at the very instant `at`), live (settled,
+//   or this pass settles it), save (of another family and unfinished for his client when the run started: the depth it stood at --
+//   elpOpenAt; else null)
+function elpBeforeItems(st, p, s, fam, runId, at, order) {
+  const rid = runId >>> 0, soon = new Map(), out = [];
+  let ix = -1;
   if (order) order.forEach((o, j) => { soon.set(o.r, j); if (o.fam === fam && (o.r[0] >>> 0) === rid) ix = j; });
-  const lists = elpFamEntries(st, p, s).map(({ fam: f, h }) => ({ fam: f, h, runs: h.runs.filter((x) => {
-    if ((f === fam && (x[0] >>> 0) === rid) || (x[2] || 0) > at) return false;
-    if (x[3]) return true;
+  for (const { fam: f, h } of elpFamEntries(st, p, s)) for (const x of h.runs) {
+    if ((f === fam && (x[0] >>> 0) === rid) || (x[2] || 0) > at) continue;
     const j = soon.get(x);
     const ok = j != null && (ix < 0 || j < ix);
-    if (ok) pend++;
-    return ok;
-  }) }));
-  return { runs: elpMergeByStart(lists).map((x) => [x.fam, x.r[1] | 0]).reverse(), pend };
+    const pend = !x[3] && ok, other = f !== fam;
+    out.push({ fam: f, h, r: x, base: !!x[3] || pend, pend, other, tie: other && (x[2] || 0) === at, live: !!x[3] || j != null, save: other ? elpOpenAt(x, at) : null });
+  }
+  return out;
+}
+// items -> [[fam, depth], ..] newest first (the start order of elpMergeByStart); saved: a run with a save depth counts at it
+function elpListOf(items, saved) {
+  const by = new Map(), dep = new Map();
+  for (const it of items) {
+    if (!by.has(it.fam)) by.set(it.fam, { fam: it.fam, h: it.h, runs: [] });
+    by.get(it.fam).runs.push(it.r);
+    if (saved && it.save != null) dep.set(it.r, it.save);
+  }
+  return elpMergeByStart(pointsPlan.ELP_FAMS.filter((f) => by.has(f)).map((f) => by.get(f))).map((x) => [x.fam, dep.has(x.r) ? dep.get(x.r) : (x.r[1] | 0)]).reverse();
+}
+// RC2-02: the readings of "the runs before run runId" his client may have fixed the target from, distinct, the job's own FIRST. The
+//   client reads its own history when the run starts; beside the job's reading that history may hold, of the OTHER families only:
+//     - a run first seen in this same pass (tie): played before this run (it counts) or after it (it does not) -- the job cannot
+//       tell, it orders the two by run id. Both readings: none of them / every one this pass settles;
+//     - a run parked at a save point (the client counts it at its save depth; the job has not settled it), and the same run once
+//       it went on (the job counts its final depth, the client counted the save depth while it was parked); a run that never
+//       ended (the client noted it at its last checkpoint; the job settles it only once it lies idle). The reading with every
+//       such run at the depth it stood at when this run was first seen (elpOpenAt), beside the job's.
+//   Runs of the family itself never move (a family's own runs settle in the order they were played, and a parked one is given up
+//   by the next), so a family with MIN_RUNS own runs reads the same skill from every list.
+function elpBeforeLists(st, p, s, fam, runId, at, order) {
+  const items = elpBeforeItems(st, p, s, fam, runId, at, order), out = [], seen = new Set();
+  const add = (list) => { const k = JSON.stringify(list); if (!seen.has(k)) { seen.add(k); out.push(list); } };
+  add(elpListOf(items.filter((it) => it.base), false));
+  for (const tieAll of [false, true]) for (const saved of [false, true]) {
+    add(elpListOf(items.filter((it) => {
+      const kept = saved && it.save != null;
+      if (it.tie) return tieAll && (it.live || kept);
+      return it.base || kept;
+    }), saved));
+  }
+  return out;
+}
+// RC2-03: the hidden skill of family fam his ROW carried when this pass began (ctx.h0 = { h: the four skills kept on his points
+//   entry, ht: when they were computed } -- at his last settle pass, under the lines of that day). His client reads it off the row
+//   -- for the target, the team hello and the points line -- while no run of his waits for its receipt. It is a reading for a run
+//   runId first seen at `at` only when (a) the row carried it by then (ht <= at): skills computed later hold runs the client could
+//   not have seen on its row when this run started; and (b) no run of his that this pass settles before it SURELY came first: such
+//   a run was waiting for its receipt when this one started, and the client read its own history then. A run of another family
+//   first seen at the same instant (the job orders the two by run id) or parked at a save point then (elpSaveAt: it went on after
+//   this run) is not sure to have come first, and a run that never ended (no final segment: settled idle, or because a newer run
+//   of its family came) left the client no receipt to wait for -- neither takes the reading away. (b) is also what keeps a chain
+//   of runs settling the same in one pass and in several.) null = no such reading.
+function elpRowSkill(ctx, p, fam, runId, at) {
+  const h0 = ctx && ctx.h0 ? ctx.h0.get(p) : null;
+  if (!h0 || !(Number(h0.ht) <= at)) return null;   // a millisecond clock: never through | 0. No stamp (an entry the job before this rule left) = no reading
+  const order = (ctx.order && ctx.order.get(p)) || [], rid = runId >>> 0;
+  const ix = order.findIndex((o) => o.fam === fam && (o.r[0] >>> 0) === rid);
+  for (let j = 0; j < order.length; j++) {
+    const o = order[j], fs0 = o.r[2] || 0;
+    if (j === ix || (ix >= 0 ? j > ix : fs0 > at)) continue;   // the run itself / what the pass settles after it (the run not in his pass: what was first seen after it)
+    if (!elpRunEnded(o.r)) continue;   // it never ended: no receipt the client could have been waiting for
+    if (o.fam === fam || !(fs0 === at || elpSaveAt(o.r, at) != null)) return null;
+  }
+  const x = h0.h[pointsPlan.ELP_FAMS.indexOf(fam)];
+  return x == null ? null : (x | 0);
 }
 // the pass lines of the four families in force at instant t of season s: { solo: [7], duo: [7], trio: [7], quad: [7] }
 function elpLinesByFam(st, s, t) { const out = {}; for (const fam of pointsPlan.ELP_FAMS) out[fam] = elpLinesAt(st, fam, s, t); return out; }
@@ -6849,10 +6969,54 @@ function elpSkillsOf(st, p, s, t) { const runs = elpSettledRuns(st, p, s), lines
 //   null. The reading looks at those runs ONLY, never at his points entry: whether he is placed NOW says nothing about the run's
 //   start (with O825 his later runs of any family place him while this run still waits), and reading it made the frozen level
 //   depend on which member the pass walked first. nowMs: the pass's clock (omitted = the idle rule never fires).
-function elpMemberHiddenBefore(st, p, fam, s, runId, firstSeen, nowMs) {
+function elpMemberHiddenBefore(st, p, fam, s, runId, firstSeen, nowMs, ctx) {
   if (!elpFamEntries(st, p, s).length) return null;
-  const b = elpRunsBefore(st, p, s, fam, runId, firstSeen, elpPassOrder(st, p, s, nowMs));
+  const b = elpRunsBefore(st, p, s, fam, runId, firstSeen, elpOrderOf(ctx, st, p, s, nowMs));
   return b.runs.length ? pointsPlan.elpHiddenFor(fam, b.runs, elpLinesByFam(st, s, firstSeen), 1) : null;
+}
+// his pass order: the one the pass computed when it began (ctx: every reading of one pass sees the same list, whoever was settled
+//   first), else computed now
+function elpOrderOf(ctx, st, p, s, nowMs) { return (ctx && ctx.order && ctx.order.has(p)) ? ctx.order.get(p) : elpPassOrder(st, p, s, nowMs); }
+// RC2-02 / RC2-03: the values member p's client may have sent as his skill of family fam for team run runId (first seen at `at`),
+//   distinct, the job's own reading (elpMemberHiddenBefore) FIRST: every reading of the runs before it (elpBeforeLists) under each
+//   candidate table (MIN_RUNS values or more = the trimmed mean, fewer = their plain mean, as the job's own), and the skill of his
+//   row (elpRowSkill)
+function elpMemberReadings(st, p, fam, s, runId, at, nowMs, ctx) {
+  const out = [], seen = new Set();
+  const add = (x) => { const k = x == null ? 'none' : String(x | 0); if (!seen.has(k)) { seen.add(k); out.push(x == null ? null : (x | 0)); } };
+  add(elpMemberHiddenBefore(st, p, fam, s, runId, at, nowMs, ctx));
+  if (elpFamEntries(st, p, s).length) {
+    const tabs = elpCandidateTabs(st, s, at, nowMs);
+    for (const list of elpBeforeLists(st, p, s, fam, runId, at, elpOrderOf(ctx, st, p, s, nowMs))) for (const tb of tabs) {
+      add(list.length ? pointsPlan.elpHiddenFor(fam, list, tb, 1) : null);
+    }
+  }
+  const rs = elpRowSkill(ctx, p, fam, runId, at);
+  if (rs != null) add(rs);
+  return out;
+}
+// RC2-02 / RC2-03: the team level a run freezes. sets = per member the values his client may have sent (elpMemberReadings: the job's
+//   own reading first), passes = the family's pass lines of each candidate table (they only place the silver line of a team
+//   nobody has a skill in). The job's own level (every member at his first value) stands unless another combination gives a LOWER
+//   target line: every seat is judged against one target, and a target above the one the host's dial showed turns a run the whole
+//   team saw passed into a miss. Among the combinations with the lowest line, the highest level. Past 4096 combinations each
+//   member keeps his lowest value (and none, if that was one of his): the lowest line is still found.
+function elpTeamPick(sets, passes) {
+  const lineOf = (th) => Math.min.apply(null, passes.map((p) => pointsPlan.targetLineOf(0, p, th, false)));
+  const own = pointsPlan.teamHiddenOf(sets.map((x) => x[0]));
+  let use = sets, total = 1;
+  for (const x of sets) total *= Math.max(1, x.length);
+  if (total > 4096) use = sets.map((x) => { const nums = x.filter((y) => y != null), o = nums.length ? [Math.min.apply(null, nums)] : []; if (x.some((y) => y == null)) o.push(null); return o; });
+  const ownLine = lineOf(own), idx = use.map(() => 0);
+  let best = own, bestLine = ownLine;
+  for (;;) {
+    const th = pointsPlan.teamHiddenOf(use.map((x, i) => x[idx[i]])), line = lineOf(th);
+    if (line < bestLine || (line === bestLine && bestLine < ownLine && (th == null ? -1 : th) > (best == null ? -1 : best))) { best = th; bestLine = line; }
+    let i = 0;
+    while (i < idx.length && ++idx[i] >= use[i].length) { idx[i] = 0; i++; }
+    if (i >= idx.length) break;
+  }
+  return best;
 }
 // O803: the team's usual level for run r of family fam (duo / trio / quad): undefined when no roster is recorded for the run (solo, the
 //   couch pair, a run that entered before this rule: the caller reads the player's own skill); else the frozen value of the run's team
@@ -6861,13 +7025,14 @@ function elpMemberHiddenBefore(st, p, fam, s, runId, firstSeen, nowMs) {
 //   The instant the members are read at is the run's own (t0 of its roster entry: the first tick the lane saw it), not the first
 //   settler's copy: two members' copies may be first seen at different ticks (late records), and with O825 everything a member
 //   played in between -- in any family -- would otherwise move the level by who settles first.
-function elpTeamHidden(st, r, fam, s, nowMs) {
+function elpTeamHidden(st, r, fam, s, nowMs, ctx) {
   if (fam === 'solo' || !ELP.PRIOR[fam]) return undefined;
   const tm = st && st.elpTeam && st.elpTeam[String(r[0] >>> 0)];
   if (!tm || !Array.isArray(tm.r)) return undefined;
   if (tm.has) return tm.h;
   const at = tm.t0 || (r[2] ? r[2] : nowMs);   // an entry noted before t0 existed: the first settler's copy, as before
-  tm.h = pointsPlan.teamHiddenOf(tm.r.map((p) => elpMemberHiddenBefore(st, p, fam, s, r[0] >>> 0, at, nowMs)));
+  // RC2-02 / RC2-03: every member's own reading first; a combination of the readings their clients may have sent that gives a lower target line wins (elpTeamPick)
+  tm.h = elpTeamPick(tm.r.map((p) => elpMemberReadings(st, p, fam, s, r[0] >>> 0, at, nowMs, ctx)), elpCandidateTabs(st, s, at, nowMs).map((tb) => tb[fam]));
   tm.has = 1;
   return tm.h;
 }
@@ -6903,13 +7068,17 @@ function elpCandidateTabs(st, s, firstSeen, nowMs) {
 //   (O803) the run's team entry, where the first settle of a team run freezes the team level. Each candidate table gives its own
 //   reading (hidden skill of the family over the runs before, target, points line); the one that leaves the player the most is
 //   taken (architecture decision 10). Returns { d, T, pass, seeded, teamH (undefined = the player's own skill) }.
-function elpSettleRun(st, p, c, h, r, fam, s, nowMs) {
+function elpSettleRun(st, p, c, h, r, fam, s, nowMs, ctx) {
   const at = r[2] ? r[2] : nowMs, tabs = elpCandidateTabs(st, s, at, nowMs);
-  const depth = r[1] | 0, seed = r[8] | 0, before = elpRunsBefore(st, p, s, fam, r[0] >>> 0, at, null).runs;
-  const teamH = elpTeamHidden(st, r, fam, s, nowMs);   // O803: the team's usual level (a team run with a roster), else undefined = own
-  let d = 0, T = 0, pass = false, flags = 0, seeded = false;
+  const depth = r[1] | 0, seed = r[8] | 0;
+  // RC2-02: the readings of the runs before it his client may have fixed the target from; befores[0] = the job's own (it wins a tie)
+  const befores = elpBeforeLists(st, p, s, fam, r[0] >>> 0, at, (ctx && ctx.order && ctx.order.has(p)) ? ctx.order.get(p) : null);
+  const teamH = elpTeamHidden(st, r, fam, s, nowMs, ctx);   // O803: the team's usual level (a team run with a roster), else undefined = own
+  let d = 0, T = 0, pass = false, flags = 0, seeded = false, alts = 1;
   if (!c.placed) {
-    T = Math.min.apply(null, tabs.map((tb) => { const ph = pointsPlan.elpHiddenFor(fam, before, tb, 1); return pointsPlan.targetOf(0, tb[fam], seed, teamH === undefined ? ph : teamH, true); }));
+    const ts = [];
+    for (const tb of tabs) for (const before of befores) { const ph = pointsPlan.elpHiddenFor(fam, before, tb, 1); ts.push(pointsPlan.targetOf(0, tb[fam], seed, teamH === undefined ? ph : teamH, true)); }
+    T = Math.min.apply(null, ts); alts = new Set(ts).size;
     pass = depth >= T;
     if (((c.n | 0) + 1) >= ELP.MIN_RUNS) {
       const five = [[fam, depth]].concat(elpSettledRuns(st, p, s));   // every settled run of the season + this one: read on the solo scale
@@ -6918,26 +7087,29 @@ function elpSettleRun(st, p, c, h, r, fam, s, nowMs) {
     }
   } else {
     const off = pointsPlan.targetOffset(seed), cur = Math.max(0, Math.min(LP_MAX, c.lp | 0));
+    const rowH = elpRowSkill(ctx, p, fam, r[0] >>> 0, at), seenT = new Set();   // RC2-03: the skill his row carried (the reading of a client with no run waiting for its receipt)
     let best = null;
-    for (const tb of tabs) {
-      const H = pointsPlan.elpHiddenFor(fam, before, tb);
+    for (const tb of tabs) for (const before of befores.concat(rowH == null ? [] : [null])) {
+      const H = before === null ? rowH : pointsPlan.elpHiddenFor(fam, before, tb);
       // O803: the target reads the team level; the settle (gap / protection / gate) his own skill. Without a team level the target
       //   reads his own skill -- and with fewer than MIN_RUNS values before the run (H null: the silver line) also their plain mean:
       //   the run may have started before his placement (a save point held it back while his other families placed him), when the
       //   client fixed the target from that reading. The one that leaves him the most is taken, as with the tables.
-      const ths = teamH !== undefined ? [teamH] : ((H == null && before.length) ? [H, pointsPlan.elpHiddenFor(fam, before, tb, 1)] : [H]);
+      const ths = teamH !== undefined ? [teamH] : ((H == null && before && before.length) ? [H, pointsPlan.elpHiddenFor(fam, before, tb, 1)] : [H]);
       for (const th of ths) {
         const t = pointsPlan.targetOf(cur, tb[fam], seed, th, false), sl = pointsPlan.endlessSettle(cur, depth >= t, H, tb[fam], off, fam);
+        seenT.add(t);
         if (!best || sl.nv > best.sl.nv) best = { sl, t };
       }
     }
+    alts = seenT.size;
     T = best.t; pass = depth >= T; c.lp = best.sl.nv; d = best.sl.nv - cur;
     flags = (best.sl.protect ? ELP.PROTECT_RS : 0) | (best.sl.clamped ? RECEIPT_F.SERIES : 0);
   }
   r[3] = 2; r[4] = d; r[5] = T;   // 2 = settled onto the one points value (its d is part of c.lp)
   c.n = (c.n | 0) + 1; c.t = nowMs;
   c.ring = receiptPush(c.ring || [], elpRunRk(s, r[8]), d, flags, 0xff);   // keyed by the run seed (the client knows it)
-  return { d, T, pass, seeded, teamH };
+  return { d, T, pass, seeded, teamH, alts };   // alts: how many different targets the readings gave (1 = nothing but the job's own)
 }
 // settled runs past the window leave it (their points stay refundable in gone)
 function elpTrim(h) {
@@ -6961,15 +7133,23 @@ function elpSettleAll(st, seasonNow, nowMs) {
     entries.push({ fam, h });
     if (!seenP.has(p)) { seenP.add(p); pids.push(p); }
   }
+  // the pass context, taken before anything settles: every player's pass order and the four skills his row carried (RC2-03). Every
+  //   reading of this pass looks at these, never at what the pass has done so far -- whoever is walked first
+  const ctx = { order: new Map(), h0: new Map() };
   for (const p of pids) {
-    const order = elpPassOrder(st, p, seasonNow | 0, nowMs);
+    ctx.order.set(p, elpPassOrder(st, p, seasonNow | 0, nowMs));
+    const c0 = elpAllOf(st, p, seasonNow | 0);
+    if (c0 && c0.placed && Array.isArray(c0.h) && c0.h.length === pointsPlan.ELP_FAMS.length) ctx.h0.set(p, { h: c0.h.slice(), ht: Number(c0.ht) });
+  }
+  for (const p of pids) {
+    const order = ctx.order.get(p);
     if (!order.length) continue;
     const c = elpAllOf(st, p, seasonNow | 0, true);
     for (const o of order) {
-      const x = elpSettleRun(st, p, c, o.h, o.r, o.fam, seasonNow | 0, nowMs);
+      const x = elpSettleRun(st, p, c, o.h, o.r, o.fam, seasonNow | 0, nowMs, ctx);
       out.push(Object.assign({ k: ratingHistKey(p, o.fam, seasonNow), runId: o.r[0] >>> 0 }, x));
     }
-    c.h = elpSkillsOf(st, p, seasonNow | 0, nowMs);   // the row's four skills, as of this pass (kept: the row moves with its player only)
+    c.h = elpSkillsOf(st, p, seasonNow | 0, nowMs); c.ht = nowMs;   // the row's four skills, as of this pass (kept: the row moves with its player only); ht: since when the row carries them (RC2-03)
   }
   for (const e of entries) {
     if (e.fam !== 'solo') for (const r of e.h.runs) if (!r[3]) pending.add(String(r[0] >>> 0));   // O803: a team run still to settle keeps its roster
@@ -11095,7 +11275,7 @@ async function main() {
   const elpUpkeepRun = async (st) => {
     const done = elpSettleAll(st, seasonId, nowMs);
     if (done.bad && done.bad.length) ghWarn('endless points: ' + done.bad.length + ' damaged history entr' + (done.bad.length === 1 ? 'y' : 'ies') + ' left alone (first ' + String(done.bad[0]).slice(0, 8) + ') -- their runs settle nothing until the state is repaired');
-    for (const x of done) console.log('  endless points ' + x.k.split('|')[1] + ' ' + x.k.slice(0, 8) + ': run ' + (x.runId >>> 0).toString(16) + ' target ' + x.T + (x.pass ? ' passed' : ' missed') + ' -> ' + (x.d >= 0 ? '+' : '') + x.d + (x.seeded ? ' (placement done: seeded)' : '') + (x.teamH !== undefined ? ' (team level ' + (x.teamH == null ? 'none' : x.teamH) + ')' : ''));
+    for (const x of done) console.log('  endless points ' + x.k.split('|')[1] + ' ' + x.k.slice(0, 8) + ': run ' + (x.runId >>> 0).toString(16) + ' target ' + x.T + (x.pass ? ' passed' : ' missed') + ' -> ' + (x.d >= 0 ? '+' : '') + x.d + (x.seeded ? ' (placement done: seeded)' : '') + (x.teamH !== undefined ? ' (team level ' + (x.teamH == null ? 'none' : x.teamH) + ')' : '') + (x.alts > 1 ? ' (best of ' + x.alts + ' targets his client may have shown)' : ''));
     RUN.elpSettled = (RUN.elpSettled | 0) + done.length;
     let ch = done.length > 0;
     const day = tiercutDay(seasonNowMs());
@@ -15217,7 +15397,7 @@ Object.assign(module.exports, { pruneFlagged, flagBaseKey, FLAG_PRUNE_WAIT_MS, b
 Object.assign(module.exports, { lateWriterRoster });   // cloud audit Q261 a 1V1 whose result writer's own start was first read with his result
 Object.assign(module.exports, { lone1v1Spoiled, lone1v1VoidClaims });   // cloud audit Q216 a ranked 1V1 whose loser wrote only records the job cannot use
 Object.assign(module.exports, { teamXpFloor, teamXpStarts, teamXpMark, teamRollbackPlan });   // cloud audit Q237 team competitive XP floors (test/team-comp-ghost-xp.js)
-Object.assign(module.exports, { RATING, RATING_FAMS, ENDLESS_RATING_LB, ELP_ALL, elpAllKey, elpAllOf, elpEntryOk, elpFamEntries, elpMergeByStart, elpPassOrder, elpSettledRuns, elpRunsBefore, elpLinesByFam, elpSkillsOf, elpCandidateTabs, ENDLESS_RATING_LB_SOLO, ENDLESS_RATING_LB_DUO, ENDLESS_RATING_LB_TRIO, ENDLESS_RATING_LB_QUAD, ENDLESS_TIERCUT_LB, ratingFamOf, fnv32, ratingRunId, ratingHistKey,
+Object.assign(module.exports, { RATING, RATING_FAMS, ENDLESS_RATING_LB, ELP_ALL, elpAllKey, elpAllOf, elpEntryOk, elpFamEntries, elpMergeByStart, elpPassOrder, elpSettledRuns, elpRunsBefore, elpSaveAt, elpOpenAt, elpBeforeItems, elpBeforeLists, elpRowSkill, elpMemberReadings, elpTeamPick, elpLinesByFam, elpSkillsOf, elpCandidateTabs, ENDLESS_RATING_LB_SOLO, ENDLESS_RATING_LB_DUO, ENDLESS_RATING_LB_TRIO, ENDLESS_RATING_LB_QUAD, ENDLESS_TIERCUT_LB, ratingFamOf, fnv32, ratingRunId, ratingHistKey,
   ratingHistUpsert, ratingHistRemove, ratingHistFinal, elpRunRk, ratingScoreOf, ratingPlan, ratingTierOf, tiercutDay, tiercutEncode, tiercutDecode, tiercutDue, pruneRatingHist,
   elpSettledDepths, elpLinesAt, elpCandidates, elpSettleRun, elpTrim, elpSettleAll, elpRunReady, elpPendingSettles, elpTeamNote, elpMemberHiddenBefore, elpTeamHidden, elpTeamTrim, elpLinesOf, elpHiddensOf, elpLinesSkipBanned, elpTableKey, elpTabNewest, elpTabRecord });
 Object.assign(module.exports, { CUP, CUP_FAMS, ENDLESS_CUP_LB, ENDLESS_CUP_HONOR_LB, cupWeekId, cupWeekStart, cupWeekBack, cupNextWeek, cupEdition, cupWeekBoardName, teamBlockSids,

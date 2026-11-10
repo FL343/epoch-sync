@@ -308,8 +308,8 @@ const SRC = fs.readFileSync(path.join(__dirname, '..', 'validate.js'), 'utf8');
   T('[7] O803: the team lane records the roster by run id (every roster seat, pid-keyed, the family and the season), once per settled segment, EA only; no other lane does',
     /if \(!PT_MODE\) elpTeamNote\(soloState, ratingRunId\(key\), rosterSids\.map\(\(x\) => pid\(String\(x\)\)\), fam\.low, t\.seasonId, nowMs\);/.test(lane) && (SRC.match(/elpTeamNote\(soloState,/g) || []).length === 1);
   T('[7] O803 / O825: the settle reads the team level into the target only (targetOf th) and the own skill of the run\'s family into the points line (endlessSettle H, fam), placing included; the seed reads the five on the solo scale',
-    /const t = pointsPlan\.targetOf\(cur, tb\[fam\], seed, th, false\), sl = pointsPlan\.endlessSettle\(cur, depth >= t, H, tb\[fam\], off, fam\);/.test(SRC) && /const ths = teamH !== undefined \? \[teamH\] : \(\(H == null && before\.length\) \? \[H, pointsPlan\.elpHiddenFor\(fam, before, tb, 1\)\] : \[H\]\);/.test(SRC)
-    && /const ph = pointsPlan\.elpHiddenFor\(fam, before, tb, 1\); return pointsPlan\.targetOf\(0, tb\[fam\], seed, teamH === undefined \? ph : teamH, true\);/.test(SRC)
+    /const t = pointsPlan\.targetOf\(cur, tb\[fam\], seed, th, false\), sl = pointsPlan\.endlessSettle\(cur, depth >= t, H, tb\[fam\], off, fam\);/.test(SRC) && /const ths = teamH !== undefined \? \[teamH\] : \(\(H == null && before && before\.length\) \? \[H, pointsPlan\.elpHiddenFor\(fam, before, tb, 1\)\] : \[H\]\);/.test(SRC)
+    && /const ph = pointsPlan\.elpHiddenFor\(fam, before, tb, 1\); ts\.push\(pointsPlan\.targetOf\(0, tb\[fam\], seed, teamH === undefined \? ph : teamH, true\)\);/.test(SRC)
     && /pointsPlan\.endlessSeedLp\(pointsPlan\.elpHiddenFor\('solo', five, tb\), tb\.solo\)/.test(SRC));
   T('[7] O803 / O825: the table key carries ELP.VER (4) and the two team constants: the pass-line table is re-recorded and republished on the first run under the new rules', /function elpTableKey\(\) \{ return JSON\.stringify\(\[ELP\.VER, /.test(SRC) && ELP.VER === 4 && v.elpTableKey().startsWith('[4,') && v.elpTableKey().endsWith(',1300,110]'));
   T('[7] couch competitive lane feeds the duo history while merged (couchRatingFam), with flags and run seed', /if \(!PT_MODE\) \{ ratingHistUpsert\(soloState, p, couchRatingFam\(\), f\.seasonId, ratingRunId\(key\), f\.endDepth, nowMs, f\.flags, f\.runSeed\); ratingTouched\.add\(sid\); \}/.test(SRC) && /function couchRatingFam\(\) \{ return COUCH_DUO_SPLIT \? 'duoc' : 'duo'; \}/.test(SRC));
@@ -336,8 +336,11 @@ const SRC = fs.readFileSync(path.join(__dirname, '..', 'validate.js'), 'utf8');
     && Object.entries({ SOLO: 6, DUO: 4, TRIO: 4, QUAD: 4 }).every(([f, n]) => (SRC.match(new RegExp('ENDLESS_RATING_LB_' + f + '\\b', 'g')) || []).length === n));
   T('[7] O825: the upkeep runs under the guard (the three parts of the chain memory restored on a throw, a warning, false); the row plan has its own', /try \{ keep = JSON\.stringify\(/.test(up) && /it never runs without its way back/.test(up) && /try \{ return await elpUpkeepRun\(st\); \}\n\s*catch \(e\) \{\n\s*const back = JSON\.parse\(keep\);/.test(up) && /st\.hist = back\[0\];/.test(up) && /the lane is skipped this run/.test(up)
     && /\} catch \(e\) \{ ghWarn\('rating: the row plan threw/.test(laneSrc));
-  T('[7] O825: one order for the settle loop and the member reading (elpPassOrder over elpPendingSettles; no second copy of the condition)', /const order = elpPassOrder\(st, p, seasonNow \| 0, nowMs\);/.test(v.elpSettleAll.toString()) && /elpPassOrder\(st, p, s, nowMs\)/.test(v.elpMemberHiddenBefore.toString()) && !/elpAllOf|placed/.test(v.elpMemberHiddenBefore.toString())
-    && /elpPendingSettles\(h, nowMs\)/.test(v.elpPassOrder.toString()) && ![v.elpSettleAll, v.elpPassOrder, v.elpMemberHiddenBefore, v.elpRunsBefore, v.elpMergeByStart].some((f) => /IDLE_MS|\[7\]/.test(f.toString())));
+  T('[7] O825 / RC2: one order for the settle loop and every reading of the pass (elpPassOrder over elpPendingSettles, taken once when the pass begins: ctx.order; no second copy of the condition)',
+    /ctx\.order\.set\(p, elpPassOrder\(st, p, seasonNow \| 0, nowMs\)\);/.test(v.elpSettleAll.toString()) && /const order = ctx\.order\.get\(p\);/.test(v.elpSettleAll.toString()) && (v.elpSettleAll.toString().match(/elpPassOrder\(/g) || []).length === 1
+    && /elpOrderOf\(ctx, st, p, s, nowMs\)/.test(v.elpMemberHiddenBefore.toString()) && /function elpOrderOf\(ctx, st, p, s, nowMs\) \{ return \(ctx && ctx\.order && ctx\.order\.has\(p\)\) \? ctx\.order\.get\(p\) : elpPassOrder\(st, p, s, nowMs\); \}/.test(SRC)
+    && !/elpAllOf|placed/.test(v.elpMemberHiddenBefore.toString())
+    && /elpPendingSettles\(h, nowMs\)/.test(v.elpPassOrder.toString()) && ![v.elpSettleAll, v.elpPassOrder, v.elpMemberHiddenBefore, v.elpRunsBefore, v.elpMergeByStart, v.elpBeforeItems, v.elpBeforeLists, v.elpRowSkill, v.elpMemberReadings, v.elpTeamPick].some((f) => /IDLE_MS|\[7\]/.test(f.toString())));
 }
 
 // ---- e2e harness (test/team-comp-ghost-xp.js shape: offline stateless board stub, every *_FILE redirected into a temp cwd) ----
@@ -679,7 +682,7 @@ function teamScenario(m, opts) {
     try { red = !memoT(mutant([['  if (tm.has) return tm.h;', '']])); } catch (e) { red = /anchor missing/.test(e.message) ? (bad('[11] ' + e.message), false) : true; }
     T('[11] mutation "the memo dropped (the team level recomputed at every settle)" turns the second seat\'s T red (his raised runs would move it)', red);
     let red2 = false;
-    try { red2 = !sameT(mutant([['tm.h = pointsPlan.teamHiddenOf(tm.r.map((p) => elpMemberHiddenBefore(st, p, fam, s, r[0] >>> 0, at, nowMs)));', 'tm.h = elpMemberHiddenBefore(st, tm.r[0], fam, s, r[0] >>> 0, at, nowMs);']])); } catch (e) { red2 = /anchor missing/.test(e.message) ? (bad('[11] ' + e.message), false) : true; }
+    try { red2 = !sameT(mutant([['tm.h = elpTeamPick(tm.r.map((p) => elpMemberReadings(st, p, fam, s, r[0] >>> 0, at, nowMs, ctx)), elpCandidateTabs(st, s, at, nowMs).map((tb) => tb[fam]));', 'tm.h = elpMemberHiddenBefore(st, tm.r[0], fam, s, r[0] >>> 0, at, nowMs, ctx);']])); } catch (e) { red2 = /anchor missing/.test(e.message) ? (bad('[11] ' + e.message), false) : true; }
     T('[11] mutation "the team level read from one seat" turns the target red', red2);
     let red3 = false;
     try { red3 = !sameT(mutant([['const ths = teamH !== undefined ? [teamH] : ', 'const ths = false ? [teamH] : ']])); } catch (e) { red3 = /anchor missing/.test(e.message) ? (bad('[11] ' + e.message), false) : true; }
@@ -839,7 +842,7 @@ console.log('-- [10] mutation self-checks --');
     ['a newer run does not settle the one before', 'newerSettles', [['((r[7] | 0) & 1) || newer || (idle', '((r[7] | 0) & 1) || (idle']]],
     ['the worst line set taken', 'bestCandidate', [['if (!best || sl.nv > best.sl.nv) best = { sl, t };', 'if (!best || sl.nv < best.sl.nv) best = { sl, t };']]],
     ['the seed without the fifth run', 'seedOverFive', [['const five = [[fam, depth]].concat(elpSettledRuns(st, p, s));', 'const five = elpSettledRuns(st, p, s);']]],
-    ['the skill counts the run being settled', 'skillBefore', [['      const H = pointsPlan.elpHiddenFor(fam, before, tb);', '      const H = pointsPlan.elpHiddenFor(fam, [[fam, depth]].concat(before), tb);']]],
+    ['the skill counts the run being settled', 'skillBefore', [['      const H = before === null ? rowH : pointsPlan.elpHiddenFor(fam, before, tb);', '      const H = before === null ? rowH : pointsPlan.elpHiddenFor(fam, [[fam, depth]].concat(before), tb);']]],
     ['receipts keyed by the run id', 'receiptBySeed', [['c.ring = receiptPush(c.ring || [], elpRunRk(s, r[8]), d, flags, 0xff);', 'c.ring = receiptPush(c.ring || [], r[0] | 0, d, flags, 0xff);']]],
     ['a conviction keeps the points', 'refund', [['const nv = Math.max(0, Math.min(LP_MAX, (c.lp | 0) - d));', 'const nv = c.lp | 0;']]],
     ['a convicted seeding run keeps the placement', 'unplace', [['if (c.placed && Array.isArray(c.seedRun) && c.seedRun[0] === fam && (c.seedRun[1] >>> 0) === runId) {', 'if (false) {']]],
@@ -962,6 +965,13 @@ function rowsStableDetail(m) {
   return { before, after, next: pl.writes.length, was, is, want: PP.elpHiddenFor('duo', m.elpSettledRuns(st, P(sids[0]), 0), m.elpLinesByFam(st, 0, now)) };
 }
 const rowsStable = (m) => { const r = rowsStableDetail(m); return r.before === 0 && r.after === 0 && r.next === 1 && r.is === r.want && r.is !== r.was; };
+// the placement over the families as a check (a placing player has no row: nothing but the runs before a run gives its target)
+function placeTargets(m) {
+  const now = 100 * DAY, st = { hist: {} }, t = now - DAY, plan = [['solo', 10], ['duo', 16], ['quad', 16], ['trio', 16], ['duo', 24]], got = [], want = [];
+  plan.forEach(([fam, d], i) => { m.ratingHistUpsert(st, 'Z', fam, 0, 400 + i, d, t + i * MIN, F, 9400 + i); const x = m.elpSettleAll(st, 0, t + i * MIN + 1)[0]; got.push(x ? x.T : null);
+    want.push(PP.targetOf(0, LN[fam], 9400 + i, PP.elpHiddenFor(fam, plan.slice(0, i).reverse(), LN, 1), true)); });
+  return JSON.stringify(got) === JSON.stringify(want) && want[1] !== PP.targetOf(0, LN.duo, 9401, null, true);
+}
 // (i) a chain memory of the older shape: the points on the family entry, its runs marked 1, no points entry
 function legacyWorld() {
   const now = 100 * DAY, t0 = now - 5 * DAY, runs = [];
@@ -1057,7 +1067,7 @@ function legacyHolds(m) {
     T('[13] ... his next run is placement run 1 of the one points value (d 0); its target reads his older runs (not the silver line); the old fields stay where they were', r.first);
     T('[13] ... a conviction of a run the older job settled removes the run and refunds nothing here (its d never entered these points): no receipt, n unchanged -- in the window and in gone', r.conv && r.gone); }
   // mutations
-  T('[13] baseline holds for the mutations below', crossHolds(v) && stuckHolds(v) && shuffleDiffs(v).diff === 0 && teamBorrowHolds(v) && legacyHolds(v).all && rowsStable(v));
+  T('[13] baseline holds for the mutations below', crossHolds(v) && stuckHolds(v) && shuffleDiffs(v).diff === 0 && teamBorrowHolds(v) && legacyHolds(v).all && rowsStable(v) && placeTargets(v));
   T('[13] mutation "the row\'s skills read fresh at every projection" turns the row check red (a table change rewrites all 30 rows)', redBy('[13] fresh skills', [['  const hs = (Array.isArray(c.h) && c.h.length === pointsPlan.ELP_FAMS.length) ? c.h : elpSkillsOf(', '  const hs = (c.h === 0) ? c.h : elpSkillsOf(']], rowsStable));
   T('[13] mutation "a conviction leaves the kept skills as they were" is caught: the removed run still counts in his row', redBy('[13] stale skills', [['  if (hit && c) c.h = elpSkillsOf(st, p, seasonId, Infinity);', '']], (m) => {
     // five runs at 10, then two at 40 (the trimmed mean keeps one of them: 1600); one of the two convicted -> 1000
@@ -1072,8 +1082,8 @@ function legacyHolds(m) {
   T('[13] mutation "a run that may not settle yet holds every family back" turns the waiting-run check red', redBy('[13] one family holds all',
     [['  return elpMergeByStart(elpFamEntries(st, p, s).map(({ fam, h }) => { const soon = elpPendingSettles(h, nowMs); return { fam, h, runs: h.runs.filter((x, i) => soon.has(i)) }; }));',
       '  const fe = elpFamEntries(st, p, s); if (fe.some(({ h }) => h.runs.some((x, i) => !x[3] && !elpRunReady(h, i, nowMs)))) return [];\n  return elpMergeByStart(fe.map(({ fam, h }) => { const soon = elpPendingSettles(h, nowMs); return { fam, h, runs: h.runs.filter((x, i) => soon.has(i)) }; }));']], stuckHolds));
-  T('[13] mutation "the late run reads every settled run (the ones started after it too)" turns the waiting-run check red', redBy('[13] later runs counted', [["    if ((f === fam && (x[0] >>> 0) === rid) || (x[2] || 0) > at) return false;", "    if (f === fam && (x[0] >>> 0) === rid) return false;"]], stuckHolds));
-  T('[13] mutation "the runs before a run = his runs of that family only" turns the first-duo-run target and the team level red', redBy('[13] own family only', [["    if ((f === fam && (x[0] >>> 0) === rid) || (x[2] || 0) > at) return false;", "    if (f !== fam || (x[0] >>> 0) === rid || (x[2] || 0) > at) return false;"]], (m) => crossHolds(m) || teamBorrowHolds(m)));
+  T('[13] mutation "the late run reads every settled run (the ones started after it too)" turns the waiting-run check red', redBy('[13] later runs counted', [["    if ((f === fam && (x[0] >>> 0) === rid) || (x[2] || 0) > at) continue;", "    if (f === fam && (x[0] >>> 0) === rid) continue;"]], stuckHolds));
+  T('[13] mutation "the runs before a run = his runs of that family only" turns the placement targets red (a placing player has no row to read; a placed one\'s row carries the borrowed skill -- RC2-03 -- so the cross-family checks alone would not see it)', redBy('[13] own family only', [["    if ((f === fam && (x[0] >>> 0) === rid) || (x[2] || 0) > at) continue;", "    if (f !== fam || (x[0] >>> 0) === rid || (x[2] || 0) > at) continue;"]], placeTargets));
   T('[13] mutation "the points line does not take the family" turns the cross-family chain red (no team length factor)', redBy('[13] no fam', [['sl = pointsPlan.endlessSettle(cur, depth >= t, H, tb[fam], off, fam);', 'sl = pointsPlan.endlessSettle(cur, depth >= t, H, tb[fam], off);']], crossHolds));
   T('[13] mutation "a run the older job settled is refunded from the one points value" turns the older-shape check red', redBy('[13] legacy refund', [['if (r[3] === 2) d = r[4] | 0;', 'if (r[3]) d = r[4] | 0;']], (m) => legacyHolds(m).conv));
   T('[13] mutation "the points kept on the family entry" (a second entry a family) turns the cross-family chain red', redBy('[13] points per family', [["  const k = elpAllKey(p, seasonId);\n  let c = st && st.hist ? st.hist[k] : null;", "  const k = elpAllKey(p, seasonId) + (make === true ? '' : '');\n  let c = null;"]], crossHolds));
@@ -1219,7 +1229,7 @@ console.log('-- [16] O825 review round --');
   const heldOk = (m) => { const r = heldTarget(m); return r.placed && r.tStart <= 4 && r.tSilver > 4 && r.x.T === r.tStart && r.x.pass === true && r.lp === r.want && r.lp > r.lp0; };
   { const r = heldTarget(v);
     T('[16] a solo run started after two (duo) runs, held by its save point while three more duo runs placed him, finished at depth 4: its target is the one the dial showed at its start (the plain mean of the two runs before it, read on the solo scale: ' + r.tStart + '), not the silver line (' + r.tSilver + ') -- it passes (+' + (r.lp - r.lp0) + ')', heldOk(v), JSON.stringify(r)); }
-  T('[16] mutation "a placed player\'s target under MIN_RUNS values reads the silver line only" turns it red (the run would miss)', redBy('[16] one reading', [["((H == null && before.length) ? [H, pointsPlan.elpHiddenFor(fam, before, tb, 1)] : [H])", "[H]"]], heldOk));
+  T('[16] mutation "a placed player\'s target under MIN_RUNS values reads the silver line only" turns it red (the run would miss)', redBy('[16] one reading', [["((H == null && before && before.length) ? [H, pointsPlan.elpHiddenFor(fam, before, tb, 1)] : [H])", "[H]"]], heldOk));
   // (d) a late segment raises a run that is settled already: the skills kept for his row follow
   function lateRaise(m) {
     const st = soloPlaced(m, 'U', now - 5 * DAY);
@@ -1232,7 +1242,7 @@ console.log('-- [16] O825 review round --');
   }
   const raiseOk = (m) => { const r = lateRaise(m); return r.h1 === r.was && r.h2 === r.want && r.want !== r.was && r.lpSame; };
   T('[16] a late segment raises a run settled already (idle settle at 5, then the client came back: 45): the points stay as settled, the skills kept for his row are read again (' + lateRaise(v).h1 + ' -> ' + lateRaise(v).h2 + ')', raiseOk(v), JSON.stringify(lateRaise(v)));
-  T('[16] mutation "the kept skills ignore a raised settled run" turns it red', redBy('[16] stale after a raise', [['      if (r[3] && ELP.PRIOR[fam]) { const c = elpAllOf(st, p, seasonId); if (c) c.h = elpSkillsOf(st, p, seasonId, nowMs); }', '']], raiseOk));
+  T('[16] mutation "the kept skills ignore a raised settled run" turns it red', redBy('[16] stale after a raise', [['      if (r[3] && ELP.PRIOR[fam]) { const c = elpAllOf(st, p, seasonId); if (c) { c.h = elpSkillsOf(st, p, seasonId, nowMs); c.ht = nowMs; } }', '']], raiseOk));
   // (e) the placement taken back clears the changes recorded before it: a later conviction of one of those runs refunds nothing
   function twiceConvicted(m) {
     const st = { hist: {} }, t = now - 3 * DAY;
@@ -1262,6 +1272,308 @@ console.log('-- [16] O825 review round --');
   { const r = damaged(v);
     T('[16] a damaged history entry (a run that is no list) is left alone and reported: the other players settle, his other family settles, the pass lines skip it; his next segment repairs the entry on the way in', r.n === 2 && JSON.stringify(r.bad) === '["BADP|solo|0"]' && r.okSettled && r.badDuo && r.badKept && JSON.stringify(r.lines) === '["OKP"]', JSON.stringify(r)); }
   T('[16] mutation "any entry with a runs list is read" throws on the damaged one (the lane would stop for everyone until the guard)', (() => { let threw = false; try { const m = mutantOf([['const elpEntryOk = (h) => !!h && Array.isArray(h.runs) && h.runs.every(Array.isArray);', 'const elpEntryOk = (h) => !!h && Array.isArray(h.runs);']]); damaged(m); } catch (e) { threw = !/anchor missing/.test(e.message); if (!threw) bad('[16] ' + e.message); } return threw; })());
+}
+
+// ---- [17] RC2-02 / RC2-03 (cloud audit 2026-11-11): the readings a client may have fixed the target from ----
+console.log('-- [17] RC2-02 / RC2-03: a family that borrows -- what the client may have held when the run started --');
+{
+  const now = 100 * DAY, HR = 3600000, t0 = now - 9 * DAY, t = now - 3 * DAY, B = 9001;   // B: the duo run under test
+  let SEED = 9700; while (PP.targetOffset(SEED) !== 0) SEED++;   // a run seed without an offset: the target is the line itself
+  const solo5 = [12, 12, 12, 12, 12].map((d) => ['solo', d]), own2 = [['duo', 30], ['duo', 10]];
+  const hWithout = PP.elpHiddenFor('duo', own2.concat(solo5), LN), hWith = PP.elpHiddenFor('duo', [['solo', 7]].concat(own2, solo5), LN), hFinal = PP.elpHiddenFor('duo', [['solo', 13]].concat(own2, solo5), LN);
+  const tOf = (h) => PP.targetOf(0, LN.duo, SEED, h, false);
+  T('[17] the numbers: five solo runs at 12 and two duo runs (10, 30) -- the duo skill borrows: ' + hWithout + ' (target ' + tOf(hWithout) + '); with one more solo run at 7 before it ' + hWith + ' (target ' + tOf(hWith) + '); the same run at 13: ' + hFinal + ' (target ' + tOf(hFinal) + '). A duo run at 17 passes the second target only',
+    hWithout === 1920 && hWith === 1663 && hFinal === 1973 && tOf(hWithout) === 19 && tOf(hWith) === 16 && tOf(hFinal) === 20);
+  // player p: five solo runs at 12 (placed by them), then his own duo runs; settled a day later
+  function base(m, p, duoOwn, st) {
+    st = st || { hist: {}, elpTab: [] };
+    [12, 12, 12, 12, 12].forEach((d, i) => m.ratingHistUpsert(st, p, 'solo', 0, 100 + i, d, t0 + i * MIN, F, 500 + i));
+    (duoOwn || [10, 30]).forEach((d, i) => m.ratingHistUpsert(st, p, 'duo', 0, 150 + i, d, t0 + (5 + i) * MIN, F, 550 + i));
+    m.elpSettleAll(st, 0, t0 + DAY);
+    return st;
+  }
+  const runB = (out) => out.find((x) => x.runId === B && x.k.split('|')[1] === 'duo');
+  // (a) TIE: a solo run A (depth 7) and the duo run B first seen at the same instant; the job orders the two by run id
+  function tie(m, idA, duoOwn) {
+    const st = base(m, 'X', duoOwn);
+    m.ratingHistUpsert(st, 'X', 'solo', 0, idA, 7, t, F, 9801); m.ratingHistUpsert(st, 'X', 'duo', 0, B, 17, t, F, SEED);
+    const order = m.elpPassOrder(st, 'X', 0, t + MIN), lists = m.elpBeforeLists ? m.elpBeforeLists(st, 'X', 0, 'duo', B, t, order) : [], listsA = m.elpBeforeLists ? m.elpBeforeLists(st, 'X', 0, 'solo', idA, t, order) : [];
+    const out = m.elpSettleAll(st, 0, t + MIN);
+    return { out, b: runB(out), a: out.find((x) => x.runId === idA), first: out[0] && out[0].runId, lists, listsA };
+  }
+  const tieOk = (m) => [9002, 9000].every((idA) => { const r = tie(m, idA); return r.out.length === 2 && r.first === Math.min(idA, B) && !!r.b && r.b.T === 16 && r.b.pass === true && r.b.d > 0; });
+  { const hi = tie(v, 9002), lo = tie(v, 9000);
+    T('[17] RC2-02 (same pass): a solo run and a duo run first seen at the same instant -- the job settles the lower run id first, the player played them in one order. The duo run reads both orders and takes the better: target 16 whichever id is lower (B first: ' + JSON.stringify([hi.b.T, hi.b.pass, hi.b.d]) + ' / A first: ' + JSON.stringify([lo.b.T, lo.b.pass, lo.b.d]) + '), the job\'s own reading alone would say 19 and a miss for one of them',
+      tieOk(v) && hi.first === B && lo.first === 9000 && hi.b.alts === 2 && lo.b.alts === 2 && hi.b.d === lo.b.d, JSON.stringify([hi.out, lo.out]));
+    eq('[17] elpBeforeLists (B settles first by id): the job\'s own list first (A not in it), then the list with A', hi.lists.map((l) => [l.length, l[0]]), [[7, ['duo', 30]], [8, ['solo', 7]]]);
+    eq('[17] elpBeforeLists (A settles first by id): the job\'s own list first (A in it), then the list without A', lo.lists.map((l) => [l.length, l[0]]), [[8, ['solo', 7]], [7, ['duo', 30]]]);
+    T('[17] the solo run of the pair (five own solo runs before it): its skill is the same from every list -- one target (alts 1), whichever id is lower', hi.a.alts === 1 && lo.a.alts === 1 && hi.a.T === lo.a.T && hi.listsA.length === 2 && new Set(hi.listsA.concat(lo.listsA).map((l) => PP.elpHiddenFor('solo', l, LN))).size === 1, JSON.stringify([hi.a, lo.a])); }
+  // (b) SAVE: a solo run S parked at a save point (depth 7) before B; the job has not settled S, the client counted it at its save depth
+  function save(m, segs, duoOwn) {
+    const st = base(m, 'X', duoOwn);
+    for (const [d, fl, at] of segs) m.ratingHistUpsert(st, 'X', 'solo', 0, 9003, d, at, fl, 9801);
+    m.ratingHistUpsert(st, 'X', 'duo', 0, B, 17, t, F, SEED);
+    const out = m.elpSettleAll(st, 0, t + MIN);
+    return { st, out, b: runB(out), S: st.hist['X|solo|0'].runs[5] };
+  }
+  const PARKED = [[7, SUS, t - HR]], PARKED2 = [[5, 0, t - 2 * HR], [7, SUS, t - HR]];
+  const saveOk = (m, segs) => { const r = save(m, segs); return r.out.length === 1 && !!r.b && r.b.T === 16 && r.b.pass === true && r.S[3] === 0 && r.S[1] === 7; };
+  { const r = save(v, PARKED), r2 = save(v, PARKED2);
+    T('[17] RC2-02 (save point): a solo run parked at depth 7 before the duo run -- it waits (not settled), the duo run still reads it at its save depth beside the job\'s own reading: target 16, passed (+' + r.b.d + '); the save point is kept on the run (r[9] = [7, seen, 0 = still parked])', saveOk(v, PARKED) && r.b.alts === 2 && JSON.stringify(r.S[9]) === JSON.stringify([7, t - HR, 0]) && r.S.length === 10, JSON.stringify([r.out, r.S]));
+    T('[17] ... the same when the run entered unparked (depth 5) and was parked by a later segment (depth 7)', saveOk(v, PARKED2) && JSON.stringify(r2.S[9]) === JSON.stringify([7, t - HR, 0]) && r2.S[2] === t - 2 * HR, JSON.stringify([r2.out, r2.S])); }
+  // (b2) a run of another family that never ended (a crash after a checkpoint, a seat that left its team): the client noted it at
+  //   the checkpoint, the job settles it only once it lies idle (a day)
+  { const CRASH = [[7, 0, t - HR]], r = save(v, CRASH);
+    T('[17] RC2-02 (never ended): a solo run with one plain segment (depth 7, no final, not parked) before the duo run -- the job has not settled it (it waits ' + (R.IDLE_MS / HR) + ' h idle), the duo run still reads it at that depth: target 16, passed; no save point on it',
+      saveOk(v, CRASH) && r.b.alts === 2 && r.S.length === 9 && R.IDLE_MS > 2 * HR, JSON.stringify([r.out, r.S]));
+    // ... but a run that MOVED after the duo run was first seen was not left behind when it started: no such reading
+    const st = base(v, 'X');
+    v.ratingHistUpsert(st, 'X', 'solo', 0, 9003, 7, t - HR, 0, 9801); v.ratingHistUpsert(st, 'X', 'duo', 0, B, 17, t, F, SEED); v.ratingHistUpsert(st, 'X', 'solo', 0, 9003, 9, t + HR, 0, 9801);
+    const b = runB(v.elpSettleAll(st, 0, t + 2 * HR));
+    T('[17] ... a plain run that moved after the duo run was first seen (a segment an hour later) was not left behind when the duo run started: the job\'s own reading only (target 19, a miss)', !!b && b.T === 19 && b.pass === false && b.alts === 1, JSON.stringify(b));
+    eq('[17] elpOpenAt: parked then -> its save depth; never ended, not parked, nothing seen after `at` -> the depth the job holds; ended / parked now without a save point by then / moved since -> none',
+      [v.elpOpenAt([1, 7, 10, 0, 0, 0, 10, 0, 0], 20), v.elpOpenAt([1, 7, 10, 0, 0, 0, 30, 0, 0], 20), v.elpOpenAt([1, 7, 10, 0, 0, 0, 10, 1, 0], 20), v.elpOpenAt([1, 9, 10, 0, 0, 0, 30, 2, 0, [9, 30, 0]], 20), v.elpOpenAt([1, 9, 10, 0, 0, 0, 15, 2, 0, [9, 15, 0]], 20), v.elpOpenAt([1, 13, 10, 2, 0, 0, 30, 1, 0, [7, 12, 30]], 20)],
+      [7, null, null, null, 9, 7]); }
+  // the save points on the run: [depth, seen at, gone on at] x n
+  { const st = { hist: {} }, k = 'U|solo|0', snap = () => JSON.stringify(st.hist[k].runs[0][9]);
+    v.ratingHistUpsert(st, 'U', 'solo', 0, 1, 7, 1000, SUS, 11); const a = snap();
+    v.ratingHistUpsert(st, 'U', 'solo', 0, 1, 7, 1500, SUS, 11); const a2 = snap();   // the same save point read again
+    v.ratingHistUpsert(st, 'U', 'solo', 0, 1, 9, 2000, SUS, 11); const b = snap();    // gone on and parked again, seen as one segment
+    v.ratingHistUpsert(st, 'U', 'solo', 0, 1, 11, 2500, 0, 11); const b2 = snap();    // gone on
+    v.ratingHistUpsert(st, 'U', 'solo', 0, 1, 13, 3000, F, 11); const c = snap();
+    v.ratingHistUpsert(st, 'U', 'solo', 0, 1, 13, 4000, SUS, 11); const d = snap();   // a stray parked segment after the final one
+    v.ratingHistUpsert(st, 'U', 'solo', 0, 2, 4, 5000, F, 12); v.ratingHistUpsert(st, 'U', 'solo', 0, 3, 4, 6000, 0, 13);
+    v.ratingHistUpsert(st, 'U', 'solo', 0, 4, 6, 7000, SUS, 14); v.ratingHistUpsert(st, 'U', 'solo', 0, 4, 12, 8000, F, 14);   // parked, then its final segment
+    eq('[17] ratingHistUpsert: the save points (r[9]) -- one added when the run parks (the same depth again adds none), closed when the next segment comes (another save point, a plain segment, the final one), untouched after the final segment; a run that never parked has none',
+      [a, a2, b, b2, c, d, st.hist[k].runs[1].length, st.hist[k].runs[2].length, JSON.stringify(st.hist[k].runs[3][9])], ['[7,1000,0]', '[7,1000,0]', '[7,1000,2000,9,2000,0]', '[7,1000,2000,9,2000,2500]', '[7,1000,2000,9,2000,2500]', '[7,1000,2000,9,2000,2500]', 9, 9, '[6,7000,8000]']);
+    const run = (sv) => [1, 0, 0, 0, 0, 0, 0, 0, 0, sv];
+    eq('[17] elpSaveAt: the depth a run stood parked at when a run first seen at `at` started -- its newest save point seen by then, unless it had gone on from it before `at`',
+      [v.elpSaveAt([1, 0, 0, 0, 0, 0, 0, 0, 0], 5), v.elpSaveAt(run([7, 10, 0]), 9), v.elpSaveAt(run([7, 10, 0]), 10), v.elpSaveAt(run([7, 10, 0]), 99), v.elpSaveAt(run([7, 10, 20]), 15), v.elpSaveAt(run([7, 10, 20]), 20), v.elpSaveAt(run([7, 10, 20]), 21),
+        v.elpSaveAt(run([7, 10, 20, 9, 20, 0]), 15), v.elpSaveAt(run([7, 10, 20, 9, 20, 0]), 25), v.elpSaveAt(run([7, 10, 20, 9, 20, 30]), 31), v.elpSaveAt(run(7), 50)],
+      [null, null, 7, 7, 7, 7, null, 7, 9, null, null]); }
+  // (c) SAVE2: S parked (7), then B, then S went on to its final depth 13 -- all before one pass (and: B settled while S was parked)
+  function save2(m, split, duoOwn) {
+    const st = base(m, 'X', duoOwn), out = [];
+    m.ratingHistUpsert(st, 'X', 'solo', 0, 9003, 7, t - HR, SUS, 9801); m.ratingHistUpsert(st, 'X', 'duo', 0, B, 17, t, F, SEED);
+    if (split) out.push(...m.elpSettleAll(st, 0, t + MIN));
+    m.ratingHistUpsert(st, 'X', 'solo', 0, 9003, 13, t + HR, F, 9801);
+    out.push(...m.elpSettleAll(st, 0, t + 2 * HR));
+    return { st, out, b: runB(out), s: out.find((x) => x.runId === 9003), lp: st.hist['X|all|0'].lp, S: st.hist['X|solo|0'].runs[5] };
+  }
+  const save2Ok = (m) => { const one = save2(m, false), two = save2(m, true); return one.out.length === 2 && one.out[0].runId === 9003 && !!one.b && one.b.T === 16 && one.b.pass === true && one.S[1] === 13 && !!two.b && two.b.T === 16 && one.b.d === two.b.d && one.s.d === two.s.d && one.lp === two.lp; };
+  { const one = save2(v, false), two = save2(v, true);
+    T('[17] RC2-02 (parked, then finished): the solo run parked at 7, the duo run played, the solo run finished at 13 -- one pass settles the solo run first and its own reading counts it at 13 (target 20: a miss); the reading at its save depth gives the target the dial showed (16): passed. One pass = two passes (the duo run settled while the other was parked): ' + JSON.stringify([one.b.T, one.b.d, one.lp]) + ' / ' + JSON.stringify([two.b.T, two.b.d, two.lp]),
+      save2Ok(v) && JSON.stringify(one.S[9]) === JSON.stringify([7, t - HR, t + HR]) && one.b.alts >= 2 && one.s.alts === 1, JSON.stringify([one.out, two.out])); }
+  // (c2) a run that was parked and went on BEFORE the other run was first seen counts at what it reached, like any run
+  function wentOn(m) {
+    const st = base(m, 'X');
+    m.ratingHistUpsert(st, 'X', 'solo', 0, 9003, 7, t - 3 * HR, SUS, 9801);
+    m.ratingHistUpsert(st, 'X', 'solo', 0, 9003, 13, t - 2 * HR, F, 9801); m.elpSettleAll(st, 0, t - 2 * HR + MIN);
+    m.ratingHistUpsert(st, 'X', 'duo', 0, B, 17, t, F, SEED);
+    return { b: runB(m.elpSettleAll(st, 0, t + MIN)), S: st.hist['X|solo|0'].runs[5] };
+  }
+  const wentOnOk = (m) => { const r = wentOn(m); return !!r.b && r.b.T === 20 && r.b.pass === false && r.b.alts === 1; };
+  T('[17] a run that was parked (7) and finished (13) two hours BEFORE the duo run was first seen counts at 13 only: target 20, one reading -- a save point is no lower reading for every later run', wentOnOk(v) && JSON.stringify(wentOn(v).S[9]) === JSON.stringify([7, t - 3 * HR, t - 2 * HR]), JSON.stringify(wentOn(v)));
+  // (c3) two save points of one run: the duo run reads the one the other run stood at when the duo run was first seen
+  function twoSaves(m) {
+    const st = base(m, 'X');
+    m.ratingHistUpsert(st, 'X', 'solo', 0, 9003, 7, t - 3 * HR, SUS, 9801);   // the solo run parked at 7
+    m.ratingHistUpsert(st, 'X', 'duo', 0, B, 6, t - 2 * HR, SUS, SEED);        // the duo run started (the dial read the solo run at 7) and was parked itself
+    m.ratingHistUpsert(st, 'X', 'solo', 0, 9003, 9, t - HR, SUS, 9801);        // the solo run went on, parked again at 9
+    m.ratingHistUpsert(st, 'X', 'solo', 0, 9003, 13, t, F, 9801);              // ... and finished at 13
+    m.ratingHistUpsert(st, 'X', 'duo', 0, B, 16, t + HR, F, SEED);             // the duo run finished at 16
+    return { b: runB(m.elpSettleAll(st, 0, t + 2 * HR)), S: st.hist['X|solo|0'].runs[5] };
+  }
+  const twoSavesOk = (m) => { const r = twoSaves(m); return !!r.b && r.b.T === 16 && r.b.pass === true; };
+  { const h9 = PP.elpHiddenFor('duo', [['solo', 9]].concat(own2, solo5), LN);
+    T('[17] two save points of one run (7, then 9, then finished at 13) around a duo run that started while it stood at 7 and was itself parked meanwhile: the duo run (finished at 16) reads the save point of ITS start (7 -> target 16: passed), not the newest one (9 -> target ' + tOf(h9) + ') nor the final depth (20)',
+      twoSavesOk(v) && tOf(h9) === 17 && JSON.stringify(twoSaves(v).S[9]) === JSON.stringify([7, t - 3 * HR, t - HR, 9, t - HR, t]), JSON.stringify(twoSaves(v))); }
+  // (d) a family he has MIN_RUNS own runs in: nothing of this moves it
+  { const OWN5 = [20, 20, 20, 20, 20], tOwn = tOf(PP.hiddenOf(OWN5));
+    const got = [tie(v, 9002, OWN5).b, tie(v, 9000, OWN5).b, save(v, PARKED, OWN5).b, save2(v, false, OWN5).b, save2(v, true, OWN5).b];
+    T('[17] a family he has five own runs in is never touched: the same four situations with five own duo runs at 20 -- one target (' + tOwn + ', alts 1) every time, the run at 17 misses as before', tOwn === 20 && got.every((x) => !!x && x.T === tOwn && x.alts === 1 && x.pass === false), JSON.stringify(got)); }
+  // (e) RC2-03: the row's skills were computed under the lines of his last settle pass; a new table moved the solo lines since
+  const NEWSOLO = [2, 6, 10, 13, 24, 35, 42];
+  const newTab = (m, st, ms) => { const byFam = {}; for (const f of PP.ELP_FAMS) byFam[f] = { N: 300, w: 1, pass: ELP.PRIOR[f].slice() }; byFam.solo = { N: 300, w: 1, pass: NEWSOLO.slice() }; m.elpTabRecord(st, 0, 20261002, ms, byFam); };
+  function rowCouch(m, opts) {
+    const st = { hist: {}, elpTab: [] };
+    [12, 12, 12, 12, 12].forEach((d, i) => m.ratingHistUpsert(st, 'R', 'solo', 0, 100 + i, d, t0 + i * MIN, F, 500 + i)); m.elpSettleAll(st, 0, t0 + DAY);
+    const c = st.hist['R|all|0'], row = (c.h || []).slice(), ht = c.ht;
+    if (opts && opts.noStamp) delete c.ht;
+    newTab(m, st, t0 + 2 * DAY);
+    const lines = m.elpLinesByFam(st, 0, t), hJob = PP.elpHiddenFor('duo', solo5, lines);
+    m.ratingHistUpsert(st, 'R', 'duo', 0, B, 20, t, F, SEED);   // no roster: the couch pair / a run from before the roster rule
+    const out = m.elpSettleAll(st, 0, t + MIN);
+    return { row, ht, hJob, tJob: PP.targetOf(0, lines.duo, SEED, hJob, false), tRow: PP.targetOf(0, lines.duo, SEED, row[1], false), b: runB(out), solo: lines.solo, htAfter: c.ht, rowAfter: c.h };
+  }
+  const rowCouchOk = (m) => { const r = rowCouch(m); return r.row[1] === 1920 && r.hJob === 2133 && r.tJob === 21 && r.tRow === 19 && !!r.b && r.b.T === 19 && r.b.pass === true && r.b.d > 0; };
+  { const r = rowCouch(v), n = rowCouch(v, { noStamp: true });
+    T('[17] RC2-03 (couch / no roster): his row carries the duo skill 1920 (five solo runs read through the lines of his last settle pass); a new table moved the solo lines (' + JSON.stringify(r.solo) + '): read fresh the skill is ' + r.hJob + ' (target ' + r.tJob + '). The client read the row (target ' + r.tRow + '): the run at 20 passes -- the settle takes the row\'s skill as one more reading',
+      rowCouchOk(v) && r.b.alts === 2 && r.ht === t0 + DAY && r.htAfter === t + MIN && JSON.stringify(r.solo) === JSON.stringify(NEWSOLO), JSON.stringify(r));
+    T('[17] ... the row is stamped when its skills are computed (ht); an entry without the stamp (the job before this rule) gives no row reading: target ' + n.b.T + ', a miss -- and is stamped by this pass', n.b.T === 21 && n.b.pass === false && n.b.alts === 1 && n.htAfter === t + MIN, JSON.stringify(n.b)); }
+  // (f) RC2-03 in a team: the hello carried the row's skill -- the frozen level takes it when it gives the lower line
+  function rowTeam(m) {
+    const st = { hist: {}, elpTab: [] };
+    [12, 12, 12, 12, 12].forEach((d, i) => m.ratingHistUpsert(st, 'M', 'solo', 0, 100 + i, d, t0 + i * MIN, F, 500 + i));
+    [24, 24, 24, 24, 24].forEach((d, i) => m.ratingHistUpsert(st, 'N', 'duo', 0, 200 + i, d, t0 + i * MIN, F, 600 + i)); m.elpSettleAll(st, 0, t0 + DAY);
+    const rowM = st.hist['M|all|0'].h[1];
+    newTab(m, st, t0 + 2 * DAY);
+    const lines = m.elpLinesByFam(st, 0, t), hJob = PP.elpHiddenFor('duo', solo5, lines);
+    for (const p of ['M', 'N']) m.ratingHistUpsert(st, p, 'duo', 0, B, 21, t, F, SEED);
+    m.elpTeamNote(st, B, ['M', 'N'], 'duo', 0, t);
+    const out = m.elpSettleAll(st, 0, t + MIN).filter((x) => x.runId === B);
+    return { out, own: PP.teamHiddenOf([hJob, 2400]), row: PP.teamHiddenOf([rowM, 2400]), frozen: st.elpTeam[String(B)].h, lineOwn: PP.targetLineOf(0, lines.duo, PP.teamHiddenOf([hJob, 2400]), false), lineRow: PP.targetLineOf(0, lines.duo, PP.teamHiddenOf([rowM, 2400]), false) };
+  }
+  const rowTeamOk = (m) => { const r = rowTeam(m); return r.own === 2267 && r.row === 2160 && r.lineOwn === 22 && r.lineRow === 21 && r.frozen === 2160 && r.out.length === 2 && r.out.every((x) => x.T === 21 && x.pass === true && x.teamH === 2160); };
+  { const r = rowTeam(v);
+    T('[17] RC2-03 (team): the member\'s hello carried his row\'s duo skill (1920, level ' + r.row + ', line ' + r.lineRow + '); read fresh under the new lines the level is ' + r.own + ' (line ' + r.lineOwn + '). The run freezes the level with the lower line: both seats read target 21 and pass at 21', rowTeamOk(v), JSON.stringify(r)); }
+  // (g) the row's skill is a reading only when the row carried it by the time the run was first seen
+  function lateRow(m) {
+    const st = { hist: {} };
+    [16, 16, 16, 16, 16].forEach((d, i) => m.ratingHistUpsert(st, 'Y', 'duo', 0, 100 + i, d, now - 9 * DAY + i * MIN, F, 500 + i)); m.elpSettleAll(st, 0, now - 8 * DAY);
+    m.ratingHistUpsert(st, 'Y', 'solo', 0, 200, 4, now - 6 * DAY, SUS, SEED);                                              // a solo run, parked
+    [3, 3, 3].forEach((d, i) => m.ratingHistUpsert(st, 'Y', 'duo', 0, 300 + i, d, now - 5 * DAY + i * MIN, F, 9300 + i)); m.elpSettleAll(st, 0, now - 4 * DAY);   // three shallow duo runs after it: his row moves down
+    const rowLater = st.hist['Y|all|0'].h[0];
+    m.ratingHistUpsert(st, 'Y', 'solo', 0, 200, 7, now - 3 * DAY, F, SEED);
+    const x = m.elpSettleAll(st, 0, now - 2 * DAY)[0];
+    return { x, rowLater, hBefore: PP.elpHiddenFor('solo', [16, 16, 16, 16, 16].map((d) => ['duo', d]), LN) };
+  }
+  const lateRowOk = (m) => { const r = lateRow(m); return r.hBefore === 1000 && r.rowLater === 467 && PP.targetOf(0, LN.solo, SEED, 467, false) === 5 && !!r.x && r.x.runId === 200 && r.x.T === 10 && r.x.pass === false; };
+  { const r = lateRow(v);
+    T('[17] a row computed AFTER the run was first seen is no reading for it: a solo run parked while his skill read 1000 (target 10); three shallow runs then move his row to ' + r.rowLater + ' (target 5); finished at 7 the run still reads target 10 -- a miss (the client fixed the target when it started)', lateRowOk(v) && r.x.alts === 1, JSON.stringify(r)); }
+  // (g2) a run of his own family that never ended settles when the next one comes: the client had no receipt to wait for and read the row
+  function danglingRow(m) {
+    const st = { hist: {} };
+    [10, 14, 16, 18, 22].forEach((d, i) => m.ratingHistUpsert(st, 'D', 'duo', 0, 100 + i, d, t0 + i * MIN, F, 500 + i)); m.elpSettleAll(st, 0, t0 + DAY);
+    const row = st.hist['D|all|0'].h[1];
+    m.ratingHistUpsert(st, 'D', 'duo', 0, 300, 30, t - HR, 0, 9300);   // a duo run that never ended (a crash after the checkpoint at 30)
+    const mid = m.elpSettleAll(st, 0, t - HR + MIN).length;
+    m.ratingHistUpsert(st, 'D', 'duo', 0, B, 16, t, F, SEED);
+    const out = m.elpSettleAll(st, 0, t + MIN);
+    return { row, mid, o: out.find((x) => x.runId === 300), b: runB(out) };
+  }
+  const danglingRowOk = (m) => { const r = danglingRow(m); return r.row === 1600 && r.mid === 0 && !!r.o && !!r.b && r.b.T === 16 && r.b.pass === true; };
+  { const r = danglingRow(v), hw = PP.hiddenOf([30, 22, 18, 16, 14, 10]);
+    T('[17] a run of his own family that never ended (depth 30) settles when his next run of the family comes; the job\'s own reading of that next run counts it (skill ' + hw + ', target ' + tOf(hw) + ': a miss at 16) -- his client had no receipt to wait for and read the row (1600, target 16): the row\'s skill stays a reading, the run passes. The one case a family with five own runs reads a second target',
+      danglingRowOk(v) && hw === 1750 && tOf(hw) === 17 && r.b.alts === 2 && r.o.alts === 1, JSON.stringify(r)); }
+  // (h) the row's skill is no reading when a run of his that this pass settles surely came first: two runs in one pass = in two
+  function chainDiffs(m, n) {
+    let s0 = 20261111, diff = 0;
+    const rnd = () => { s0 = (Math.imul(s0, 1103515245) + 12345) >>> 0; return s0 / 4294967296; }, ri = (a, b) => a + Math.floor(rnd() * (b - a + 1));
+    for (let i = 0; i < n; i++) {
+      const fams = rnd() < 0.5 ? ['duo', 'duo'] : (rnd() < 0.5 ? ['solo', 'duo'] : ['duo', 'solo']);
+      const depths = Array.from({ length: ri(5, 8) }, () => ri(1, 30)), run = { dA: ri(0, 30), sA: ri(1, 2 ** 31 - 1), dB: ri(0, 30), sB: ri(1, 2 ** 31 - 1) };
+      const go = (split) => { const st = { hist: {} }; depths.forEach((d, j) => m.ratingHistUpsert(st, 'C', 'duo', 0, 100 + j, d, now - 10 * DAY + j * MIN, F, 500 + j)); m.elpSettleAll(st, 0, now - 9 * DAY);
+        const tA = now - 10 * MIN, tB = now - 2 * MIN; m.ratingHistUpsert(st, 'C', fams[0], 0, 7001, run.dA, tA, F, run.sA); if (split) m.elpSettleAll(st, 0, tA + 1000); m.ratingHistUpsert(st, 'C', fams[1], 0, 9001, run.dB, tB, F, run.sB);
+        m.elpSettleAll(st, 0, now); const r = st.hist['C|' + fams[1] + '|0'].runs.find((x) => x[0] === 9001); return JSON.stringify([r[4], r[5], st.hist['C|all|0'].lp]); };
+      if (go(true) !== go(false)) diff++;
+    }
+    return diff;
+  }
+  T('[17] two runs of one player, minutes apart (300 histories; the same family or two): settled in one pass = in two passes -- the row\'s skill is no reading for the second while the first surely came before it (' + chainDiffs(v, 300) + ' differ)', chainDiffs(v, 300) === 0);
+  // (i) the team level a run freezes: the job's own stands unless another combination of the members' readings gives a LOWER line
+  { const D = LN.duo, L = (th) => PP.targetLineOf(0, D, th, false);
+    eq('[17] elpTeamPick: one reading each -> the job\'s own; a second reading with a lower line wins (2000 / 1500 with 800 -> 1150); one with the same line does not move the level (1990 below, 2010 above: own 1400 stands); among the lowest lines the highest level; none + a value',
+      [v.elpTeamPick([[2000], [800]], [D]), v.elpTeamPick([[2000, 1500], [800]], [D]), v.elpTeamPick([[2000, 1990], [800]], [D]), v.elpTeamPick([[2000, 2010], [800]], [D]), v.elpTeamPick([[2000, 1500, 1450], [800]], [D]), v.elpTeamPick([[null, 1600], [2400]], [D]), v.elpTeamPick([[1600, null], [2400]], [D]), v.elpTeamPick([[null], [null]], [D])],
+      [1400, 1150, 1400, 1400, 1150, 2000, 2000, null]);
+    T('[17] elpTeamPick lines: ' + [1400, 1395, 1405, 1150, 1125, 2000, 2400].map((x) => x + ' -> ' + L(x)).join(', '), L(1400) === 14 && L(1395) === 14 && L(1405) === 14 && L(1150) === 11 && L(1125) === 11 && L(2000) === 20 && L(2400) === 24);
+    const big = [0, 1, 2, 3].map((i) => [2600, 2400, 2200, 2000, 1800, 1600, 1400, 1200, 1000 + i]), pick = v.elpTeamPick(big, [D]);
+    T('[17] elpTeamPick past 4096 combinations (four members, nine readings each): each member\'s lowest reading -- the lowest line is still found (' + L(pick) + ', own ' + L(2600) + ')', L(pick) === L(PP.teamHiddenOf(big.map((x) => Math.min.apply(null, x)))) && L(pick) < L(2600)); }
+  // the tie through a team run: member M (borrows) played a solo run at the instant the team run was first seen
+  function teamTie(m, idA) {
+    const st = base(m, 'M');
+    [24, 24, 24, 24, 24].forEach((d, i) => m.ratingHistUpsert(st, 'N', 'duo', 0, 200 + i, d, t0 + i * MIN, F, 600 + i)); m.elpSettleAll(st, 0, t0 + DAY + 1);
+    m.ratingHistUpsert(st, 'M', 'solo', 0, idA, 7, t, F, 9801);
+    for (const p of ['M', 'N']) m.ratingHistUpsert(st, p, 'duo', 0, B, 20, t, F, SEED);
+    m.elpTeamNote(st, B, ['M', 'N'], 'duo', 0, t);
+    const out = m.elpSettleAll(st, 0, t + MIN).filter((x) => x.runId === B);
+    return { out, frozen: st.elpTeam[String(B)].h };
+  }
+  const teamTieOk = (m) => [9002, 9000].every((idA) => { const r = teamTie(m, idA); return r.frozen === PP.teamHiddenOf([hWith, 2400]) && r.out.length === 2 && r.out.every((x) => x.T === 20 && x.pass === true); });
+  T('[17] RC2-02 in a team: the member who borrows played a solo run at the instant the team run came -- the level freezes with the lower line (his skill with that run: ' + PP.teamHiddenOf([hWith, 2400]) + ' -> target 20; without: ' + PP.teamHiddenOf([hWithout, 2400]) + ' -> 21), whichever id is lower; both seats pass at 20',
+    teamTieOk(v) && PP.teamHiddenOf([hWith, 2400]) === 2032 && PP.teamHiddenOf([hWithout, 2400]) === 2160 && PP.targetLineOf(0, LN.duo, 2160, false) === 21);
+  // (j) never below the job's own reading: random worlds, the code against a copy that reads the job's own only (the code before the fix)
+  const OWN_ONLY = [
+    ['  for (const tieAll of [false, true]) for (const saved of [false, true]) {', '  for (const tieAll of []) for (const saved of [false, true]) {'],
+    ['befores.concat(rowH == null ? [] : [null])', 'befores'],
+    ['tm.h = elpTeamPick(tm.r.map((p) => elpMemberReadings(st, p, fam, s, r[0] >>> 0, at, nowMs, ctx)), elpCandidateTabs(st, s, at, nowMs).map((tb) => tb[fam]));', 'tm.h = pointsPlan.teamHiddenOf(tm.r.map((p) => elpMemberHiddenBefore(st, p, fam, s, r[0] >>> 0, at, nowMs, ctx)));'],
+  ];
+  function neverWorse(m0, m1, seed0, iters) {
+    let seed = seed0;
+    const rnd = () => { seed = (Math.imul(seed, 1103515245) + 12345) >>> 0; return seed / 4294967296; }, ri = (n) => Math.floor(rnd() * n);
+    const FM = ['solo', 'duo', 'trio', 'quad'], SIZE = { solo: 1, duo: 2, trio: 3, quad: 4 }, PL = ['p0', 'p1', 'p2', 'p3'], T0 = Date.UTC(2026, 10, 20);
+    const res = { worse: 0, baseDiff: 0, moved: 0, firsts: 0, first: null };
+    for (let it = 0; it < iters; it++) {
+      const pick = (fam) => PL.slice().sort(() => rnd() - 0.5).slice(0, SIZE[fam]);
+      const baseEv = [], lastEv = []; let id = 1000, at = T0;
+      for (let i = 0, N = 6 + ri(14); i < N; i++) { at += (1 + ri(3)) * HR; const fam = FM[ri(4)]; baseEv.push({ at, pl: pick(fam), fam, id: id++, depth: 3 + ri(40), fl: F }); }
+      const tabAt = rnd() < 0.5 ? at + 2 * DAY : 0, tabFam = FM[ri(4)], shift = 1 + ri(4);
+      at += 4 * DAY;
+      for (let i = 0, N = 3 + ri(4); i < N; i++) {
+        if (rnd() < 0.5) at += (1 + ri(2)) * HR;
+        const fam = FM[ri(4)], e = { at, pl: pick(fam), fam, id: id++, depth: 3 + ri(40), fl: rnd() < 0.25 ? SUS : F };
+        lastEv.push(e);
+        if (e.fl === SUS && rnd() < 0.5) lastEv.push({ at: at + (rnd() < 0.5 ? 0 : HR), pl: e.pl, fam, id: e.id, depth: e.depth + ri(10), fl: F, more: 1 });   // parked, then finished later in the batch
+      }
+      const end = at + 2 * HR;
+      const play = (m) => {
+        const st = { hist: {}, elpTab: [] };
+        const feed = (e) => { for (const p of e.pl) m.ratingHistUpsert(st, p, e.fam, 0, e.id, e.depth, e.at, e.fl, e.id); if (e.pl.length > 1 && !e.more) m.elpTeamNote(st, e.id, e.pl, e.fam, 0, e.at); };
+        for (const e of baseEv) { feed(e); m.elpSettleAll(st, 0, e.at + MIN); }
+        const baseSt = canon([st.hist, st.elpTeam || {}]), placed = {};
+        for (const p of PL) placed[p] = !!(st.hist[p + '|all|0'] && st.hist[p + '|all|0'].placed);
+        if (tabAt) { const byFam = {}; for (const f of PP.ELP_FAMS) byFam[f] = { N: 300, w: 1, pass: ELP.PRIOR[f].slice() }; byFam[tabFam] = { N: 300, w: 1, pass: ELP.PRIOR[tabFam].map((x, i) => x + (i ? shift : 0)) }; m.elpTabRecord(st, 0, 20261125, tabAt, byFam); }
+        for (const e of lastEv.slice().sort((a, b) => a.at - b.at)) feed(e);
+        return { baseSt, placed, out: m.elpSettleAll(st, 0, end) };
+      };
+      const a = play(m0), b = play(m1);
+      if (a.baseSt !== b.baseSt) { res.baseDiff++; continue; }
+      if (JSON.stringify(a.out.map((x) => [x.k, x.runId, x.T, x.d])) !== JSON.stringify(b.out.map((x) => [x.k, x.runId, x.T, x.d]))) res.moved++;
+      for (const p of PL) {
+        const x0 = a.out.find((x) => x.k.split('|')[0] === p), x1 = b.out.find((x) => x.k.split('|')[0] === p);
+        if (!x0 && !x1) continue;
+        res.firsts++;
+        const bad1 = !x0 || !x1 || x0.runId !== x1.runId || x0.k !== x1.k || (a.placed[p] ? x1.d < x0.d : x1.T > x0.T);
+        if (bad1) { res.worse++; if (!res.first) res.first = { it, p, x0, x1 }; }
+      }
+    }
+    return res;
+  }
+  { let m0 = null, r = null;
+    try { m0 = mutantOf(OWN_ONLY); r = neverWorse(m0, v, 11, 150); } catch (e) { bad('[17] never-worse: ' + e.message); }
+    if (r) {
+      T('[17] never below the job\'s own reading: 150 random worlds (4 players, 4 families, clean history, then a table change and a last batch with ties, save points and parked-then-finished runs, one pass) -- against a copy that reads the job\'s own only, every player\'s first run of the pass gets the same or more (placed: the points; placing: the same target or a lower one): ' + r.worse + ' worse of ' + r.firsts + '; the clean history settles the same in both (' + r.baseDiff + ' differ)',
+        r.worse === 0 && r.baseDiff === 0 && r.firsts > 300, JSON.stringify(r.first));
+      T('[17] ... and the worlds are not trivial: the readings move a target or the points in ' + r.moved + ' of the 150', r.moved >= 20);
+    } }
+  // wiring pins
+  T('[17] wiring: the settle takes the pass context (order + the rows as the pass began), the member readings and the team pick; the log line says when more than one target was read; the stamp is written where the skills are (the pass end, a late raise)',
+    /const x = elpSettleRun\(st, p, c, o\.h, o\.r, o\.fam, seasonNow \| 0, nowMs, ctx\);/.test(SRC) && /const ctx = \{ order: new Map\(\), h0: new Map\(\) \};/.test(SRC) && /ctx\.h0\.set\(p, \{ h: c0\.h\.slice\(\), ht: Number\(c0\.ht\) \}\);/.test(SRC)
+    && /\(x\.alts > 1 \? ' \(best of ' \+ x\.alts \+ ' targets his client may have shown\)' : ''\)/.test(SRC) && (SRC.match(/c\.ht = nowMs;/g) || []).length === 2 && !/\bht \| 0\b/.test(SRC)
+    && [v.elpSaveAt, v.elpOpenAt, v.elpBeforeItems, v.elpBeforeLists, v.elpRowSkill, v.elpMemberReadings, v.elpTeamPick].every((f) => typeof f === 'function'));
+  // mutations
+  T('[17] baseline holds for the mutations below', tieOk(v) && saveOk(v, PARKED) && saveOk(v, PARKED2) && saveOk(v, [[7, 0, t - HR]]) && save2Ok(v) && wentOnOk(v) && twoSavesOk(v) && danglingRowOk(v) && rowCouchOk(v) && rowTeamOk(v) && lateRowOk(v) && teamTieOk(v) && chainDiffs(v, 120) === 0);
+  T('[17] mutation "two runs first seen at the same instant: the job\'s id order only" turns the same-pass check red (the duo run settled first by id would miss)', redBy('[17] tie', [['  for (const tieAll of [false, true]) for (const saved of [false, true]) {', '  for (const tieAll of [false]) for (const saved of [false, true]) {']], tieOk));
+  T('[17] mutation "a run parked at a save point never counts" turns the save-point checks red (parked; parked then finished)', redBy('[17] saved', [['  for (const tieAll of [false, true]) for (const saved of [false, true]) {', '  for (const tieAll of [false, true]) for (const saved of [false]) {']], (m) => saveOk(m, PARKED) || save2Ok(m)));
+  T('[17] mutation "a run that enters parked carries no save point" turns the save-point check red', redBy('[17] no save point on entry', [['    h.runs.push(sus ? [runId, depth, nowMs, 0, 0, 0, nowMs, fin | sus, runSeed | 0, [depth, nowMs, 0]] : ', '    h.runs.push(false ? [runId, depth, nowMs, 0, 0, 0, nowMs, fin | sus, runSeed | 0, [depth, nowMs, 0]] : ']], (m) => saveOk(m, PARKED)));
+  T('[17] mutation "a later segment that parks the run records no save point" turns the two-segment check red', redBy('[17] no save point later', [['      else if (!open || (sv[sv.length - 3] | 0) !== (r[1] | 0)) { if (open) sv[sv.length - 1] = nowMs; (r[9] = sv || []).push(r[1] | 0, nowMs, 0); }', '']], (m) => saveOk(m, PARKED2)));
+  const SAVE_AT = '    return (!sv[i + 2] || Number(sv[i + 2]) >= at) ? Math.max(0, sv[i] | 0) : null;';
+  T('[17] mutation "a run that went on counts at what it reached only" turns the parked-then-finished and the two-save-point checks red (the parked one alone still holds)', redBy('[17] save point dropped', [[SAVE_AT, '    return !sv[i + 2] ? Math.max(0, sv[i] | 0) : null;']], (m) => save2Ok(m) || twoSavesOk(m))
+    && !redBy('[17] save point dropped (control)', [[SAVE_AT, '    return !sv[i + 2] ? Math.max(0, sv[i] | 0) : null;']], (m) => saveOk(m, PARKED)));
+  T('[17] mutation "a run that was ever parked counts at its save depth for good" turns the went-on-before check red (a lower reading for every later run)', redBy('[17] save point for good', [[SAVE_AT, '    return Math.max(0, sv[i] | 0);']], wentOnOk));
+  T('[17] mutation "the newest save point only" turns the two-save-point check red (the run reads the save point of its own start)', redBy('[17] newest save point', [['    if (!(Number(sv[i + 1]) <= at)) continue;   // a save point seen after it: not what the client held then\n', '']], twoSavesOk));
+  T('[17] mutation "the gone-on time is never written" turns the went-on-before check red', redBy('[17] never closed', [['      if (!sus) { if (open) sv[sv.length - 1] = nowMs; }', '      if (!sus) { }']], wentOnOk));
+  const OPEN_AT = '  return (!elpRunEnded(x) && !elpRunParked(x) && !((x[6] || 0) > at)) ? Math.max(0, x[1] | 0) : null;';
+  T('[17] mutation "a run that never ended counts only once it settles" turns the never-ended check red (the parked one still holds)', redBy('[17] never ended', [[OPEN_AT, '  return null;']], (m) => saveOk(m, [[7, 0, t - HR]])) && !redBy('[17] never ended (control)', [[OPEN_AT, '  return null;']], (m) => saveOk(m, PARKED)));
+  T('[17] mutation "the row\'s skill is no reading across a run that never ended" turns the own-family check red (the run would miss at the target the job reads)', redBy('[17] row across a run that never ended', [['    if (!elpRunEnded(o.r)) continue;   // it never ended: no receipt the client could have been waiting for\n', '']], danglingRowOk));
+  T('[17] mutation "the row\'s skill is no reading of the settle" turns the couch check red (the fresh skill under the new lines: a miss)', redBy('[17] no row reading', [['befores.concat(rowH == null ? [] : [null])', 'befores']], rowCouchOk));
+  T('[17] mutation "the row\'s skill is no reading of a member" turns the team check red', redBy('[17] no row reading (team)', [['  if (rs != null) add(rs);', '']], rowTeamOk));
+  T('[17] mutation "the row\'s skill whenever it was computed" turns the late-row check red (the run would pass on a skill his row got after it started)', redBy('[17] no stamp check', [['  if (!h0 || !(Number(h0.ht) <= at)) return null;', '  if (!h0) return null;']], lateRowOk));
+  T('[17] mutation "the stamp through | 0" (a millisecond clock cut to 32 bits) turns the late-row check red', redBy('[17] stamp | 0', [['  if (!h0 || !(Number(h0.ht) <= at)) return null;', '  if (!h0 || !((h0.ht | 0) <= at)) return null;']], lateRowOk));
+  T('[17] mutation "the row\'s skill though a run of his surely came first" turns one pass = two passes red', redBy('[17] row over a pending run', [['    if (o.fam === fam || !(fs0 === at || elpSaveAt(o.r, at) != null)) return null;', '']], (m) => chainDiffs(m, 300) === 0));
+  T('[17] mutation "the team level from the job\'s own readings only" (the code before the fix) turns both team checks red', redBy('[17] team own only', [OWN_ONLY[2]], (m) => teamTieOk(m) || rowTeamOk(m)));
+  T('[17] mutation "a reading with the SAME line moves the level" turns the pick red (own 1400 must stand beside 1405)', redBy('[17] pick on a tie', [['(line === bestLine && bestLine < ownLine && ', '(line === bestLine && ']], (m) => m.elpTeamPick([[2000, 2010], [800]], [LN.duo]) === 1400));
+  T('[17] mutation "the pick takes the higher line" turns the pick red', redBy('[17] pick higher', [['    if (line < bestLine || (', '    if (line > bestLine || (']], (m) => m.elpTeamPick([[2000, 1500], [800]], [LN.duo]) === 1150 && m.elpTeamPick([[1600, null], [2400]], [LN.duo]) === 2000));
 }
 
 if (failN) { console.log('FAIL (endless-rating) ' + failN); process.exit(1); } else console.log('ALL PASS (endless-rating)');
