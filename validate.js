@@ -6714,15 +6714,46 @@ function elpTeamNote(st, runId, pids, fam, s, nowMs) {
   if (e) { e.at = nowMs; return e; }
   return (st.elpTeam[k] = { r: pids.map(String).slice().sort(), fam, s: s | 0, at: nowMs });
 }
-// O803: member p's hidden skill as it stood before run runId (first seen at firstSeen) of family fam, season s: over his runs settled
-//   already that were first seen no later than it (the run itself left out; newest first, hiddenOf takes the window), placed =
-//   hiddenOf (null under MIN_RUNS, as his own settle reads it), placing = the plain mean of the runs so far (minRuns 1), none settled
-//   yet / no entry = null. For the settler himself this is the skill his own settle reads (the settled runs are a prefix of the list).
-function elpMemberHiddenBefore(st, p, fam, s, runId, firstSeen) {
+// run i of entry h may settle now (its own condition; elpSettleAll also needs every run before it settled first): its final segment
+//   came, a newer run of the player in the family started (starting another run gives a save up), or no segment came for IDLE_MS
+//   while no save point is open. The one predicate of elpSettleAll's loop and of elpPendingSettles (RC2-01: they must not drift).
+function elpRunReady(h, i, nowMs) {
+  const r = h.runs[i], newer = i < h.runs.length - 1, idle = nowMs != null && nowMs - (r[6] || r[2] || 0) >= RATING.IDLE_MS;
+  return !!(((r[7] | 0) & 1) || newer || (idle && !((r[7] | 0) & 2)));
+}
+// the unsettled runs of entry h that this settle pass will settle (elpSettleAll: in start order, up to the first run that may not):
+//   the set of their indexes in h.runs
+function elpPendingSettles(h, nowMs) {
+  const out = new Set();
+  for (let i = 0; i < h.runs.length; i++) {
+    if (h.runs[i][3]) continue;
+    if (!elpRunReady(h, i, nowMs)) break;
+    out.add(i);
+  }
+  return out;
+}
+// O803: member p's hidden skill as it stood before run runId (first seen at firstSeen) of family fam, season s: over his runs
+//   first seen no later than it (the run itself left out; newest first, hiddenOf takes the window) that are settled -- or that this
+//   same settle pass settles and that come before runId in his own list (Q395 / RC2-01, cloud audit 2026-11-10: elpSettleAll walks
+//   the entries one by one, so a team's two runs settling in the same pass froze the second run's team level before the later
+//   entry's member had settled the first one -- the target then differed from the one every seat saw on the dial; settling the two
+//   runs in one pass or in two now freezes the same value). Placed = hiddenOf (null under MIN_RUNS, as his own settle reads it;
+//   the runs this pass settles count toward the placement as they will), placing = the plain mean of the runs so far (minRuns 1),
+//   none yet / no entry = null. nowMs: the pass's clock (omitted = the idle rule never fires). For the settler himself this is the
+//   skill his own settle reads (his settled runs are a prefix of the list and nothing of his after the run is counted).
+function elpMemberHiddenBefore(st, p, fam, s, runId, firstSeen, nowMs) {
   const hm = st && st.hist && st.hist[ratingHistKey(p, fam, s)];
   if (!hm || !Array.isArray(hm.runs)) return null;
-  const before = hm.runs.filter((x) => x[3] && (x[0] >>> 0) !== (runId >>> 0) && (x[2] || 0) <= firstSeen).map((x) => x[1] | 0).reverse();
-  if (hm.placed) return pointsPlan.hiddenOf(before);
+  const rid = runId >>> 0, at = hm.runs.findIndex((x) => (x[0] >>> 0) === rid), soon = elpPendingSettles(hm, nowMs);
+  let pend = 0;
+  const before = hm.runs.filter((x, i) => {
+    if ((x[0] >>> 0) === rid || (x[2] || 0) > firstSeen) return false;
+    if (x[3]) return true;
+    const ok = soon.has(i) && (at < 0 || i < at);
+    if (ok) pend++;
+    return ok;
+  }).map((x) => x[1] | 0).reverse();
+  if (hm.placed || (pend && ((hm.n | 0) + pend) >= ELP.MIN_RUNS)) return pointsPlan.hiddenOf(before);
   return before.length ? pointsPlan.hiddenOf(before, 1) : null;
 }
 // O803: the team's usual level for run r of family fam (duo / trio / quad): undefined when no roster is recorded for the run (solo, the
@@ -6735,7 +6766,7 @@ function elpTeamHidden(st, r, fam, s, nowMs) {
   if (!tm || !Array.isArray(tm.r)) return undefined;
   if (tm.has) return tm.h;
   const at = r[2] ? r[2] : nowMs;
-  tm.h = pointsPlan.teamHiddenOf(tm.r.map((p) => elpMemberHiddenBefore(st, p, fam, s, r[0] >>> 0, at)));
+  tm.h = pointsPlan.teamHiddenOf(tm.r.map((p) => elpMemberHiddenBefore(st, p, fam, s, r[0] >>> 0, at, nowMs)));
   tm.has = 1;
   return tm.h;
 }
@@ -6813,8 +6844,7 @@ function elpSettleAll(st, seasonNow, nowMs) {
     for (let i = 0; i < h.runs.length; i++) {
       const r = h.runs[i];
       if (r[3]) continue;
-      const newer = i < h.runs.length - 1, idle = nowMs - (r[6] || r[2] || 0) >= RATING.IDLE_MS;
-      if (!(((r[7] | 0) & 1) || newer || (idle && !((r[7] | 0) & 2)))) break;   // the runs after it wait (start order)
+      if (!elpRunReady(h, i, nowMs)) break;   // the runs after it wait (start order)
       const x = elpSettleRun(st, h, r, fam, s, nowMs);
       out.push(Object.assign({ k, runId: r[0] >>> 0 }, x));
     }
@@ -15022,7 +15052,7 @@ Object.assign(module.exports, { lone1v1Spoiled, lone1v1VoidClaims });   // cloud
 Object.assign(module.exports, { teamXpFloor, teamXpStarts, teamXpMark, teamRollbackPlan });   // cloud audit Q237 team competitive XP floors (test/team-comp-ghost-xp.js)
 Object.assign(module.exports, { RATING, RATING_FAMS, ENDLESS_RATING_LB_SOLO, ENDLESS_RATING_LB_DUO, ENDLESS_RATING_LB_TRIO, ENDLESS_RATING_LB_QUAD, ENDLESS_TIERCUT_LB, ratingFamOf, fnv32, ratingRunId, ratingHistKey,
   ratingHistUpsert, ratingHistRemove, ratingHistFinal, elpRunRk, ratingScoreOf, ratingPlan, ratingTierOf, tiercutDay, tiercutEncode, tiercutDecode, tiercutDue, pruneRatingHist,
-  elpSettledDepths, elpLinesAt, elpCandidates, elpSettleRun, elpTrim, elpSettleAll, elpTeamNote, elpMemberHiddenBefore, elpTeamHidden, elpTeamTrim, elpLinesOf, elpHiddensOf, elpLinesSkipBanned, elpTableKey, elpTabNewest, elpTabRecord });
+  elpSettledDepths, elpLinesAt, elpCandidates, elpSettleRun, elpTrim, elpSettleAll, elpRunReady, elpPendingSettles, elpTeamNote, elpMemberHiddenBefore, elpTeamHidden, elpTeamTrim, elpLinesOf, elpHiddensOf, elpLinesSkipBanned, elpTableKey, elpTabNewest, elpTabRecord });
 Object.assign(module.exports, { CUP, CUP_FAMS, ENDLESS_CUP_LB, ENDLESS_CUP_HONOR_LB, cupWeekId, cupWeekStart, cupWeekBack, cupNextWeek, cupEdition, cupWeekBoardName, teamBlockSids,
   cupStandings, cupPodium, cupPodiumFor, cupVerdict, cupMarksOf, cupHonorEncode, cupHonorDecode, cupHonorPlan, cupHeldMasks, cupCarrierEncode, cupCarrierDecode, cupRevoke, pruneCup, cupId, cupScrub, cupPidVerdict });   // O180 Gold Rush Cup (client knife 5.1c-1; test/endless-cup.js)   // O103 endless competitive rating (client knife 5.1a; test/endless-rating.js)
 Object.assign(module.exports, { BAN_LB, BAN_ACT_MM, banRowFull, fullBanSet, cupSkipBanned, elpLinesSkipBanned, CUP_BAN_WAIT_MS });   // cloud audit Q338 full bans kept off the cup podium / tier cuts / composite ladders (test/ban-skip.js; sanctions.js reads BAN_LB from here)

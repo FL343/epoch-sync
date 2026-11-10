@@ -33,6 +33,11 @@
 //       reads the team level for his target but seeds from his own skill; no roster (solo / couch / an older run) = own skill;
 //       entries older than TAB_DAYS leave once nobody still carries the run. Mutations: the memo dropped (recomputed at each
 //       settle) -> the second seat's T differs -> red; the roster's skills read through the settler's own -> red
+//  [12] Q395 / RC2-01 (cloud audit 2026-11-10): a team's two runs settled in ONE pass freeze the same team level (and give every
+//       seat the same T and d) as in two passes -- the member reading counts the runs this pass settles that come before the run in
+//       his own list; the fixed point of the audit both entry orders, a 400-roster sweep (placing seats inside), two runs at the
+//       same instant, the reading itself, one predicate for the loop and the reading (static); mutations: only settled runs counted
+//       (the code before) -> red; no cut at the run's place in the list -> red
 // Usage: node test/endless-rating.js
 // ============================================================
 const { spawnSync } = require('child_process');
@@ -625,11 +630,109 @@ function teamScenario(m, opts) {
     try { red = !sameT(mutant([['  if (tm.has) return tm.h;', '']])); } catch (e) { red = /anchor missing/.test(e.message) ? (bad('[11] ' + e.message), false) : true; }
     T('[11] mutation "the memo dropped (the team level recomputed at every settle)" turns the second seat\'s T red (his two deep runs in between would move it)', red);
     let red2 = false;
-    try { red2 = !sameT(mutant([['tm.h = pointsPlan.teamHiddenOf(tm.r.map((p) => elpMemberHiddenBefore(st, p, fam, s, r[0] >>> 0, at)));', 'tm.h = elpMemberHiddenBefore(st, tm.r[0], fam, s, r[0] >>> 0, at);']])); } catch (e) { red2 = /anchor missing/.test(e.message) ? (bad('[11] ' + e.message), false) : true; }
+    try { red2 = !sameT(mutant([['tm.h = pointsPlan.teamHiddenOf(tm.r.map((p) => elpMemberHiddenBefore(st, p, fam, s, r[0] >>> 0, at, nowMs)));', 'tm.h = elpMemberHiddenBefore(st, tm.r[0], fam, s, r[0] >>> 0, at, nowMs);']])); } catch (e) { red2 = /anchor missing/.test(e.message) ? (bad('[11] ' + e.message), false) : true; }
     T('[11] mutation "the team level read from one seat" turns the target red', red2);
     let red3 = false;
     try { red3 = !sameT(mutant([['const th = teamH === undefined ? H : teamH;   // O803', 'const th = H;   // O803']])); } catch (e) { red3 = /anchor missing/.test(e.message) ? (bad('[11] ' + e.message), false) : true; }
     T('[11] mutation "the target reads the own skill again" turns it red', red3);
+  }
+}
+
+// ---- [12] Q395 / RC2-01: a team's two runs settled in one pass freeze the same team level as in two passes ----
+console.log('-- [12] Q395: two runs of a team in one settle pass = in two passes --');
+{
+  // the cloud audit's case (archive/CLOUD_AUDIT_RC2_2026-11 RC2-01, the fixed point): X and Y five duo runs at 14-16 each, then the
+  //   team run A (depth 2) and right after it B (depth 12). Two passes: A settles alone, B next time. One pass: both at once, the
+  //   entries walked one by one -- before the fix B's level was frozen while the later entry still held A unsettled (1459, not 1450).
+  //   order = which member's entry the pass walks first (the entries keep the order they entered the chain memory)
+  const now = 100 * DAY;
+  function pairWorld(m, order, depths) {
+    const st = { hist: {} };
+    for (const p of order) (depths[p] || []).forEach((d, i) => m.ratingHistUpsert(st, p, 'duo', 0, (p === order[0] ? 100 : 200) + i, d, now - 10 * DAY + i * 60000, F, (p === order[0] ? 500 : 600) + i));
+    m.elpSettleAll(st, 0, now - 9 * DAY);
+    return st;
+  }
+  const ing = (m, st, members, rid, d, seed, t, flags) => { for (const p of members) m.ratingHistUpsert(st, p, 'duo', 0, rid, d, t, flags == null ? F : flags, seed); m.elpTeamNote(st, rid, members.slice(), 'duo', 0, t); };
+  // two runs A then B of the roster; split = A settles in a pass of its own; returns { sameT, lvlB, Tb, d (per member) }
+  function twoRuns(m, order, depths, run, split) {
+    const st = pairWorld(m, order, depths), tA = now - 600000, tB = split === 'tie' ? tA : now - 120000;
+    ing(m, st, order, 7001, run.dA, run.sA, tA);
+    if (split === true) m.elpSettleAll(st, 0, tA + 1000);
+    ing(m, st, order, 9001, run.dB, run.sB, tB);
+    const o = m.elpSettleAll(st, 0, now), b = o.filter((x) => x.runId === 9001), a = o.filter((x) => x.runId === 7001);
+    return { st, a, b, lvlB: b.length ? b[0].teamH : undefined, Tb: b.length ? b[0].T : undefined, oneT: new Set(b.map((x) => x.T)).size === 1,
+      d: order.map((p) => (st.hist[v.ratingHistKey(p, 'duo', 0)].runs.find((r) => r[0] === 9001) || [])[4]) };
+  }
+  const FIX = { X: [14, 15, 16, 15, 14], Y: [14, 15, 16, 15, 14] }, RUN = { dA: 2, sA: 4242, dB: 12, sB: 5151 };
+  for (const order of [['X', 'Y'], ['Y', 'X']]) {
+    const two = twoRuns(v, order, FIX, RUN, true), one = twoRuns(v, order, FIX, RUN, false);
+    const want = PP.teamHiddenOf(order.map((p) => PP.hiddenOf([2].concat(FIX[p].slice().reverse()))));
+    T('[12] fixed point, entries ' + order.join(' then ') + ': one pass freezes B\'s team level ' + one.lvlB + ' = two passes ' + two.lvlB + ' = every member\'s skill with A counted (' + want + '); one T ' + one.Tb + ', the same d',
+      one.lvlB === two.lvlB && one.lvlB === want && one.Tb === two.Tb && one.oneT && two.oneT && JSON.stringify(one.d) === JSON.stringify(two.d), JSON.stringify([one.lvlB, two.lvlB, want, one.d, two.d]));
+  }
+  // a sweep: duo / trio, histories of 0..8 runs (placing seats included, the fifth run placing inside the pass), both entry orders
+  let s0 = 20261110;
+  const rnd = () => { s0 = (Math.imul(s0, 1103515245) + 12345) >>> 0; return s0 / 4294967296; };
+  const ri = (a, b) => a + Math.floor(rnd() * (b - a + 1));
+  function sweep(m, n) {
+    let diff = 0, first = null;
+    for (let t = 0; t < n; t++) {
+      const size = ri(2, 3), names = ['M0', 'M1', 'M2'].slice(0, size), depths = {};
+      for (const p of names) depths[p] = Array.from({ length: ri(0, 8) }, () => ri(1, 30));
+      const run = { dA: ri(0, 30), sA: ri(1, 2 ** 31 - 1), dB: ri(0, 30), sB: ri(1, 2 ** 31 - 1) };
+      const order = rnd() < 0.5 ? names : names.slice().reverse();
+      const multi = (mm, sp) => { const st = { hist: {} }; for (const p of order) (depths[p] || []).forEach((d, i) => mm.ratingHistUpsert(st, p, 'duo', 0, 100 * (1 + names.indexOf(p)) + i, d, now - 10 * DAY + i * 60000, F, 500 + 100 * names.indexOf(p) + i)); mm.elpSettleAll(st, 0, now - 9 * DAY);
+        const tA = now - 600000, tB = now - 120000; ing(mm, st, order, 7001, run.dA, run.sA, tA); if (sp) mm.elpSettleAll(st, 0, tA + 1000); ing(mm, st, order, 9001, run.dB, run.sB, tB);
+        const o = mm.elpSettleAll(st, 0, now).filter((x) => x.runId === 9001);
+        return JSON.stringify({ h: o.length ? o[0].teamH : 'none', T: o.map((x) => x.T), d: order.map((p) => (st.hist[mm.ratingHistKey(p, 'duo', 0)].runs.find((r) => r[0] === 9001) || [])[4]) }); };
+      const a = multi(m, true), b = multi(m, false);
+      if (a !== b) { diff++; if (!first) first = { depths, run, order, two: a, one: b }; }
+    }
+    return { diff, first };
+  }
+  { const r = sweep(v, 400); T('[12] sweep 400 rosters (duo / trio, 0..8 runs each, both entry orders): one pass = two passes for B\'s level, every T and every d (' + r.diff + ' differ)', r.diff === 0, JSON.stringify(r.first)); }
+  // two runs first seen in the same pass (the same instant): A's level counts nothing of B (it came after A in every list)
+  {
+    const one = twoRuns(v, ['X', 'Y'], FIX, RUN, 'tie'), wantA = PP.teamHiddenOf(['X', 'Y'].map((p) => PP.hiddenOf(FIX[p].slice().reverse())));
+    T('[12] A and B first seen at the same instant: A\'s level is the skill before A (' + wantA + '), B\'s counts A', one.a.length === 2 && one.a[0].teamH === wantA && one.lvlB === PP.teamHiddenOf(['X', 'Y'].map((p) => PP.hiddenOf([2].concat(FIX[p].slice().reverse())))), JSON.stringify([one.a.map((x) => x.teamH), one.lvlB]));
+  }
+  // the reading itself: a member's run the pass will settle counts before the next run of his list; one that waits does not
+  {
+    const st = { hist: {} }, t0 = now - DAY;
+    [8, 10, 12, 14, 16].forEach((d, i) => v.ratingHistUpsert(st, 'Q', 'duo', 0, 100 + i, d, t0 + i, F, 500 + i)); v.elpSettleAll(st, 0, t0 + 10);
+    v.ratingHistUpsert(st, 'Q', 'duo', 0, 300, 20, t0 + 20, F, 700);   // final, not settled yet: this pass settles it
+    v.ratingHistUpsert(st, 'Q', 'duo', 0, 301, 40, t0 + 30, SUS, 701);   // a save point open: waits
+    const before300 = v.elpMemberHiddenBefore(st, 'Q', 'duo', 0, 300, t0 + 20, now), before301 = v.elpMemberHiddenBefore(st, 'Q', 'duo', 0, 301, t0 + 30, now), after = v.elpMemberHiddenBefore(st, 'Q', 'duo', 0, 999, t0 + 40, now);
+    const w5 = PP.hiddenOf([16, 14, 12, 10, 8]), w6 = PP.hiddenOf([20, 16, 14, 12, 10, 8]), w7 = PP.hiddenOf([40, 20, 16, 14, 12, 10, 8]);
+    T('[12] elpMemberHiddenBefore: the run itself never counts (' + before300 + '); a final run the pass settles counts before the next run (' + before301 + '); a run with a save point open does not (' + after + ', not ' + w7 + ')',
+      w5 !== w6 && w6 !== w7 && before300 === w5 && before301 === w6 && after === w6, JSON.stringify([before300, before301, after, w5, w6, w7]));
+    T('[12] elpRunReady / elpPendingSettles: final or a newer run or idle without a save; the pass\'s prefix stops at the first that waits',
+      v.elpRunReady(st.hist['Q|duo|0'], 5, now) && !v.elpRunReady(st.hist['Q|duo|0'], 6, now) && JSON.stringify([...v.elpPendingSettles(st.hist['Q|duo|0'], now)]) === '[5]'
+      && v.elpRunReady({ runs: [[1, 3, 0, 0, 0, 0, 0, 0, 1]] }, 0, R.IDLE_MS) && !v.elpRunReady({ runs: [[1, 3, 0, 0, 0, 0, 0, 2, 1]] }, 0, R.IDLE_MS) && !v.elpRunReady({ runs: [[1, 3, 0, 0, 0, 0, 0, 0, 1]] }, 0, R.IDLE_MS - 1));
+  }
+  // static: the settle loop and the reading share one predicate (they must not drift)
+  {
+    const sa = v.elpSettleAll.toString(), ps = v.elpPendingSettles.toString();
+    T('[12] elpSettleAll and elpPendingSettles both decide with elpRunReady (no second copy of the condition)', /if \(!elpRunReady\(h, i, nowMs\)\) break;/.test(sa) && /if \(!elpRunReady\(h, i, nowMs\)\) break;/.test(ps) && !/IDLE_MS/.test(sa) && !/IDLE_MS/.test(ps));
+  }
+  // mutations (the loader of [11])
+  {
+    const ROOT = path.join(__dirname, '..').replace(/\\/g, '/');
+    const mutant = (pairs) => {
+      let m = SRC;
+      for (const [good, badS] of pairs) { if (m.indexOf(good) < 0) throw new Error('mutation anchor missing: ' + good.slice(0, 90)); m = m.split(good).join(badS); }
+      m = m.replace(/require\('\.\//g, "require('" + ROOT + '/').replace(/__dirname/g, JSON.stringify(ROOT));
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'endless-rating-q395-'));
+      const p = path.join(dir, 'validate.js'); fs.writeFileSync(p, m);
+      try { delete require.cache[p]; return require(p); } finally { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) {} }
+    };
+    const fixedPointSame = (m) => ['XY', 'YX'].every((o) => { const ord = o.split(''); const a = twoRuns(m, ord, FIX, RUN, true), b = twoRuns(m, ord, FIX, RUN, false); return a.lvlB === b.lvlB && a.Tb === b.Tb; });
+    let red = false;
+    try { const mm = mutant([['    const ok = soon.has(i) && (at < 0 || i < at);', '    const ok = false;']]); red = !fixedPointSame(mm) && sweep(mm, 200).diff > 0; } catch (e) { red = /anchor missing/.test(e.message) ? (bad('[12] ' + e.message), false) : true; }
+    T('[12] mutation "only the runs settled already count" (the code before the fix) turns the fixed point and the sweep red', red);
+    let red2 = false;
+    try { const mm = mutant([['    const ok = soon.has(i) && (at < 0 || i < at);', '    const ok = soon.has(i);']]); const one = twoRuns(mm, ['X', 'Y'], FIX, RUN, 'tie'); red2 = one.a[0].teamH !== PP.teamHiddenOf(['X', 'Y'].map((p) => PP.hiddenOf(FIX[p].slice().reverse()))); } catch (e) { red2 = /anchor missing/.test(e.message) ? (bad('[12] ' + e.message), false) : true; }
+    T('[12] mutation "no cut at the run\'s place in the list" counts B inside A\'s level when both came at the same instant -> red', red2);
   }
 }
 
@@ -682,7 +785,7 @@ console.log('-- [10] mutation self-checks --');
     liveLines: (m) => { const many = []; for (let i = 0; i < 200; i++) many.push((i + 1) * 100); return JSON.stringify(m.elpLinesOf(many, SOLO).pass) === JSON.stringify([41, 106, 146, 171, 187, 196, 202]); },
   };
   const cases = [
-    ['a final run waits', 'finalSettles', [['if (!(((r[7] | 0) & 1) || newer ||', 'if (!(newer ||']]],
+    ['a final run waits', 'finalSettles', [['return !!(((r[7] | 0) & 1) || newer ||', 'return !!(newer ||']]],   // elpRunReady (Q395: the one predicate)
     ['an open save point settles at idle', 'saveWaits', [['(idle && !((r[7] | 0) & 2))', 'idle']]],
     ['a newer run does not settle the one before', 'newerSettles', [['((r[7] | 0) & 1) || newer || (idle', '((r[7] | 0) & 1) || (idle']]],
     ['the worst line set taken', 'bestCandidate', [['if (!best || sl.nv > best.sl.nv) best = { sl, t };', 'if (!best || sl.nv < best.sl.nv) best = { sl, t };']]],
