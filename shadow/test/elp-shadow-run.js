@@ -147,7 +147,7 @@ console.log('-- [5] independence from the reconcile job');
   T('[5] no step named "test" (test/channel-workflows.js would take it for a reconcile suite)', !/- name: test\n/.test(y));
   const pushes = y.split('\n').filter((L2) => /\bgit push\b/.test(L2) && !/^\s*#/.test(L2));
   T('[5] the only push is the retry loop on the history branch', pushes.length === 1 && /GITHUB_REF_NAME=shadow\/elp\n\s*n=0\n\s*until git pull --rebase origin "\$\{GITHUB_REF_NAME\}" && git push; do/.test(y));
-  T('[5] runs once a day (not on the 5-minute grid) + by hand', /- cron: '\d+ \d+ \* \* \*'/.test(y) && /workflow_dispatch:/.test(y));
+  T('[5] runs once a day (not on the 5-minute grid) + by hand (+ a dry run on a push of the code it reads: elp-shadow-wiring.js)', /- cron: '\d+ \d+ \* \* \*'/.test(y) && /workflow_dispatch:/.test(y));
   // least privilege + no share of the reconcile jobs' queue / machines
   const perms = (y.match(/\npermissions:\n((?:  .*\n)+)/) || [])[1] || '';
   T('[5] permissions: contents: write only (the default token pushes the history branch; nothing else)', perms.trim() === 'contents: write');

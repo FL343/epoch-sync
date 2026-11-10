@@ -10,10 +10,22 @@ name: elp-shadow
 # Isolation: no secret at all (the default token only: read the repo, push the history branch), a GitHub-hosted
 # runner, its own concurrency group, and a minute off the reconcile ticks (validate :x0 / demo :x1 / playtest :x3;
 # :x7 shares only the feedback offset).
+# A push to main that changes what the shadow reads (the rules, the reconcile, the shadow itself) runs it at once as a dry
+# run: the checks and the computation, never the history write (shadow/test/elp-shadow-wiring.js pins this). Before, its
+# tests ran only on the daily schedule, so a change of points-plan.js ELP.PRIOR broke them unseen until the next morning.
+# The 5-minute state commits touch none of these paths (and a bot push never starts a workflow).
 on:
   workflow_dispatch:
   schedule:
     - cron: '37 1 * * *'
+  push:
+    branches: [main]
+    paths:
+      - 'points-plan.js'
+      - 'validate.js'
+      - 'attest.js'
+      - 'shadow/**'
+      - '.github/workflows/elp-shadow.yml'
 permissions:
   contents: write
 concurrency:
@@ -57,6 +69,7 @@ jobs:
           node shadow/elp-shadow.js --state endless-solo.json $prev --history "$RUNNER_TEMP/hist/elp-shadow.json" --out "$RUNNER_TEMP/hist/elp-shadow.json" --md "$RUNNER_TEMP/hist/latest.md"
           { echo '```'; cat "$RUNNER_TEMP/hist/latest.md"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
       - name: keep the history
+        if: github.event_name != 'push'
         run: |
           cd "$RUNNER_TEMP/hist"
           git config user.name "github-actions[bot]"

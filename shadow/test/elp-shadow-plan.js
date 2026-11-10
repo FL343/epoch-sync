@@ -125,7 +125,10 @@ console.log('-- [8] the season prior chain');
   const fin = { 0: { solo: [3, 7, 10, 13, 17, 23, 32] }, 1: { solo: [3, 7, 11, 14, 18, 25, 35] } };
   const p0 = S.priorOf('solo', 0, fin), p1 = S.priorOf('solo', 1, fin), p2 = S.priorOf('solo', 2, fin), p3 = S.priorOf('solo', 3, fin), pd = S.priorOf('duo', 1, fin);
   T('[8] season 0 -> preset', p0.src === 'preset' && p0.lines.join() === PP.ELP.PRIOR.solo.join());
-  T('[8] season 1 -> geometric mix of the S0 final and the preset', p1.src === 's0-final+preset' && near(p1.lines[6], Math.sqrt(32 * 55), 1e-9));
+  // the preset is read from points-plan.js, never copied as a literal: O781 moved the solo grandmaster line 55 -> 42 and a
+  //   literal 55 here kept this run red for two days (the shadow tests only ran on the daily schedule then)
+  const pr = PP.ELP.PRIOR.solo;
+  T('[8] season 1 -> geometric mix of the S0 final and the preset', p1.src === 's0-final+preset' && S.SHADOW.PRIOR_MIX_S1 === 0.5 && p1.lines.length === pr.length && p1.lines.every((x, k) => near(x, Math.sqrt(fin[0].solo[k] * pr[k]), 1e-9)), p1.lines.map((x) => x.toFixed(3)).join('/'));
   T('[8] season 2 -> the S1 final', p2.src === 's1-final' && p2.lines.join() === fin[1].solo.join());
   T('[8] no final of the previous season -> preset', p3.src === 'preset' && pd.src === 'preset');
 }
