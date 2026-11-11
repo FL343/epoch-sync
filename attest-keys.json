@@ -370,12 +370,16 @@
     },
     "2026111102": {
       "pubs": [
+        "20b4b87d9e0c06a32771da7c7f189dfb0e4b1cf3eb61c9b3c937a1f48dcf73f2",
         "45d62b004ac24e3e3bcd4343ef07c34ef301e797b6db81da07c7dffbdfcc10c5"
       ],
       "sealed": true,
-      "at": "2026-11-11T08:40:06.549Z",
+      "at": "2026-11-11T08:59:03.146Z",
       "pubInfo": {
         "45d62b004ac24e3e3bcd4343ef07c34ef301e797b6db81da07c7dffbdfcc10c5": {
+          "ch": "ea"
+        },
+        "20b4b87d9e0c06a32771da7c7f189dfb0e4b1cf3eb61c9b3c937a1f48dcf73f2": {
           "ch": "ea"
         }
       }
