@@ -336,7 +336,8 @@
           "retiredAt": "2026-11-08T16:19:47.406Z"
         },
         "839caacbf1c6661385dea517005fcf2cf6d37d3e430386451dbc1d051e2bb219": {
-          "ch": "ea"
+          "ch": "ea",
+          "retiredAt": "2026-11-11T10:16:08.026Z"
         }
       }
     },
@@ -349,7 +350,8 @@
       "at": "2026-11-08T14:10:17.521Z",
       "pubInfo": {
         "31bc5b2ee9ebfec3d801537f99e13ea7c01470888629781d60f89b1847a884bd": {
-          "ch": "ea"
+          "ch": "ea",
+          "retiredAt": "2026-11-11T10:16:08.026Z"
         },
         "6eb2d8f529bb2e14e38757475cce413ca6fba34d36aebcfb2a157f78e52429b6": {
           "ch": "demo"
@@ -364,7 +366,8 @@
       "at": "2026-11-11T04:41:10.067Z",
       "pubInfo": {
         "7006a1c50d1fc6aa0f1b73fe288cf500a9e08018d98d5f294bbc59a25f3c4aa2": {
-          "ch": "ea"
+          "ch": "ea",
+          "retiredAt": "2026-11-11T10:16:08.026Z"
         }
       }
     },
