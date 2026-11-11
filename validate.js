@@ -26,7 +26,7 @@ const { RULES_VER, LP_MAX, LP_SEG, lpSeg, LP_SEED, seedLp, SOFT_RESET, softReset
   boundaryOf, crosslineDelta, matchPlan, settleLine, baseMt, premadeMaskOf, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, appliesLp, isTeamMt, leaverLpPenalty,
   rankedSeatMaskOf, mtSansSeats, seatAppliesLp, anyAppliesLp,
   RS_MAGIC, reducedStakesPlan, teamLpPlan, RS_THRESHOLD, RS_UPSET_BONUS, RS_STRONG_UPSET_LOSS, RS_SOLO_VS_TRIO, RS_TRIO_WIN, LEAVER_LP_PENALTY,
-  ratingDetails, RECEIPT_F, lpDetailsOf, lpDetails, receiptPush, pulseDetails } = pointsPlan;
+  ratingDetails, RECEIPT_F, lpDetailsOf, lpDetails, receiptPush, pulseDetails, PLACEMENT_TARGET, placementOf } = pointsPlan;
 // O480 points receipts: the details of every points-board write = the RS reveal slot (rv = this run's flagged outcome { matchHash,
 //   seed, flag, adjDelta, normalDelta }, else the unread reveal already on the row, kept as before) + the receipt ring (the row's
 //   ring with this run's events of the player applied in order: { mh, change, set, clear }, see points-plan.js receiptPush). Every
@@ -4655,15 +4655,16 @@ const LATE_CAP = { N: Number(process.env.LATE_CAP_N || 2), MS: Number(process.en
 //   at his leave), every rank as the settle ranks the players with him there (the FFA plan and lpDelta read it, team
 //   plans read the seats); moved: { [steamID]: the points delta the settle gave a rated player }; seeded: the ids the
 //   settle seeded (no series clamp, as at the settle); plan(all) -> the settle's points plan for all of them, or null;
-//   mates: the seats whose gain counts (the other members of his premade unit). Each delta is the settle's own: the
-//   plan's or lpDelta, the series clamp, then 0..LP_MAX.
+//   mates: the seats whose gain counts (the other members of his premade unit); placing (O717, optional): the ids in a
+//   placement match of the season at the settle (placementMode), the leaver's own included. Each delta is the settle's own:
+//   the plan's or lpDelta, the series clamp (and the placement rules), then 0..LP_MAX.
 //   Returns { w: his delta with his record there, g: [[steamID, gain]] for each rated player at a seat in mates whose
 //   delta at the settle was above the one with him there (gain > 0) }.
-function lateShadow(rows, x, moved, seeded, plan, mates) {
+function lateShadow(rows, x, moved, seeded, plan, mates, placing) {
   const all = rows.concat([x]), n = all.length, alt = plan(all);
   const deltaOf = (r) => {   // the settle's own line (points-plan.js settleLine)
     const cur = r.lp | 0, rs = alt && alt[r.steamID];
-    return settleLine(cur, rs, r.rank | 0, n, !!(seeded && seeded.has(r.steamID))).nv - cur;
+    return settleLine(cur, rs, r.rank | 0, n, { seeded: !!(seeded && seeded.has(r.steamID)), placing: !!(placing && placing.has(r.steamID)) }).nv - cur;
   };
   const g = [];
   for (const r of rows) {
@@ -4672,6 +4673,21 @@ function lateShadow(rows, x, moved, seeded, plan, mates) {
     if (gain > 0) g.push([String(r.steamID), gain]);
   }
   return { w: deltaOf(x), g };
+}
+// ---- O717 placement matches of a season (companion KNIFE_O717 sections 3.1-3.3; points-plan.js placementOf / settleLine) ----
+// pure: the mode of one player's points line at a ranked settle. seeded = this settle seeded his points (his first settle this
+//   season): the series clamp skipped, as before. placing = from season 1 on, a match among his first PLACEMENT_TARGET settled
+//   matches this season, counted on his row's receipt ring as it stands before this match (ringDet: the row read with his
+//   receipts queued by earlier runs and noted earlier this run applied, lpPlan) -- the reading the client shares for its own
+//   count and everyone's "calibrating" state. The preseason (season 0) keeps the rules it had: only the seed settle skips the
+//   clamp. Also the lone-1V1 payment (Q184: a settled win, counted on the ring like any) and lateShadow (a convicted leaver's
+//   would-be line and his unit's) read it; a leaver fine never does (the fine is not protected; its receipt carries LEAVE).
+//   Returns { seeded, placing, n: the settled matches on the ring before this one (0 for the seed settle; null = a full ring
+//   without its first entry, placed) }.
+function placementMode(seasonIdNow, seeded, ringDet) {
+  if (seeded) return { seeded: true, placing: false, n: 0 };
+  const pl = placementOf(ringDet, PLACEMENT_TARGET);
+  return { seeded: false, placing: (seasonIdNow | 0) >= 1 && !pl.placed, n: pl.n };
 }
 function loadConfessions() { try { return JSON.parse(fs.readFileSync(CONFESSIONS_FILE, 'utf8')) || {}; } catch (e) { return {}; } }
 // live: Set of "pid|matchKey" keys whose 0xB5 record this run's shard read showed, built only when
@@ -11006,12 +11022,15 @@ async function main() {
         for (const p of ps) {
           const so = skillL[p.op] || ts.DEFAULTS;
           const plan = reducedStakesPlan([{ steamID: sid, seat: 0, mmr, rank: 1, lp: cur }, { steamID: '~' + p.op, seat: 1, mmr: ts.displayRating(so.mu, so.sigma), rank: 2, lp: 0 }], 2, 0, 0);
-          const d0 = (plan && plan[sid]) ? plan[sid].adjDelta : lpDelta(cur, 1, 2);
-          const d = seeded ? d0 : crosslineDelta(cur, d0, true);
+          // the settle's own line (points-plan.js settleLine: the winner's row, or lpDelta at place 1 of 2; won either way, so the
+          //   series clamp reads a win). O717: the payment is a settled match on his ring like any, so a placement match of the
+          //   season settles by its rules (placementMode on the ring before it: the row, his queued receipts, the payments before)
+          //   -- for a win only the cap under master can bite.
+          const sl = settleLine(cur, (plan && plan[sid]) || null, 1, 2, placementMode(seasonId, seeded, lpPlan(sid, e ? e.det : null, null, evs).det));
           const before = cur;
-          cur = Math.max(0, Math.min(LP_MAX, cur + d));
+          cur = sl.nv;
           if (p.m) evs.push({ mh: mhOfKey(p.m), change: cur - before, clear: 0xff,
-            set: ((plan && plan[sid]) ? (plan[sid].flag & RECEIPT_F.RS) : 0) | (d !== d0 ? RECEIPT_F.SERIES : 0) | (seeded ? RECEIPT_F.SEEDED : 0) });
+            set: ((plan && plan[sid]) ? (plan[sid].flag & RECEIPT_F.RS) : 0) | (sl.clamped ? RECEIPT_F.SERIES : 0) | (seeded ? RECEIPT_F.SEEDED : 0) });
           seeded = false;
         }
         if (!APPLY_MMR) { console.log('  (dry-run) lone-1v1 pts ' + plog(sid) + ' = ' + cur); continue; }
@@ -14531,6 +14550,19 @@ async function main() {
           }
         }
       }
+      // O717: who plays a placement match of the season here (placementMode), read now -- before this match notes any receipt
+      //   (a mate's line below and lateShadow for a leaver must read the ring as it stood before the match). The rated players
+      //   of a ranked seat and the leavers of one (lateShadow reads a convicted leaver's would-be line with it).
+      const placingNow = new Set(), placedN = {};
+      if (lpId && anyLp) {
+        const ids = tsIn.filter((t) => seatLp(t.id)).map((t) => t.id).concat(leavers0.filter((x) => seatAppliesLp(matchType, x.seat)).map((x) => x.steamID));
+        for (const id of ids) {
+          if (lp[id] == null) continue;
+          const pm = placementMode(seasonId, seededNow.has(id), lpPlan(id, lpDet[id], null, []).det);
+          if (pm.placing) { placingNow.add(id); placedN[id] = pm.n | 0; }
+        }
+      }
+      const lineMode = (id) => ({ seeded: seededNow.has(id), placing: placingNow.has(id) });
       // repeat-group decay: advance streak memory for the WHOLE consensus roster (writers + leavers)
       //   and fetch each rated player's update weight. Applied to the TrueSkill delta below;
       //   points/XP/CP untouched (real play is not zero-sum -- only rating farming is sealed).
@@ -14770,16 +14802,18 @@ async function main() {
           const rs = own ? (rsPlanOwn && rsPlanOwn[r.id]) : (rsPlan && rsPlan[r.id]);
           // the plan's delta (or the plain lpDelta at his own place), then the promotion/relegation series clamp: decisive line
           //   crossing for the boundary-zone match (won: plan-supplied -- unit average rank / team outcome -- else top-half at his
-          //   own rank). PROTECTED (flag 2) keeps its compressed natural loss; a seed settle (first ranked) skips the clamp too.
+          //   own rank). PROTECTED (flag 2) keeps its compressed natural loss; a seed settle (first ranked) skips the clamp too;
+          //   a placement match of the season (O717, lineMode) has no relegation series and stays under master.
           //   One composition with the client and lateShadow (points-plan.js settleLine, O480).
-          const sl = settleLine(cur, rs, rankX[r.id], nP, seededNow.has(r.id));
+          const sl = settleLine(cur, rs, rankX[r.id], nP, lineMode(r.id));
           const d0 = sl.d0, wonLike = sl.won, d = sl.d, nv = sl.nv;
           lp[r.id] = nv; changedLp[r.id] = nv; lpMoved[r.id] = nv - cur;
           // O480: the match's points receipt on his row (what this settle moved, why: reveal flag / series clamp / seeded)
-          noteReceipt(r.id, g[0].d[3] | 0, nv - cur, ((rs && rs.flag) & RECEIPT_F.RS) | (d !== d0 ? RECEIPT_F.SERIES : 0) | (seededNow.has(r.id) ? RECEIPT_F.SEEDED : 0), 0xff);
+          noteReceipt(r.id, g[0].d[3] | 0, nv - cur, ((rs && rs.flag) & RECEIPT_F.RS) | (sl.clamped ? RECEIPT_F.SERIES : 0) | (seededNow.has(r.id) ? RECEIPT_F.SEEDED : 0), 0xff);
           if (rs && rs.flag) reveal[r.id] = { matchHash: g[0].d[3] | 0, seed: g[0].d[4] | 0, flag: rs.flag, adjDelta: d, normalDelta: rs.normalDelta };
           lpLine = ' | pts ' + cur + (d >= 0 ? '+' : '') + d + '->' + nv + (rs && rs.flag ? (' [' + (rs.flag === 1 ? 'UPSET' : 'PROTECTED') + ' normal ' + rs.normalDelta + ']') : '')
-            + (d !== d0 ? (' [SERIES ' + (wonLike ? 'PROMOTED' : 'RELEGATED') + ' from ' + d0 + ']') : '');
+            + (sl.clamped ? (' [SERIES ' + (wonLike ? 'PROMOTED' : 'RELEGATED') + ' from ' + d0 + ']') : '')
+            + (placingNow.has(r.id) ? (' [PLACEMENT ' + ((placedN[r.id] | 0) + 1) + '/' + PLACEMENT_TARGET + (sl.capped ? ', held under master' : '') + ']') : '');
         }
         console.log('  settle ' + c.m + ': ' + plog(r.id) + ' rank' + rankX[r.id] + ' mu' + r.mu.toFixed(2) + ' sigma' + r.sigma.toFixed(2) + ' -> ' + ts.displayRating(r.mu, r.sigma) + lpLine);
       }
@@ -14815,11 +14849,11 @@ async function main() {
           const xs = x.seat | 0;
           const planX = (all) => matchPlan(all, matchType,
             { scores, leaverSeats: lSeats.filter((s) => (s | 0) !== xs), winTeam: t2Win, absent: absentIn.filter((a) => (a.seat | 0) !== xs), finished: finishedIn });
-          lateSh[x.steamID] = lateShadow(planIn.map(withRank), withRank(xr), lpMoved, seededNow, planX, unitMates(xs));
+          lateSh[x.steamID] = lateShadow(planIn.map(withRank), withRank(xr), lpMoved, seededNow, planX, unitMates(xs), placingNow);
           if (ownRows) {   // Q264: the gain of a mate who settled as before Q227, read the same way without the stand-ins
             const rk2 = rankWith(ownRows.concat([xr]).map((q) => ({ steamID: q.steamID, seat: q.seat | 0, score: scores[q.seat | 0] | 0 })));
             const with2 = (q) => Object.assign({}, q, { rank: rk2[q.steamID] });
-            const g2 = lateShadow(ownRows.map(with2), with2(xr), lpMoved, seededNow, planX, unitMates(xs)).g;
+            const g2 = lateShadow(ownRows.map(with2), with2(xr), lpMoved, seededNow, planX, unitMates(xs), placingNow).g;
             lateSh[x.steamID].g = lateSh[x.steamID].g.filter((y) => !stoodOwn.has(y[0])).concat(g2.filter((y) => stoodOwn.has(y[0])));
           }
         }
@@ -15530,6 +15564,7 @@ Object.assign(module.exports, { ffaPlaceOf, ffaLowerHalf });   // cloud audit Q1
 Object.assign(module.exports, { leaveConfirmHold, startRosterGaps, LEAVE_CONFIRM_MS, LEAVE_CONFIRM_MIN_MS });   // cloud audit Q121 leave confirmation
 Object.assign(module.exports, { durCapOf });   // O792 a friends' room's duration bound scales with its levels
 Object.assign(module.exports, { LATE_RESULT_MS, LATE_CAP, lateShadow });   // cloud audit Q228 a convicted leave whose own result comes in late
+Object.assign(module.exports, { placementMode, PLACEMENT_TARGET, placementOf });   // O717 placement matches of a season (test/placement-rules.js)
 Object.assign(module.exports, { rosterContestSeats, applyRosterContest, seatLayout, seatLayoutsDisagree });   // cloud audit Q75 one account per seat per match key (+ Q80 third review seat layout)
 Object.assign(module.exports, { registerStartRosters, startRosterSplit, rosterCanon, startRosterDisagrees, seatGateRoster, seatedOnRoster, applySeatGate });   // cloud audit Q80 seat gate
 Object.assign(module.exports, { seatlessPrivate, dropSeatlessPrivate });   // cloud audit Q123

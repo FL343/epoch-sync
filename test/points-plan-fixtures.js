@@ -47,13 +47,32 @@ for (const k of ['lpSeg', 'lpDelta', 'seedLp', 'softResetLp', 'seasonSeedLp', 'b
   if (v[k] !== PP[k]) bad('[3] validate.js ' + k + ' is not the module\'s function');
 T('[3] the settle\'s exported rules are the module\'s own (identity)', ['LP_SEG', 'LP_SEED', 'SOFT_RESET', 'reducedStakesPlan', 'teamLpPlan', 'lpDelta', 'crosslineDelta'].every((k) => v[k] === PP[k]));
 const VSRC = fs.readFileSync(path.join(ROOT, 'validate.js'), 'utf8');
-T('[3] the settle composes its plan and its points line through the module (matchPlan / settleLine)',
-  /const rsPlan = matchPlan\(planIn, matchType, \{/.test(VSRC) && /const sl = settleLine\(cur, rs, rankX\[r\.id\], nP, seededNow\.has\(r\.id\)\);/.test(VSRC)
+T('[3] the settle composes its plan and its points line through the module (matchPlan / settleLine; O717: the line\'s mode = lineMode, seeded or a placement match)',
+  /const rsPlan = matchPlan\(planIn, matchType, \{/.test(VSRC) && /const sl = settleLine\(cur, rs, rankX\[r\.id\], nP, lineMode\(r\.id\)\);/.test(VSRC)
+  && /const lineMode = \(id\) => \(\{ seeded: seededNow\.has\(id\), placing: placingNow\.has\(id\) \}\);/.test(VSRC)
   && /return settleLine\(cur, rs, r\.rank \| 0, n, /.test(VSRC));
 // [4]
 {
   const kinds = new Set(doc.cases.map((c) => c.kind));
-  T('[4] all six kinds present', ['match', 'seed', 'leave', 'boundary', 'seat', 'endless'].every((k) => kinds.has(k)), [...kinds].join(','));
+  T('[4] all seven kinds present', ['match', 'seed', 'leave', 'boundary', 'seat', 'endless', 'placement'].every((k) => kinds.has(k)), [...kinds].join(','));
+  // O717: the placement matches -- the relegation band without its series, the promotion band with it, the cap under master
+  //   (from a clamp and from a natural win), the same match as a sixth (placed), seeded and placing on one part, a PROTECTED loss,
+  //   a team code, a part over the cap; the ring readings of placementOf (the counted flags, a full ring, no ring, the target)
+  {
+    const pl = doc.cases.filter((c) => c.kind === 'match' && c.in.parts.some((p) => p.placing));
+    const outs = pl.flatMap((c) => c.in.parts.filter((p) => p.placing).map((p) => ({ p, o: c.out[p.id], c })));
+    T('[4] placement (O717): placing parts in the relegation band (natural), the promotion band (forced up), capped at 5999, seeded + placing, PROTECTED, a team code, over the cap',
+      outs.some((x) => PP.boundaryOf(x.p.lp) === 'relegation' && !x.o.won && x.o.d === x.o.d0 && !(x.c.out[x.p.id].plan && x.c.out[x.p.id].plan.flag === 2))
+      && outs.some((x) => PP.boundaryOf(x.p.lp) === 'promotion' && x.o.won && x.o.clamped && !x.o.capped)
+      && outs.some((x) => x.o.capped && x.o.nv === PP.PLACE_CAP) && outs.some((x) => x.o.capped && x.o.d < x.o.d0)
+      && outs.some((x) => x.p.seeded && !x.o.clamped && !x.o.capped) && outs.some((x) => x.o.plan && x.o.plan.flag === 2)
+      && pl.some((c) => PP.isTeamMt(c.in.mt)) && outs.some((x) => x.p.lp > PP.PLACE_CAP && x.o.capped && x.o.d === 0)
+      && doc.cases.some((c) => c.kind === 'match' && !c.in.parts.some((p) => p.placing) && c.in.parts.some((p) => p.lp === 5900 && c.out[p.id].nv > PP.PLACE_CAP)));
+    const pc = doc.cases.filter((c) => c.kind === 'placement').map((c) => c.out);
+    T('[4] placementOf (O717): placing, placed at 5, VOID / LEAVE not counted, a full ring without its seed entry, no ring, a target parameter',
+      pc.some((o) => !o.placed && o.n === 3) && pc.some((o) => o.placed && o.n === 5) && pc.some((o) => o.n === 4 && o.seen === 6)
+      && pc.some((o) => o.placed && o.n === null && o.ring) && pc.some((o) => o.placed && !o.ring) && doc.cases.some((c) => c.kind === 'placement' && (c.in.target | 0) > 0));
+  }
   // O728: the endless cases call the endless functions only (the replay is PP[fn]), each of them, and the settle shapes the rules name
   const ELP_FNS = ['hiddenOf', 'teamHiddenOf', 'elpIsTeam', 'elpConvert', 'elpHiddenFor', 'tierOfHidden', 'skillTierOf', 'targetOffset', 'targetLineOf', 'targetOf', 'endlessDelta', 'endlessSettle', 'endlessSeedLp', 'elpRowDetails', 'elpRowOf', 'elpTableDetails', 'elpTableOf'];
   const en = doc.cases.filter((c) => c.kind === 'endless');

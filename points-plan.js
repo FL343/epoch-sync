@@ -23,7 +23,7 @@
   else if (root) root.POINTS_PLAN = api;
 })(typeof module === 'object' && !!module && typeof exports === 'object' && this === exports, typeof window !== 'undefined' ? window : null, function () {
   const RULES_VER = 2;
-  const FIXTURES_HASH = 'ae19d6309de4aff9';
+  const FIXTURES_HASH = 'b8fa1c809cd9a2d1';
   // the knobs configure() can move (production runs these defaults)
   const DEFAULTS = Object.freeze({ RS_THRESHOLD: 400, RS_UPSET_BONUS: 1.0, RS_STRONG_UPSET_LOSS: 0.5, RS_SOLO_VS_TRIO: 0.6, RS_TRIO_WIN: 0.7, LEAVER_LP_PENALTY: 100 });
   const LP_MAX = 9999;
@@ -390,15 +390,31 @@
   // ---- the points line of one rated player at a ranked settle (O480: one composition for the settle, lateShadow and the client) ----
   //   cur: his points before the match; plan: his row of the match plan (reducedStakesPlan / teamLpPlan: { adjDelta, flag, won }),
   //   null / undefined when no plan applies (a fair all-solo match: the plain lpDelta at his own place); rank / pc: his place and the
-  //   number of rated players (plain path only); seeded: this settle seeded his points (his first settle this season).
-  //   The series clamp is skipped for a PROTECTED end (flag 2 keeps its compressed loss) and for a seeded player (the seed is his
-  //   placement already); the result stays on the board's 0..LP_MAX.
-  //   Returns { d0: the delta before the series clamp, d: after it, won: the side the clamp read, nv: his new points }.
-  function settleLine(cur, plan, rank, pc, seeded) {
+  //   number of rated players (plain path only); mode (O717): { seeded, placing }, a boolean reads as { seeded: it } (the calls
+  //   written before O717 pass one):
+  //     seeded: this settle seeded his points (his first settle this season): the series clamp is skipped (the seed is his
+  //       placement already), nothing else changes;
+  //     placing: a placement match of the season (placementOf below; from season 1 on -- the job and the client decide that, this
+  //       file reads no clock): the promotion series as ever (a top-half finish in the promotion band crosses up), NO relegation
+  //       series (a bottom-half finish in the relegation band takes its natural delta: the tier stays hidden while he places), and
+  //       the points stay under the master line (PLACE_CAP; never pushed below his points before the match). seeded wins when
+  //       both are set.
+  //   The series clamp is skipped for a PROTECTED end too (flag 2 keeps its compressed loss); the result stays on the board's 0..LP_MAX.
+  //   Returns { d0: the delta before the series clamp, d: after it (and the placement cap), won: the side the clamp read, nv: his
+  //   new points, clamped: the series clamp moved the delta (the receipt's SERIES), capped: the placement cap moved it }.
+  function settleLine(cur, plan, rank, pc, mode) {
+    const m = (mode !== null && typeof mode === 'object') ? mode : { seeded: !!mode };
+    const seeded = !!m.seeded, placing = !seeded && !!m.placing;
     const d0 = plan ? plan.adjDelta : lpDelta(cur, rank, pc);
     const won = plan ? !!plan.won : ((rank | 0) <= (pc + 1) / 2);
-    const d = ((plan && plan.flag === 2) || seeded) ? d0 : crosslineDelta(cur, d0, won);
-    return { d0, d, won, nv: Math.max(0, Math.min(LP_MAX, cur + d)) };
+    let d = ((plan && plan.flag === 2) || seeded || (placing && !won)) ? d0 : crosslineDelta(cur, d0, won);
+    const clamped = d !== d0;
+    let capped = false;
+    if (placing) {
+      const room = Math.max(cur | 0, PLACE_CAP) - (cur | 0);
+      if (d > room) { d = room; capped = true; }
+    }
+    return { d0, d, won, nv: Math.max(0, Math.min(LP_MAX, cur + d)), clamped, capped };
   }
   // ---- the rating the points plan reads, on the player's rating-board row (O480) ----
   //   rating-board details = [RATING_MAGIC, rating, RULES_VER, 0]: rating = the display rating the next ranked settle feeds this
@@ -461,6 +477,36 @@
   }
   // the receipt of match mh on a row's details, or null
   function receiptOf(det, mh) { return lpDetailsOf(det).ring.find((e) => e.mh === (mh | 0)) || null; }
+  // ---- O717 placement matches of a season (companion KNIFE_O717 sections 3.1-3.3; the user's calls A64-A72, 2026-11-09) ----
+  //   From season 1 on every player's first PLACEMENT_TARGET settled matches of a season are placement matches: his tier stays
+  //   hidden (the client), and they settle by settleLine mode.placing. The count is his row of the season's points board (each
+  //   season a new board, so a new row): the receipt ring, one entry per match that moved or voided his points there, the first
+  //   one SEEDED. placementOf(det, target) -> { placed, n, ring, seen }: n = the entries carrying neither VOID (the match moved
+  //   nobody's points) nor LEAVE (a leaver fine) = the matches settled for him; placed = n >= target (default PLACEMENT_TARGET);
+  //   seen = the entries read. Two readings cannot count: a full ring whose SEEDED entry was pushed out = at least RECEIPT_CAP
+  //   matches -> placed, n null; a row with no ring at all (written before O480, test boards only) -> placed, n null, ring false.
+  //   The client reads everyone's row through this (the "calibrating" state of others, O782) and its own at the read-back, so
+  //   the job and both ends count one way. No new persistent field: the ring was there already (architecture decision 9).
+  //   Known deviations (architecture decision 10's side: early, never a loss): RECEIPT_CAP - PLACEMENT_TARGET + 1 (4) or more
+  //   VOID / LEAVE entries among the first RECEIPT_CAP (8) of a season count a player placed before five settled matches (his
+  //   tier shows early, a relegation series can come early); a fine refunded later (the refund clears LEAVE) counts as a match.
+  const PLACEMENT_TARGET = 5;
+  const PLACE_CAP = LP_SEG[5].min - 1;   // 5999: one under the master line (the reveal of a placement is at most diamond)
+  function placementOf(det, target) {
+    const t = (target | 0) > 0 ? (target | 0) : PLACEMENT_TARGET;
+    const d = Array.isArray(det) ? det : [];
+    if (!(d.length >= RS_SLOT + 2 && ((d[RS_SLOT] | 0) & 0xff) === RECEIPT_MAGIC)) return { placed: true, n: null, ring: false, seen: 0 };
+    const k = Math.min(RECEIPT_CAP, Math.max(0, d[RS_SLOT + 1] | 0));
+    let n = 0, seeded = false, seen = 0;
+    for (let i = 0; i < k && RS_SLOT + 4 + 3 * i < d.length; i++) {
+      const fl = d[RS_SLOT + 4 + 3 * i] | 0;
+      seen++;
+      if (fl & RECEIPT_F.SEEDED) seeded = true;
+      if (!(fl & (RECEIPT_F.VOID | RECEIPT_F.LEAVE))) n++;
+    }
+    if (seen >= RECEIPT_CAP && !seeded) return { placed: true, n: null, ring: true, seen };
+    return { placed: n >= t, n, ring: true, seen };
+  }
 
   // ===== O728 endless competitive points (user calls 2026-11-08; companion KNIFE_O728_ENDLESS_LP_PLAN sections 2-3) =====
   // A competitive endless run of a family (solo / duo / trio / quad) settles on the versus points scale 0..LP_MAX with the versus
@@ -774,6 +820,7 @@
     leaverLpPenalty, RS_MAGIC, reducedStakesPlan, teamLpPlan,
     RATING_MAGIC, ratingDetails, ratingDetailsOf,
     RECEIPT_MAGIC, RECEIPT_CAP, RS_SLOT, RECEIPT_F, receiptVer, lpDetailsOf, lpDetails, receiptPush, receiptOf,
+    PLACEMENT_TARGET, PLACE_CAP, placementOf,
     PULSE_MAGIC, pulseDetails, pulseOf,
     ELP, ELP_FAMS, lpTierIdx, hiddenOf, teamHiddenOf, elpIsTeam, elpConvert, elpHiddenFor, tierOfHidden, skillTierOf, targetOffset, targetLineOf, targetOf, endlessDelta, endlessSettle, endlessSeedLp,
     elpRowDetails, elpRowOf, elpReceiptOf, elpTableDetails, elpTableOf,

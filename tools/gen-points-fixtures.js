@@ -35,6 +35,10 @@ const crypto = require('crypto');
 
 const FILE = path.join(__dirname, '..', 'fixtures', 'points-plan', 'cases.json');
 const P = (id, seat, mmr, rank, lp, seeded) => Object.assign({ id, seat, mmr, rank, lp }, seeded ? { seeded: true } : {});
+// O717: a part in a placement match of the season (settleLine mode.placing); seeded too = the seed settle of a placement
+const PL = (id, seat, mmr, rank, lp, seeded) => Object.assign(P(id, seat, mmr, rank, lp, seeded), { placing: true });
+// O717: a points row's details carrying a receipt ring of these flags, newest first (the reveal slot empty)
+const RING = (...flags) => [0, 0, 0, 0, 0, 0, 0xC6, flags.length].concat(...flags.map((f, i) => [7100 + i, 10 + i, f | (2 << 8)]));
 const ffa = (b, mask, trioAt) => (b | ((mask | 0) << 4) | ((trioAt | 0) << 8));
 const seats = (mt, ranked) => (mt | ((ranked | 0) << 11));   // O716: the ranked-seat mask (RANKED_SEAT_SHIFT)
 
@@ -85,6 +89,28 @@ const CASES = [
   { name: 'series: relegation zone, the strong side upset is still forced down (PROTECTED is the weak side only)', kind: 'match', mt: 2, parts: [P('s', 0, 1900, 3, 4100), P('w1', 1, 1300, 1, 1500), P('w2', 2, 1350, 2, 1600)] },
   { name: 'series: a player seeded by this settle skips the clamp', kind: 'match', mt: 2, parts: [P('n', 0, 1720, 1, 2880, true), P('b', 1, 1700, 2, 2500)] },
   { name: 'series: grandmaster line, relegation loss', kind: 'match', mt: 2, parts: [P('a', 0, 2400, 1, 8600), P('b', 1, 2400, 2, 8050)] },
+  // ---- O717 placement matches of a season (settleLine mode.placing: the promotion series as ever, no relegation series, under master) ----
+  { name: 'placement: relegation zone, bottom half (no relegation series: the natural delta)', kind: 'match', mt: 2, parts: [P('a', 0, 1300, 1, 2600), P('b', 1, 1300, 2, 2600), P('c', 2, 1300, 3, 2600), PL('d', 3, 1300, 4, 2050)] },
+  { name: 'placement: promotion zone, top half (the promotion series as ever: up to min + 150)', kind: 'match', mt: 2, parts: [PL('a', 0, 1300, 1, 1960), P('b', 1, 1300, 2, 1500), P('c', 2, 1300, 3, 1500), P('d', 3, 1300, 4, 1500)] },
+  { name: 'placement: diamond promotion zone, top half (held at 5999: the reveal is at most diamond)', kind: 'match', mt: 2, parts: [PL('a', 0, 1300, 1, 5900), P('b', 1, 1300, 2, 4500), P('c', 2, 1300, 3, 4500), P('d', 3, 1300, 4, 4500)] },
+  { name: 'placement: the same match as his sixth (placed: promoted to master)', kind: 'match', mt: 2, parts: [P('a', 0, 1300, 1, 5900), P('b', 1, 1300, 2, 4500), P('c', 2, 1300, 3, 4500), P('d', 3, 1300, 4, 4500)] },
+  { name: 'placement: diamond 5990, a natural win past the master line (held at 5999)', kind: 'match', mt: 2, parts: [PL('a', 0, 1300, 1, 5990), P('b', 1, 1300, 2, 4500)] },
+  { name: 'placement: the seed settle of a placement (seeded wins: no clamp, no cap)', kind: 'match', mt: 2, parts: [PL('n', 0, 1720, 1, 2880, true), P('b', 1, 1700, 2, 2500)] },
+  { name: 'placement: relegation zone, a PROTECTED loss keeps its compressed delta', kind: 'match', mt: 2, parts: [P('s', 0, 1900, 1, 2600), PL('w', 1, 1300, 2, 2050)] },
+  { name: 'placement: team 2v2 (mt 6), losers in the relegation zone keep the natural team delta (b3 placed: forced down), winners in the promotion zone go up', kind: 'match', mt: 6,
+    parts: [PL('a0', 0, 1500, 1, 1950), PL('a1', 1, 1500, 2, 1920), PL('b2', 2, 1500, 3, 2050), P('b3', 3, 1500, 4, 2060)], team: { scores: [300, 250, 200, 180], leaverSeats: [], winTeam: 0 } },
+  { name: 'placement: already over the cap (out of reach from a season turn): a win holds his points, a loss in the band is natural', kind: 'match', mt: 2, parts: [PL('a', 0, 1300, 1, 6100), PL('b', 1, 1300, 2, 6100)] },
+  // ---- O717 placementOf: the settled matches of a season on a row's receipt ring ----
+  { name: 'placementOf: three entries, the first seeded (3, placing)', kind: 'placement', det: RING(0, 0, 16), target: 0 },
+  { name: 'placementOf: five entries (placed)', kind: 'placement', det: RING(0, 0, 0, 0, 16), target: 0 },
+  { name: 'placementOf: a void and a leaver fine do not count (6 entries, 4)', kind: 'placement', det: RING(32, 4, 0, 0, 0, 16), target: 0 },
+  { name: 'placementOf: the first match a leave (SEEDED + LEAVE does not count)', kind: 'placement', det: RING(0, 0, 0, 16 | 4), target: 0 },
+  { name: 'placementOf: a full ring whose seed entry was pushed out (placed, n null)', kind: 'placement', det: RING(32, 32, 32, 32, 0, 0, 0, 0), target: 0 },
+  { name: 'placementOf: a full ring still holding the seed entry (4 settled, placing)', kind: 'placement', det: RING(32, 32, 32, 32, 0, 0, 0, 16), target: 0 },
+  { name: 'placementOf: a row with no ring (before O480: placed, ring false)', kind: 'placement', det: [], target: 0 },
+  { name: 'placementOf: a row with the reveal slot only (placed, ring false)', kind: 'placement', det: [0xC5, 1, 2, 3, 4, 5], target: 0 },
+  { name: 'placementOf: the target as a parameter (3 of 3: placed)', kind: 'placement', det: RING(0, 0, 16), target: 3 },
+  { name: 'placementOf: the seed match only (1)', kind: 'placement', det: RING(16), target: 0 },
   // ---- the board bounds ----
   { name: 'clamp: the top of the board (9999)', kind: 'match', mt: 2, parts: [P('a', 0, 2600, 1, 9990), P('b', 1, 2600, 2, 9500)] },
   { name: 'clamp: the floor (0)', kind: 'match', mt: 2, parts: [P('a', 0, 1000, 1, 100), P('b', 1, 1000, 2, 3)] },
@@ -371,6 +397,7 @@ function replay(PP, c) {
   if (c.kind === 'boundary') return PP.boundaryOf(c.lp);
   if (c.kind === 'seat') return { mask: PP.rankedSeatMaskOf(c.mt), sans: PP.mtSansSeats(c.mt), base: PP.baseMt(c.mt), any: PP.anyAppliesLp(c.mt), seats: [0, 1, 2, 3, 4, 5].map((s) => PP.seatAppliesLp(c.mt, s)) };
   if (c.kind === 'endless') return PP[c.fn].apply(null, c.args);   // O728: one endless points function at fixed inputs
+  if (c.kind === 'placement') return PP.placementOf(c.det, c.target);   // O717: the settled matches of a season on a row's ring
   if (c.kind !== 'match') throw new Error('unknown case kind ' + c.kind);
   const parts = c.parts.map((p) => ({ steamID: p.id, seat: p.seat, mmr: p.mmr, rank: p.rank, lp: p.lp }));
   const plan = PP.matchPlan(parts, c.mt, c.team || null);
@@ -378,8 +405,11 @@ function replay(PP, c) {
   for (const p of c.parts) {
     if (!PP.seatAppliesLp(c.mt, p.seat)) { out[p.id] = null; continue; }   // O716: a quick seat of a mixed table settles no points
     const row = (plan && plan[p.id]) || null;
-    const line = PP.settleLine(p.lp, row, p.rank, parts.length, !!p.seeded);
+    // O717: a placing part passes the mode object (and its out names what the series clamp / the placement cap did); the other
+    //   parts keep the boolean form of the calls written before O717 (both forms stay pinned)
+    const line = PP.settleLine(p.lp, row, p.rank, parts.length, p.placing ? { seeded: !!p.seeded, placing: true } : !!p.seeded);
     out[p.id] = { plan: row, d0: line.d0, d: line.d, won: line.won, nv: line.nv };
+    if (p.placing) { out[p.id].clamped = line.clamped; out[p.id].capped = line.capped; }
   }
   return out;
 }
