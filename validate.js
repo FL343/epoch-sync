@@ -6305,7 +6305,7 @@ function noteFinish(leavers, p, games) {
 //   The per-match abandoner class (dispClassOf 5 / 7 = 0 points) stays: a real client never writes a settle record with
 //   those codes (user-quit / kicked go to the menu without one), so only a hand-made record ever carries them.
 // O777 (2026-11-09, user ruling under architecture decision 10): the full game's launch week (EA 2026-11-17, the window to
-//   2026-11-24T03:17:00Z in validate.yml) gets the same switch on the MAIN channel (KEY_CHANNEL 'ea'), quick and ranked alike:
+//   2026-11-24T12:26:00Z in validate.yml) gets the same switch on the MAIN channel (KEY_CHANNEL 'ea'), quick and ranked alike:
 //   a brand-new anti-cheat chain and the first-boot crash of dual-GPU laptops had not met real players yet, and a hard crash
 //   the player cannot come back from within the hour is convicted as a leave. Two more parts, both O777:
 //   - the leaves convicted while the switch is on are marked on the leaver state (noteLeave, w entries [mh, g, 1]) and the

@@ -235,7 +235,7 @@ for (const [ch, state, until, exp] of CELLS) {
   // O777: the value validate.yml carries (the launch week). The instant itself is checked on injected clocks (a day before /
   //   at / after it); only the last line looks at the real clock, either branch green, so the next-year clock stays green
   const VM = (() => { const src = fs.readFileSync(path.join(WF, 'validate.yml'), 'utf8'); const m = src.match(/^ {10}LEAVER_XP_RECORD_ONLY_UNTIL:\s*'([^']*)'\s*$/m); return m ? m[1] : null; })();
-  eq('[2] validate.yml carries the launch-week instant', VM, '2026-11-24T03:17:00Z');
+  eq('[2] validate.yml carries the launch-week instant', VM, '2026-11-24T12:26:00Z');
   const tv = Date.parse(VM || '');
   eq('[2] validate.yml value honored on the main channel a day before it, over at it and after (injected clocks)',
     [v.leaverXpRecordOnlyUntil('ea', VM, tv - 86400000), v.leaverXpRecordOnlyUntil('ea', VM, tv), v.leaverXpRecordOnlyUntil('ea', VM, tv + 1)], [tv, 0, 0]);

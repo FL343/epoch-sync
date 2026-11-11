@@ -189,9 +189,9 @@ jobs:
           # (validate.js leaverXpRecordOnlyUntil / leaverLpFineOf: strict ISO-8601 UTC, at most 31 days ahead, main channel
           # only for the fine). After it both come back by themselves -- these lines need no removal. test/channel-workflows.js
           # allows these keys here (and the XP one on the demo twin) and nowhere else.
-          LEAVER_XP_RECORD_ONLY_UNTIL: '2026-11-24T03:17:00Z'
+          LEAVER_XP_RECORD_ONLY_UNTIL: '2026-11-24T12:26:00Z'
           LEAVER_LP_EASY: '50'
-          LEAVER_LP_EASY_UNTIL: '2026-11-24T03:17:00Z'
+          LEAVER_LP_EASY_UNTIL: '2026-11-24T12:26:00Z'
         run: node validate.js
       - name: persist
         id: persist

@@ -1,6 +1,6 @@
 'use strict';
 // O777 (2026-11-09, user ruling under architecture decision 10): the full game's launch week (EA 2026-11-17, the window to
-// 2026-11-24T03:17:00Z in validate.yml) is lenient with leaves on the MAIN channel -- a brand-new anti-cheat chain and the
+// 2026-11-24T12:26:00Z in validate.yml) is lenient with leaves on the MAIN channel -- a brand-new anti-cheat chain and the
 // first-boot crash of dual-GPU laptops had not met real players, and a hard crash the player cannot come back from within
 // the hour is convicted as a leave. test/channel-leaver-record-only.js pins the XP switch per channel; this file pins the rest:
 //   [1] the ranked leave fine of the window (leaverLpFineOf): LEAVER_LP_EASY (a whole number 0..LEAVER_LP_PENALTY) until
@@ -41,7 +41,7 @@ const J = JSON.stringify;
 const W = v.LEAVER_XP.window;
 
 // ---------------- [1] the launch-week ranked fine ----------------
-const NOW = Date.parse('2026-11-17T00:00:00Z'), END = Date.parse('2026-11-24T03:17:00Z'), ENDS = '2026-11-24T03:17:00Z';
+const NOW = Date.parse('2026-11-17T00:00:00Z'), END = Date.parse('2026-11-24T12:26:00Z'), ENDS = '2026-11-24T12:26:00Z';
 function check1(vv) {
   const f = (ch, fine, until, base, now) => vv.leaverLpFineOf(ch, fine, until, base == null ? 100 : base, now == null ? NOW : now);
   assert.deepStrictEqual(f('ea', '50', ENDS), { fine: 50, until: END }, 'main, inside the window: 50');
@@ -49,11 +49,11 @@ function check1(vv) {
   assert.deepStrictEqual(f('ea', '50', ENDS, 100, END), { fine: 100, until: 0 }, 'past: off');
   assert.deepStrictEqual([f('ea', '0', ENDS).fine, f('ea', ' 50 ', ENDS).fine, f('ea', '100', ENDS).fine, f('ea', 50, ENDS).fine], [0, 50, 100, 50], 'whole numbers 0..base');
   for (const x of ['101', '9999', '-5', '5.5', 'fifty', '', null, undefined, '1e2', '0x32', '50 points']) assert.deepStrictEqual(f('ea', x, ENDS), { fine: 100, until: 0 }, 'fine ' + J(x) + ': the normal fine');
-  for (const x of ['2026-11-24', '2026-11-24T03:17:00+08:00', '2026-11-24T03:17:00', 'soon', '', null, '2026-13-45T00:00:00Z']) assert.strictEqual(f('ea', '50', x).fine, 100, 'until ' + J(x) + ': the normal fine');
+  for (const x of ['2026-11-24', '2026-11-24T12:26:00+08:00', '2026-11-24T12:26:00', 'soon', '', null, '2026-13-45T00:00:00Z']) assert.strictEqual(f('ea', '50', x).fine, 100, 'until ' + J(x) + ': the normal fine');
   const MAX = vv.LEAVER_XP_RECORD_ONLY_MAX_MS;
   assert.strictEqual(f('ea', '50', new Date(NOW + MAX).toISOString(), 100, NOW).fine, 50, 'exactly 31 days ahead: honored');
   assert.strictEqual(f('ea', '50', new Date(NOW + MAX + 1000).toISOString(), 100, NOW).fine, 100, 'past the cap (a typo\'d year): the normal fine');
-  assert.strictEqual(f('ea', '50', '2027-11-24T03:17:00Z').fine, 100, 'next year: the normal fine');
+  assert.strictEqual(f('ea', '50', '2027-11-24T12:26:00Z').fine, 100, 'next year: the normal fine');
   for (const ch of ['demo', 'playtest', null, 'main', 'EA']) assert.deepStrictEqual(f(ch, '50', ENDS), { fine: 100, until: 0 }, 'channel ' + J(ch) + ': the normal fine');
   assert.deepStrictEqual([f('ea', '50', ENDS, 80).fine, f('ea', '90', ENDS, 80).fine], [50, 80], 'an overridden normal fine: never harsher than it');
   assert.strictEqual(vv.leaverSwitchUntil(ENDS, END - 1), END, 'the shared instant reader');
