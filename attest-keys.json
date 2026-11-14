@@ -411,6 +411,18 @@
         }
       }
     },
+    "2026111403": {
+      "pubs": [
+        "d1520f7f469a4af316301c28eab4a6d12658b9f1fc2da98bf49f414f094c5834"
+      ],
+      "sealed": true,
+      "at": "2026-11-14T04:44:27.265Z",
+      "pubInfo": {
+        "d1520f7f469a4af316301c28eab4a6d12658b9f1fc2da98bf49f414f094c5834": {
+          "ch": "ea"
+        }
+      }
+    },
     "dev": {
       "pubs": [
         "f341d48777a90ad4ca0db15deb16824c7162c872fd48fa8c07b9b0458844d835"
