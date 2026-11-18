@@ -77,7 +77,7 @@ console.log('=== Q327: an endless run a save can still bring back keeps its chai
 }
 
 // ---- [1] pure ----
-const NOW = Date.UTC(2027, 0, 20, 12);           // inside season 1 (2026-12-01 .. 2027-03-01)
+const NOW = Date.UTC(2099, 1, 20, 12);           // inside season 1 of the table as it stands (O844: not scheduled, the placeholder 2099-01-01 .. 2099-04-01)
 const OLD = NOW - 100 * DAY;                     // a run idle 100 days
 const run = (o) => Object.assign({ max: 0, ms: 0, saves: {}, t: OLD }, o || {});
 const SK = (season) => v.soloRunKey('p0', season, 4242);
@@ -108,8 +108,8 @@ const TK = (season) => 'T|a+b+c|' + season + '|4242';
       K(SK(0), run({ max: 10, saves: sv, t: e0L - 60 * DAY }), e0L - 5 * DAY, null, e0L - 5 * DAY) &&
       K(SK(0), run({ max: 10, saves: sv, t: e0L - 60 * DAY }), e0L + WAIT + DAY, null, e0L + WAIT + DAY) &&
       !K(SK(0), run({ max: 10, saves: sv, t: e0L - 60 * DAY }), e0L + WAIT + DAY + 1, null, e0L + WAIT + DAY + 1) &&
-      !K(SK(0), run({ max: 10, saves: sv, t: Date.UTC(2026, 8, 30) }), Date.UTC(2026, 11, 20), null, Date.UTC(2026, 11, 20)) &&
-      !K(TK(0), run({ max: 10, saves: sv, t: Date.UTC(2026, 8, 30) }), Date.UTC(2026, 11, 20), null, Date.UTC(2026, 11, 20)));
+      !K(SK(0), run({ max: 10, saves: sv, t: e0L - 62 * DAY }), e0L + 19 * DAY, null, e0L + 19 * DAY) &&
+      !K(TK(0), run({ max: 10, saves: sv, t: e0L - 62 * DAY }), e0L + 19 * DAY, null, e0L + 19 * DAY));
   }
   T('[1] competitive past the 45 days inside its season: kept with an unused save point (solo and team)', K(SK(1), run({ k: 0, max: 10, saves: sv })) && K(TK(1), run({ k: 0, max: 10, saves: sv })));
   T('[1] competitive past the 45 days: dropped with the save used, with no save, when FINAL', !K(SK(1), run({ k: 0, max: 10, saves: used })) && !K(SK(1), run({ k: 0, max: 10 })) &&

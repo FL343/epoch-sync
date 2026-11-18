@@ -46,7 +46,7 @@ const clone = (o) => JSON.parse(J(o));
 
 const MIN = 60000;
 const POINTS = 7, S1B = 9;   // the preseason board 'points' (last season's from season 1 on) and 'points_s1' (listed, so a failure can name it)
-const PRE = { SEASON_NOW: '2026-11-30T23:50:00Z' }, S1 = { SEASON_NOW: '2026-12-01T00:00:00Z' }, S2 = { SEASON_NOW: '2027-03-01T00:05:00Z' };
+const PRE = { SEASON_NOW: '2098-12-31T23:50:00Z' }, S1 = { SEASON_NOW: '2099-01-01T00:00:00Z' }, S2 = { SEASON_NOW: '2099-04-01T00:05:00Z' };
 const HOLD_OFF = { LP_LAST_HOLD_MS: '0' };
 const fail = (env, boards) => Object.assign({}, env, { STUB_FAIL_POST: J(boards) });
 const ents = (rows) => Object.keys(rows || {}).map((s) => ({ steamID: s, score: rows[s].score, details: rows[s].details || [] }));

@@ -5124,9 +5124,16 @@ const LP_LB = process.env.LP_LB;
 // `<base>_s<id>`; the previous season's board becomes a free archive. Only visible points and
 // the seasonal endless board reset between seasons -- rating (mu/sigma), xp, career counters,
 // exit-rate state and the wallet all carry over. The lifetime endless board never resets.
+// O844 (user ruling 2026-11-18: the points are not reset, a season only takes a settlement; no season turn on 2026-12-01): the
+//   next season is NOT SCHEDULED. A row that starts at SEASON_UNSCHEDULED or later stands for "no date yet": the clock never
+//   reaches it, so the job stays in season 0 -- the base boards, no soft reset -- and every rule that begins with season 1 (the
+//   placement matches of a season, one tier down at the season turn) is in the code but out of reach. Scheduling a season again =
+//   a real instant here AND in the client table (lockstep-pinned), shipped with a version gate (the old package's table still
+//   holds the old instant).
+const SEASON_UNSCHEDULED = Date.UTC(2099, 0, 1);
 const SEASONS = [
-  { id: 1, start: Date.UTC(2026, 11, 1) },   // season 1 opens (preseason before this)
-  { id: 2, start: Date.UTC(2027, 2, 1) },    // quarterly boundaries from here on
+  { id: 1, start: SEASON_UNSCHEDULED },      // season 1: not scheduled (was 2026-12-01)
+  { id: 2, start: Date.UTC(2099, 3, 1) },    // quarterly boundaries from there on
 ];
 // SEASON_NOW: ISO override of "now" for the season clock (synthetic e2e only; production unset).
 const SEASON_NOW_MS = process.env.SEASON_NOW ? Date.parse(process.env.SEASON_NOW) : null;
@@ -15741,7 +15748,7 @@ Object.assign(module.exports, { pruneFlagged, flagBaseKey, FLAG_PRUNE_WAIT_MS, b
 Object.assign(module.exports, { lateWriterRoster });   // cloud audit Q261 a 1V1 whose result writer's own start was first read with his result
 Object.assign(module.exports, { lone1v1Spoiled, lone1v1VoidClaims });   // cloud audit Q216 a ranked 1V1 whose loser wrote only records the job cannot use
 Object.assign(module.exports, { teamXpFloor, teamXpStarts, teamXpMark, teamRollbackPlan });   // cloud audit Q237 team competitive XP floors (test/team-comp-ghost-xp.js)
-Object.assign(module.exports, { RATING, RATING_FAMS, ENDLESS_RATING_LB, ELP_ALL, elpAllKey, elpAllOf, elpEntryOk, elpFamEntries, elpMergeByStart, elpPassOrder, elpPlaceAt, elpLeftOf, elpPassOrders, elpTryOrder, elpPickOrders, ELP_ORDER_CAP, elpSettledRuns, elpRunsBefore, elpSaveAt, elpOpenAt, elpBeforeItems, elpBeforeLists, elpRowSkill, elpMemberReadings, elpTeamPick, elpLinesByFam, elpSkillsOf, elpCandidateTabs, ENDLESS_RATING_LB_SOLO, ENDLESS_RATING_LB_DUO, ENDLESS_RATING_LB_TRIO, ENDLESS_RATING_LB_QUAD, ENDLESS_TIERCUT_LB, ratingFamOf, fnv32, ratingRunId, ratingHistKey,
+Object.assign(module.exports, { RATING, RATING_FAMS, ENDLESS_RATING_LB, ELP_ALL, elpAllKey, elpAllOf, elpEntryOk, elpFamEntries, elpMergeByStart, elpPassOrder, elpPlaceAt, elpLeftOf, elpPassOrders, elpTryOrder, elpPickOrders, ELP_ORDER_CAP, SEASON_UNSCHEDULED, elpSettledRuns, elpRunsBefore, elpSaveAt, elpOpenAt, elpBeforeItems, elpBeforeLists, elpRowSkill, elpMemberReadings, elpTeamPick, elpLinesByFam, elpSkillsOf, elpCandidateTabs, ENDLESS_RATING_LB_SOLO, ENDLESS_RATING_LB_DUO, ENDLESS_RATING_LB_TRIO, ENDLESS_RATING_LB_QUAD, ENDLESS_TIERCUT_LB, ratingFamOf, fnv32, ratingRunId, ratingHistKey,
   ratingHistUpsert, ratingHistRemove, ratingHistFinal, elpRunRk, ratingScoreOf, ratingPlan, ratingTierOf, tiercutDay, tiercutEncode, tiercutDecode, tiercutDue, pruneRatingHist,
   elpSettledDepths, elpLinesAt, elpCandidates, elpSettleRun, elpTrim, elpSettleAll, elpRunReady, elpPendingSettles, elpTeamNote, elpMemberHiddenBefore, elpTeamHidden, elpTeamTrim, elpLinesOf, elpHiddensOf, elpLinesSkipBanned, elpTableKey, elpTabNewest, elpTabRecord });
 Object.assign(module.exports, { CUP, CUP_FAMS, ENDLESS_CUP_LB, ENDLESS_CUP_HONOR_LB, cupWeekId, cupWeekStart, cupWeekBack, cupNextWeek, cupEdition, cupWeekBoardName, teamBlockSids,

@@ -18,7 +18,7 @@ const assert = (label, cond) => (cond ? ok(label) : bad(label));
 const eq = (label, got, exp) => { const a = JSON.stringify(got), b = JSON.stringify(exp); if (a === b) ok(label + ' = ' + a); else bad(label + ' = ' + a + ' (expected ' + b + ')'); };
 
 const DAY = 24 * 3600 * 1000;
-const NOW = Date.parse('2027-01-20T12:00:00Z');
+const NOW = Date.parse('2099-02-20T12:00:00Z');   // inside season 1 of the table as it stands (O844: season 1 is not scheduled -- the placeholder 2099-01-01)
 const LAUNCH = Date.parse('2026-11-17T18:00:00Z');
 const S1 = '76561198000000001', S2 = '76561198000000002', S3 = '76561198000000003', S4 = '76561198000000004';
 
@@ -133,7 +133,7 @@ function world0() {
       endless_rating_solo_s1: [{ steamID: S1, score: 9000, detailData: v.encodeDetails(pp.elpRowDetails({ n: 20, tier: 6, placed: 1, h: { solo: 5600 } }, [])) }],
     },
     own: {
-      4815320: { [S1]: own(S1, '2026-11-20T00:00:00Z'), [S2]: own(S2, '2026-11-20T00:00:00Z', { ownersteamid: S4 }), [S3]: own(S3, '2027-01-15T00:00:00Z') },
+      4815320: { [S1]: own(S1, '2026-11-20T00:00:00Z'), [S2]: own(S2, '2026-11-20T00:00:00Z', { ownersteamid: S4 }), [S3]: own(S3, '2099-02-15T00:00:00Z') },   // five days before the test clock: still inside the refund window
       3777060: { [S1]: own(S1, '2025-08-01T00:00:00Z') },
     },
     inv: { [S2]: [404] },
@@ -180,10 +180,10 @@ function world0() {
 
   // automatic opening at the launch moment: before it only the allow list, from it everybody (no flag to flip)
   w = world0(); fk = fakeSteam(w);
-  const pre = await g.run({ v, env: Object.assign({}, ENV, { GRANTS_LIVE: '', GRANTS_ALLOW: S3, GRANTS_LAUNCH_AT: '2027-01-21T00:00:00Z' }), nowMs: NOW, mode: 'daily', fetch: fk.fetch, log: () => {} });
+  const pre = await g.run({ v, env: Object.assign({}, ENV, { GRANTS_LIVE: '', GRANTS_ALLOW: S3, GRANTS_LAUNCH_AT: '2099-02-21T00:00:00Z' }), nowMs: NOW, mode: 'daily', fetch: fk.fetch, log: () => {} });
   assert('before the launch moment: not live, only the allow-listed account', pre.live === false && pre.looked === 1 && !w.inv[S1]);
   w = world0(); fk = fakeSteam(w);
-  const post = await g.run({ v, env: Object.assign({}, ENV, { GRANTS_LIVE: '', GRANTS_ALLOW: S3, GRANTS_LAUNCH_AT: '2027-01-20T11:59:00Z' }), nowMs: NOW, mode: 'daily', fetch: fk.fetch, log: () => {} });
+  const post = await g.run({ v, env: Object.assign({}, ENV, { GRANTS_LIVE: '', GRANTS_ALLOW: S3, GRANTS_LAUNCH_AT: '2099-02-20T11:59:00Z' }), nowMs: NOW, mode: 'daily', fetch: fk.fetch, log: () => {} });
   assert('from the launch moment: live by itself, every candidate', post.live === true && post.looked === 3 && w.inv[S1] && w.inv[S1].length > 0);
 
   // explicit account list instead of the mirror board (smoke / backfill), still behind the allow gate

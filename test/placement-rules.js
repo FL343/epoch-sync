@@ -142,7 +142,7 @@ T('[6] the count: VOID / LEAVE do not count, a confession fine (LEAVE | SEEDED) 
 // [8] the real job
 const MIN = 60000;
 const POINTS = 7, S1B = 9;
-const PRE = { SEASON_NOW: '2026-11-30T20:00:00Z' }, S1 = { SEASON_NOW: '2026-12-01T00:10:00Z' };
+const PRE = { SEASON_NOW: '2098-12-31T20:00:00Z' }, S1 = { SEASON_NOW: '2099-01-01T00:10:00Z' };
 const ents = (rows) => Object.keys(rows || {}).map((s) => ({ steamID: s, score: rows[s].score, details: rows[s].details || [] }));
 const boardsOf = (recs, rows) => H.shardBoards(recs, [{ id: 5, name: 'progress', entries: [] }, { id: 6, name: 'rating', entries: [] },
   { id: POINTS, name: 'points', entries: ents(rows.points) }, { id: S1B, name: 'points_s1', entries: ents(rows.s1) }, { id: 8, name: 'cp_bank', entries: [] }]);

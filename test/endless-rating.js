@@ -500,12 +500,12 @@ console.log('-- [8] e2e: points rows + the pass-line table on a settle-free tick
     const r5 = runCron(noVg, { SOLO_FILE: r1.state.SOLO_FILE });
     T('[8] no carrier account available (no version_gate row, env unset): not published, run green, rows maintained', r5.code === 0 && postsTo(r5, BOARD.tiercut).length === 0 && /no carrier account/.test(r5.out));
     // season 1 (S1 opens 2026-12-01): the season boards, nobody placed yet (placement again), a season-1 table of the prior
-    const r7 = runCron(world([], { all: current }, carrierRow), { SOLO_FILE: r1.state.SOLO_FILE }, { SEASON_NOW: '2026-12-01T00:10:00Z' });
+    const r7 = runCron(world([], { all: current }, carrierRow), { SOLO_FILE: r1.state.SOLO_FILE }, { SEASON_NOW: '2099-01-01T00:10:00Z' });
     const tc7 = postsTo(r7, BOARD.tiercut), dec7 = tc7.length ? v.tiercutDecode(Number(field(tc7[0], 'score')), detailsOf(tc7[0])) : null;
     T('[8] season 1: the season-1 points board is resolved, the season-0 rows are not touched, no row written (nobody placed in season 1)', r7.code === 0 && /season board created: endless_rating_all_s1 /.test(r7.out) && !/season board created: endless_rating_(solo|duo|trio|quad)_s1/.test(r7.out) && postsTo(r7, BOARD.rAll).length === 0 && postsTo(r7, BOARD.rAll, 'DeleteLeaderboardScore').length === 0
       && Array.from(r7.out.matchAll(/season board created: endless_rating_[a-z]+_s1 id=(\d+)/g)).map((mm) => mm[1]).every((id) => postsTo(r7, id).length === 0 && postsTo(r7, id, 'DeleteLeaderboardScore').length === 0),
       r7.out.split('\n').filter((l) => /rating|tiercut/.test(l)).join(' | '));
-    T('[8] season 1: a season-1 table of the prior lines (N 0) published on day 20261201', !!dec7 && dec7.season === 1 && dec7.day === 20261201 && dec7.byFam.solo.N === 0 && JSON.stringify(dec7.byFam.solo.pass) === JSON.stringify(SOLO), JSON.stringify(dec7));
+    T('[8] season 1: a season-1 table of the prior lines (N 0) published on day 20990101', !!dec7 && dec7.season === 1 && dec7.day === 20990101 && dec7.byFam.solo.N === 0 && JSON.stringify(dec7.byFam.solo.pass) === JSON.stringify(SOLO), JSON.stringify(dec7));
   }
 }
 

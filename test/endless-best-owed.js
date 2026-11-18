@@ -48,7 +48,7 @@ const eq = (label, got, want) => T(label + ' = ' + JSON.stringify(got), JSON.str
 const VALIDATE = path.join(__dirname, '..', 'validate.js');
 const SRC = fs.readFileSync(VALIDATE, 'utf8');
 const FILE_VARS = Array.from(new Set(Array.from(SRC.matchAll(/process\.env\.([A-Z0-9_]+_FILE)\b/g), m => m[1])));
-const S0_NOW = '2026-10-01T12:00:00Z', S1_NOW = '2026-12-10T12:00:00Z', WEEK = v.cupWeekId(Date.parse(S1_NOW));
+const S0_NOW = '2026-10-01T12:00:00Z', S1_NOW = '2099-01-10T12:00:00Z', WEEK = v.cupWeekId(Date.parse(S1_NOW));
 // the endless best boards the world keeps (every other board the job may create reads empty and is not followed)
 const EN = 15, EN3 = 11, EN4 = 12, COMP2 = 16, COMP3 = 13, COMP4 = 17, CLS2 = 20, CLS3 = 21, CLS4 = 22, OV_COMP = 30, OV_CAS = 31, OV_CLS = 32, EN_S1 = 23, COMP2_S1 = 24, COMP2_W = 25;
 const BEST = { [EN]: 'endless_board', [EN3]: 'endless_board_trio', [EN4]: 'endless_board_quad', [COMP2]: 'endless_comp_duo', [COMP3]: 'endless_comp_trio', [COMP4]: 'endless_comp_quad',

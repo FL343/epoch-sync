@@ -25,19 +25,36 @@ const t = (label, cond) => cond ? ok(label) : bad(label);
 
 console.log('=== season clock (table lookup, id 0 = preseason) ===');
 eq('table rows', SEASONS.map(s => s.id), [1, 2]);
-eq('season 1 opens Dec 1 2026 UTC', SEASONS[0].start, Date.UTC(2026, 11, 1));
-eq('season 2 opens Mar 1 2027 UTC', SEASONS[1].start, Date.UTC(2027, 2, 1));
+eq('O844: season 1 is not scheduled -- its row starts at SEASON_UNSCHEDULED (2099-01-01 UTC)', [SEASONS[0].start, V.SEASON_UNSCHEDULED], [Date.UTC(2099, 0, 1), Date.UTC(2099, 0, 1)]);
+eq('season 2 follows a quarter later (2099-04-01 UTC)', SEASONS[1].start, Date.UTC(2099, 3, 1));
+eq('O844: no season turn on 2026-12-01, nor on any day a job will see -- season 0 on 2026-12-01, 2027-03-01, 2030, 2060 and one ms before the placeholder', [Date.UTC(2026, 11, 1), Date.UTC(2026, 11, 2), Date.UTC(2027, 2, 1), Date.UTC(2030, 0, 1), Date.UTC(2060, 0, 1), V.SEASON_UNSCHEDULED - 1].map(seasonAt), [0, 0, 0, 0, 0, 0]);
+t('O844: every row of the table is unscheduled (a row with a real date must come with the client table, the lockstep and a version gate)', SEASONS.every((s) => s.start >= V.SEASON_UNSCHEDULED));
+{
+  // mutation: season 1 back on its old date -> the two O844 checks above turn red (a copy of validate.js, loaded in-process)
+  const fs = require('fs'), path = require('path'), os = require('os');
+  const ROOT = path.join(__dirname, '..').replace(/\\/g, '/'), GOOD = '{ id: 1, start: SEASON_UNSCHEDULED },';
+  const src = fs.readFileSync(path.join(__dirname, '..', 'validate.js'), 'utf8');
+  let red = false;
+  if (src.indexOf(GOOD) < 0) bad('O844 mutation anchor missing: ' + GOOD);
+  else {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'season-o844-')), p = path.join(dir, 'validate.js');
+    fs.writeFileSync(p, src.split(GOOD).join('{ id: 1, start: Date.UTC(2026, 11, 1) },').replace(/require\('\.\//g, "require('" + ROOT + '/').replace(/__dirname/g, JSON.stringify(ROOT)));
+    try { const m = require(p); red = m.seasonAt(Date.UTC(2026, 11, 2)) === 1 && !m.SEASONS.every((s) => s.start >= m.SEASON_UNSCHEDULED); }
+    finally { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) {} }
+  }
+  t('O844 mutation: season 1 back on 2026-12-01 turns both checks red (the season would turn by itself on that day)', red);
+}
 {
   let increasing = true;
   for (let i = 1; i < SEASONS.length; i++) if (SEASONS[i].start <= SEASONS[i - 1].start || SEASONS[i].id !== SEASONS[i - 1].id + 1) increasing = false;
   t('rows strictly increasing (start + contiguous ids)', increasing);
 }
 eq('before season 1 -> preseason 0', seasonAt(Date.UTC(2026, 7, 1)), 0);
-eq('one ms before season 1 -> 0', seasonAt(Date.UTC(2026, 11, 1) - 1), 0);
-eq('exact season-1 boundary -> 1', seasonAt(Date.UTC(2026, 11, 1)), 1);
-eq('mid season 1 -> 1', seasonAt(Date.UTC(2027, 0, 15)), 1);
-eq('exact season-2 boundary -> 2', seasonAt(Date.UTC(2027, 2, 1)), 2);
-eq('past the last row stays 2 (append a row to change seasons)', seasonAt(Date.UTC(2028, 0, 1)), 2);
+eq('one ms before season 1 -> 0', seasonAt(Date.UTC(2099, 0, 1) - 1), 0);
+eq('exact season-1 boundary -> 1', seasonAt(Date.UTC(2099, 0, 1)), 1);
+eq('mid season 1 -> 1', seasonAt(Date.UTC(2099, 1, 15)), 1);
+eq('exact season-2 boundary -> 2', seasonAt(Date.UTC(2099, 3, 1)), 2);
+eq('past the last row stays 2 (append a row to change seasons)', seasonAt(Date.UTC(2100, 1, 1)), 2);
 
 console.log('=== board naming ===');
 eq('preseason 0 -> base board', seasonBoardName('x', 0), 'x');

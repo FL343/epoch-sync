@@ -463,7 +463,7 @@ console.log('=== a lagging read of the points board takes this job\'s last write
 //   soft-reset source). A beats B at 23:50 the night before (300 / 250: bronze keeps its points through the soft reset -- O786 moved the case from silver, which drops a tier now -- so a
 //   lost match shows), then again on the new board ten minutes later, his previous-season row read from a copy behind the first.
 {
-  const PRE = { SEASON_NOW: '2026-11-30T23:50:00Z' }, S1 = { SEASON_NOW: '2026-12-01T00:00:00Z' };
+  const PRE = { SEASON_NOW: '2098-12-31T23:50:00Z' }, S1 = { SEASON_NOW: '2099-01-01T00:00:00Z' };
   const S1_OFF = Object.assign({}, S1, HOLD_OFF), PRE_OFF = Object.assign({}, PRE, HOLD_OFF);
   // the id the stub gave points_s1 in a run (ids from 90000 by FindOrCreate call order, names the fixture lacks; see settle-stub)
   const s1Id = (r) => {
