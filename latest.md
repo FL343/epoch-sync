@@ -1,49 +1,49 @@
-ELP shadow (O759 / O760) -- day 20261117, season 0. SHADOW ONLY: nothing is written to Steam or to the reconcile state.
+ELP shadow (O759 / O760) -- day 20261118, season 0. SHADOW ONLY: nothing is written to Steam or to the reconcile state.
 
 O760 pass lines: official (head-count blend, published) vs shadow (hybrid log-normal fit + credibility vs prior, TAU 0.3 + EMA 0.3)
 
-[solo] placed N 0 | official: table 20261117, w 0 | shadow prior: preset | smoothed with 20261116
-  N 0: no placed players -- both use the prior.
+[solo] placed N 3 | official: table 20261118, w 0 | shadow prior: preset | smoothed with 20261117
   tier             bronze   silver     gold platinum  diamond   master grandmas
   official              2        6       10       15       24       35       42
   shadow                2        6       10       15       24       35       43
   diff                  0        0        0        0        0        0       +1
   credibility        0.00     0.00     0.00     0.00     0.00     0.00     0.00
-  est. error            -        -        -        -        -        -        -
-  jump vs prev       0.0%     0.0%     0.0%     0.0%     0.0%     0.3%     1.1%
-  placed players whose skill tier would differ under the shadow lines: 0 of 0
+  est. error        54.3%    51.4%    54.3%    60.6%    72.2%   100.5%   132.2%
+  jump vs prev       0.0%     0.0%     0.0%     0.0%     0.0%     0.2%     0.7%
+  N < 20: fitted / empirical values not shown
+  placed players whose skill tier would differ under the shadow lines: 0 of 3
 
-[duo] placed N 0 | official: table 20261117, w 0 | shadow prior: preset | smoothed with 20261116
+[duo] placed N 0 | official: table 20261118, w 0 | shadow prior: preset | smoothed with 20261117
   N 0: no placed players -- both use the prior.
   tier             bronze   silver     gold platinum  diamond   master grandmas
   official              3       10       16       24       32       38       44
-  shadow                3       10       16       24       32       40       48
-  diff                  0        0        0        0        0       +2       +4
+  shadow                3       10       16       24       32       39       47
+  diff                  0        0        0        0        0       +1       +3
   credibility        0.00     0.00     0.00     0.00     0.00     0.00     0.00
   est. error            -        -        -        -        -        -        -
-  jump vs prev       0.0%     0.0%     0.0%     0.0%     0.6%     2.0%     3.2%
+  jump vs prev       0.0%     0.0%     0.0%     0.0%     0.5%     1.4%     2.3%
   placed players whose skill tier would differ under the shadow lines: 0 of 0
 
-[trio] placed N 0 | official: table 20261117, w 0 | shadow prior: preset | smoothed with 20261116
+[trio] placed N 0 | official: table 20261118, w 0 | shadow prior: preset | smoothed with 20261117
   N 0: no placed players -- both use the prior.
   tier             bronze   silver     gold platinum  diamond   master grandmas
   official              3       10       16       24       32       38       44
-  shadow                3       10       16       24       32       40       48
-  diff                  0        0        0        0        0       +2       +4
+  shadow                3       10       16       24       32       39       47
+  diff                  0        0        0        0        0       +1       +3
   credibility        0.00     0.00     0.00     0.00     0.00     0.00     0.00
   est. error            -        -        -        -        -        -        -
-  jump vs prev       0.0%     0.0%     0.0%     0.0%     0.6%     2.0%     3.2%
+  jump vs prev       0.0%     0.0%     0.0%     0.0%     0.5%     1.4%     2.3%
   placed players whose skill tier would differ under the shadow lines: 0 of 0
 
-[quad] placed N 0 | official: table 20261117, w 0 | shadow prior: preset | smoothed with 20261116
+[quad] placed N 0 | official: table 20261118, w 0 | shadow prior: preset | smoothed with 20261117
   N 0: no placed players -- both use the prior.
   tier             bronze   silver     gold platinum  diamond   master grandmas
   official              3       10       16       24       32       38       44
-  shadow                3       10       16       24       32       40       48
-  diff                  0        0        0        0        0       +2       +4
+  shadow                3       10       16       24       32       39       47
+  diff                  0        0        0        0        0       +1       +3
   credibility        0.00     0.00     0.00     0.00     0.00     0.00     0.00
   est. error            -        -        -        -        -        -        -
-  jump vs prev       0.0%     0.0%     0.0%     0.0%     0.6%     2.0%     3.2%
+  jump vs prev       0.0%     0.0%     0.0%     0.0%     0.5%     1.4%     2.3%
   placed players whose skill tier would differ under the shadow lines: 0 of 0
 
 O759 grandmaster calibration (off; would open at an effective pool >= 20 with full windows and a day-over-day rank correlation >= 0.8)
