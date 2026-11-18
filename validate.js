@@ -425,7 +425,13 @@ const CONFESS_MAGIC = 0xB5;
 // cuts its network together to void a losing match still pays one exit-rate hit at the host (architecture decision 10:
 // the honest opponents are spared first; the seat-1 teammate cannot be told apart from an honest elected host).
 const NOTE_MAGIC = 0xBD;
-const NOTE_DISP = new Set([2, 3, 4]);
+// O886: + 9 'eac-drop' -- a client the anti-cheat took out of its match (removed by the host on a protection failure, or
+//   leaving by itself when the host's protection failed) goes to the menu without a settle record too. With no consistent
+//   settle group (a 1V1; a host whose joiners all left on his failure) the start-orphan verdict charged it an exit-rate hit.
+//   Same trust surface as the other three (it spares only its own writer on a key nobody settled, which a lone 0xB1 of his
+//   already does). On a key that settles the note is read at one more place, under a cap: see EAC_EXCUSE.
+const NOTE_DISP = new Set([2, 3, 4, 9]);
+const EAC_NOTE_DISP = 9;
 // 'kicked' (7) = removed by the host for in-match inactivity; classed abandoner like user-quit.
 // A kicked player never writes a settle record (they leave mid-match), so the code never appears
 // in a shard in practice -- it exists for client-side exit-signal classing and table lockstep.
@@ -516,6 +522,109 @@ function loneWitnessLeavers(g, gro) {
     if (seat !== present && gro[seat] === pid(sid)) out.push({ seat, steamID: sid });
   }
   return out;
+}
+// ---- removed by the anti-cheat: an absence that is not a leave (O886 section C, 2026-11-18) ----
+// With enforcement on, the host removes a seat whose protection failed (client mp.js eacDropPeer: an anti-cheat action on
+// the peer, the 75 s authentication / channel deadlines, a renewal it never came back from), and a joiner leaves by itself
+// when the anti-cheat reports the host's seat. The client classes both innocent ('eac-drop', 9: no exit-rate signal, no
+// optimistic fine, a rejoin record kept) and writes no settle record. Here the seat was just an absent roster seat with a
+// start of its own: the settle convicted it like any quit (exit rate, the ranked fine, the streak) and the start-orphan
+// verdict charged the exit rate (test/leaver-own-record.js [2] is that shape). The first real case was an honest Steam Deck
+// whose guard login had expired after a suspend (O886): two honest players, both removed, both convicted.
+// Two signals, because the two ends have different witnesses:
+//   - the others finished (a consistent group): every finisher's settle record carries a self-describing tail block
+//     [ED_MAGIC | ED_VER << 8 | ED_LEN << 16, seat bitmask] naming the seats the host removed that way (the host broadcasts
+//     mp:EAC_DROP to the table, so each finisher copies it; written only when the mask is not 0 -- a match without a removal
+//     keeps today's bytes). A seat counts when a strict majority of the group's writers name it (one vote per account, as the
+//     roster vote in detectLeavers). The block is a settle-tail block (magic + length, before the 0xE5 signature block): a
+//     reader that does not know it walks past it, and it is in no consistency vector.
+//   - nobody can witness (the seat left by itself and the others finished; or its record of the frame is all there is): its
+//     own exit note (0xBD) with disposition 9, remembered on the key's starts entry (p.nd) like p.noted.
+// Either way the seat is EXCUSED, not removed from the absent seats: it stays in leavers0 (teammate shield, repeat-group
+// memory, the Q149 accounting of the losing team) and is treated exactly as a Q56-excused dissenter at every site t2ex is
+// read (no conviction: no exit rate, no fine, no streak break; no placement seed; not a counted losing seat for Q136; no
+// Q167 ghost loss; no late-result shadow). This match moves nothing of his. The finishers settle as they did.
+// What it must not become (architecture decision 10 protects the honest; the ladder still has to hold):
+//   - a free quit: the note is the leaver's own word and the block is copied from the host's frame, so a modified client
+//     (or a table that agrees) can claim either. An account is excused at most EAC_EXCUSE.CAP times per EAC_EXCUSE.WINDOW_MS
+//     (the user's call 2026-11-18: 2 per 7 days, the note and the block share it); past it the seat is convicted as before.
+//     The cap list is on the leaver state (leavers[pid].ed, epoch seconds), written at the settle only.
+//   - points from nowhere: the excused seat gains nothing, and a losing team with nobody but excused seats moves no rating
+//     (Q136, as for t2ex). EAC_EXCUSE.FINE (0 today) is the amount an excused ranked seat pays instead of the leaver fine,
+//     should the data show the cap is not enough (the user asked for the knob 2026-11-18; a job-only change).
+//   - record-only signals: `ew` on every writer whose record named an excused seat (who vouches, per account), and the run
+//     summary rows. No trust input.
+// A confessed quit is never excused (his own word says he left), nor a seat that is not convicted anyway (Q69 named-only,
+// a dropped record, seen agreeing). Friends' rooms, bot matches and endless runs have no leaver economy and never get here.
+const ED_MAGIC = 0xEA, ED_VER = 1, ED_LEN = 1;   // client result-reporter.js EACD_MAGIC / EACD_VER / EACD_LEN (same values)
+const EAC_EXCUSE = {
+  CAP: Math.max(0, Number(process.env.EAC_EXCUSE_CAP == null || process.env.EAC_EXCUSE_CAP === '' ? 2 : process.env.EAC_EXCUSE_CAP) | 0),
+  WINDOW_MS: Math.max(0, Number(process.env.EAC_EXCUSE_WINDOW_MS || 7 * 86400000)),
+  FINE: Math.max(0, Number(process.env.EAC_EXCUSE_FINE || 0) | 0),
+};
+// the seats a record names as removed by the anti-cheat (its own seat never; 0 = none, also: an endless record, a version
+//   this job does not read, a block cut short): the settle-tail walk of gambleTagOf / liftOrphanBlockOf
+function eacDropMaskOf(r) {
+  const d = r.d, pc = d[8] | 0;
+  if (pc < 2 || pc > 6 || isEndlessMt(d[2] | 0)) return 0;
+  let k = 11 + 3 * pc;   // (k, not i: the other tail readers' lines are mutation anchors of their own tests and must stay unique)
+  if (d.length > k && ((d[k] | 0) & ~0x3F) === T2BY_TAG) k++;
+  while (k < d.length) {
+    const h = d[k] | 0, mg = h & 0xff, ver = (h >>> 8) & 0xff, len = (h >>> 16) & 0xff;
+    if (mg === CHAR_MAGIC && len === pc) { k += 1 + Math.ceil(pc / 4); continue; }
+    if (!len) return 0;
+    if (mg === ED_MAGIC && ver === ED_VER) return (len === ED_LEN && !(h >>> 24) && k + ED_LEN < d.length) ? ((d[k + 1] | 0) & 0x3F & ~(1 << (d[5] | 0)) & ((1 << pc) - 1)) : 0;
+    k += 1 + len;
+  }
+  return 0;
+}
+// the seats a strict majority of the group's writers name (one vote per account: his first record) -> { seat: [writer sids] }
+function eacDropSeats(g) {
+  const out = {};
+  if (!g || !g.length) return out;
+  const seen = new Set(), votes = {};
+  for (const r of g) {
+    const w = String(r.steamID);
+    if (seen.has(w)) continue;
+    seen.add(w);
+    const mask = eacDropMaskOf(r);
+    for (let s = 0; s < 6; s++) if ((mask >> s) & 1) (votes[s] = votes[s] || []).push(w);
+  }
+  for (const s of Object.keys(votes)) if (votes[s].length * 2 > seen.size) out[s] = votes[s];
+  return out;
+}
+// the excuses an account still has listed inside the window (the cap's count); nothing is written
+function eacExcuseUsed(leavers, p, now) {
+  const e = leavers && leavers[p];
+  if (!e || !Array.isArray(e.ed)) return 0;
+  const from = Math.floor((now - EAC_EXCUSE.WINDOW_MS) / 1000);
+  return e.ed.filter((t) => Number(t) > from).length;
+}
+// an excuse given at a settle: listed on the leaver state (window-pruned). No leave is counted: leaves / w / o are not
+//   touched, and an entry made here is the old two-field shape leaverEntry converts on its first real leave.
+function noteEacExcuse(leavers, p, now) {
+  const e = leavers[p] = leavers[p] || { leaves: 0, lastMatch: '' };
+  const from = Math.floor((now - EAC_EXCUSE.WINDOW_MS) / 1000);
+  e.ed = (Array.isArray(e.ed) ? e.ed.filter((t) => Number(t) > from) : []).concat([Math.floor(now / 1000)]);
+  return e;
+}
+// which of a settle's convictable absent seats are excused, and why: Map(pid -> { by: 'block' | 'note', seat, who: [sids] }).
+//   Pure (the cap is read, not spent: the settle loop spends it where it would have convicted). skip(pid) = not his to
+//   excuse (confessed, already excused). An account past the cap is left out and counted in capped.
+function eacExcusePlan(g, leavers0, pend, leavers, now, skip) {
+  const ex = new Map(), capped = [];
+  if (!leavers0 || !leavers0.length) return { ex, capped };
+  const named = eacDropSeats(g), nd = (pend && Array.isArray(pend.nd)) ? pend.nd : [];
+  for (const x of leavers0) {
+    const h = pid(String(x.steamID));
+    if (ex.has(h) || (skip && skip(h))) continue;
+    const who = named[x.seat | 0];
+    const by = who ? 'block' : (nd.indexOf(h) >= 0 ? 'note' : '');
+    if (!by) continue;
+    if (eacExcuseUsed(leavers, h, now) >= EAC_EXCUSE.CAP) { capped.push({ h, seat: x.seat | 0, by }); continue; }
+    ex.set(h, { by, seat: x.seat | 0, who: who || [] });
+  }
+  return { ex, capped };
 }
 // ---- absent-seat hold (R1-B2-04 / R1-X14, cloud audit 2026-10) ----
 // A missing record is only evidence that its player left once (a) this run read EVERY record shard and (b) the gap has
@@ -4146,6 +4255,7 @@ function writeRunSummary() {
       '| endless writers naming different affix reroll bitmaps: the reachable one with the most votes read, nobody flagged (Q306) | ' + s('endlessRrDiff', 0) + ' |',
       '| starts pending / exit-rate hits | ' + s('pending', 0) + ' / ' + s('convicted', 0) + ' |',
       '| start-orphan seats spared by their own exit note (Q64) | ' + s('exitNoteSpared', 0) + ' |',
+      '| absent seats the anti-cheat removed, excused at a settle: named by the finishers / by their own exit note / past the cap, convicted as before (O886) | ' + s('eacExcused', 0) + ' / ' + s('eacExcusedNote', 0) + ' / ' + s('eacExcuseCapped', 0) + ' |',
       '| keys the host\'s match header held voided at maturity / seats spared there (Q294) | ' + s('headerVoid', 0) + ' / ' + s('headerSpared', 0) + ' |',
       '| starts-state notes / endless, friends\' room and bot entries dropped, no record of the key left on the shards (Q144) | ' + s('noteGone', 0) + ' / ' + s('entryGone', 0) + ' |',
       '| processed keys remembered / dropped past the cap (Q144) | ' + s('processedN', 0) + ' / ' + s('processedPruned', 0) + ' |',
@@ -10708,6 +10818,15 @@ async function main() {
   const startsRes = reconcileStarts(starts, groups, consistentKeys, processed, startsPending, leavers, nowMs, STARTS_MATURITY_MS, confState, shardsComplete, registeredEarly, seenKeys, noted, heldKeys, errAbsence);   // Q144: + seenKeys; Q64: + noted; Q294: + heldKeys; O618: + every exit-rate-only hit
   if (startsRes.registered || startsRes.convicted || startsRes.cleaned || Object.keys(startsPending).length)
     console.log('starts: ' + Object.keys(startsPending).length + ' pending (+' + startsRes.registered + ' new), ' + startsRes.convicted + ' exit-rate hits, ' + startsRes.cleaned + ' cleaned' + (startsRes.held ? ', ' + startsRes.held + ' matured verdict(s) held (incomplete shard read)' : ''));
+  // O886: an 'eac-drop' exit note of a roster member is remembered on the key's starts entry (p.nd, cumulative: the row can
+  //   be overwritten before the group settles) -- the settle loop reads it under the cap (eacExcusePlan, see EAC_EXCUSE)
+  for (const n of notes) {
+    if ((n.dispCode | 0) !== EAC_NOTE_DISP) continue;
+    const p = startsPending[n.m], h = pid(String(n.steamID));
+    if (!p || !p.roster || !Object.keys(p.roster).some((seat) => p.roster[seat] === h)) continue;
+    if (!Array.isArray(p.nd)) p.nd = [];
+    if (p.nd.indexOf(h) < 0) p.nd.push(h);
+  }
   // Q316: a friends' room only one player wrote a result for (the others started, wrote nothing, for PRIVATE_LONE.WAIT_MS)
   //   joins the consistent groups and settles for him alone in the private branch. After reconcileStarts (this run's
   //   p.settled / p.started), ahead of saveEarlyMarks (p.pl goes to disk with the start side). Not a consistent key for
@@ -14206,6 +14325,11 @@ async function main() {
     // Q56 team-gamble dissent settle: dissenters not yet due are EXCUSED (pids) -- they stay in leavers0 (absent seats:
     //   teammate shield, repeat-group memory) but get no conviction and no placement seed, like a confessed leave
     const t2ex = new Set(Array.isArray(c.t2ex) ? c.t2ex.map(String) : []);
+    // O886: the absent seats the anti-cheat took out (the finishers' tail block / the seat's own 'eac-drop' note), under the
+    //   per-account cap -- excused like a Q56 dissenter at every site that reads t2ex below (see EAC_EXCUSE). The cap is
+    //   spent at the conviction loop, where the settle can no longer be deferred.
+    const edPlan = eacExcusePlan(g, leavers0, pend, leavers, nowMs, (h) => !!confState[h + '|' + c.m] || confSeen.has(h + '|' + c.m) || t2ex.has(h));
+    for (const h of edPlan.ex.keys()) t2ex.add(h);
     // Q136 (see teamLossCounted): a team match whose losing team counts nobody at this settle -- no writer on a losing seat,
     //   no losing seat convicted on his own record -- moves no rating: no TrueSkill update, no points, no placement seed of a
     //   writer, no group-decay step. Nobody is flagged (each writer already carries the Q69 `un` signal per named-only seat);
@@ -14718,9 +14842,33 @@ async function main() {
         console.log('  leaver ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' already confessed -- consensus conviction skipped');
         continue;
       }
+      const edX = edPlan.ex.get(pid(String(x.steamID)));
+      if (edX) {   // O886: removed by the anti-cheat -- excused (EAC_EXCUSE): the cap is spent here, nothing else of his moves
+        const hx = pid(String(x.steamID));
+        noteEacExcuse(leavers, hx, nowMs);
+        RUN[edX.by === 'block' ? 'eacExcused' : 'eacExcusedNote'] = (RUN[edX.by === 'block' ? 'eacExcused' : 'eacExcusedNote'] | 0) + 1;
+        for (const sid of edX.who) { const sg = sigPlayer(signals, pid(sid), nowMs); sg.ew = (sg.ew | 0) + 1; }   // who vouched (record only)
+        if (edX.who.length) sigDirty = true;
+        console.log('  leaver ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' removed by the anti-cheat ('
+          + (edX.by === 'block' ? 'named by ' + edX.who.length + ' of ' + writerSids.length + ' writers' : 'his own exit note')
+          + ') -- excused, no conviction (O886; ' + eacExcuseUsed(leavers, hx, nowMs) + ' of ' + EAC_EXCUSE.CAP + ' in the window)');
+        if (EAC_EXCUSE.FINE > 0 && lpId && seatAppliesLp(matchType, x.seat)) {   // 0 today (see EAC_EXCUSE)
+          const cur = lp[x.steamID] == null ? 0 : lp[x.steamID];
+          const nv = leaverLpPenalty(cur, EAC_EXCUSE.FINE);
+          if (nv !== cur) { lp[x.steamID] = nv; changedLp[x.steamID] = nv; noteReceipt(x.steamID, g[0].d[3] | 0, nv - cur, RECEIPT_F.LEAVE, 0); }
+          console.log('  excused LP ' + c.m + ': ' + plog(x.steamID) + ' pts ' + cur + '-' + EAC_EXCUSE.FINE + '->' + nv);
+        }
+        continue;
+      }
       if (t2ex.has(pid(String(x.steamID)))) {
         console.log('  leaver ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' team-gamble dissent not yet due -- excused, no conviction');
         continue;
+      }
+      const edCap = edPlan.capped.find((y) => y.h === pid(String(x.steamID)));
+      if (edCap) {   // O886: past the cap -- convicted below as any leave
+        RUN.eacExcuseCapped = (RUN.eacExcuseCapped | 0) + 1;
+        console.log('  leaver ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' removed by the anti-cheat (' + (edCap.by === 'block' ? 'the finishers named him' : 'his own exit note')
+          + ') but past ' + EAC_EXCUSE.CAP + ' excuses in the window -- convicted as a leave (O886)');
       }
       noteLeave(leavers, pid(x.steamID), c.m); leaverHits++;   // O717 N2: the lifetime count + the leave window
       console.log('  leaver ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' (in roster, no record; total ' + leavers[pid(x.steamID)].leaves + ')');
@@ -15332,7 +15480,7 @@ async function main() {
 if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
-module.exports = { SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CLASSIC_OWNERS: classicOwners.CLASSIC, CLASSIC_FILE, CHAT_MUTE: chatMute.CHAT_MUTE, CHAT_MUTE_FILE, CHAT_MUTE_LB, CHAT_REPORT_LB, isVoidDisp, voidByConsensus, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, RS_SOLO_VS_TRIO, RS_TRIO_WIN, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, DISPUTE_FLOOR, disputeFloorOf, disputeFloorAdmit, disputeFloorXp, CONSOLE_OWED, owedTag, owedItem, owedItemXp, owedRefund, owedUnsent, consoleOwedTake, consoleOwedPlan, consoleOwedRebase, CONFESS_MAGIC, NOTE_MAGIC, NOTE_DISP, reconcileConfessions, SANITY, sanityFlags, sanitySplit, recordSanityFlags, SANITY_RECORD_SLUGS, SANITY_ROSTER_SLUGS, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, rekeyReports, repKeysReady, REP_KEYS, REP_KEYS_VER, CHAT_KEYS, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, trustIndex, TRUST_T, TRUST_LB, TRUST_REJ_BIT, SHADOW_POOL, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan, postForm, postFormDetails, findOrCreateBoard, isTestBoardName, sandboxOn, ghWarn, ghErr, PT_MODE, PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, ACTIVE_MATCH_LB, seedStarterCp, ptBoardPlan, PRIVATE_XP, isPrivateMt, privateProgressOf, creditXpPrivate, BOT_XP, isBotMt, botTierOf, botTierMult, botSeatSplit, botRanksOf, botRankEffOf, botXpGain, botProgressOf, creditXpBot, DEMO_APPID, ENDLESS_XP, computeXpEndless, creditXpEndless, CAMPAIGN_LB, SEEDCAP_REJECT_LADDER_MIN, seedcapRejectWindowMin, seedcapRejectUntilMin, seedcapRejectActive, seedcapNEff,
+module.exports = { ED_MAGIC, ED_VER, ED_LEN, EAC_EXCUSE, EAC_NOTE_DISP, eacDropMaskOf, eacDropSeats, eacExcusePlan, eacExcuseUsed, noteEacExcuse, SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CLASSIC_OWNERS: classicOwners.CLASSIC, CLASSIC_FILE, CHAT_MUTE: chatMute.CHAT_MUTE, CHAT_MUTE_FILE, CHAT_MUTE_LB, CHAT_REPORT_LB, isVoidDisp, voidByConsensus, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, RS_SOLO_VS_TRIO, RS_TRIO_WIN, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, DISPUTE_FLOOR, disputeFloorOf, disputeFloorAdmit, disputeFloorXp, CONSOLE_OWED, owedTag, owedItem, owedItemXp, owedRefund, owedUnsent, consoleOwedTake, consoleOwedPlan, consoleOwedRebase, CONFESS_MAGIC, NOTE_MAGIC, NOTE_DISP, reconcileConfessions, SANITY, sanityFlags, sanitySplit, recordSanityFlags, SANITY_RECORD_SLUGS, SANITY_ROSTER_SLUGS, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, rekeyReports, repKeysReady, REP_KEYS, REP_KEYS_VER, CHAT_KEYS, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, trustIndex, TRUST_T, TRUST_LB, TRUST_REJ_BIT, SHADOW_POOL, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan, postForm, postFormDetails, findOrCreateBoard, isTestBoardName, sandboxOn, ghWarn, ghErr, PT_MODE, PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, ACTIVE_MATCH_LB, seedStarterCp, ptBoardPlan, PRIVATE_XP, isPrivateMt, privateProgressOf, creditXpPrivate, BOT_XP, isBotMt, botTierOf, botTierMult, botSeatSplit, botRanksOf, botRankEffOf, botXpGain, botProgressOf, creditXpBot, DEMO_APPID, ENDLESS_XP, computeXpEndless, creditXpEndless, CAMPAIGN_LB, SEEDCAP_REJECT_LADDER_MIN, seedcapRejectWindowMin, seedcapRejectUntilMin, seedcapRejectActive, seedcapNEff,
   ENDLESS_COMP_LB, SAVE_BOX_LB, SOLO_FILE, COMP, soloSanity, soloChainPlan, rerollChain, soloMilestones, soloAdvance, soloRunKey, soloRunKind, soloRunKept, soloRunSeason, seasonEndMs, pruneSolo, soloStartAttested, loadSolo, saveSolo, segOrderOf, segStartOf, freshOrder, freshOrderPaced, freshSeqPlan, seqStartMs, seqKeptLag, seqKeep, seqAddKept, SEQ_KEPT_MAX, writerReadyAt, writerClaim,
   ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, SAVE_BOX_LB_DUO, SAVE_BOX_LB_TRIO, teamRunKey, soloMsSlot, groupRecords, nosumVerdict, DISP_NOSUMMARY, isFinishDisp,
   ENDLESS_COMP_LB_QUAD, SAVE_BOX_LB_QUAD, ENDLESS_LB_QUAD, ENDLESS_MAX_PC, compFamKeyOf,   // client knife 3.7a (O178 four seats)

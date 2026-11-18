@@ -315,7 +315,11 @@ function check6(vv, src) {
   const code = src.split('\n').filter((l) => !/^\s*\/\//.test(l)).map((l) => l.replace(/\s\/\/ .*$/, ''));
   const calls = code.filter((l) => /\bleaverLpPenalty\(/.test(l) && !/module\.exports/.test(l));
   assert.ok(calls.length >= 2, 'fine sites found: ' + calls.length);
-  for (const l of calls) assert.ok(/leaverLpPenalty\([^,]+, (LEAVER_LP_FINE|opts\.penalty)\)/.test(l), 'a fine site not on LEAVER_LP_FINE: ' + l.trim());
+  // O886: one site is not a leave fine -- the amount an EXCUSED seat (removed by the anti-cheat) pays instead, its own knob
+  //   (EAC_EXCUSE.FINE, 0 today; test/eac-excuse.js [8]). Exactly one such site; every leave fine stays on LEAVER_LP_FINE.
+  const excuse = calls.filter((l) => /leaverLpPenalty\(cur, EAC_EXCUSE\.FINE\)/.test(l));
+  assert.ok(excuse.length <= 1, 'excuse-fine sites: ' + excuse.length);
+  for (const l of calls) if (excuse.indexOf(l) < 0) assert.ok(/leaverLpPenalty\([^,]+, (LEAVER_LP_FINE|opts\.penalty)\)/.test(l), 'a fine site not on LEAVER_LP_FINE: ' + l.trim());
   const pen = code.filter((l) => /\bpenalty: /.test(l));
   assert.ok(pen.length >= 1 && pen.every((l) => /penalty: LEAVER_LP_FINE\b/.test(l)), 'the confession fine: ' + pen.map((l) => l.trim()).join(' | '));
   // LEAVER_LP_PENALTY in code only where it is the base of the window's fine, the knob, or a log

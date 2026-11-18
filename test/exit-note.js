@@ -190,8 +190,8 @@ const mkStart = (writer, roster, hash) => { const d = []; d[2] = 5; d[3] = (hash
 const KEY = '111_7_5', MAT = 2 * HOUR;
 {
   T('[1] NOTE_MAGIC 0xBD (0xB1..0xBC all taken on the client)', v.NOTE_MAGIC === 0xBD);
-  T('[1] NOTE_DISP = { host-left, level-begin-timeout, migrate-disband } exactly (Q221 added level-begin-timeout)', v.NOTE_DISP instanceof Set && v.NOTE_DISP.size === 3
-    && [...v.NOTE_DISP].map(v.dispName).sort().join(',') === 'host-left,level-begin-timeout,migrate-disband', JSON.stringify([...(v.NOTE_DISP || [])]));
+  T('[1] NOTE_DISP = { host-left, level-begin-timeout, migrate-disband, eac-drop } exactly (Q221 added level-begin-timeout, O886 eac-drop)', v.NOTE_DISP instanceof Set && v.NOTE_DISP.size === 4
+    && [...v.NOTE_DISP].map(v.dispName).sort().join(',') === 'eac-drop,host-left,level-begin-timeout,migrate-disband', JSON.stringify([...(v.NOTE_DISP || [])]));
   const [A, B, C, D] = ids([101, 102, 103, 104]), X = SID(109);
   const R4 = { 0: A, 1: B, 2: C, 3: D };
   const pend0 = () => ({ [KEY]: { t0: 0, mt: 5, roster: { 0: v.pid(A), 1: v.pid(B), 2: v.pid(C), 3: v.pid(D) }, settled: [], started: [A, B, C, D].map(v.pid) } });
@@ -286,7 +286,7 @@ const e1 = (P, withNotes, disp) => {
   const P = E3P, h = 0x9603, S = [0, 1, 2, 3].map(s => start(5, h, P, s));
   const N = [note(5, h, P, 0, 5), note(5, h, P, 1, 8), note(5, h, P, 2, 7), note(5, h, P, 3, 9)];
   const rs = timeline(absentSteps(S, N));
-  T('[4] E3: user-quit / eac-kick / kicked / eac-drop notes: all four hit', allOk(rs, 4) && JSON.stringify(leaves(last(rs), P)) === '[1,1,1,1]' && sparedN(rs) === 0,
+  T('[4] E3: user-quit / eac-kick / kicked notes: all three hit; the eac-drop note (O886: in NOTE_DISP now) spares its writer', allOk(rs, 4) && JSON.stringify(leaves(last(rs), P)) === '[1,1,1,0]' && sparedN(rs) === 1,
     JSON.stringify(leaves(last(rs), P)));
   const S0 = [0, 1, 2, 3].map(s => start(5, h + 1, P, s));
   const rs0 = timeline(absentSteps(S0, [note(5, h + 1, P, 2, 0), note(5, h + 1, P, 3, 6)]));
@@ -398,8 +398,12 @@ const e7 = (P) => {
   // Q346 (2026-10-31): a sixth line, the fresh class order (freshSeqPlan) -- it reads a note's shard to order matches
   //   (rework: the call goes on with the kept minutes on the next line, so the pinned line ends at LEDGER_SHARDS,)
   //   first seen together (his own shard rotation); it settles nothing and holds nothing (test/fresh-seq-order.js)
-  T('[11] the notes array is touched on six lines only (declared, routed, logged, seen keys, the noted set, the class order) -- never a settle group or a hold',
-    noteLines.length === 6 && noteLines.every(l => !/leaveConfirmHold|groupRecords|absenceHold|recs\.concat\(notes|recs\.push/.test(l))
+  // O886: a seventh line -- the eac-drop notes (disposition 9 only) of roster members are kept on the key's starts entry (p.nd);
+  //   the settle loop reads p.nd under the per-account cap (test/eac-excuse.js). Any other note still reaches the verdict only.
+  T('[11] the notes array is touched on seven lines only (declared, routed, logged, seen keys, the noted set, the class order, O886: the eac-drop notes kept on the starts entry) -- never a settle group or a hold',
+    noteLines.filter(l => l === 'for (const n of notes) {').length === 1 && main.indexOf("for (const n of notes) {\n    if ((n.dispCode | 0) !== EAC_NOTE_DISP) continue;\n    const p = startsPending[n.m], h = pid(String(n.steamID));\n    if (!p || !p.roster || !Object.keys(p.roster).some((seat) => p.roster[seat] === h)) continue;") > main.indexOf('const startsRes = reconcileStarts(')
+    && v.EAC_NOTE_DISP === 9 && v.dispName(9) === 'eac-drop' &&
+    noteLines.length === 7 && noteLines.every(l => !/leaveConfirmHold|groupRecords|absenceHold|recs\.concat\(notes|recs\.push/.test(l))
     && noteLines.filter(l => /^const seq = freshSeqPlan\(fresh, freshT0, starts\.map\([^\n]*\)\.concat\(confessions, notes\), LEDGER_SHARDS,$/.test(l)).length === 1, JSON.stringify(noteLines));
   T('[11] notes reach one consumer only: the reconcileStarts call, filtered by NOTE_DISP', (code.match(/\bnoted\b/g) || []).length === 2
     && /const noted = new Set\(notes\.filter\(\(n\) => NOTE_DISP\.has\(n\.dispCode \| 0\)\)\.map\(\(n\) => pid\(String\(n\.steamID\)\) \+ '\|' \+ n\.m\)\);\n\s+const startsRes = reconcileStarts\([^\n]*, seenKeys, noted(?:, heldKeys(?:, errAbsence)?)?\);/.test(main),   // O618: + errAbsence   // Q294: + the held keys after it
@@ -455,7 +459,7 @@ const e10 = (P, notes, hostLone) => {
     && sparedN(rs) === 1 && rs.every(r => pointPosts(r).length === 0), JSON.stringify(leaves(last(rs), P)) + ' ' + last(rs).out.split('\n').filter(l => /start-orphan|lone/.test(l)).join(' | '));
 }
 {
-  const s5 = mutant('const NOTE_DISP = new Set([2, 3, 4]);', 'const NOTE_DISP = new Set([2, 4]);', '[12m]');
+  const s5 = mutant('const NOTE_DISP = new Set([2, 3, 4, 9]);', 'const NOTE_DISP = new Set([2, 4, 9]);', '[12m]');
   if (s5) try {
     const m = timeline(e10(QMP, true, true), s5);
     T('[12] mutant (level-begin-timeout dropped from NOTE_DISP, the code before Q221): both honest joiners hit again', allOk(m, 4) && JSON.stringify(leaves(last(m), QMP)) === '[0,1,1]',
