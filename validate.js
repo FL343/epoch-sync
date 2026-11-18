@@ -7415,10 +7415,27 @@ function elpSettleAll(st, seasonNow, nowMs, opt) {
       const cp = Object.assign({}, st, JSON.parse(JSON.stringify({ hist: st.hist, elpTeam: st.elpTeam === undefined ? null : st.elpTeam })));
       if (st.elpTeam === undefined) delete cp.elpTeam;
       elpSettleAll(cp, seasonNow, nowMs, { picks: pk });
-      return (p) => { const c = elpAllOf(cp, p, seasonNow | 0); return (c && c.placed) ? (c.lp | 0) : -1; };
+      const f = (p) => { const c = elpAllOf(cp, p, seasonNow | 0); return (c && c.placed) ? (c.lp | 0) : -1; };
+      f.team = cp.elpTeam || {};
+      // every member's copy of team run k is settled on this copy (a member whose copy left the window counts as not: the safe side)
+      f.all = (k) => { const e = f.team[k]; return e.r.every((q) => { const h = cp.hist[ratingHistKey(q, e.fam, e.s)]; return !!(h && Array.isArray(h.runs) && h.runs.some((r) => (r[0] >>> 0) === (Number(k) >>> 0) && r[3])); }); };
+      return f;
     };
     const own = lpOn(null), got = lpOn(picks);
-    if (pids.some((p) => got(p) < own(p))) { out.dropped = picks.size; picks = new Map(); }
+    // review 2026-11-18 (Q402 round 1): the points compared below are those of THIS pass. A team run freezes its level at its first
+    //   settle, and a member whose copy of the run arrives in a later pass reads that frozen level for his target -- the points
+    //   never show him. So the picks are given up too when they freeze the level of any team run at a higher target line than the
+    //   job's own orders do, unless every member's copy of the run settled in this pass (then the points cover them all). A level
+    //   on one side and none on the other (the silver line of whichever table): any difference counts.
+    const lineOf = (th) => (th == null ? null : pointsPlan.targetLineOf(0, null, th, false));
+    const raised = Object.keys(got.team).some((k) => {
+      const a = got.team[k], b = own.team[k];
+      if (!(a && a.has) || got.all(k)) return false;
+      if (!(b && b.has)) return true;   // frozen under the picked orders only
+      const la = lineOf(a.h), lb = lineOf(b.h);
+      return (la === null || lb === null) ? a.h !== b.h : la > lb;
+    });
+    if (raised || pids.some((p) => got(p) < own(p))) { out.dropped = picks.size; picks = new Map(); }
   }
   for (const [p, i] of picks) {
     const orders = elpPassOrders(st, p, seasonNow | 0, nowMs, elpLeftOf(st, p, seasonNow | 0));

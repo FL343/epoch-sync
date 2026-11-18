@@ -1698,12 +1698,34 @@ console.log('-- [18] Q402 / Q403: around the placement line, the order his play 
   T('[18] the row\'s skill is still a reading of a parked run that the picked order settles after a run first seen later (that run cannot have been waiting for its receipt when the parked run started); a finished run seen before it still takes the reading away', rowLaterHolds(v));
   // the guard: a pick that leaves anybody below the job's own orders is given up. Shown with a picker that takes the WORST order.
   const WORST = [['if (lp > bestLp) { best = i; bestLp = lp; }', 'if (lp < bestLp) { best = i; bestLp = lp; }']];
-  const GUARD = ['    if (pids.some((p) => got(p) < own(p))) { out.dropped = picks.size; picks = new Map(); }\n', ''];
+  const GUARD = ['    if (raised || pids.some((p) => got(p) < own(p))) { out.dropped = picks.size; picks = new Map(); }\n', ''];
   const guardHolds = (m) => { const a = settled(m, ownBestWorld), b = settled(m, ownBestWorld, NONE); return a.lp === b.lp && canon(a.st.hist) === canon(b.st.hist); };
   { let mw = null;
     try { mw = mutantOf(WORST); } catch (e) { bad('[18] guard: ' + e.message); }
     if (mw) { const a = settled(mw, ownBestWorld);
       T('[18] the guard: with a picker that takes the worst order, the whole pass is settled on two copies, somebody ends below the job\'s own orders -> the pick is given up (dropped 1), the pass settles in the job\'s own orders', guardHolds(mw) && a.dropped === 1 && a.picks.length === 0); }
+  }
+  // review round 1 (2026-11-18): the guard above compares the points of ONE pass. A team run freezes its level at its first settle; a
+  //   member whose copy of that run settles in a LATER pass reads the frozen level for his target and is in nobody's comparison.
+  //   The stored world (cloud review, rv-xpass.js --seed=1 world 1354, as it came): p1's pass would take an order (the 3rd of 12)
+  //   that freezes duo run 1788458060 at 2118 where the job's own orders freeze 2031; p0's copy of that run settles a day later --
+  //   target 20 and a miss (-24) instead of target 19 and a pass (+119). The guard gives such picks up: p0 gets what he got before.
+  const LATE = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'elp-mate-late-1354.json'), 'utf8')), LATE_RUN = 1788458060;
+  const latePlay = (m, opt) => {
+    const st = { hist: {} }, got = { picks: 0, dropped: 0, p0: null }; let si = 0;
+    for (const at of LATE.passes) {
+      while (si < LATE.segs.length && LATE.segs[si].t <= at) { const g = LATE.segs[si++]; m.ratingHistUpsert(st, g.p, g.fam, 0, g.id, g.depth, at, g.fl, g.id); if (g.roster.length > 1) m.elpTeamNote(st, g.id, g.roster, g.fam, 0, at); }
+      const out = m.elpSettleAll(st, 0, at, opt);
+      for (const x of out) if (x.k === 'p0|duo|0' && (x.runId >>> 0) === LATE_RUN) got.p0 = { T: x.T, pass: x.pass, d: x.d, teamH: x.teamH };
+      got.picks += out.picks.length; got.dropped += out.dropped;
+    }
+    got.lp = lpOf(st, 'p0');
+    return got;
+  };
+  const lateHolds = (m) => { const a = latePlay(m, undefined), b = latePlay(m, NONE); return !!a.p0 && !!b.p0 && a.p0.T <= b.p0.T && a.lp >= b.lp; };
+  { const a = latePlay(v, undefined), b = latePlay(v, NONE);
+    eq('[18] review round 1 -- a teammate whose copy of a team run settles in a later pass: the level the run froze under the job\'s own orders (2031: target 19, a pass, +119, 3223 in the end)', [b.p0, b.lp], [{ T: 19, pass: true, d: 119, teamH: 2031 }, 3223]);
+    T('[18] ... the picks that would freeze that run higher (2118: target 20, a miss) are given up: the late teammate settles exactly as under the job\'s own orders (the guard gave ' + a.dropped + ' pick(s) up over the world\'s ' + LATE.passes.length + ' passes)', lateHolds(v) && canon([a.p0, a.lp]) === canon([b.p0, b.lp]) && a.dropped >= 1);
   }
   // random worlds: four players, four families, team runs, parked runs, ties -- nobody ever ends a pass below what the job's own orders leave him; the result does not depend on the key order of the file
   function worlds(m, seed0, iters) {
@@ -1755,7 +1777,13 @@ console.log('-- [18] Q402 / Q403: around the placement line, the order his play 
     && /const own = elpPassOrder\(st, p, s, nowMs\)/.test(v.elpPassOrders.toString()) && /const out = \[own\]/.test(v.elpPassOrders.toString())
     && /the order of this pass taken among/.test(SRC) && /picked order\(s\) given up/.test(SRC));
   // mutations
-  T('[18] baseline holds for the mutations below', q402Holds(v) && q403Holds(v) && ownBestHolds(v) && sameAsOwn(v, placedWorld) && untouched(v, q402World) && rowLaterHolds(v) && guardHolds(v));
+  T('[18] baseline holds for the mutations below', q402Holds(v) && q403Holds(v) && ownBestHolds(v) && sameAsOwn(v, placedWorld) && untouched(v, q402World) && rowLaterHolds(v) && guardHolds(v) && lateHolds(v));
+  T('[18] mutation "the guard compares the points of the pass only" (the guard before the review) turns the late-teammate check red: his target goes up a level, a pass becomes a miss',
+    redBy('[18] points only', [['    if (raised || pids.some((p) => got(p) < own(p))) {', '    if (pids.some((p) => got(p) < own(p))) {']], lateHolds));
+  T('[18] mutation "a level frozen LOWER gives the picks up, a higher one passes" turns the late-teammate check red (the direction: a higher level is the one that hurts)',
+    redBy('[18] direction', [['a.h !== b.h : la > lb;', 'a.h !== b.h : la < lb;']], lateHolds));
+  T('[18] mutation "a team run counts as covered once ANY copy of it settled" turns the late-teammate check red (the exemption is for a run whose every member settled in this pass)',
+    redBy('[18] any copy', [['return e.r.every((q) => { const h = cp.hist[ratingHistKey(q, e.fam, e.s)];', 'return e.r.some((q) => { const h = cp.hist[ratingHistKey(q, e.fam, e.s)];']], lateHolds));
   const PICK = ['elpPickOrders(st, pids, seasonNow | 0, nowMs, ctx);', 'new Map();'];
   T('[18] mutation "the job\'s own order always" (the settle before this rule) turns the Q402 and the Q403 checks red', redBy('[18] no pick', [PICK], q402Holds) && redBy('[18] no pick (Q403)', [PICK], q403Holds));
   const PLACE = '  return (elpRunParked(r) && !elpRunEnded(r) && i < h.runs.length - 1) ? (h.runs[i + 1][2] || 0) : (r[2] || 0);';
