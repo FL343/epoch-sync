@@ -11179,7 +11179,7 @@ async function main() {
           const before = cur;
           cur = sl.nv;
           if (p.m) evs.push({ mh: mhOfKey(p.m), change: cur - before, clear: 0xff,
-            set: ((plan && plan[sid]) ? (plan[sid].flag & RECEIPT_F.RS) : 0) | (sl.clamped ? RECEIPT_F.SERIES : 0) | (seeded ? RECEIPT_F.SEEDED : 0) });
+            set: ((plan && plan[sid]) ? (plan[sid].flag & RECEIPT_F.RS) : 0) | ((sl.clamped && !sl.capped) ? RECEIPT_F.SERIES : 0) | (seeded ? RECEIPT_F.SEEDED : 0) });   // a placement match held under master: no promotion happened, no SERIES (as below)
           seeded = false;
         }
         if (!APPLY_MMR) { console.log('  (dry-run) lone-1v1 pts ' + plog(sid) + ' = ' + cur); continue; }
@@ -14960,11 +14960,15 @@ async function main() {
           const sl = settleLine(cur, rs, rankX[r.id], nP, lineMode(r.id));
           const d0 = sl.d0, wonLike = sl.won, d = sl.d, nv = sl.nv;
           lp[r.id] = nv; changedLp[r.id] = nv; lpMoved[r.id] = nv - cur;
-          // O480: the match's points receipt on his row (what this settle moved, why: reveal flag / series clamp / seeded)
-          noteReceipt(r.id, g[0].d[3] | 0, nv - cur, ((rs && rs.flag) & RECEIPT_F.RS) | (sl.clamped ? RECEIPT_F.SERIES : 0) | (seededNow.has(r.id) ? RECEIPT_F.SEEDED : 0), 0xff);
+          // O480: the match's points receipt on his row (what this settle moved, why: reveal flag / series clamp / seeded).
+          //   SERIES = a series landing moved the points. A placement match held under the master line (sl.capped, O717) landed
+          //   nowhere -- the promotion was taken back by the cap -- so it carries no SERIES: his client reads the same
+          //   (clamped && !capped), and a correction notice then never names "a series landing" for it.
+          const series = !!sl.clamped && !sl.capped;
+          noteReceipt(r.id, g[0].d[3] | 0, nv - cur, ((rs && rs.flag) & RECEIPT_F.RS) | (series ? RECEIPT_F.SERIES : 0) | (seededNow.has(r.id) ? RECEIPT_F.SEEDED : 0), 0xff);
           if (rs && rs.flag) reveal[r.id] = { matchHash: g[0].d[3] | 0, seed: g[0].d[4] | 0, flag: rs.flag, adjDelta: d, normalDelta: rs.normalDelta };
           lpLine = ' | pts ' + cur + (d >= 0 ? '+' : '') + d + '->' + nv + (rs && rs.flag ? (' [' + (rs.flag === 1 ? 'UPSET' : 'PROTECTED') + ' normal ' + rs.normalDelta + ']') : '')
-            + (sl.clamped ? (' [SERIES ' + (wonLike ? 'PROMOTED' : 'RELEGATED') + ' from ' + d0 + ']') : '')
+            + (series ? (' [SERIES ' + (wonLike ? 'PROMOTED' : 'RELEGATED') + ' from ' + d0 + ']') : '')
             + (placingNow.has(r.id) ? (' [PLACEMENT ' + ((placedN[r.id] | 0) + 1) + '/' + PLACEMENT_TARGET + (sl.capped ? ', held under master' : '') + ']') : '');
         }
         console.log('  settle ' + c.m + ': ' + plog(r.id) + ' rank' + rankX[r.id] + ' mu' + r.mu.toFixed(2) + ' sigma' + r.sigma.toFixed(2) + ' -> ' + ts.displayRating(r.mu, r.sigma) + lpLine);

@@ -177,6 +177,8 @@ const got = (r, board) => ({ C: lastPts(r, board, C), D: lastPts(r, board, D), A
 const mX = match(2, 0x7172, [X1, X2, X3, E]), mY = match(2, 0x7173, [Y1, Y2, Y3, E]);
 const rowsE = (M) => ({ points: {}, s1: { [E]: row(M, 2050, 4) } });
 const E_STEPS = [[0, mX.S, S1], [5 * MIN, mX.S.concat(mY.S), S1], [6 * MIN, mX.all.concat(mY.all), S1]];
+// the newest receipt on the row the runs wrote for sid (season 1 board), or null
+function receiptOf(r, sid) { for (const rr of r.rs) for (const p of H.postsOf(rr, S1B, sid)) return PP.lpDetailsOf(p.details).ring[0]; return null; }
 function jobCases(script, M) {
   const r1 = run([[0, m1.S, S1], [5 * MIN, m1.all, S1]], rowsOf(M, 's1'), null, script);
   const r0 = run([[0, m1.S, PRE], [5 * MIN, m1.all, PRE]], rowsOf(M, 'pre'), null, script);
@@ -196,10 +198,13 @@ function jobCases(script, M) {
   T('[8] the same match in the preseason settles by the old rules: C / D promoted to 6150, A / B forced to 1850', J(j.pre) === J(WANT_PRE), J(j.pre));
   T('[8] E\'s two matches settled in one run (one write, the third run): the 5th placement match natural (2033), then a normal one in the band forced down: 1850 (the first match\'s receipt counted)',
     j.e === 1850 && J(j.eRun) === '[0,0,1]' && new RegExp(v.pid(String(E)).slice(0, 8) + '[^\\n]*\\[PLACEMENT 5/5\\]').test(j.r2.out), String(j.e) + ' writes per run ' + J(j.eRun));
-  // the receipt of C's capped placement match: SERIES (the clamp moved it), not LEAVE / VOID (it counts), delta 99
-  const cp = (() => { for (const rr of j.r1.rs) for (const p of H.postsOf(rr, S1B, C)) return PP.lpDetailsOf(p.details).ring[0]; return null; })();
-  T('[8] C\'s receipt: delta 99 (5900 -> 5999), SERIES, counted (no LEAVE / VOID): 3 settled on his ring now', !!cp && cp.delta === 99 && (cp.flags & F.SERIES) && !(cp.flags & (F.LEAVE | F.VOID))
-    && (() => { for (const rr of j.r1.rs) for (const p of H.postsOf(rr, S1B, C)) return PP.placementOf(p.details).n === 3; return false; })(), J(cp));
+  // the receipt of C's capped placement match: no SERIES (the cap took the promotion back: nothing landed; his client reads
+  //   clamped && !capped the same way), not LEAVE / VOID (it counts), delta 99. D, placed and promoted in the same match: SERIES.
+  const cp = receiptOf(j.r1, C), dp = receiptOf(j.r1, D);
+  T('[8] C\'s receipt: delta 99 (5900 -> 5999), no SERIES (held under master: no promotion happened), counted (no LEAVE / VOID): 3 settled on his ring now; D\'s (promoted to 6150): SERIES',
+    !!cp && cp.delta === 99 && !(cp.flags & F.SERIES) && !(cp.flags & (F.LEAVE | F.VOID)) && !!dp && !!(dp.flags & F.SERIES)
+    && (() => { for (const rr of j.r1.rs) for (const p of H.postsOf(rr, S1B, C)) return PP.placementOf(p.details).n === 3; return false; })(), J([cp, dp]));
+  T('[8] the settle log: no [SERIES PROMOTED] on C\'s held match, one on D\'s', !new RegExp(plog(C) + '[^\\n]*\\[SERIES').test(j.r1.out) && new RegExp(plog(D) + '[^\\n]*\\[SERIES PROMOTED').test(j.r1.out));
 }
 
 // [9] class: the settle lines of the job
@@ -282,6 +287,13 @@ function mutV(pairs) {
     cls = /settleLine\(cur, rs, rankX\[r\.id\], nP, seededNow\.has\(r\.id\)\)/.test(code);
   } finally { mu.done(); }
   T('[8] / [9] mutation: the settle line without the placement mode turns [8] red (' + J(s1) + ') and is the call [9] names', J(s1) !== J(WANT_S1) && cls);
+}
+{
+  const mu = mutV([['const series = !!sl.clamped && !sl.capped;', 'const series = !!sl.clamped;']]);
+  let cp = null;
+  try { const r = run([[0, m1.S, S1], [5 * MIN, m1.all, S1]], rowsOf(PP, 's1'), null, mu.path); cp = receiptOf(r, C); } finally { mu.done(); }
+  T('[8] mutation: SERIES on a placement match held under master (the receipt before the fix) turns [8] red', !!cp && !!(cp.flags & F.SERIES), J(cp));
+  T('[8] the lone 1V1 supplement names the same rule (no SERIES when the cap held the points)', /\(\(sl\.clamped && !sl\.capped\) \? RECEIPT_F\.SERIES : 0\)/.test(H.SRC) && !/\(sl\.clamped \? RECEIPT_F\.SERIES : 0\)/.test(H.SRC));
 }
 
 console.log(failN ? ('placement-rules: ' + failN + ' FAIL') : 'placement-rules: all ok');
