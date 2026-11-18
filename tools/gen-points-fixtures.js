@@ -23,7 +23,7 @@
 //   seat: { mt } -> which seats of the code move points (O716 one queue: the ranked-seat mask in bits 11-16; no mask = the old
 //     whole-table rule): { mask, sans: the code without the mask, base, any: anyAppliesLp, seats: seatAppliesLp of seats 0..5 }.
 //     A case added here moves no settled delta (no RULES_VER bump): it pins the reading both sides share.
-//   endless: { fn, args } -> PP[fn](...args), one O728 endless points function (hiddenOf / teamHiddenOf (O803) / elpIsTeam / elpConvert / elpHiddenFor (O825) /
+//   endless: { fn, args } -> PP[fn](...args), one O728 endless points function (hiddenOf / teamHiddenOf (O803) / elpIsTeam / elpConvert / elpHiddenFor (O825) / elpSeedHidden (version 6) /
 //     tierOfHidden / skillTierOf / targetOffset / targetLineOf / targetOf / endlessDelta / endlessSettle / endlessSeedLp / elpRowDetails / elpRowOf /
 //     elpTableDetails / elpTableOf) at fixed inputs. The endless rules carry their own version (ELP.VER on the published table), not RULES_VER: an endless
 //     case that moves bumps ELP.VER. O825 (ELP v4): the cases of version 3 keep their inputs and their values (endlessDelta's result gained the field team,
@@ -187,8 +187,13 @@ function endlessCases() {
   const out = [
     // the hidden skill (depths newest first)
     E('hidden, no run', 'hiddenOf', [[]]),
-    E('hidden, 4 runs (placement: null)', 'hiddenOf', [[10, 9, 8, 7]]),
-    E('hidden, 4 runs read for a placement target (plain mean)', 'hiddenOf', [[10, 9, 8, 7], 1]),
+    E('hidden, 4 runs (version 6: trimmed from three runs on -- the two middle ones)', 'hiddenOf', [[10, 9, 8, 7]]),
+    E('hidden, 3 runs = the middle one', 'hiddenOf', [[10, 4, 8]]),
+    E('hidden, 2 runs = null', 'hiddenOf', [[10, 9]]),
+    E('hidden, 4 runs counted as version 5 did (the last argument 5) = null', 'hiddenOf', [[10, 9, 8, 7], null, 5]),
+    E('hidden, 4 runs read for a placement target as version 5 did (plain mean)', 'hiddenOf', [[10, 9, 8, 7], 1, 5]),
+    E('hidden, 4 runs read for a placement target (version 6: three runs or more = the trimmed mean)', 'hiddenOf', [[10, 9, 8, 7], 1]),
+    E('hidden, 2 runs read for a placement target (plain mean)', 'hiddenOf', [[10, 7], 1]),
     E('hidden, 1 run read for a placement target', 'hiddenOf', [[0], 1]),
     E('hidden, 5 runs (the highest and the lowest leave)', 'hiddenOf', [[30, 9, 8, 7, 0]]),
     E('hidden, 12 runs (the newest 10 count)', 'hiddenOf', [[5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 90, 90]]),
@@ -284,7 +289,9 @@ function endlessCases() {
     E('seed, silver 950 (near the gold line: kept below the band)', 'endlessSeedLp', [950, SOLO]),
     E('seed, exactly the gold line (kept above the relegation band)', 'endlessSeedLp', [1000, SOLO]),
     E('seed, gold 1250', 'endlessSeedLp', [1250, SOLO]),
-    E('seed, platinum 1600 (above the relegation band)', 'endlessSeedLp', [1600, SOLO]),
+    E('seed, 13.9 levels (gold, just under the cap)', 'endlessSeedLp', [1390, SOLO]),
+    E('seed, 14.0 levels = the cap (version 6: 2800, the top of gold under the promotion band)', 'endlessSeedLp', [1400, SOLO]),
+    E('seed, platinum 1600 (the cap: a placement never hands out platinum)', 'endlessSeedLp', [1600, SOLO]),
     E('seed, platinum 2000 (the cap)', 'endlessSeedLp', [2000, SOLO]),
     E('seed, above the grandmaster line (the cap)', 'endlessSeedLp', [9000, SOLO]),
     E('seed, duo silver 1400', 'endlessSeedLp', [1400, DUO]),
@@ -341,17 +348,34 @@ function onePointsCases(E, SOLO, DUO, TRIO, QUAD, LINES) {
     E('hidden for, five solo runs = hiddenOf of them', 'elpHiddenFor', ['solo', [['solo', 30], ['solo', 9], ['solo', 8], ['solo', 7], ['solo', 0]], LINES]),
     E('hidden for, five solo runs among duo runs (the duo runs do not count)', 'elpHiddenFor', ['solo', [['duo', 40], ['solo', 30], ['solo', 9], ['duo', 40], ['solo', 8], ['solo', 7], ['solo', 0], ['duo', 40]], LINES]),
     E('hidden for, twelve solo runs (the newest 10 count)', 'elpHiddenFor', ['solo', [5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 90, 90].map((d) => ['solo', d]), LINES]),
-    E('hidden for, duo with two own runs: the three newest solo runs fill, read on the duo scale', 'elpHiddenFor', ['duo', [['solo', 10], ['duo', 20], ['solo', 15], ['solo', 24], ['duo', 14], ['solo', 2], ['solo', 2]], LINES]),
-    E('hidden for, duo never played: five solo runs read on the duo scale (trimmed)', 'elpHiddenFor', ['duo', [['solo', 10], ['solo', 15], ['solo', 24], ['solo', 6], ['solo', 12], ['solo', 55]], LINES]),
-    E('hidden for, quad never played: runs of three other families fill', 'elpHiddenFor', ['quad', [['trio', 18], ['duo', 16], ['solo', 10], ['solo', 15], ['duo', 24]], LINES]),
-    E('hidden for, three runs in all = null', 'elpHiddenFor', ['duo', [['solo', 10], ['duo', 20], ['solo', 15]], LINES]),
-    E('hidden for, three runs in all read for a placement target (plain mean on the duo scale)', 'elpHiddenFor', ['duo', [['solo', 10], ['duo', 20], ['solo', 15]], LINES, 1]),
-    E('hidden for, four own runs and no other = null', 'elpHiddenFor', ['solo', [['solo', 10], ['solo', 9], ['solo', 8], ['solo', 7]], LINES]),
+    E('hidden for, duo with two own runs: the newest solo run fills up to three, read on the duo scale', 'elpHiddenFor', ['duo', [['solo', 10], ['duo', 20], ['solo', 15], ['solo', 24], ['duo', 14], ['solo', 2], ['solo', 2]], LINES]),
+    E('hidden for, the same counted as version 5 did: the three newest solo runs fill up to five', 'elpHiddenFor', ['duo', [['solo', 10], ['duo', 20], ['solo', 15], ['solo', 24], ['duo', 14], ['solo', 2], ['solo', 2]], LINES, null, 5]),
+    E('hidden for, duo never played: the three newest solo runs read on the duo scale (the middle one)', 'elpHiddenFor', ['duo', [['solo', 10], ['solo', 15], ['solo', 24], ['solo', 6], ['solo', 12], ['solo', 55]], LINES]),
+    E('hidden for, quad never played: the three newest runs of the other families fill', 'elpHiddenFor', ['quad', [['trio', 18], ['duo', 16], ['solo', 10], ['solo', 15], ['duo', 24]], LINES]),
+    E('hidden for, three runs in all = the middle one on the duo scale', 'elpHiddenFor', ['duo', [['solo', 10], ['duo', 20], ['solo', 15]], LINES]),
+    E('hidden for, two runs in all = null', 'elpHiddenFor', ['duo', [['solo', 10], ['duo', 20]], LINES]),
+    E('hidden for, three runs in all counted as version 5 did = null', 'elpHiddenFor', ['duo', [['solo', 10], ['duo', 20], ['solo', 15]], LINES, null, 5]),
+    E('hidden for, three runs in all read for a placement target (version 6: the middle one)', 'elpHiddenFor', ['duo', [['solo', 10], ['duo', 20], ['solo', 15]], LINES, 1]),
+    E('hidden for, three runs in all read for a placement target as version 5 did (plain mean on the duo scale)', 'elpHiddenFor', ['duo', [['solo', 10], ['duo', 20], ['solo', 15]], LINES, 1, 5]),
+    E('hidden for, four own runs = the two middle ones', 'elpHiddenFor', ['solo', [['solo', 10], ['solo', 9], ['solo', 8], ['solo', 7]], LINES]),
+    E('hidden for, four own runs counted as version 5 did = null', 'elpHiddenFor', ['solo', [['solo', 10], ['solo', 9], ['solo', 8], ['solo', 7]], LINES, null, 5]),
     E('hidden for, four own runs read for a placement target = hiddenOf(.., 1)', 'elpHiddenFor', ['solo', [['solo', 10], ['solo', 9], ['solo', 8], ['solo', 7]], LINES, 1]),
     E('hidden for, one run of another family read for a placement target', 'elpHiddenFor', ['trio', [['solo', 10]], LINES, 1]),
     E('hidden for, a run of a family without lines (duoc) is left out', 'elpHiddenFor', ['duo', [['duoc', 50], ['solo', 10], ['solo', 10], ['solo', 10], ['solo', 10], ['solo', 10]], LINES]),
     E('hidden for, no lines for the family itself: its own runs only', 'elpHiddenFor', ['duo', [['duo', 20], ['solo', 10], ['solo', 10], ['solo', 10], ['solo', 10]], { solo: SOLO }, 1]),
     E('hidden for, a negative depth counts as 0', 'elpHiddenFor', ['solo', [['solo', -3], ['solo', 2], ['solo', 2], ['solo', 2], ['solo', 2]], LINES]),
+    // version 6: the seed reading (the lowest run left out, the rest averaged; every run on the solo scale)
+    E('seed skill, no run', 'elpSeedHidden', [[], LINES]),
+    E('seed skill, one run = itself', 'elpSeedHidden', [[['solo', 7]], LINES]),
+    E('seed skill, two runs = the better one', 'elpSeedHidden', [[['solo', 7], ['solo', 3]], LINES]),
+    E('seed skill, three solo runs = the mean of the better two', 'elpSeedHidden', [[['solo', 10], ['solo', 4], ['solo', 8]], LINES]),
+    E('seed skill, four runs = the mean of the best three', 'elpSeedHidden', [[['solo', 12], ['solo', 10], ['solo', 4], ['solo', 8]], LINES]),
+    E('seed skill, a team run read on the solo scale', 'elpSeedHidden', [[['duo', 16], ['solo', 4], ['solo', 8]], LINES]),
+    E('seed skill, three team runs of three families', 'elpSeedHidden', [[['quad', 24], ['trio', 10], ['duo', 3]], LINES]),
+    E('seed skill, a zero run is the one left out', 'elpSeedHidden', [[['solo', 0], ['solo', 25], ['solo', 40]], LINES]),
+    E('seed skill, twelve runs (the newest 10 count)', 'elpSeedHidden', [[5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 90, 90].map((d) => ['solo', d]), LINES]),
+    E('seed skill, a run of a family without lines (duoc) is left out', 'elpSeedHidden', [[['duoc', 50], ['solo', 10], ['solo', 6]], LINES]),
+    E('seed skill, a negative depth counts as 0', 'elpSeedHidden', [[['solo', -3], ['solo', 2], ['solo', 4]], LINES]),
     // the gate of a team family: the line x TEAM_GATE / 100
     E('team gate, duo 6100 = diamond (on the master line 61, short of 67.1)', 'skillTierOf', [6100, DUO, 'duo']),
     E('team gate, duo 6709 = diamond', 'skillTierOf', [6709, DUO, 'duo']),

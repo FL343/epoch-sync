@@ -38,6 +38,13 @@
 //       - the row v2 round-trips with the four skills; the v1 per-family row reads as none
 //       Mutations: TEAM_GAIN 1000 / the factor on both pass and miss / the factor at master and up / TEAM_GATE 100 / a team family
 //       by default / no borrowed runs / borrowed runs not converted / a convert without the lines / a v1 row read as a row -> red
+//  [12] ELP version 6 (user calls 2026-11-18: three placement runs, the worst one dropped, the others averaged): MIN_RUNS 3 in every
+//       role (the hidden skill trims from three runs, a family borrows up to three, fewer = no skill); the count as the optional
+//       last argument of hiddenOf / elpHiddenFor reads version 5 (MIN_RUNS_OLD 5) value for value; the seed reading
+//       elpSeedHidden -- the newest WINDOW runs on the solo scale, the single lowest left out, the rest averaged, defined for any
+//       count -- against an independent reading over random histories, never lower when a run gets deeper or a deeper run is
+//       added, the pinned shapes. Mutations: the count argument ignored / the highest run dropped / the trimmed mean back at the
+//       seed / team runs not converted -> red
 const path = require('path');
 const fs = require('fs');
 const PP = require(path.join(__dirname, '..', 'points-plan.js'));
@@ -111,18 +118,20 @@ function factorErrors(M) {
   }
   return errs;
 }
-function hiddenErrors(M) {
-  const errs = [];
-  const want = (d) => { const w = d.slice(0, 10).map((x) => Math.max(0, x)); if (w.length < 5) return null; const s = w.slice().sort((a, b) => a - b).slice(1, -1); return Math.round(s.reduce((a, b) => a + b, 0) * 100 / s.length); };
+function hiddenErrors(M, min) {
+  const errs = [], K = min == null ? M.ELP.MIN_RUNS : min;   // min given: the count passed as hiddenOf's last argument (version 5 = 5)
+  const want = (d) => { const w = d.slice(0, 10).map((x) => Math.max(0, x)); if (w.length < K) return null; const s = w.slice().sort((a, b) => a - b).slice(1, -1); return Math.round(s.reduce((a, b) => a + b, 0) * 100 / s.length); };
   let seed = 7;
   const rnd = () => { seed = (Math.imul(seed, 1103515245) + 12345) >>> 0; return seed; };
   for (let i = 0; i < 400; i++) {
     const n = rnd() % 14, d = [];
     for (let j = 0; j < n; j++) d.push((rnd() % 60) - 3);
-    if (M.hiddenOf(d) !== want(d)) errs.push(['hidden', J(d), M.hiddenOf(d), want(d)]);
+    const got = min == null ? M.hiddenOf(d) : M.hiddenOf(d, undefined, min);
+    if (got !== want(d)) errs.push(['hidden', J(d), got, want(d)]);
     const p = d.slice(0, 10).map((x) => Math.max(0, x));
-    const wp = p.length >= 5 ? want(d) : (p.length ? Math.round(p.reduce((a, b) => a + b, 0) * 100 / p.length) : null);
-    if (M.hiddenOf(d, 1) !== wp) errs.push(['placing', J(d), M.hiddenOf(d, 1), wp]);
+    const wp = p.length >= K ? want(d) : (p.length ? Math.round(p.reduce((a, b) => a + b, 0) * 100 / p.length) : null);
+    const gp = min == null ? M.hiddenOf(d, 1) : M.hiddenOf(d, 1, min);
+    if (gp !== wp) errs.push(['placing', J(d), gp, wp]);
   }
   return errs;
 }
@@ -212,7 +221,7 @@ console.log('=== O728 endless points (points-plan.js ELP v' + PP.ELP.VER + ') ==
 // [5]
 {
   const e = hiddenErrors(PP);
-  T('[5] hidden skill = the trimmed mean of the newest 10 (null under 5); the placement read = the plain mean under 5', !e.length, J(e.slice(0, 3)));
+  T('[5] hidden skill = the trimmed mean of the newest 10 (null under MIN_RUNS = ' + PP.ELP.MIN_RUNS + '); the placement read = the plain mean under it', !e.length && PP.ELP.MIN_RUNS === 3, J(e.slice(0, 3)));
   T('[5] tierOfHidden: the nearest line, the lower tier on a tie, null without a skill', PP.tierOfHidden(950, SOLO) === 2 && PP.tierOfHidden(400, SOLO) === 0 && PP.tierOfHidden(401, SOLO) === 1 && PP.tierOfHidden(null, SOLO) === null && PP.tierOfHidden(500, null) === null);
   const got = [3400, 3799, 3800, 5000, 5499, 5500, 1200, null].map((x) => PP.skillTierOf(x, SOLO)), want = [4, 4, 5, 5, 5, 6, 2, null];
   T('[5] skillTierOf: master / grandmaster only on reaching their line (3400 -> diamond though nearer master; 5000 -> master though nearer grandmaster) = ' + J(got), J(got) === J(want));
@@ -242,7 +251,12 @@ console.log('=== O728 endless points (points-plan.js ELP v' + PP.ELP.VER + ') ==
 {
   const e = seedErrors(PP);
   T('[7] the seed sits outside both series bands, at most SEED_CAP ' + PP.ELP.SEED_CAP + ', never lower for a higher skill', !e.length, J(e.slice(0, 3)));
-  T('[7] a skill at a line seeds just above that tier\'s relegation band; at or above platinum caps', PP.endlessSeedLp(1000, SOLO) === 2121 && PP.endlessSeedLp(2000, SOLO) === 3200 && PP.endlessSeedLp(null, SOLO) === 0);
+  // version 6 (user call 2026-11-18): the cap is 2800, the top of gold under the promotion band -- a placement never hands out platinum
+  const capHolds = (M) => M.ELP.SEED_CAP === 2800 && M.lpTierIdx(2800) === 2 && M.boundaryOf(2800) == null && M.endlessSeedLp(1390, SOLO) === 2780 && [1400, 1500, 2000, 9000].every((h) => M.endlessSeedLp(h, SOLO) === 2800);
+  T('[7] a skill at a line seeds just above that tier\'s relegation band (gold line: 2121); from 14.0 levels up the seed is the cap 2800 = the top of gold under the promotion band (13.9 -> 2780); the versus cap stays ' + PP.LP_SEED.CAP, PP.endlessSeedLp(1000, SOLO) === 2121 && capHolds(PP) && PP.LP_SEED.CAP === 3200 && PP.endlessSeedLp(null, SOLO) === 0);
+  { const src7 = fs.readFileSync(path.join(__dirname, '..', 'points-plan.js'), 'utf8'), win7 = {}; let red7 = false;
+    if (src7.split('SEED_CAP: 2800,').length !== 2) bad('[7] mutation anchor missing: SEED_CAP'); else { new Function('window', src7.split('SEED_CAP: 2800,').join('SEED_CAP: 3200,'))(win7); red7 = !capHolds(win7.POINTS_PLAN) && win7.POINTS_PLAN.endlessSeedLp(2000, SOLO) === 3200; }
+    T('[7] mutation "the seed cap back at 3200" (mid platinum: a placement hands out platinum) turns it red', red7); }
 }
 // [8]
 {
@@ -299,7 +313,7 @@ console.log('=== O728 endless points (points-plan.js ELP v' + PP.ELP.VER + ') ==
   T('[9] TRIM 0 turns [5] red', tr && hiddenErrors(tr).length > 0);
   const sb = mut('seed on the band edge', [['lo + BOUNDARY_MARGIN + 1', 'lo + BOUNDARY_MARGIN']]);
   T('[9] the seed allowed on the relegation band edge turns [7] red', sb && seedErrors(sb).length > 0);
-  const sc = mut('SEED_CAP 4100', [['SEED_CAP: 3200', 'SEED_CAP: 4100']]);
+  const sc = mut('SEED_CAP 4100', [['SEED_CAP: 2800', 'SEED_CAP: 4100']]);
   T('[9] a seed cap inside diamond turns [7] red', sc && seedErrors(sc).length > 0);
 }
 
@@ -381,14 +395,16 @@ function convertErrors(M) {
   return errs;
 }
 // elpHiddenFor against an independent reading over random run lists; a one-family player reads hiddenOf
-function hiddenForErrors(M) {
-  const errs = [], FAMS = ['solo', 'duo', 'trio', 'quad'];
+function hiddenForErrors(M, min) {
+  const errs = [], FAMS = ['solo', 'duo', 'trio', 'quad'], K = min == null ? M.ELP.MIN_RUNS : min;   // min given: the count as elpHiddenFor's last argument
+  const call = (fam, runs, m) => (min == null ? M.elpHiddenFor(fam, runs, LINES4, m) : M.elpHiddenFor(fam, runs, LINES4, m, min));
+  const hid = (own, m) => (min == null ? M.hiddenOf(own, m) : M.hiddenOf(own, m, min));
   const want = (fam, runs, minRuns) => {
     const own = runs.filter((r) => r[0] === fam).slice(0, 10).map((r) => Math.max(0, r[1]) * 100);
     let list = own;
-    if (own.length < 5) list = own.concat(runs.filter((r) => r[0] !== fam && LINES4[r[0]]).map((r) => M.elpConvert(Math.max(0, r[1]) * 100, LINES4[r[0]], LINES4[fam])).slice(0, 5 - own.length));
-    if (!list.length || list.length < (minRuns == null ? 5 : minRuns)) return null;
-    const use = list.length >= 5 ? list.slice().sort((a, b) => a - b).slice(1, -1) : list;
+    if (own.length < K) list = own.concat(runs.filter((r) => r[0] !== fam && LINES4[r[0]]).map((r) => M.elpConvert(Math.max(0, r[1]) * 100, LINES4[r[0]], LINES4[fam])).slice(0, K - own.length));
+    if (!list.length || list.length < (minRuns == null ? K : minRuns)) return null;
+    const use = list.length >= K ? list.slice().sort((a, b) => a - b).slice(1, -1) : list;
     return Math.round(use.reduce((a, b) => a + b, 0) / use.length);
   };
   let seed = 11;
@@ -397,18 +413,56 @@ function hiddenForErrors(M) {
     const n = rnd() % 16, runs = [], one = i % 3 === 0 ? FAMS[rnd() % 4] : null;
     for (let j = 0; j < n; j++) runs.push([one || (rnd() % 9 === 0 ? 'duoc' : FAMS[rnd() % 4]), (rnd() % 60) - 3]);
     for (const fam of FAMS) for (const m of [undefined, 1]) {
-      const got = M.elpHiddenFor(fam, runs, LINES4, m);
+      const got = call(fam, runs, m);
       if (got !== want(fam, runs, m)) errs.push(['value', fam, m, J(runs), got, want(fam, runs, m)]);
       const own = runs.filter((r) => r[0] === fam).map((r) => r[1]);
-      if (own.length >= 5 && got !== M.hiddenOf(own)) errs.push(['own five', fam, J(runs), got, M.hiddenOf(own)]);
-      if (one === fam && got !== M.hiddenOf(own, m)) errs.push(['one family', fam, m, J(runs), got, M.hiddenOf(own, m)]);
+      if (own.length >= K && got !== hid(own)) errs.push(['own runs', fam, J(runs), got, hid(own)]);
+      if (one === fam && got !== hid(own, m)) errs.push(['one family', fam, m, J(runs), got, hid(own, m)]);
     }
   }
   // the borrowed runs are the NEWEST of the other families, on this family's scale (two own duo runs + the three newest solo runs)
   const mix = [['solo', 10], ['duo', 20], ['solo', 15], ['solo', 24], ['duo', 14], ['solo', 2], ['solo', 2]];
-  if (M.elpHiddenFor('duo', mix, LINES4) !== Math.round((2000 + 1600 + 2400) / 3)) errs.push(['the newest fill', M.elpHiddenFor('duo', mix, LINES4)]);
-  if (M.elpHiddenFor('duo', [['solo', 10], ['solo', 10], ['solo', 10], ['solo', 10], ['solo', 10]], LINES4) !== 1600) errs.push(['never played', M.elpHiddenFor('duo', [['solo', 10], ['solo', 10], ['solo', 10], ['solo', 10], ['solo', 10]], LINES4)]);
-  if (M.elpHiddenFor('duo', [], LINES4, 1) !== null || M.elpHiddenFor('duo', null, LINES4) !== null) errs.push(['no run']);
+  //   counting five: duo 20, 14 + solo 10 (-> 16), 15 (-> 24), 24 (-> 38.x) = five values, the lowest and the highest leave
+  if (K === 5 && call('duo', mix) !== Math.round((2000 + 1600 + 2400) / 3)) errs.push(['the newest fill (five)', call('duo', mix)]);
+  //   counting three: duo 20, 14 + the ONE newest solo run 10 (-> 16) = three values, the middle one stays
+  if (K === 3 && call('duo', mix) !== 1600) errs.push(['the newest fill (three)', call('duo', mix)]);
+  if (call('duo', [['solo', 10], ['solo', 10], ['solo', 10], ['solo', 10], ['solo', 10]]) !== 1600) errs.push(['never played', call('duo', [['solo', 10], ['solo', 10], ['solo', 10], ['solo', 10], ['solo', 10]])]);
+  if (call('duo', [], 1) !== null || call('duo', null) !== null) errs.push(['no run']);
+  return errs;
+}
+// version 6: the seed reading against an independent one -- the newest WINDOW runs, each on the solo scale (a run of a family
+//   without lines left out), the lowest value out, the mean of the rest; one value = itself; none = null. Monotone: a deeper run
+//   in the place of a run, or one more run at or above the current reading, never lowers it.
+function seedHiddenErrors(M) {
+  const errs = [], FAMS = ['solo', 'duo', 'trio', 'quad'];
+  const want = (runs) => {
+    const xs = runs.filter((r) => LINES4[r[0]]).slice(0, 10).map((r) => (r[0] === 'solo' ? Math.max(0, r[1]) * 100 : M.elpConvert(Math.max(0, r[1]) * 100, LINES4[r[0]], LINES4.solo)));
+    if (!xs.length) return null;
+    if (xs.length === 1) return xs[0];
+    const st = xs.slice().sort((a, b) => a - b).slice(1);
+    return Math.round(st.reduce((a, b) => a + b, 0) / st.length);
+  };
+  let seed = 23;
+  const rnd = () => { seed = (Math.imul(seed, 1103515245) + 12345) >>> 0; return seed >>> 8; };
+  for (let i = 0; i < 600; i++) {
+    const n = rnd() % 14, runs = [];
+    for (let j = 0; j < n; j++) runs.push([rnd() % 11 === 0 ? 'duoc' : FAMS[rnd() % 4], (rnd() % 60) - 3]);
+    const got = M.elpSeedHidden(runs, LINES4);
+    if (got !== want(runs)) { errs.push(['value', J(runs), got, want(runs)]); continue; }
+    if (n && n <= 10) {
+      const j = rnd() % n, deeper = runs.map((r, k) => (k === j ? [r[0], r[1] + 1 + (rnd() % 9)] : r));
+      if (M.elpSeedHidden(deeper, LINES4) < got) errs.push(['a deeper run lowered it', J(runs), j]);
+    }
+  }
+  // the shapes: three runs = the mean of the better two; four = the mean of the best three; one deep team run among shallow solo
+  //   runs counts on the solo scale (duo 16 = solo 10 on these lines); two runs = the better one; a family without lines is left out
+  const S3 = [['solo', 10], ['solo', 4], ['solo', 8]];
+  if (M.elpSeedHidden(S3, LINES4) !== 900) errs.push(['three runs', M.elpSeedHidden(S3, LINES4)]);
+  if (M.elpSeedHidden(S3.concat([['solo', 12]]), LINES4) !== 1000) errs.push(['four runs', M.elpSeedHidden(S3.concat([['solo', 12]]), LINES4)]);
+  if (M.elpSeedHidden([['duo', 16], ['solo', 4], ['solo', 8]], LINES4) !== 900) errs.push(['a team run', M.elpSeedHidden([['duo', 16], ['solo', 4], ['solo', 8]], LINES4)]);
+  if (M.elpSeedHidden([['solo', 7], ['solo', 3]], LINES4) !== 700 || M.elpSeedHidden([['solo', 7]], LINES4) !== 700) errs.push(['one / two runs']);
+  if (M.elpSeedHidden([], LINES4) !== null || M.elpSeedHidden(null, LINES4) !== null || M.elpSeedHidden([['duoc', 30]], LINES4) !== null) errs.push(['no run']);
+  if (M.elpSeedHidden([['duo', 16]], { solo: LINES4.solo }) !== null || M.elpSeedHidden([['solo', 9], ['duo', 40]], { solo: LINES4.solo }) !== 900) errs.push(['a family without lines']);
   return errs;
 }
 // the team length factor: below master a pass x TEAM_GAIN / 1000, a miss x 1000 / TEAM_GAIN; from master up nothing; team reported
@@ -471,13 +525,15 @@ function teamGateErrors(M) {
   //   none of them. On the code as it is, a case that moved must be a points line (endlessDelta / endlessSettle), and naming solo
   //   still gives what leaving the family out gives.
   const V3_BACK = [
+    ['SEED_CAP: 2800,', 'SEED_CAP: 3200,'],   // version 6 (the seed cap under platinum): version 3 capped at 3200
+    ['MIN_RUNS: 3, TRIM: 1,', 'MIN_RUNS: 5, TRIM: 1,'],   // version 6 (three placement runs): version 3 counted five
     ['protect: !isPass && ht != null && ht >= cur, team', 'protect: !isPass && (cur < ELP.GATE_TIER || (ht != null && ht >= cur)), team'],
     ['BOUNDARY_MARGIN = 120, PROMO_LAND = 150, RELEG_LAND = 150', 'BOUNDARY_MARGIN = 120, PROMO_LAND = 10, RELEG_LAND = 15'],
   ];
-  T('[11] ELP v5 (O825 v4 + O785): VER 5, ROW_VER 2, TEAM_GAIN 1300, TEAM_GATE 110 (the table keeps TC_VER 2 and carries the version)', E.VER === 5 && E.ROW_VER === 2 && E.TEAM_GAIN === 1300 && E.TEAM_GATE === 110 && E.TC_VER === 2 && PP.elpTableDetails(0, {})[2] === 5, J([E.VER, E.ROW_VER, E.TEAM_GAIN, E.TEAM_GATE]));
+  T('[11] ELP v6 (O825 v4 + O785 v5 + three placement runs): VER 6, ROW_VER 2, TEAM_GAIN 1300, TEAM_GATE 110 (the table keeps TC_VER 2 and carries the version)', E.VER === 6 && E.ROW_VER === 2 && E.TEAM_GAIN === 1300 && E.TEAM_GATE === 110 && E.TC_VER === 2 && PP.elpTableDetails(0, {})[2] === 6, J([E.VER, E.ROW_VER, E.TEAM_GAIN, E.TEAM_GATE]));
   const v3 = mut3('the version 3 rules put back', V3_BACK);
   const fe = v3 ? frozenErrors(v3) : ['no v3'];
-  T('[11] the family left out or named solo gives every value of version 3 with the two O785 rules put back (' + FROZEN.cases.length + ' frozen cases: hidden skill, tiers, the gate, targets, deltas, settles, seeds)', FROZEN.cases.length >= 200 && FROZEN.elpVer === 3 && !fe.length, J(fe.slice(0, 3)));
+  T('[11] the family left out or named solo gives every value of version 3 with the two O785 rules and the count of five put back (' + FROZEN.cases.length + ' frozen cases: hidden skill, tiers, the gate, targets, deltas, settles, seeds)', FROZEN.cases.length >= 200 && FROZEN.elpVer === 3 && !fe.length, J(fe.slice(0, 3)));
   const moved = FROZEN.cases.filter((c) => J(dropTeam(PP[c.fn].apply(null, c.args))) !== J(c.out));
   const FAM_AT0 = { skillTierOf: 2, endlessDelta: 5, endlessSettle: 5 };
   const soloOff = FROZEN.cases.filter((c) => {
@@ -485,8 +541,12 @@ function teamGateErrors(M) {
     const args = c.args.slice(); while (args.length < FAM_AT0[c.fn]) args.push(undefined); args[FAM_AT0[c.fn]] = 'solo';
     return J(dropTeam(PP[c.fn].apply(null, args))) !== J(dropTeam(PP[c.fn].apply(null, c.args)));
   });
-  T('[11] O785 moved only points lines of the frozen cases (' + moved.length + ' moved, all endlessDelta / endlessSettle) and naming solo still reads as leaving the family out',
-    moved.length > 0 && moved.every((c) => c.fn === 'endlessDelta' || c.fn === 'endlessSettle') && !soloOff.length, J([moved.filter((c) => c.fn !== 'endlessDelta' && c.fn !== 'endlessSettle').map((c) => c.name).slice(0, 3), soloOff.map((c) => c.name).slice(0, 3)]));
+  // version 6 moves one more kind of frozen case on purpose: the hidden skill of three or four runs (none before, the trimmed mean now)
+  const few = (c) => c.fn === 'hiddenOf' && Array.isArray(c.args[0]) && c.args[0].length >= 3 && c.args[0].length < 5 && c.args[1] == null && c.out === null;
+  const capped = (c) => c.fn === 'endlessSeedLp' && c.out > 2800;   // ... and the seeds above the new cap (2800)
+  const other = moved.filter((c) => c.fn !== 'endlessDelta' && c.fn !== 'endlessSettle' && !few(c) && !capped(c));
+  T('[11] O785 moved only points lines of the frozen cases and version 6 only the hidden skill of three or four runs and the seeds above the cap 2800 (' + moved.length + ' moved: ' + moved.filter(few).length + ' / ' + moved.filter(capped).length + ' of the version 6 kinds) and naming solo still reads as leaving the family out',
+    moved.length > 0 && moved.some(few) && moved.some(capped) && !other.length && !soloOff.length, J([other.map((c) => c.name).slice(0, 3), soloOff.map((c) => c.name).slice(0, 3)]));
   for (const fam of TEAM_FAMS) {
     const se = signErrors(PP, fam), sw = swingErrors(PP, fam), sr = seriesErrors(PP, fam);
     T('[11] a ' + fam + ' run keeps [1]-[3]: every pass gains / every miss loses, the largest change ' + sw.max + ' stays under BOUNDARY_MARGIN, series / floor / gate', !se.length && !sw.errs.length && sw.max === E.SWING_CAP && !sr.length, J([se.slice(0, 2), sw.errs.slice(0, 2), sr.slice(0, 2)]));
@@ -495,7 +555,7 @@ function teamGateErrors(M) {
   T('[11] elpConvert: a line lands on the same line, the same table is the identity, never lower for a deeper run, there and back within 0.05 of a level (6 line sets, every pair)', !ce.length, J(ce.slice(0, 3)));
   T('[11] elpConvert: solo 12.5 reads as duo 20 (half way between the gold and the platinum lines of both), 1 as 1.5, 60 as 96', PP.elpConvert(1250, SOLO, DUO) === 2000 && PP.elpConvert(100, SOLO, DUO) === 150 && PP.elpConvert(6000, SOLO, DUO) === 9600);
   const he = hiddenForErrors(PP);
-  T('[11] elpHiddenFor: five own runs = hiddenOf of them (a one-family player reads version 3, the placement reading too); fewer = the newest runs of the other families fill, read on this family\'s scale (600 random histories x 4 families)', !he.length, J(he.slice(0, 2)));
+  T('[11] elpHiddenFor: MIN_RUNS own runs = hiddenOf of them (a one-family player reads his own runs, the placement reading too); fewer = the newest runs of the other families fill up to MIN_RUNS, read on this family\'s scale (600 random histories x 4 families)', !he.length, J(he.slice(0, 2)));
   const tf = teamFactorErrors(PP);
   T('[11] the team length factor: below master a team pass = the solo one x 1.3, a team miss = the solo one / 1.3 (rounding; the cap ' + E.SWING_CAP + ' and the sign floor hold); master and up unchanged; team reported where it applied; solo / duoc / none = no factor', !tf.length, J(tf.slice(0, 3)));
   T('[11] gold 2500 duo: pass 74 (solo 57), miss -20 (solo -25); platinum 3500 duo pass is at the cap (119)',
@@ -532,6 +592,57 @@ function teamGateErrors(M) {
   T('[11] a convert that ignores the lines between bronze and grandmaster turns the convert check red', g8 && convertErrors(g8).length > 0);
   const g10 = mut3('the v1 row read as a row', [['(((det[0] | 0) >>> 8) & 0xff) !== ELP.ROW_VER) return null;\n    const h = {}, ring = [];', '(((det[0] | 0) >>> 8) & 0xff) > ELP.ROW_VER) return null;\n    const h = {}, ring = [];']]);
   T('[11] a v1 per-family row read as a v2 row turns the row check red (its hidden skill would read as the tier)', g10 && g10.elpRowOf([0xEE | 256, 7, 950, 1, 1, 198, 2, -5, 40, 264, 77, -13, 258]) !== null);
+}
+
+// [12] ELP version 6: three placement runs, the lowest run left out at the seed
+{
+  const E = PP.ELP;
+  const SRC6 = fs.readFileSync(path.join(__dirname, '..', 'points-plan.js'), 'utf8');
+  const mut6 = (label, pairs) => {
+    let src = SRC6;
+    for (const [from, to, times] of pairs) { if (src.split(from).length - 1 !== (times || 1)) { bad('[12] mutation anchor missing: ' + label + ' (' + from.slice(0, 60) + ')'); return null; } src = src.split(from).join(to); }
+    const win = {};
+    try { new Function('window', src)(win); } catch (e6) { bad('[12] mutation ' + label + ' does not load: ' + e6.message); return null; }
+    return win.POINTS_PLAN;
+  };
+  T('[12] version 6: MIN_RUNS 3, VER 6; MIN_RUNS_OLD 5 (what a client built before it counts with: the job\'s old-client window)', E.MIN_RUNS === 3 && E.VER === 6 && E.MIN_RUNS_OLD === 5 && E.WINDOW === 10 && E.TRIM === 1);
+  const h5 = hiddenErrors(PP, 5), f5 = hiddenForErrors(PP, 5);
+  T('[12] the count as the last argument: hiddenOf(d, minRuns, 5) / elpHiddenFor(.., minRuns, 5) read the five-run rule (400 + 600 random histories against the independent reading); left out = this version ([5] / [11])', !h5.length && !f5.length, J([h5.slice(0, 2), f5.slice(0, 2)]));
+  // ... and value for value what the module itself gives with MIN_RUNS 5 (version 5 as it shipped)
+  const v5 = mut6('MIN_RUNS back to 5', [['MIN_RUNS: 3, TRIM: 1,', 'MIN_RUNS: 5, TRIM: 1,']]);
+  if (v5) {
+    const FAMS = ['solo', 'duo', 'trio', 'quad'], diff = [];
+    let seed = 31;
+    const rnd = () => { seed = (Math.imul(seed, 1103515245) + 12345) >>> 0; return seed >>> 8; };
+    for (let i = 0; i < 500; i++) {
+      const n = rnd() % 14, d = [], runs = [];
+      for (let j = 0; j < n; j++) { d.push((rnd() % 60) - 3); runs.push([FAMS[rnd() % 4], (rnd() % 60) - 3]); }
+      for (const m of [undefined, 1]) {
+        if (PP.hiddenOf(d, m, 5) !== v5.hiddenOf(d, m)) diff.push(['hiddenOf', J(d), m]);
+        for (const fam of FAMS) if (PP.elpHiddenFor(fam, runs, LINES4, m, 5) !== v5.elpHiddenFor(fam, runs, LINES4, m)) diff.push(['elpHiddenFor', fam, J(runs), m]);
+      }
+    }
+    T('[12] ... the same values the module gives when MIN_RUNS is 5 (500 random histories, both readings, the four families): the job reads a version 5 client through this argument', !diff.length, J(diff.slice(0, 2)));
+  }
+  const se = seedHiddenErrors(PP);
+  T('[12] elpSeedHidden: the newest WINDOW runs on the solo scale, the single lowest left out, the mean of the rest -- an independent reading over 600 random histories; a deeper run never lowers it; three runs = the better two, four = the best three, a team run through the lines, one run = itself, none = null', !se.length, J(se.slice(0, 2)));
+  {
+    // the seed is never below what the trimmed reading (the middle run of three) gives -- the reason for the rule: one weak run does not pull the seed down
+    let low = 0, seed = 5;
+    const rnd = () => { seed = (Math.imul(seed, 1103515245) + 12345) >>> 0; return seed >>> 8; };
+    for (let i = 0; i < 500; i++) { const d = [rnd() % 50, rnd() % 50, rnd() % 50]; if (PP.elpSeedHidden(d.map((x) => ['solo', x]), LINES4) < PP.hiddenOf(d)) low++; }
+    T('[12] three solo runs: the seed reading is never below the hidden skill of the same runs (500 random triples); [10, 4, 8] seeds from 9.0 where the skill reads 8.0', low === 0 && PP.elpSeedHidden([['solo', 10], ['solo', 4], ['solo', 8]], LINES4) === 900 && PP.hiddenOf([10, 4, 8]) === 800);
+  }
+  const COUNT = 'const M = min == null ? ELP.MIN_RUNS : Math.max(1, min | 0);';
+  const m1 = mut6('the count argument ignored', [[COUNT, 'const M = ELP.MIN_RUNS;', 2]]);
+  T('[12] mutation "the count argument ignored" turns the version 5 reading red (the old-client window would read version 6 twice)', m1 && hiddenErrors(m1, 5).length > 0 && hiddenForErrors(m1, 5).length > 0);
+  const SUM = '    let sum = 0; for (let i = 1; i < xs.length; i++) sum += xs[i];\n    return Math.round(sum / (xs.length - 1));';
+  const m2 = mut6('the highest run dropped', [[SUM, '    let sum = 0; for (let i = 0; i < xs.length - 1; i++) sum += xs[i];\n    return Math.round(sum / (xs.length - 1));']]);
+  T('[12] mutation "the HIGHEST run left out" turns the seed check red', m2 && seedHiddenErrors(m2).length > 0);
+  const m3 = mut6('the trimmed mean at the seed', [[SUM, '    const u = xs.length >= 3 ? xs.slice(1, -1) : xs; let sum = 0; for (const x of u) sum += x;\n    return Math.round(sum / u.length);']]);
+  T('[12] mutation "the trimmed mean at the seed" (three runs = the middle one: MIN_RUNS 3 and nothing else) turns the seed check red', m3 && seedHiddenErrors(m3).length > 0 && m3.elpSeedHidden([['solo', 10], ['solo', 4], ['solo', 8]], LINES4) === 800);
+  const m4 = mut6('team runs not converted', [['      else if (elpLinesOk(to) && elpLinesOk(lines[r[0]])) xs.push(elpConvert(d100, lines[r[0]], to));', '      else xs.push(d100);']]);
+  T('[12] mutation "a team run taken at its own depth" (not read on the solo scale) turns the seed check red', m4 && seedHiddenErrors(m4).length > 0);
 }
 
 console.log(failN ? ('endless-lp: ' + failN + ' FAIL') : 'endless-lp: all ok');

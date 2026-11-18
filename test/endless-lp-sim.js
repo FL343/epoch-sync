@@ -1,16 +1,25 @@
 'use strict';
 // O728 endless competitive points: a simulation over the pure rules (points-plan.js ELP), fixed random seed, under a second.
 //   Made-up players with a true level (mean depth) and a luck spread (lognormal depth, coefficient of variation 0.3 / 0.6) place
-//   (5 runs, the seed) and then play against the prior solo pass lines. The rules are built like versus (the user's call
+//   (MIN_RUNS runs, the seed reading of the rules, at most SEED_CAP) and then play against the prior solo pass lines. The rules are built like versus (the user's call
 //   2026-11-08): the target follows the player's own level, so
 //   [1] about half the runs pass (overall and at each luck spread: 0.42..0.58)
 //   [2] below master grinding climbs: runs from the placement to diamond (the median of a group) for a silver / gold / platinum /
 //       diamond-level player within 30 % of 150 / 80 / 40 / 20 (the user's table)
 //   [3] the master gate: a player whose hidden skill is below master never reaches master in 300 runs
-//   [4] promotion / relegation ping-pong: tier-line crossings a player in 300 runs <= 20 (and the share crossed back in 10 runs);
+//   [4] promotion / relegation ping-pong: tier-line crossings a player in 300 runs (and the share crossed back in 10 runs);
 //       O785 (2026-11-09): was <= 35 while a floor held every miss under master; the floor is gone (normal promotion and
-//       relegation, the user's call) and the series landings moved to +-150, so a promotion sticks: max 14 here
-//   [5] the zero-sum top: grandmaster-level players started at 8600 drift nowhere in 300 runs (mean change within +-200 points)
+//       relegation, the user's call) and the series landings moved to +-150, so a promotion sticks.
+//       Version 6 (2026-11-18): read over GROUPS random sequences instead of one. The old line "the worst player of ONE sequence
+//       <= 20" was the tail of that sequence: over 40 sequences the worst player reads 10..28 under five placement runs and
+//       11..26 under three (median 15 / 17; 5 sequences of 40 above 20 under either), the mean 5.1 / 5.0 -- the placement count
+//       does not move it (after ten runs the two rules are the same rule). Now: the mean <= 6, at most 0.5 % of the players
+//       above 20 crossings, and the mean within 0.5 of the five-run rule's.
+//   [5] the top: grandmaster-level players started at 8600, the mean change after 300 runs. Read over GROUPS sequences too: it is
+//       about -230 under five placement runs AND under three (40 sequences: -364..-10 / -340..-45); the old line "within +-200"
+//       held on the one sequence the file used (-10, the best of the forty) and fails on 25 of 40 under the five-run rule
+//       itself. A slow drift down at the very top, not a change of this version (noted for the companion roadmap, O799's
+//       neighbourhood). Now: within 60 of the five-run rule's figure, and the guard +-350.
 //   [6] (printed) per tier: the pass rate the players had beside the table's balance rate, and where each level ended
 //   [7] mutations: no master gate -> [3] red; the old target (the points tier line) -> [1] red; MUL 1000 -> [2] red; the series
 //       landings back to +10 / -15 -> [4] red (O785); "rated above the skill: gain less, lose more" below master too -> [9] red
@@ -41,6 +50,8 @@ function rng(seed) { let a = seed >>> 0; return () => { a = (a + 0x6D2B79F5) >>>
 function gauss(r) { let u = 0, v = 0; while (u === 0) u = r(); while (v === 0) v = r(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); }
 function depthOf(r, mu, cv) { const s = Math.sqrt(Math.log(1 + cv * cv)); return Math.max(0, Math.round(mu * Math.exp(s * gauss(r) - s * s / 2))); }
 const mean = (a) => a.reduce((s, x) => s + x, 0) / (a.length || 1);
+// the skill a placement seeds from: the rules' seed reading over the placement runs (depths NEWEST first)
+const seedSkill = (M, depths) => (typeof M.elpSeedHidden === 'function' ? M.elpSeedHidden(depths.map((d) => ['solo', d]), { solo: LINES }) : M.hiddenOf(depths));
 const median = (a) => { const b = a.slice().sort((x, y) => x - y); return b.length ? b[Math.floor((b.length - 1) / 2)] : NaN; };
 
 // one player: placement (the target rule of a placement run) then n runs; startLp = null (the seed) or points set by hand
@@ -48,7 +59,7 @@ function play(M, mu, cv, seed, n, startLp) {
   const r = rng(seed);
   const depths = [];
   for (let i = 0; i < M.ELP.MIN_RUNS; i++) depths.unshift(depthOf(r, mu, cv));
-  let lp = startLp != null ? startLp : M.endlessSeedLp(M.hiddenOf(depths), LINES);
+  let lp = startLp != null ? startLp : M.endlessSeedLp(seedSkill(M, depths), LINES);
   const lp0 = lp, tiers = [], passAt = [], hts = [];
   let toDiamond = null;
   for (let i = 0; i < n; i++) {
@@ -69,11 +80,11 @@ function crossingsOf(tiers) { let c = 0, back = 0; for (let i = 1; i < tiers.len
 const MUS = [3, 5, 8, 12, 18, 25, 35, 45], CVS = [0.3, 0.6], PER = 6, N = 300, GM_MU = 50;
 const WALL_MUS = [30, 35, 40, 45], WALL_CV = 0.1;
 const LEVELS = [['silver', 6], ['gold', 10], ['platinum', 15], ['diamond', 24]], WANT = { silver: 150, gold: 80, platinum: 40, diamond: 20 };
-function simulate(M) {
-  const out = { pop: [], toD: {}, gm: [] };
+function simulate(M, shift) {
+  const out = { pop: [], toD: {}, gm: [] }, sh = (shift | 0) * 1000003;   // shift: another random sequence for the same players (0 = the one every figure below was tuned on)
   let k = 0;
   for (const mu of MUS) for (const cv of CVS) for (let j = 0; j < PER; j++) {
-    const seed = 1000 + (k++) * 7919, p = play(M, mu, cv, seed, N, null);
+    const seed = 1000 + sh + (k++) * 7919, p = play(M, mu, cv, seed, N, null);
     out.pop.push({ mu, cv, p, cross: crossingsOf(p.tiers), hid: M.tierOfHidden(Math.round(mu * 100), LINES) });
   }
   for (const [name, mu] of LEVELS) {
@@ -81,9 +92,22 @@ function simulate(M) {
     for (const cv of CVS) for (let j = 0; j < 10; j++) { const p = play(M, mu, cv, 50000 + mu * 101 + j * 13 + (cv > 0.5 ? 7 : 0), 600, null); runs.push(p.toDiamond == null ? 601 : p.toDiamond); }
     out.toD[name] = { median: median(runs), runs };
   }
-  for (const cv of CVS) for (let j = 0; j < 10; j++) { const p = play(M, GM_MU, cv, 90000 + j * 31 + (cv > 0.5 ? 3 : 0), N, 8600); out.gm.push(p.lp - 8600); }
+  for (const cv of CVS) for (let j = 0; j < 10; j++) { const p = play(M, GM_MU, cv, 90000 + sh + j * 31 + (cv > 0.5 ? 3 : 0), N, 8600); out.gm.push(p.lp - 8600); }
   return out;
 }
+// [4] / [5] over GROUPS random sequences: the crossings of every player (the population of simulate) and the change of every
+//   grandmaster-level player from 8600 -- { cross: [per player], gm: [per player] }
+const GROUPS = 12;
+function simulateGroups(M) {
+  const cross = [], gm = [];
+  for (let g = 0; g < GROUPS; g++) {
+    const sh = g * 1000003; let k = 0;
+    for (const mu of MUS) for (const cv of CVS) for (let j = 0; j < PER; j++) cross.push(crossingsOf(play(M, mu, cv, 1000 + sh + (k++) * 7919, N, null).tiers).c);
+    for (const cv of CVS) for (let j = 0; j < 10; j++) gm.push(play(M, GM_MU, cv, 90000 + sh + j * 31 + (cv > 0.5 ? 3 : 0), N, 8600).lp - 8600);
+  }
+  return { cross, gm };
+}
+const pingOk = (g) => mean(g.cross) <= 6 && g.cross.filter((c) => c > 20).length <= 0.005 * g.cross.length;
 // O781 [8]: the wall-hugging group (true level 30..45, cv 0.1) + a grandmaster-level wall-hugger started at 8600
 function simulateWall(M) {
   const out = { pop: [], gm: [] };
@@ -102,7 +126,7 @@ const wallOk = (w) => { const r = wallRates(w); return r.all >= 0.42 && r.all <=
 function maxPoints(M, mu, cv, seed) {
   const r = rng(seed), depths = [];
   for (let i = 0; i < M.ELP.MIN_RUNS; i++) depths.unshift(depthOf(r, mu, cv));
-  let lp = M.endlessSeedLp(M.hiddenOf(depths), LINES), mx = lp;
+  let lp = M.endlessSeedLp(seedSkill(M, depths), LINES), mx = lp;
   for (let i = 0; i < N; i++) {
     const seedRun = (r() * 4294967296) >>> 0, H = M.hiddenOf(depths);
     const d = depthOf(r, mu, cv);
@@ -162,7 +186,7 @@ function pairRates(sim) {
   return { all: mean(strong.concat(weak)), strong: mean(strong), weak: mean(weak), sameSign: mean(sign), perPair };
 }
 const pairsOk = (sim) => { const r = pairRates(sim); return r.all >= 0.42 && r.all <= 0.58 && [r.strong, r.weak].every((x) => x >= 0.40 && x <= 0.65) && r.perPair.every(([a, b]) => a >= 0.40 && a <= 0.65 && b >= 0.40 && b <= 0.65); };
-module.exports = { simulate, passRates, gateMax, grindToDiamond, loadVariant, simulateWall, wallRates, simulatePairs, pairRates, WANT, LEVELS, PAIRS };
+module.exports = { simulate, simulateGroups, passRates, gateMax, grindToDiamond, loadVariant, simulateWall, wallRates, simulatePairs, pairRates, WANT, LEVELS, PAIRS, GROUPS };
 
 if (require.main === module) {
   let failN = 0;
@@ -188,12 +212,17 @@ if (require.main === module) {
   T('[3] master gate: players below master in hidden skill (mean depth 3..25) never reach master in 300 runs (highest ' + gm + ')', gm < PP0.LP_SEG[5].min);
   // [4]
   const cr = S.pop.map((x) => x.cross.c), back = S.pop.reduce((s, x) => s + x.cross.back, 0), tot = cr.reduce((s, x) => s + x, 0);
-  T('[4] ping-pong: tier-line crossings a player in 300 runs: mean ' + mean(cr).toFixed(1) + ', max ' + Math.max.apply(null, cr) + ' (<= 20); crossed back within 10 runs ' + (tot ? (100 * back / tot).toFixed(1) : '0') + ' %', Math.max.apply(null, cr) <= 20);
+  // the five-run rule beside it (version 5: MIN_RUNS 5, the trimmed mean at the seed) on the same sequences
+  const FIVE = loadVariant([['MIN_RUNS: 3, TRIM: 1,', 'MIN_RUNS: 5, TRIM: 1,'], ['elpConvert, elpHiddenFor, elpSeedHidden, tierOfHidden,', 'elpConvert, elpHiddenFor, tierOfHidden,']]);
+  const G6 = simulateGroups(PP0), G5 = simulateGroups(FIVE);
+  const over = (g) => g.cross.filter((c) => c > 20).length;
+  T('[4] ping-pong over ' + GROUPS + ' random sequences (' + G6.cross.length + ' players, 300 runs each): tier-line crossings a player, mean ' + mean(G6.cross).toFixed(2) + ' (<= 6), ' + over(G6) + ' players above 20 (<= 0.5 %), the worst ' + Math.max.apply(null, G6.cross) + '; the first sequence alone: mean ' + mean(cr).toFixed(1) + ', max ' + Math.max.apply(null, cr) + ', crossed back within 10 runs ' + (tot ? (100 * back / tot).toFixed(1) : '0') + ' %', pingOk(G6));
+  T('[4] ... the placement count does not move it: under five placement runs the same sequences give mean ' + mean(G5.cross).toFixed(2) + ', ' + over(G5) + ' above 20, the worst ' + Math.max.apply(null, G5.cross) + ' (the means within 0.5)', Math.abs(mean(G6.cross) - mean(G5.cross)) <= 0.5 && pingOk(G5));
   // [9] O785
   const gr = grindToDiamond(PP0);
   T('[9] a bronze-level grinder (mean depth 3) reaches diamond: ' + gr.got + ' / ' + gr.runs.length + ' within 600 runs, median ' + gr.median + ' runs (<= 250)', gr.got === gr.runs.length && gr.median <= 250);
   // [5]
-  T('[5] zero-sum top: 20 grandmaster-level players from 8600, mean change after 300 runs ' + mean(S.gm).toFixed(0) + ' (within +-200; spread ' + Math.min.apply(null, S.gm) + '..' + Math.max.apply(null, S.gm) + ')', Math.abs(mean(S.gm)) <= 200);
+  T('[5] the top over ' + GROUPS + ' random sequences: ' + G6.gm.length + ' grandmaster-level players from 8600, mean change after 300 runs ' + mean(G6.gm).toFixed(0) + ' (guard +-350; under five placement runs ' + mean(G5.gm).toFixed(0) + ': within 60 of it -- the drift is not this version\'s; the first sequence alone ' + mean(S.gm).toFixed(0) + ', spread ' + Math.min.apply(null, S.gm) + '..' + Math.max.apply(null, S.gm) + ')', Math.abs(mean(G6.gm)) <= 350 && Math.abs(mean(G6.gm) - mean(G5.gm)) <= 60);
   // [6]
   console.log('  [6] per tier: the pass rate players had there | the table balance rate (loss - drip) / (win + loss)');
   for (let k = 0; k < 7; k++) {
@@ -213,15 +242,15 @@ if (require.main === module) {
   const s1 = simulate(mul1);
   T('[7] MUL all 1000 turns [2] red (' + LEVELS.map(([n]) => n + ' ' + s1.toD[n].median).join(', ') + ' runs)', LEVELS.some(([name]) => !(s1.toD[name].median >= WANT[name] * 0.7 && s1.toD[name].median <= WANT[name] * 1.3)));
   const oldLand = loadVariant([['PROMO_LAND = 150, RELEG_LAND = 150', 'PROMO_LAND = 10, RELEG_LAND = 15']]);
-  const sF = simulate(oldLand), crF = sF.pop.map((x) => x.cross.c);
-  T('[7] the series landings back to +10 / -15 bring the ping-pong back (max ' + Math.max.apply(null, crF) + ' crossings) -- [4] red', Math.max.apply(null, crF) > 20);
+  const gF = simulateGroups(oldLand);
+  T('[7] the series landings back to +10 / -15 bring the ping-pong back (mean ' + mean(gF.cross).toFixed(1) + ' crossings, ' + gF.cross.filter((c) => c > 20).length + ' players above 20, the worst ' + Math.max.apply(null, gF.cross) + ') -- [4] red', !pingOk(gF));
   const strictLow = loadVariant([['else if (ht != null && ht < cur && cur >= ELP.GATE_TIER) gap = isPass ? ELP.GAP_DOWN : ELP.GAP_UP;', 'else if (ht != null && ht < cur) gap = isPass ? ELP.GAP_DOWN : ELP.GAP_UP;']]);
   const gS = grindToDiamond(strictLow);
   T('[7] "rated above the skill: gain less, lose more" below master too stops the grinder (' + gS.got + ' / ' + gS.runs.length + ' reach diamond, median ' + gS.median + ') -- [9] red', !(gS.got === gS.runs.length && gS.median <= 250));
   // [8] O781 wall-huggers
   const W = simulateWall(PP0), wr = wallRates(W);
   T('[8] wall-huggers (true level ' + WALL_MUS.join('/') + ', cv ' + WALL_CV + ') pass about half: overall ' + wr.all.toFixed(3) + ' (0.42..0.58), per level ' + wr.per.map((x) => x.toFixed(2)).join(' ') + ' (0.40..0.65)', wallOk(W));
-  T('[8] (known drift, O799 at the S1 boundary) a grandmaster-level wall-hugger (level 45, cv ' + WALL_CV + ') from 8600: mean change after 300 runs ' + mean(W.gm).toFixed(0) + ' (guard: no worse than +-2000; the goal is +-200; spread ' + Math.min.apply(null, W.gm) + '..' + Math.max.apply(null, W.gm) + ')', Math.abs(mean(W.gm)) <= 2000);
+  T('[8] (known drift, O799) a grandmaster-level wall-hugger (level 45, cv ' + WALL_CV + ') from 8600: mean change after 300 runs ' + mean(W.gm).toFixed(0) + ' (guard: no worse than +-2000; the goal is +-200; spread ' + Math.min.apply(null, W.gm) + '..' + Math.max.apply(null, W.gm) + ')', Math.abs(mean(W.gm)) <= 2000);
   const wO = simulateWall(oldTarget);
   T('[8] the old target (the points tier line) turns the wall-huggers red too (overall ' + wallRates(wO).all.toFixed(3) + ', per level ' + wallRates(wO).per.map((x) => x.toFixed(2)).join(' ') + ')', !wallOk(wO));
   // [9] O803 mixed pairs: one team target

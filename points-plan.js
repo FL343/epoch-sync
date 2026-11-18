@@ -23,7 +23,7 @@
   else if (root) root.POINTS_PLAN = api;
 })(typeof module === 'object' && !!module && typeof exports === 'object' && this === exports, typeof window !== 'undefined' ? window : null, function () {
   const RULES_VER = 2;
-  const FIXTURES_HASH = '46655049f5fe7392';
+  const FIXTURES_HASH = '555d8e89d373c8b8';
   // the knobs configure() can move (production runs these defaults)
   const DEFAULTS = Object.freeze({ RS_THRESHOLD: 400, RS_UPSET_BONUS: 1.0, RS_STRONG_UPSET_LOSS: 0.5, RS_SOLO_VS_TRIO: 0.6, RS_TRIO_WIN: 0.7, LEAVER_LP_PENALTY: 100 });
   const LP_MAX = 9999;
@@ -561,13 +561,24 @@
   //     - a team run is longer than a solo one: below GATE_TIER (master) a team pass gains MUL x TEAM_GAIN / 1000 and a team miss
   //       loses MUL x 1000 / TEAM_GAIN (endlessDelta, fam; the swing cap and the sign floor unchanged; reported as team);
   //     - the master / grandmaster gate of a team family asks the skill to reach the line x TEAM_GATE / 100 (skillTierOf, fam);
-  //     - the placement seeds from the five runs read on the solo scale: endlessSeedLp(elpHiddenFor('solo', runs, lines), solo lines).
+  //     - the placement seeds from its runs read on the solo scale: endlessSeedLp(elpSeedHidden(runs, lines), solo lines), at most
+  //       SEED_CAP 2800 (version 6;
+  //       before: elpHiddenFor('solo', the five runs, lines)).
   //   A call that leaves fam out reads as solo: every value of version 3 stays (test/endless-lp.js holds the version 3 cases).
   // O785 (2026-11-09, VER 5; written as VER 3 before O803 / O825 took 3 and 4, replayed after them): the demotion protection lost
   //   its "every miss under master" half and the series landings moved to +-150 (BOUNDARY_MARGIN block above): settled runs of
   //   every family move.
+  // Version 6 (user calls 2026-11-18, D7: "three runs, the worst one dropped, the other two averaged"): MIN_RUNS 5 -> 3 in all of
+  //   its roles -- the placement is the season's first three settled runs; the hidden skill trims from three runs on; a family
+  //   short of three own runs borrows up to three; fewer than three values = no skill (the silver line); the pass lines of a
+  //   family read the players with three own settled runs. The one new reading is the seed (elpSeedHidden): the lowest run leaves,
+  //   the rest average -- with the trimmed mean (three runs = the middle one) a single weak first run pulled the seed down
+  //   (archive/PLACE3_EVAL_2026-11-16 in the companion repo: every profile seeds at or above the five-run rule). hiddenOf /
+  //   elpHiddenFor take the count as an optional last argument: the job reads version 5 (MIN_RUNS_OLD) beside version 6 for runs an
+  //   older client may have started (validate.js, the old-client window); a call without it reads this version.
   const ELP = Object.freeze({
-    WINDOW: 10, MIN_RUNS: 5, TRIM: 1, GAP_UP: 1500, GAP_DOWN: 500, STAKE_STEP: 100, SPREAD: 2, SEED_CAP: 3200, VER: 5,
+    WINDOW: 10, MIN_RUNS: 3, TRIM: 1, GAP_UP: 1500, GAP_DOWN: 500, STAKE_STEP: 100, SPREAD: 2, SEED_CAP: 2800, VER: 6,
+    MIN_RUNS_OLD: 5,               // MIN_RUNS of versions 1..5: what a client built before version 6 counts with (the job's old-client window reads through it; the client never does)
     MUL: Object.freeze([850, 850, 1500, 3100, 2800, 2800, 2800]), TARGET_Q: 990, SWING_CAP: 119, GATE_TIER: 5,
     TEAM_GAIN: 1300,               // O825: per mille; a team run below master: a pass x TEAM_GAIN / 1000, a miss x 1000 / TEAM_GAIN
     TEAM_GATE: 110,                // O825: per cent of the master / grandmaster line a team family's skill must reach (solo: 100)
@@ -599,12 +610,14 @@
   const elpLinesOk = (pass) => Array.isArray(pass) && pass.length >= LP_SEG.length;
   // the hidden skill x 100 of a family's runs this season. depths = the levels each run passed, NEWEST first; the first WINDOW count.
   //   From MIN_RUNS runs the TRIM highest and the TRIM lowest leave before the mean. Fewer runs than minRuns (default MIN_RUNS) = null;
-  //   the placement target reads it with minRuns 1 (the plain mean of the runs so far).
-  function hiddenOf(depths, minRuns) {
+  //   the placement target reads it with minRuns 1 (the plain mean of the runs so far). min (optional, default MIN_RUNS): the
+  //   count the reading trims from -- MIN_RUNS_OLD reads as a version 5 client did.
+  function hiddenOf(depths, minRuns, min) {
     const d = (Array.isArray(depths) ? depths : []).slice(0, ELP.WINDOW).map((x) => Math.max(0, x | 0));
-    const need = minRuns == null ? ELP.MIN_RUNS : Math.max(1, minRuns | 0);
+    const M = min == null ? ELP.MIN_RUNS : Math.max(1, min | 0);
+    const need = minRuns == null ? M : Math.max(1, minRuns | 0);
     if (!d.length || d.length < need) return null;
-    const use = d.length >= ELP.MIN_RUNS ? d.slice().sort((a, b) => a - b).slice(ELP.TRIM, d.length - ELP.TRIM) : d;
+    const use = d.length >= M ? d.slice().sort((a, b) => a - b).slice(ELP.TRIM, d.length - ELP.TRIM) : d;
     let sum = 0; for (const x of use) sum += x;
     return Math.round(sum * 100 / use.length);
   }
@@ -639,25 +652,48 @@
   //   runs; with MIN_RUNS of them or more this IS hiddenOf of them (a player of one family reads what version 3 read). Short of
   //   MIN_RUNS, the runs of the other families (newest first, each through elpConvert onto this family's scale) fill the list up
   //   to MIN_RUNS; then MIN_RUNS values = the trimmed mean (as hiddenOf), fewer = null, or their plain mean when minRuns is
-  //   relaxed (a placement target passes 1). No run at all = null. A run of a family without lines is left out.
-  function elpHiddenFor(fam, runs, linesByFam, minRuns) {
+  //   relaxed (a placement target passes 1). No run at all = null. A run of a family without lines is left out. min (optional,
+  //   default MIN_RUNS): the count in every role above -- MIN_RUNS_OLD reads as a version 5 client did.
+  function elpHiddenFor(fam, runs, linesByFam, minRuns, min) {
     const list = Array.isArray(runs) ? runs : [], lines = linesByFam || {}, to = lines[fam];
     const own = [];
     for (const r of list) { if (r && r[0] === fam) { own.push(Math.max(0, r[1] | 0)); if (own.length >= ELP.WINDOW) break; } }
-    if (own.length >= ELP.MIN_RUNS) return hiddenOf(own, minRuns);
+    const M = min == null ? ELP.MIN_RUNS : Math.max(1, min | 0);
+    if (own.length >= M) return hiddenOf(own, minRuns, M);
     const all = own.map((x) => x * 100);
     if (elpLinesOk(to)) {
       for (const r of list) {
-        if (all.length >= ELP.MIN_RUNS) break;
+        if (all.length >= M) break;
         if (!r || r[0] === fam || !elpLinesOk(lines[r[0]])) continue;
         all.push(elpConvert(Math.max(0, r[1] | 0) * 100, lines[r[0]], to));
       }
     }
-    const need = minRuns == null ? ELP.MIN_RUNS : Math.max(1, minRuns | 0);
+    const need = minRuns == null ? M : Math.max(1, minRuns | 0);
     if (!all.length || all.length < need) return null;
-    const use = all.length >= ELP.MIN_RUNS ? all.slice().sort((a, b) => a - b).slice(ELP.TRIM, all.length - ELP.TRIM) : all;
+    const use = all.length >= M ? all.slice().sort((a, b) => a - b).slice(ELP.TRIM, all.length - ELP.TRIM) : all;
     let sum = 0; for (const x of use) sum += x;
     return Math.round(sum / use.length);
+  }
+  // Version 6: the skill x 100 a placement seeds from. runs = every settled run of the season with the run that completes the
+  //   placement, [[fam, depth], ..] NEWEST first, the four families mixed; linesByFam as elpHiddenFor. The newest WINDOW runs, each
+  //   read on the solo scale (a solo run as it is, a team run through elpConvert; a run of a family without lines is left out);
+  //   the single lowest value leaves, the rest average. One value = itself; none = null. Defined for any count: three runs (the
+  //   placement) = the mean of the better two; a player the job seeds from four runs on the day the rule changed = the mean of
+  //   his best three; a seed taken back by a conviction and read again over more runs = all but the lowest.
+  function elpSeedHidden(runs, linesByFam) {
+    const list = Array.isArray(runs) ? runs : [], lines = linesByFam || {}, to = lines.solo, xs = [];
+    for (const r of list) {
+      if (xs.length >= ELP.WINDOW) break;
+      if (!r) continue;
+      const d100 = Math.max(0, r[1] | 0) * 100;
+      if (r[0] === 'solo') xs.push(d100);
+      else if (elpLinesOk(to) && elpLinesOk(lines[r[0]])) xs.push(elpConvert(d100, lines[r[0]], to));
+    }
+    if (!xs.length) return null;
+    if (xs.length === 1) return xs[0];
+    xs.sort((a, b) => a - b);
+    let sum = 0; for (let i = 1; i < xs.length; i++) sum += xs[i];
+    return Math.round(sum / (xs.length - 1));
   }
   // the tier (0..6) a hidden skill sits in: the pass line nearest to it, the lower tier on a tie. No skill (or no lines) = null.
   function tierOfHidden(hidden100, pass) {
@@ -734,7 +770,11 @@
   }
   // the points a finished placement seeds from the hidden skill: between the pass lines k and k+1 the skill interpolates over the
   //   tier's width, kept out of both series bands (BOUNDARY_MARGIN + 1 from either line; bronze has no relegation band and starts
-  //   at 0), capped at SEED_CAP (mid platinum: diamond and up are climbed, as the versus LP_SEED.CAP). No skill / no lines = 0.
+  //   at 0), capped at SEED_CAP. Version 6 (user call 2026-11-18, "cap it at 2800 for everybody"): 2800 = the top of gold under the
+  //   promotion band -- a placement never hands out platinum, it is won in a promotion run. (Before: 3200, mid platinum, as the
+  //   versus LP_SEED.CAP, which stays.) Why: with three runs and the lowest left out, ONE deep team run -- read on the solo scale
+  //   through the loose team priors -- is half of the seed: of the 8 real players the rule would seed on the day it was measured,
+  //   6 landed on the cap, 3 of them on one deep duo run alone. No skill / no lines = 0.
   function endlessSeedLp(hidden100, pass) {
     if (hidden100 == null || !elpLinesOk(pass)) return 0;
     const h = hidden100 | 0, top = LP_SEG.length - 1;
@@ -830,7 +870,7 @@
     RECEIPT_MAGIC, RECEIPT_CAP, RS_SLOT, RECEIPT_F, receiptVer, lpDetailsOf, lpDetails, receiptPush, receiptOf,
     PLACEMENT_TARGET, PLACE_CAP, placementOf,
     PULSE_MAGIC, pulseDetails, pulseOf,
-    ELP, ELP_FAMS, lpTierIdx, hiddenOf, teamHiddenOf, elpIsTeam, elpConvert, elpHiddenFor, tierOfHidden, skillTierOf, targetOffset, targetLineOf, targetOf, endlessDelta, endlessSettle, endlessSeedLp,
+    ELP, ELP_FAMS, lpTierIdx, hiddenOf, teamHiddenOf, elpIsTeam, elpConvert, elpHiddenFor, elpSeedHidden, tierOfHidden, skillTierOf, targetOffset, targetLineOf, targetOf, endlessDelta, endlessSettle, endlessSeedLp,
     elpRowDetails, elpRowOf, elpReceiptOf, elpTableDetails, elpTableOf,
   }, knobs());
   return api;

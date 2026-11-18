@@ -316,7 +316,7 @@ const SRC = S.SRC;
   const lane = SRC.slice(SRC.indexOf('const banSetOnce = async () => {'), SRC.indexOf('const maintainRating = async'));
   T('[7] the ban board is looked up on the listing only, never created (sanctions.js owns it)', /=== BAN_LB/.test(lane) && !/findOrCreateBoard\(BAN_LB/.test(SRC) && !/resolveSeasonBoard\([^)]*BAN_LB/.test(SRC));
   T('[7] read once per run (memoized, failure included)', /if \(banSet !== undefined\) return banSet;/.test(lane) && /banSet = null;/.test(lane));
-  T('[7] every exit path that keeps the cup / tier cuts gets the bans (maintainRating / maintainCup ask for them themselves)', (SRC.match(/await banSetOnce\(\)/g) || []).length === 3);
+  T('[7] every exit path that keeps the cup / tier cuts gets the bans (maintainRating / maintainCup ask for them themselves; ELP version 6: the rows owed of maintainRating too -- a fully banned account is not resolved)', (SRC.match(/await banSetOnce\(\)/g) || []).length === 4 && /if \(bans\.has\(sid\)\) \{ banned\+\+; continue; \}/.test(SRC));
   T('[7] the composite read of the bans sits after the per-size reads (just before the composite loop)', SRC.indexOf('const ovBans = await banSetOnce();') > SRC.indexOf("'solo comp board'") && SRC.indexOf('const ovBans = await banSetOnce();') < SRC.indexOf('for (const F of OVERALL_FAMS) { await writeOverall(F, false); await writeOverall(F, true); }'));
 }
 const ROOT = S.ROOT.replace(/\\/g, '/');
