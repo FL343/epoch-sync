@@ -187,6 +187,8 @@ try {
     T('[1] majority: one of two is none (strict)', seats([{ tail: ED(4) }, { tail: [] }]) === '');
     T('[1] majority: two of three', seats([{ tail: ED(4) }, { tail: ED(4) }, { tail: [], seat: 1, sid: 9 }]) === '2');
     T('[1] majority: one account writing twice is one vote', seats([{ tail: ED(4), sid: 1 }, { tail: ED(4), sid: 1 }, { tail: [], sid: 2, seat: 1 }]) === '');
+    T('[1] majority: two of four is none (strict)', seats([{ tail: ED(4), sid: 1 }, { tail: ED(4), sid: 2, seat: 1 }, { tail: [], sid: 3 }, { tail: [], sid: 4, seat: 1 }]) === '');
+    T('[1] one kept record alone never excuses (a lone-witness settle: only the seat\'s own note can)', seats([{ tail: ED(4) }]) === '' && seats([{ tail: ED(4), sid: 1 }, { tail: ED(4), sid: 1 }]) === '');
     const now = 1800000000000, L = {};
     T('[1] cap list: empty state reads 0', v.eacExcuseUsed(L, 'p', now) === 0);
     v.noteEacExcuse(L, 'p', now - 8 * 86400000); v.noteEacExcuse(L, 'p', now - 86400000);
@@ -196,9 +198,11 @@ try {
   }
 
   // ---- [2] both finishers name the removed seat / [3] the control ----
+  //   the tails are the live shape: the 5.4a char block first, then the 0xEA block (what the client writes for a 3P match)
   const H2 = 0x8861;
-  const ex = threeRuns(table(2, H2, ED(4), ED(4)));
-  const ctl = threeRuns(table(2, H2));
+  const LIVE = (ed) => CHARS3.concat(ed || []);
+  const ex = threeRuns(table(2, H2, LIVE(ED(4)), LIVE(ED(4))));
+  const ctl = threeRuns(table(2, H2, LIVE(), LIVE()));
   {
     const r = ex.r3;
     T('[2] three runs exit 0; the match settles on run 3 (after the Q121 wait)', ex.allOk && !processedOf(ex.r2).has(keyOf(2, H2)) && processedOf(r).has(keyOf(2, H2)), r.out.slice(-600));
@@ -316,7 +320,11 @@ try {
     T('[10] a confessed or already excused seat is not the plan\'s', SRC.indexOf("eacExcusePlan(g, leavers0, pend, leavers, nowMs, (h) => !!confState[h + '|' + c.m] || confSeen.has(h + '|' + c.m) || t2ex.has(h));") > iT2);
 
     const MT = [
-      ['[10a] majority', 'if (votes[s].length * 2 > seen.size) out[s] = votes[s];', 'if (votes[s].length * 2 >= seen.size) out[s] = votes[s];',
+      ['[10a] majority', 'if (votes[s].length >= 2 && votes[s].length * 2 > seen.size) out[s] = votes[s];', 'if (votes[s].length >= 2 && votes[s].length * 2 >= seen.size) out[s] = votes[s];',
+        null, 'unit-half', null, 'two of four writers excuse'],
+      ['[10a2] two writers', 'if (votes[s].length >= 2 && votes[s].length * 2 > seen.size) out[s] = votes[s];', 'if (votes[s].length * 2 > seen.size) out[s] = votes[s];',
+        null, 'unit-lone', null, 'one kept record alone excuses'],
+      ['[10a3] one of two', 'if (votes[s].length >= 2 && votes[s].length * 2 > seen.size) out[s] = votes[s];', 'if (votes[s].length >= 1) out[s] = votes[s];',
         () => table(2, 0x8881, ED(4), null), null, (m) => leavesOf(m.r3, C) === 0, 'one of two writers excuses'],
       ['[10b] cap', 'if (eacExcuseUsed(leavers, h, now) >= EAC_EXCUSE.CAP) {', 'if (eacExcuseUsed(leavers, h, now) >= 99) {',
         () => table(2, 0x8871, ED(4), ED(4)), 'cap', (m) => leavesOf(m.r3, C) === 0, 'the third removal is excused'],
@@ -337,6 +345,13 @@ try {
         T(tag + ' mutant (' + what + '): the unit in [1] goes red', mv.eacDropMaskOf({ d: rec3(0xB1, 2, 1, 2, ROS, 0, ED(4)) }) === 4);
         continue;
       }
+      if (mode === 'unit-half' || mode === 'unit-lone') {
+        const mv = require(s);
+        const rec = (sid, seat, tail) => ({ steamID: 'w' + sid, d: rec3(0xB1, 2, 1, seat, ROS, 0, tail) });
+        const grp = mode === 'unit-half' ? [rec(1, 0, ED(4)), rec(2, 1, ED(4)), rec(3, 0, []), rec(4, 1, [])] : [rec(1, 0, ED(4))];
+        T(tag + ' mutant (' + what + '): the unit in [1] goes red', Object.keys(mv.eacDropSeats(grp)).join(',') === '2');
+        continue;
+      }
       const nowS = Math.floor(Date.now() / 1000);
       const o = { script: s };
       if (mode === 'cap') o.files = { LEAVERS_FILE: { [v.pid(C)]: { leaves: 0, lastMatch: '', ed: [nowS - 2 * 86400, nowS - 86400] } } };
@@ -353,7 +368,7 @@ try {
     // the reader switched off: a job that does not know the block settles the same records exactly as the control ([3])
     const s3 = mutant('if (mg === ED_MAGIC && ver === ED_VER) return', 'if (mg === 0x1ff && ver === ED_VER) return', '[10h]');
     if (s3) {
-      const m = threeRuns(table(2, H2, ED(4), ED(4)), { script: s3 });
+      const m = threeRuns(table(2, H2, LIVE(ED(4)), LIVE(ED(4))), { script: s3 });
       const same = [A, B, C].every((sid) => [5, 6, 7].every((id) => JSON.stringify(writesFor(m.r3, id, sid)) === JSON.stringify(writesFor(ctl.r3, id, sid))));
       T('[10h] reader off (a job that does not know the block): the block-carrying records settle byte for byte as the control -- C convicted, same writes for A, B, C',
         m.allOk && same && leavesOf(m.r3, C) === 1 && edOf(m.r3, C) === 0, 'leaves=' + leavesOf(m.r3, C));

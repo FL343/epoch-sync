@@ -536,7 +536,7 @@ function loneWitnessLeavers(g, gro) {
 //     [ED_MAGIC | ED_VER << 8 | ED_LEN << 16, seat bitmask] naming the seats the host removed that way (the host broadcasts
 //     mp:EAC_DROP to the table, so each finisher copies it; written only when the mask is not 0 -- a match without a removal
 //     keeps today's bytes). A seat counts when a strict majority of the group's writers name it (one vote per account, as the
-//     roster vote in detectLeavers). The block is a settle-tail block (magic + length, before the 0xE5 signature block): a
+//     roster vote in detectLeavers) and at least two do (one kept record alone never excuses: eacDropSeats). The block is a settle-tail block (magic + length, before the 0xE5 signature block): a
 //     reader that does not know it walks past it, and it is in no consistency vector.
 //   - nobody can witness (the seat left by itself and the others finished; or its record of the frame is all there is): its
 //     own exit note (0xBD) with disposition 9, remembered on the key's starts entry (p.nd) like p.noted.
@@ -578,7 +578,10 @@ function eacDropMaskOf(r) {
   }
   return 0;
 }
-// the seats a strict majority of the group's writers name (one vote per account: his first record) -> { seat: [writer sids] }
+// the seats a strict majority of the group's writers name (one vote per account: his first record), at least TWO of them
+//   -> { seat: [writer sids] }. Two: a settle that stands on one kept record (Q302 lone witness, the single-writer lanes)
+//   would let one account's block excuse a seat -- the roster needs a second source there too (loneWitnessLeavers). With one
+//   writer only the seat's own note can excuse it.
 function eacDropSeats(g) {
   const out = {};
   if (!g || !g.length) return out;
@@ -590,7 +593,7 @@ function eacDropSeats(g) {
     const mask = eacDropMaskOf(r);
     for (let s = 0; s < 6; s++) if ((mask >> s) & 1) (votes[s] = votes[s] || []).push(w);
   }
-  for (const s of Object.keys(votes)) if (votes[s].length * 2 > seen.size) out[s] = votes[s];
+  for (const s of Object.keys(votes)) if (votes[s].length >= 2 && votes[s].length * 2 > seen.size) out[s] = votes[s];
   return out;
 }
 // the excuses an account still has listed inside the window (the cap's count); nothing is written
