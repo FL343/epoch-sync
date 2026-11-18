@@ -6973,6 +6973,120 @@ function elpMergeByStart(lists) {
 function elpPassOrder(st, p, s, nowMs) {
   return elpMergeByStart(elpFamEntries(st, p, s).map(({ fam, h }) => { const soon = elpPendingSettles(h, nowMs); return { fam, h, runs: h.runs.filter((x, i) => soon.has(i)) }; }));
 }
+// ---- Q402 / Q403 (cloud audit 2026-11-14; architecture decision 10): the order of a pass the job cannot know ----
+// The job orders the runs of a pass by the tick it first saw them, then by run id (elpPassOrder). Two things that order cannot know:
+//   - runs of different families first seen at the same tick (a late job sees an hour of play at once): which was played first (Q403);
+//   - a parked run that a newer run of its family gives up: his client counted it the moment the newer run started -- after every
+//     run he had finished by then -- while the job holds only the tick it first saw the parked run at (Q402).
+// Around the placement line the order decides which run seeds the points and which one is judged as a points run, and his client
+//   showed "a placement run, nothing moves" for every run it counted before the line. So for a player who is not placed when the
+//   pass begins and whose pass reaches the line, every order his play may have had is settled on a copy and the one that leaves him
+//   the most points is taken (elpPickOrders); the job's own order stands whenever no other gives more. A placed player, and a pass
+//   that stays below the line, keep the job's own order: not one byte of theirs changes.
+// the instant run i of entry h takes its place at among the runs of the OTHER families: the tick it was first seen at; a parked run
+//   that a newer run of its family gives up -- the first tick of that newer run. Within a family it never runs back.
+function elpPlaceAt(h, i) {
+  const r = h.runs[i];
+  return (elpRunParked(r) && !elpRunEnded(r) && i < h.runs.length - 1) ? (h.runs[i + 1][2] || 0) : (r[2] || 0);
+}
+const ELP_ORDER_CAP = 30;   // the orders tried for one player in one pass (five runs tied over three families = 30); past it the first ones walked
+// how many runs of his pass still count before the placement line: the last of them seeds (elpSettleRun: the run that brings his
+//   settled runs to MIN_RUNS); 1 when he holds MIN_RUNS already and is not placed (a conviction took his seed run back)
+function elpLeftOf(st, p, s) { const c = elpAllOf(st, p, s); return Math.max(1, ELP.MIN_RUNS - (c ? (c.n | 0) : 0)); }
+// the orders the runs of player p's pass may have been played in, as far as the placement line goes: [order, ..], the job's own
+//   (elpPassOrder) FIRST and always among them. left = how many runs of the pass still count before the line (elpLeftOf).
+//   - the base order: every run at the instant it takes its place at (elpPlaceAt), runs placed at the same instant as the job's
+//     own order has them. It differs from the job's own only where a parked run is given up (Q402);
+//   - the runs placed at the same instant as the run ON the line (the left-th of the base order), when some of them fall behind
+//     the line: every merge of them that keeps a family's own order, the rest of the base order around it (Q403). Only their
+//     order decides which runs count before the line; a tie that lies wholly before or wholly behind it is left as it is (the
+//     same runs seed either way), so a pass of many runs costs a handful of orders, not every merge of the pass.
+//   Walked in the fixed family order: the list is the same whatever the key order of the file.
+function elpPassOrders(st, p, s, nowMs, left) {
+  const own = elpPassOrder(st, p, s, nowMs), keyOf = (o) => o.fam + ':' + (o.r[0] >>> 0), strip = (o) => ({ fam: o.fam, h: o.h, r: o.r });
+  const out = [own], seen = new Set([own.map(keyOf).join(',')]);
+  const add = (o) => { const k = o.map(keyOf).join(','); if (!seen.has(k)) { seen.add(k); out.push(o.map(strip)); } };
+  const rank = new Map(), lists = [];
+  own.forEach((o, i) => rank.set(o.r, i));
+  for (const { fam, h } of elpFamEntries(st, p, s)) {
+    const soon = elpPendingSettles(h, nowMs), runs = [];
+    h.runs.forEach((x, i) => { if (soon.has(i)) runs.push({ fam, h, r: x, at: elpPlaceAt(h, i) }); });
+    if (runs.length) lists.push(runs);
+  }
+  if (lists.length < 2) return out;
+  const idx = lists.map(() => 0), base = [];
+  for (;;) {
+    let pick = -1;
+    for (let i = 0; i < lists.length; i++) {
+      if (idx[i] >= lists[i].length) continue;
+      if (pick < 0) { pick = i; continue; }
+      const x = lists[i][idx[i]], y = lists[pick][idx[pick]];
+      if (x.at < y.at || (x.at === y.at && rank.get(x.r) < rank.get(y.r))) pick = i;
+    }
+    if (pick < 0) break;
+    base.push(lists[pick][idx[pick]++]);
+  }
+  add(base);
+  const k = left | 0;
+  if (!(k >= 1 && k < base.length)) return out;   // the line is not inside this pass: every order puts the same runs before it
+  const at = base[k - 1].at;
+  let a = k - 1, b = k - 1;
+  while (a > 0 && base[a - 1].at === at) a--;
+  while (b < base.length - 1 && base[b + 1].at === at) b++;
+  if (b < k) return out;   // the tie ends on the line
+  const fams = [], tied = [];
+  for (let i = a; i <= b; i++) { let j = fams.indexOf(base[i].fam); if (j < 0) { j = fams.length; fams.push(base[i].fam); tied.push([]); } tied[j].push(base[i]); }
+  if (tied.length < 2) return out;
+  const order = pointsPlan.ELP_FAMS.filter((x) => fams.indexOf(x) >= 0).map((x) => tied[fams.indexOf(x)]), at2 = order.map(() => 0), cur = [];
+  const walk = () => {
+    if (out.length >= ELP_ORDER_CAP) return;
+    if (cur.length === b - a + 1) { add(base.slice(0, a).concat(cur, base.slice(b + 1))); return; }
+    for (let i = 0; i < order.length; i++) {
+      if (at2[i] >= order[i].length) continue;
+      cur.push(order[i][at2[i]++]); walk(); at2[i]--; cur.pop();
+    }
+  };
+  walk();
+  return out;
+}
+// the points player p ends the pass with when his runs settle in `order` -- on a copy: his own entries and the team entries of
+//   his runs are copied, everything else is read in place (his settles write nothing else). ctx = the pass context (the other
+//   players' orders as they stand). -1 = still not placed.
+function elpTryOrder(st, p, s, nowMs, ctx, order) {
+  const copy = (o) => JSON.parse(JSON.stringify(o));
+  const hist = Object.assign({}, st.hist), team = st.elpTeam ? Object.assign({}, st.elpTeam) : st.elpTeam, twin = new Map();
+  for (const { fam, h } of elpFamEntries(st, p, s)) { const k = ratingHistKey(p, fam, s); hist[k] = copy(h); twin.set(h, hist[k]); }
+  const ak = elpAllKey(p, s);
+  if (hist[ak]) hist[ak] = copy(hist[ak]);
+  if (team) for (const o of order) { const k = String(o.r[0] >>> 0); if (st.elpTeam[k]) team[k] = copy(st.elpTeam[k]); }
+  const stT = Object.assign({}, st, { hist, elpTeam: team });
+  // the readings find a run of the pass by the array itself (elpBeforeItems): the order is rebuilt over the copies
+  const ordT = order.map((o) => { const hT = twin.get(o.h); return { fam: o.fam, h: hT, r: hT.runs[o.h.runs.indexOf(o.r)] }; });
+  const ctxT = { order: new Map(ctx.order), h0: ctx.h0, memo: ctx.memo, trial: p };   // memo: the other members' readings, the same in every trial (elpTeamHidden)
+  ctxT.order.set(p, ordT);
+  const c = elpAllOf(stT, p, s, true);
+  for (const o of ordT) elpSettleRun(stT, p, c, o.h, o.r, o.fam, s, nowMs, ctxT);
+  return c.placed ? (c.lp | 0) : -1;
+}
+// the order each player's pass settles in: Map p -> index into elpPassOrders(p) (0 = the job's own: left out). Only a player who
+//   is not placed when the pass begins and whose pass reaches the placement line is looked at; each one is tried against the job's
+//   own orders of everybody else (ctx is not written here), so the picks do not depend on who is walked first.
+function elpPickOrders(st, pids, s, nowMs, ctx) {
+  const picks = new Map();
+  ctx = { order: ctx.order, h0: ctx.h0, memo: new Map() };   // the trials share what does not depend on the tried order; the pass context itself gets no memo
+  for (const p of pids) {
+    const own = ctx.order.get(p), c0 = elpAllOf(st, p, s);
+    if (!own || own.length < 2 || (c0 && c0.placed)) continue;
+    const left = elpLeftOf(st, p, s);
+    if (own.length <= left) continue;   // the line is not inside this pass (the last run seeds at most): no order changes which runs count before it
+    const orders = elpPassOrders(st, p, s, nowMs, left);
+    if (orders.length < 2) continue;
+    let best = 0, bestLp = elpTryOrder(st, p, s, nowMs, ctx, orders[0]);
+    for (let i = 1; i < orders.length; i++) { const lp = elpTryOrder(st, p, s, nowMs, ctx, orders[i]); if (lp > bestLp) { best = i; bestLp = lp; } }   // a tie keeps the earlier one: the job's own first
+    if (best) picks.set(p, best);
+  }
+  return picks;
+}
 // every settled run of player p in season s, NEWEST first: [[fam, depth], ..] (the reading of points-plan.js elpHiddenFor)
 function elpSettledRuns(st, p, s) {
   return elpMergeByStart(elpFamEntries(st, p, s).map(({ fam, h }) => ({ fam, h, runs: h.runs.filter((x) => x[3]) }))).map((x) => [x.fam, x.r[1] | 0]).reverse();
@@ -7078,7 +7192,10 @@ function elpRowSkill(ctx, p, fam, runId, at) {
   const ix = order.findIndex((o) => o.fam === fam && (o.r[0] >>> 0) === rid);
   for (let j = 0; j < order.length; j++) {
     const o = order[j], fs0 = o.r[2] || 0;
-    if (j === ix || (ix >= 0 ? j > ix : fs0 > at)) continue;   // the run itself / what the pass settles after it (the run not in his pass: what was first seen after it)
+    // the run itself / what the pass settles after it / what was first seen after it: a run seen later cannot have been waiting
+    //   for its receipt when this one started, wherever the pass puts it (Q402: an order of elpPassOrders may settle a parked
+    //   run after runs first seen later than it)
+    if (j === ix || (ix >= 0 && j > ix) || fs0 > at) continue;
     if (!elpRunEnded(o.r)) continue;   // it never ended: no receipt the client could have been waiting for
     if (o.fam === fam || !(fs0 === at || elpSaveAt(o.r, at) != null)) return null;
   }
@@ -7111,7 +7228,13 @@ function elpOrderOf(ctx, st, p, s, nowMs) { return (ctx && ctx.order && ctx.orde
 //   candidate table (MIN_RUNS values or more = the trimmed mean, fewer = their plain mean, as the job's own), and the skill of his
 //   row (elpRowSkill)
 function elpMemberReadings(st, p, fam, s, runId, at, nowMs, ctx) {
+  // Q402 / Q403: while the orders of a pass are tried (ctx.memo, elpPickOrders) the readings of every member but the tried player
+  //   are the same in each trial -- nothing of theirs is written and their orders stand -- so they are read once (the list is
+  //   never written by its readers). The settle itself carries no memo.
+  const memo = ctx && ctx.memo, mk = (memo && ctx.trial !== p) ? p + '|' + fam + '|' + (runId >>> 0) + '|' + at : null;
+  if (mk && memo.has(mk)) return memo.get(mk);
   const out = [], seen = new Set();
+  if (mk) memo.set(mk, out);
   const add = (x) => { const k = x == null ? 'none' : String(x | 0); if (!seen.has(k)) { seen.add(k); out.push(x == null ? null : (x | 0)); } };
   add(elpMemberHiddenBefore(st, p, fam, s, runId, at, nowMs, ctx));
   if (elpFamEntries(st, p, s).length) {
@@ -7251,7 +7374,10 @@ function elpTrim(h) {
 // settle every settleable run of the current season's competitive histories: player by player, each player's runs of every family
 //   in his pass order (elpPassOrder) onto his one points entry. The windows are trimmed once every player is through (a member
 //   reading never sees a half-trimmed pass). Returns the settles ([{ k (the run's family entry), runId, d, T, pass, seeded, teamH }]).
-function elpSettleAll(st, seasonNow, nowMs) {
+// Q402 / Q403: before anything settles, a player whose pass crosses the placement line gets the order of his pass picked among the
+//   orders his play may have had (elpPickOrders); out.picks = [[p, index, of how many]], out.dropped = picks given up by the guard.
+//   opt.picks (a Map, or null = none) settles with exactly those picks: the guard's two copies, and the tests.
+function elpSettleAll(st, seasonNow, nowMs, opt) {
   const out = [], pending = new Set(), pids = [], seenP = new Set(), entries = [], bad = [];
   for (const k of Object.keys((st && st.hist) || {})) {
     const at = k.lastIndexOf('|'), s = Number(k.slice(at + 1)), head = k.slice(0, at), cutAt = head.lastIndexOf('|'), fam = head.slice(cutAt + 1);
@@ -7269,6 +7395,29 @@ function elpSettleAll(st, seasonNow, nowMs) {
     ctx.order.set(p, elpPassOrder(st, p, seasonNow | 0, nowMs));
     const c0 = elpAllOf(st, p, seasonNow | 0);
     if (c0 && c0.placed && Array.isArray(c0.h) && c0.h.length === pointsPlan.ELP_FAMS.length) ctx.h0.set(p, { h: c0.h.slice(), ht: Number(c0.ht) });
+  }
+  // Q402 / Q403: the picked orders go into the pass context before anything settles (every reading of the pass sees them). The
+  //   guard: a pick also moves what a teammate's reading counts before a shared team run, so the whole pass is settled on two
+  //   copies -- the job's own orders, the picked ones -- and unless nobody ends below what the job's own orders leave him, the
+  //   picks are given up (the pass settles exactly as it did before this rule).
+  const given = !!opt && opt.picks !== undefined;
+  let picks = given ? (opt.picks || new Map()) : elpPickOrders(st, pids, seasonNow | 0, nowMs, ctx);
+  out.picks = []; out.dropped = 0;
+  if (picks.size && !given) {
+    const lpOn = (pk) => {
+      const cp = Object.assign({}, st, JSON.parse(JSON.stringify({ hist: st.hist, elpTeam: st.elpTeam === undefined ? null : st.elpTeam })));
+      if (st.elpTeam === undefined) delete cp.elpTeam;
+      elpSettleAll(cp, seasonNow, nowMs, { picks: pk });
+      return (p) => { const c = elpAllOf(cp, p, seasonNow | 0); return (c && c.placed) ? (c.lp | 0) : -1; };
+    };
+    const own = lpOn(null), got = lpOn(picks);
+    if (pids.some((p) => got(p) < own(p))) { out.dropped = picks.size; picks = new Map(); }
+  }
+  for (const [p, i] of picks) {
+    const orders = elpPassOrders(st, p, seasonNow | 0, nowMs, elpLeftOf(st, p, seasonNow | 0));
+    if (!(i > 0 && i < orders.length)) continue;
+    ctx.order.set(p, orders[i]);
+    out.picks.push([p, i, orders.length]);
   }
   for (const p of pids) {
     const order = ctx.order.get(p);
@@ -11419,6 +11568,9 @@ async function main() {
     const done = elpSettleAll(st, seasonId, nowMs);
     if (done.bad && done.bad.length) ghWarn('endless points: ' + done.bad.length + ' damaged history entr' + (done.bad.length === 1 ? 'y' : 'ies') + ' left alone (first ' + String(done.bad[0]).slice(0, 8) + ') -- their runs settle nothing until the state is repaired');
     for (const x of done) console.log('  endless points ' + x.k.split('|')[1] + ' ' + x.k.slice(0, 8) + ': run ' + (x.runId >>> 0).toString(16) + ' target ' + x.T + (x.pass ? ' passed' : ' missed') + ' -> ' + (x.d >= 0 ? '+' : '') + x.d + (x.seeded ? ' (placement done: seeded)' : '') + (x.teamH !== undefined ? ' (team level ' + (x.teamH == null ? 'none' : x.teamH) + ')' : '') + (x.alts > 1 ? ' (best of ' + x.alts + ' targets his client may have shown)' : ''));
+    // Q402 / Q403: whose pass settled in another order than the job's own (the one that leaves him the most, of the orders his play may have had)
+    for (const [p, i, n] of (done.picks || [])) console.log('  endless points ' + String(p).slice(0, 8) + ': the order of this pass taken among ' + n + ' his play may have had (#' + i + '; the job\'s own is #0)');
+    if (done.dropped) console.log('  endless points: ' + done.dropped + ' picked order(s) given up -- somebody would have ended below what the job\'s own orders leave him; the pass settled in the job\'s own orders');
     RUN.elpSettled = (RUN.elpSettled | 0) + done.length;
     let ch = done.length > 0;
     const day = tiercutDay(seasonNowMs());
@@ -15585,7 +15737,7 @@ Object.assign(module.exports, { pruneFlagged, flagBaseKey, FLAG_PRUNE_WAIT_MS, b
 Object.assign(module.exports, { lateWriterRoster });   // cloud audit Q261 a 1V1 whose result writer's own start was first read with his result
 Object.assign(module.exports, { lone1v1Spoiled, lone1v1VoidClaims });   // cloud audit Q216 a ranked 1V1 whose loser wrote only records the job cannot use
 Object.assign(module.exports, { teamXpFloor, teamXpStarts, teamXpMark, teamRollbackPlan });   // cloud audit Q237 team competitive XP floors (test/team-comp-ghost-xp.js)
-Object.assign(module.exports, { RATING, RATING_FAMS, ENDLESS_RATING_LB, ELP_ALL, elpAllKey, elpAllOf, elpEntryOk, elpFamEntries, elpMergeByStart, elpPassOrder, elpSettledRuns, elpRunsBefore, elpSaveAt, elpOpenAt, elpBeforeItems, elpBeforeLists, elpRowSkill, elpMemberReadings, elpTeamPick, elpLinesByFam, elpSkillsOf, elpCandidateTabs, ENDLESS_RATING_LB_SOLO, ENDLESS_RATING_LB_DUO, ENDLESS_RATING_LB_TRIO, ENDLESS_RATING_LB_QUAD, ENDLESS_TIERCUT_LB, ratingFamOf, fnv32, ratingRunId, ratingHistKey,
+Object.assign(module.exports, { RATING, RATING_FAMS, ENDLESS_RATING_LB, ELP_ALL, elpAllKey, elpAllOf, elpEntryOk, elpFamEntries, elpMergeByStart, elpPassOrder, elpPlaceAt, elpLeftOf, elpPassOrders, elpTryOrder, elpPickOrders, ELP_ORDER_CAP, elpSettledRuns, elpRunsBefore, elpSaveAt, elpOpenAt, elpBeforeItems, elpBeforeLists, elpRowSkill, elpMemberReadings, elpTeamPick, elpLinesByFam, elpSkillsOf, elpCandidateTabs, ENDLESS_RATING_LB_SOLO, ENDLESS_RATING_LB_DUO, ENDLESS_RATING_LB_TRIO, ENDLESS_RATING_LB_QUAD, ENDLESS_TIERCUT_LB, ratingFamOf, fnv32, ratingRunId, ratingHistKey,
   ratingHistUpsert, ratingHistRemove, ratingHistFinal, elpRunRk, ratingScoreOf, ratingPlan, ratingTierOf, tiercutDay, tiercutEncode, tiercutDecode, tiercutDue, pruneRatingHist,
   elpSettledDepths, elpLinesAt, elpCandidates, elpSettleRun, elpTrim, elpSettleAll, elpRunReady, elpPendingSettles, elpTeamNote, elpMemberHiddenBefore, elpTeamHidden, elpTeamTrim, elpLinesOf, elpHiddensOf, elpLinesSkipBanned, elpTableKey, elpTabNewest, elpTabRecord });
 Object.assign(module.exports, { CUP, CUP_FAMS, ENDLESS_CUP_LB, ENDLESS_CUP_HONOR_LB, cupWeekId, cupWeekStart, cupWeekBack, cupNextWeek, cupEdition, cupWeekBoardName, teamBlockSids,

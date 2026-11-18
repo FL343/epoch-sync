@@ -1576,4 +1576,197 @@ console.log('-- [17] RC2-02 / RC2-03: a family that borrows -- what the client m
   T('[17] mutation "the pick takes the higher line" turns the pick red', redBy('[17] pick higher', [['    if (line < bestLine || (', '    if (line > bestLine || (']], (m) => m.elpTeamPick([[2000, 1500], [800]], [LN.duo]) === 1150 && m.elpTeamPick([[1600, null], [2400]], [LN.duo]) === 2000));
 }
 
+// ---- [18] Q402 / Q403 (cloud audit 2026-11-14): the order of a pass the job cannot know -- around the placement line, the one that leaves the player the most ----
+console.log('-- [18] Q402 / Q403: around the placement line, the order his play may have had that leaves him the most --');
+{
+  const HR = 3600000, T0 = Date.UTC(2026, 10, 18);
+  const lpOf = (st, p) => { const c = st.hist[p + '|all|0']; return (c && c.placed) ? (c.lp | 0) : -1; };
+  const names = (order) => order.map((o) => o.fam + ' ' + (o.r[0] >>> 0));
+  const NONE = { picks: null };   // the pass in the job's own orders (the settle before this rule)
+  // Q402: four solo placement runs settled; a trio run parked (seen, never settled); then a NEW trio run and a solo run, both
+  //   finished, first seen in one late pass. "Solo first, then the new trio run" (the parked run is counted after the solo run)
+  //   and "the new trio run first, then solo" (the parked run is the fifth) hand the job the very same data.
+  function q402World(m) {
+    const st = { hist: {} };
+    [12, 14, 16, 18].forEach((d, i) => m.ratingHistUpsert(st, 'Q', 'solo', 0, 100 + i, d, T0 + HR + i * MIN, F, 500 + i));
+    m.elpSettleAll(st, 0, T0 + 2 * HR, NONE);
+    const tP = T0 + 3 * HR;
+    m.ratingHistUpsert(st, 'Q', 'trio', 0, 200, 20, tP, SUS, 600);
+    m.elpSettleAll(st, 0, tP, NONE);
+    const tX = tP + 45 * MIN;
+    m.ratingHistUpsert(st, 'Q', 'trio', 0, 201, 18, tX, F, 601);
+    m.ratingHistUpsert(st, 'Q', 'solo', 0, 300, 6, tX, F, 700);
+    return { st, at: tX, p: 'Q' };
+  }
+  // Q403: `base` solo runs settled; then the batch, every run finished and first seen at the same tick
+  const batchWorld = (base, batch) => (m) => {
+    const st = { hist: {} };
+    base.forEach((d, i) => m.ratingHistUpsert(st, 'Z', 'solo', 0, 100 + i, d, T0 + HR + i * MIN, F, 500 + i));
+    m.elpSettleAll(st, 0, T0 + 2 * HR, NONE);
+    const tX = T0 + 5 * HR;
+    for (const [fam, id, d, seed] of batch) m.ratingHistUpsert(st, 'Z', fam, 0, id, d, tX, F, seed);
+    return { st, at: tX, p: 'Z' };
+  };
+  const q403World = batchWorld([12, 14, 16], [['solo', 20, 6, 720], ['solo', 21, 8, 721], ['trio', 30, 20, 730]]);    // not placed, the pass crosses the line: the job's own order is the worst of three
+  const ownBestWorld = batchWorld([12, 14, 16], [['solo', 20, 12, 720], ['solo', 21, 30, 721], ['trio', 30, 3, 730]]);   // ... the job's own order is the best of three
+  const placedWorld = batchWorld([12, 14, 16, 18, 20], [['solo', 20, 3, 720], ['trio', 30, 40, 730], ['duo', 40, 2, 740]]);   // placed before the pass
+  const belowWorld = batchWorld([12, 14], [['solo', 20, 30, 720], ['trio', 30, 3, 730]]);   // two more runs: four in all, below the line
+  const forced = (m, world, i) => { const w = world(m), pk = new Map(); if (i) pk.set(w.p, i); const out = m.elpSettleAll(w.st, 0, w.at, { picks: pk }); return { lp: lpOf(w.st, w.p), out, st: w.st }; };
+  const settled = (m, world, opt) => { const w = world(m), out = m.elpSettleAll(w.st, 0, w.at, opt); return { lp: lpOf(w.st, w.p), out, st: w.st, picks: out.picks, dropped: out.dropped }; };
+  const ordersOf = (m, world) => { const w = world(m); return m.elpPassOrders(w.st, w.p, 0, w.at, m.elpLeftOf(w.st, w.p, 0)); };
+  // a tie that lies wholly before the line (two runs tied, then three alone: the fifth seeds) / wholly behind it (the run on the line alone, then two tied)
+  const tieBeforeWorld = (m) => { const w = batchWorld([12], [['solo', 20, 6, 720], ['trio', 30, 20, 730]])(m); [21, 22, 23].forEach((id, i) => m.ratingHistUpsert(w.st, 'Z', 'solo', 0, id, 9 + i, w.at + (i + 1) * MIN, F, 740 + i)); w.at += 4 * MIN; return w; };
+  const tieBehindWorld = (m) => { const w = batchWorld([12, 14, 16, 18], [['solo', 20, 6, 720]])(m); m.ratingHistUpsert(w.st, 'Z', 'solo', 0, 21, 8, w.at + MIN, F, 721); m.ratingHistUpsert(w.st, 'Z', 'trio', 0, 30, 20, w.at + MIN, F, 730); w.at += 2 * MIN; return w; };
+  // Q402 without a tie: the solo run was first seen (a checkpoint) between the parked run and the new trio run, its final segment in the late pass
+  function q402EarlyWorld(m) {
+    const st = { hist: {} };
+    [12, 14, 16, 18].forEach((d, i) => m.ratingHistUpsert(st, 'Q', 'solo', 0, 100 + i, d, T0 + HR + i * MIN, F, 500 + i));
+    m.elpSettleAll(st, 0, T0 + 2 * HR, NONE);
+    const tP = T0 + 3 * HR;
+    m.ratingHistUpsert(st, 'Q', 'trio', 0, 200, 20, tP, SUS, 600);
+    m.elpSettleAll(st, 0, tP, NONE);
+    m.ratingHistUpsert(st, 'Q', 'solo', 0, 300, 3, tP + 20 * MIN, 0, 700);   // a checkpoint of the solo run: seen, not ready
+    m.elpSettleAll(st, 0, tP + 20 * MIN, NONE);
+    const tX = tP + 45 * MIN;
+    m.ratingHistUpsert(st, 'Q', 'solo', 0, 300, 6, tX, F, 700);
+    m.ratingHistUpsert(st, 'Q', 'trio', 0, 201, 18, tX, F, 601);
+    return { st, at: tX, p: 'Q' };
+  }
+  // the pick = the best of every order, never below the job's own, and exactly the settle of that order
+  function bestHolds(m, world, wantPick) {
+    const n = ordersOf(m, world).length, each = [];
+    for (let i = 0; i < n; i++) each.push(forced(m, world, i));
+    const got = settled(m, world), max = Math.max.apply(null, each.map((x) => x.lp)), ix = each.findIndex((x) => x.lp === max);
+    return got.lp === max && got.lp >= each[0].lp && canon(got.st.hist) === canon(each[ix].st.hist) && JSON.stringify(got.picks) === JSON.stringify(wantPick) && got.dropped === 0;
+  }
+  const q402Holds = (m) => {
+    const o = ordersOf(m, q402World).map(names), got = settled(m, q402World), c = got.st.hist['Q|all|0'];
+    return JSON.stringify(o) === JSON.stringify([['trio 200', 'trio 201', 'solo 300'], ['solo 300', 'trio 200', 'trio 201'], ['trio 200', 'solo 300', 'trio 201']])
+      && bestHolds(m, q402World, [['Q', 1, 3]]) && got.lp > forced(m, q402World, 0).lp && JSON.stringify(c.seedRun) === JSON.stringify(['solo', 300])
+      && got.out.map((x) => x.runId).join(',') === '300,200,201' && got.out[1].pass === true && got.out[1].d > 0;
+  };
+  const q403Holds = (m) => {
+    const o = ordersOf(m, q403World).map(names), f = [0, 1, 2].map((i) => forced(m, q403World, i).lp);
+    return JSON.stringify(o) === JSON.stringify([['solo 20', 'solo 21', 'trio 30'], ['solo 20', 'trio 30', 'solo 21'], ['trio 30', 'solo 20', 'solo 21']])
+      && f[1] === f[2] && f[1] > f[0] && bestHolds(m, q403World, [['Z', 1, 3]]);   // #1 and #2 leave the same: the earlier one is taken
+  };
+  const ownBestHolds = (m) => { const f = [0, 1, 2].map((i) => forced(m, ownBestWorld, i).lp); return f[0] > f[1] && f[0] > f[2] && bestHolds(m, ownBestWorld, []) && canon(settled(m, ownBestWorld).st.hist) === canon(settled(m, ownBestWorld, NONE).st.hist); };
+  const sameAsOwn = (m, world) => { const a = settled(m, world), b = settled(m, world, NONE); return a.picks.length === 0 && a.dropped === 0 && canon([a.st.hist, a.out.map((x) => [x.k, x.runId, x.d, x.T])]) === canon([b.st.hist, b.out.map((x) => [x.k, x.runId, x.d, x.T])]); };
+  const untouched = (m, world) => {   // the trials write nothing: the state after elpPickOrders is the state before, and the pick is found
+    const w = world(m), before = canon([w.st.hist, w.st.elpTeam || null]);
+    const picks = m.elpPickOrders(w.st, [w.p], 0, w.at, { order: new Map([[w.p, m.elpPassOrder(w.st, w.p, 0, w.at)]]), h0: new Map() });
+    return canon([w.st.hist, w.st.elpTeam || null]) === before && picks.get(w.p) === 1;
+  };
+  T('[18] Q402: a parked run given up in the pass that first sees the new run of its family AND a finished run of another family -- three orders (the job\'s own first; the parked run after the other family\'s run; between): the one that leaves the most is settled (the solo run seeds, the parked run is a points run that passed), never below the job\'s own; the result is exactly the settle of that order', q402Holds(v));
+  T('[18] Q403: three runs of two families first seen at the same tick across the line -- every merge that keeps a family\'s own order; the job\'s own (by run id) leaves the least here, the first of the two best is taken', q403Holds(v));
+  T('[18] the job\'s own order stands when no other leaves more (no pick; the state is the one the job\'s own orders leave, byte for byte)', ownBestHolds(v));
+  T('[18] a placed player keeps the job\'s own order: nothing is tried, the pass settles byte for byte as before (six orders exist)', ordersOf(v, placedWorld).length === 6 && sameAsOwn(v, placedWorld));
+  T('[18] a pass that stays below the placement line keeps the job\'s own order (nothing to try: every order puts the same runs before the line)', ordersOf(v, belowWorld).length === 1 && sameAsOwn(v, belowWorld) && settled(v, belowWorld).lp === -1);
+  T('[18] a tie that lies wholly before the line, or wholly behind it, is left as the job has it (the same runs count before the line either way): one order each, the pass settles as before',
+    ordersOf(v, tieBeforeWorld).length === 1 && sameAsOwn(v, tieBeforeWorld) && settled(v, tieBeforeWorld).lp >= 0 && ordersOf(v, tieBehindWorld).length === 1 && sameAsOwn(v, tieBehindWorld) && settled(v, tieBehindWorld).lp >= 0);
+  { const o = ordersOf(v, q402EarlyWorld).map(names), f = [0, 1].map((i) => forced(v, q402EarlyWorld, i).lp);
+    T('[18] Q402 without a tie (the solo run first seen between the parked run and the new one): the job\'s own order (the parked run first) and the base order (the solo run first: finished before the parked run was given up) -- the better of the two is settled',
+      JSON.stringify(o) === JSON.stringify([['trio 200', 'solo 300', 'trio 201'], ['solo 300', 'trio 200', 'trio 201']]) && f[1] > f[0] && bestHolds(v, q402EarlyWorld, [['Q', 1, 2]]), JSON.stringify([o, f])); }
+  T('[18] the trials write nothing into the state (the player\'s entries and the team entries are copied; the order is rebuilt over the copies)', untouched(v, q402World) && untouched(v, q403World));
+  // elpPlaceAt / elpPassOrders on their own
+  { const st = { hist: {} };
+    v.ratingHistUpsert(st, 'A', 'trio', 0, 1, 9, 1000, SUS, 11); v.ratingHistUpsert(st, 'A', 'trio', 0, 2, 9, 5000, F, 12); v.ratingHistUpsert(st, 'A', 'trio', 0, 3, 9, 7000, SUS, 13);
+    v.ratingHistUpsert(st, 'A', 'duo', 0, 4, 9, 2000, SUS, 14); v.ratingHistUpsert(st, 'A', 'duo', 0, 4, 12, 3000, F, 14); v.ratingHistUpsert(st, 'A', 'duo', 0, 5, 9, 6000, F, 15);
+    const tr = H(st, 'A', 'trio'), du = H(st, 'A', 'duo');
+    eq('[18] the instant a run takes its place at: a parked run a newer run of its family gives up = that run\'s first tick; a finished run, a parked run with no newer run, a run that was parked and went on = its own', [v.elpPlaceAt(tr, 0), v.elpPlaceAt(tr, 1), v.elpPlaceAt(tr, 2), v.elpPlaceAt(du, 0), v.elpPlaceAt(du, 1)], [5000, 5000, 7000, 2000, 6000]);
+    const one = { hist: {} }; [1, 2, 3].forEach((i) => v.ratingHistUpsert(one, 'B', 'solo', 0, i, 9, 1000, F, 20 + i));
+    eq('[18] one family: the job\'s own order only', v.elpPassOrders(one, 'B', 0, 2000, 1).map(names), [['solo 1', 'solo 2', 'solo 3']]);
+    const two = { hist: {} }; v.ratingHistUpsert(two, 'C', 'solo', 0, 9, 9, 1000, F, 31); v.ratingHistUpsert(two, 'C', 'duo', 0, 8, 9, 2000, F, 32); v.ratingHistUpsert(two, 'C', 'solo', 0, 7, 9, 2000, F, 33);
+    eq('[18] the line on the second run: a run first seen earlier never moves behind a run of another family seen later; the two seen together come both ways', v.elpPassOrders(two, 'C', 0, 3000, 2).map(names), [['solo 9', 'solo 7', 'duo 8'], ['solo 9', 'duo 8', 'solo 7']]);
+    eq('[18] the line on the first run (seen alone) / past the end of the pass / not given: the job\'s own order only', [1, 3, undefined].map((left) => v.elpPassOrders(two, 'C', 0, 3000, left).length), [1, 1, 1]);
+    const many = { hist: {} }; let id = 1;
+    for (const fam of PP.ELP_FAMS) for (let i = 0; i < 2; i++) { v.ratingHistUpsert(many, 'D', fam, 0, id, 9, 1000, F, 40 + id); id++; }
+    const os = v.elpPassOrders(many, 'D', 0, 2000, 1), keys = new Set(os.map((o) => names(o).join('>')));
+    T('[18] past the cap (eight runs tied over four families: 2520 merges) the first ' + v.ELP_ORDER_CAP + ' walked are tried, all different, the job\'s own first, each a merge that keeps a family\'s own order',
+      os.length === v.ELP_ORDER_CAP && keys.size === os.length && names(os[0]).join('>') === names(v.elpPassOrder(many, 'D', 0, 2000)).join('>')
+      && os.every((o) => o.length === 8 && PP.ELP_FAMS.every((fam) => { const ids = o.filter((x) => x.fam === fam).map((x) => x.r[0]); return ids.length === 2 && ids[0] < ids[1]; })));
+  }
+  // the row's skill stays a reading of a parked run settled after runs first seen later than it (review round 1 of the cloud draft: 14 of 228 cells lost it)
+  const rowLaterHolds = (m) => {
+    const st = { hist: {} };
+    m.ratingHistUpsert(st, 'R', 'solo', 0, 150, 9, 4500, F, 550); m.ratingHistUpsert(st, 'R', 'trio', 0, 200, 20, 5000, SUS, 600); m.ratingHistUpsert(st, 'R', 'duo', 0, 300, 9, 9000, F, 700); m.ratingHistUpsert(st, 'R', 'trio', 0, 201, 9, 9000, F, 601);
+    const tr = H(st, 'R', 'trio'), du = H(st, 'R', 'duo'), so = H(st, 'R', 'solo'), h0 = new Map([['R', { h: [1000, 2100, 2200, 2300], ht: 4000 }]]);
+    const later = { order: new Map([['R', [{ fam: 'duo', h: du, r: du.runs[0] }, { fam: 'trio', h: tr, r: tr.runs[0] }, { fam: 'trio', h: tr, r: tr.runs[1] }]]]), h0 };   // the duo run (seen at 9000) before the parked trio run (seen at 5000)
+    const earlier = { order: new Map([['R', [{ fam: 'solo', h: so, r: so.runs[0] }, { fam: 'trio', h: tr, r: tr.runs[0] }, { fam: 'trio', h: tr, r: tr.runs[1] }]]]), h0 };   // a finished solo run seen at 4500 before it: it surely came first
+    return m.elpRowSkill(later, 'R', 'trio', 200, 5000) === 2200 && m.elpRowSkill(earlier, 'R', 'trio', 200, 5000) === null;
+  };
+  T('[18] the row\'s skill is still a reading of a parked run that the picked order settles after a run first seen later (that run cannot have been waiting for its receipt when the parked run started); a finished run seen before it still takes the reading away', rowLaterHolds(v));
+  // the guard: a pick that leaves anybody below the job's own orders is given up. Shown with a picker that takes the WORST order.
+  const WORST = [['if (lp > bestLp) { best = i; bestLp = lp; }', 'if (lp < bestLp) { best = i; bestLp = lp; }']];
+  const GUARD = ['    if (pids.some((p) => got(p) < own(p))) { out.dropped = picks.size; picks = new Map(); }\n', ''];
+  const guardHolds = (m) => { const a = settled(m, ownBestWorld), b = settled(m, ownBestWorld, NONE); return a.lp === b.lp && canon(a.st.hist) === canon(b.st.hist); };
+  { let mw = null;
+    try { mw = mutantOf(WORST); } catch (e) { bad('[18] guard: ' + e.message); }
+    if (mw) { const a = settled(mw, ownBestWorld);
+      T('[18] the guard: with a picker that takes the worst order, the whole pass is settled on two copies, somebody ends below the job\'s own orders -> the pick is given up (dropped 1), the pass settles in the job\'s own orders', guardHolds(mw) && a.dropped === 1 && a.picks.length === 0); }
+  }
+  // random worlds: four players, four families, team runs, parked runs, ties -- nobody ever ends a pass below what the job's own orders leave him; the result does not depend on the key order of the file
+  function worlds(m, seed0, iters) {
+    let seed = seed0;
+    const rnd = () => { seed = (Math.imul(seed, 1103515245) + 12345) >>> 0; return seed / 4294967296; }, ri = (n) => Math.floor(rnd() * n);
+    const FM = ['solo', 'duo', 'trio', 'quad'], SIZE = { solo: 1, duo: 2, trio: 3, quad: 4 }, PL = ['p0', 'p1', 'p2', 'p3'];
+    const res = { below: 0, picked: 0, pickedPlayers: 0, dropped: 0, gained: 0, shuffled: 0, first: null };
+    for (let it = 0; it < iters; it++) {
+      const team = (fam) => PL.slice().sort(() => rnd() - 0.5).slice(0, SIZE[fam]);
+      const ids = Array.from({ length: 24 }, (x, i) => 1000 + i).sort(() => rnd() - 0.5);   // run ids say nothing of the start order
+      const baseEv = [], lastEv = []; let at = T0, k = 0;
+      for (let i = 0, N = ri(7); i < N; i++) { at += (1 + ri(3)) * HR; const fam = FM[ri(4)]; baseEv.push({ at, pl: team(fam), fam, id: ids[k++], depth: 3 + ri(30), fl: rnd() < 0.2 ? SUS : F }); }
+      at += DAY;
+      for (let i = 0, N = 3 + ri(6); i < N; i++) { if (rnd() < 0.3) at += (1 + ri(2)) * HR; const fam = FM[ri(4)]; lastEv.push({ at, pl: team(fam), fam, id: ids[k++], depth: 3 + ri(30), fl: rnd() < 0.2 ? SUS : F }); }
+      const end = at + HR;
+      const play = (opt, shuffle) => {
+        const st = { hist: {} };
+        const feed = (e) => { for (const p of e.pl) m.ratingHistUpsert(st, p, e.fam, 0, e.id, e.depth, e.at, e.fl, e.id); if (e.pl.length > 1) m.elpTeamNote(st, e.id, e.pl, e.fam, 0, e.at); };
+        for (const e of baseEv) { feed(e); m.elpSettleAll(st, 0, e.at + MIN, NONE); }
+        for (const e of lastEv) feed(e);
+        if (shuffle) { const hist = {}; for (const key of Object.keys(st.hist).reverse()) hist[key] = st.hist[key]; st.hist = hist; }
+        return { st, out: m.elpSettleAll(st, 0, end, opt) };
+      };
+      const a = play(NONE), b = play(undefined), c = play(undefined, true);
+      if (b.out.picks.length) { res.picked++; res.pickedPlayers += b.out.picks.length; }
+      res.dropped += b.out.dropped;
+      if (canon([b.st.hist, b.st.elpTeam || null]) !== canon([c.st.hist, c.st.elpTeam || null])) res.shuffled++;
+      for (const p of PL) {
+        const x0 = lpOf(a.st, p), x1 = lpOf(b.st, p);
+        if (x1 > x0) res.gained++;
+        if (x1 < x0) { res.below++; if (!res.first) res.first = { it, p, x0, x1 }; }
+      }
+    }
+    return res;
+  }
+  { const r = worlds(v, 402, 400);
+    T('[18] 400 random worlds (four players, four families, team runs with a frozen level, parked runs, ties, run ids in no order; a short history, then a last batch in one pass): nobody ends the pass below what the job\'s own orders leave him (' + r.below + '); the same state whatever the key order of the file (' + r.shuffled + ' differ)', r.below === 0 && r.shuffled === 0, JSON.stringify(r.first));
+    T('[18] ... and the worlds are not trivial: an order was picked in ' + r.picked + ' of them (' + r.pickedPlayers + ' players), ' + r.gained + ' players ended above the job\'s own orders; the guard gave ' + r.dropped + ' picks up', r.picked >= 20 && r.gained >= 20);
+    let mg = null;
+    try { mg = mutantOf([GUARD]); } catch (e) { bad('[18] no-guard copy: ' + e.message); }
+    if (mg) { const g = worlds(mg, 402, 400); console.log('  note  [18] without the guard, the same 400 worlds: ' + g.below + ' players below the job\'s own orders (teammates of a picked player)'); }
+  }
+  // wiring pins
+  const sa = v.elpSettleAll.toString(), pk = v.elpPickOrders.toString();
+  T('[18] wiring: the picks are taken before anything settles and written into the pass context (every reading of the pass sees them); the gate (not placed when the pass begins, the pass reaches MIN_RUNS, two runs or more); the job\'s own order is tried first and a tie keeps it; the log names a picked pass',
+    sa.indexOf('elpPickOrders(st, pids, seasonNow | 0, nowMs, ctx)') > 0 && sa.indexOf('ctx.order.set(p, orders[i]);') > 0 && sa.indexOf('ctx.order.set(p, orders[i]);') < sa.indexOf('const order = ctx.order.get(p);')
+    && pk.indexOf('if (!own || own.length < 2 || (c0 && c0.placed)) continue;') > 0 && pk.indexOf('if (own.length <= left) continue;') > 0 && pk.indexOf('elpPassOrders(st, p, s, nowMs, left)') > 0
+    && sa.indexOf('elpPassOrders(st, p, seasonNow | 0, nowMs, elpLeftOf(st, p, seasonNow | 0))') > 0 && /let best = 0, bestLp = elpTryOrder\(st, p, s, nowMs, ctx, orders\[0\]\);/.test(pk) && /if \(lp > bestLp\)/.test(pk)
+    && /const own = elpPassOrder\(st, p, s, nowMs\)/.test(v.elpPassOrders.toString()) && /const out = \[own\]/.test(v.elpPassOrders.toString())
+    && /the order of this pass taken among/.test(SRC) && /picked order\(s\) given up/.test(SRC));
+  // mutations
+  T('[18] baseline holds for the mutations below', q402Holds(v) && q403Holds(v) && ownBestHolds(v) && sameAsOwn(v, placedWorld) && untouched(v, q402World) && rowLaterHolds(v) && guardHolds(v));
+  const PICK = ['elpPickOrders(st, pids, seasonNow | 0, nowMs, ctx);', 'new Map();'];
+  T('[18] mutation "the job\'s own order always" (the settle before this rule) turns the Q402 and the Q403 checks red', redBy('[18] no pick', [PICK], q402Holds) && redBy('[18] no pick (Q403)', [PICK], q403Holds));
+  const PLACE = '  return (elpRunParked(r) && !elpRunEnded(r) && i < h.runs.length - 1) ? (h.runs[i + 1][2] || 0) : (r[2] || 0);';
+  T('[18] mutation "a parked run takes its place at its own first tick" turns the Q402 check red (the order the solo-first play had is never tried); the tie of Q403 still holds', redBy('[18] parked at its own tick', [[PLACE, '  return r[2] || 0;']], q402Holds) && !redBy('[18] parked at its own tick (control)', [[PLACE, '  return r[2] || 0;']], q403Holds));
+  const WALK = '      cur.push(order[i][at2[i]++]); walk(); at2[i]--; cur.pop();';
+  T('[18] mutation "runs seen together come one way only" turns the Q403 check red', redBy('[18] one merge', [[WALK, WALK + ' break;']], q403Holds));
+  T('[18] mutation "a tie takes the later order" turns the Q403 check red (the first of the two best)', redBy('[18] tie later', [['if (lp > bestLp) { best = i; bestLp = lp; }', 'if (lp >= bestLp) { best = i; bestLp = lp; }']], q403Holds));
+  T('[18] mutation "the order that leaves the least" without the guard turns the own-order check red (with the guard the pick is given up: checked above)', redBy('[18] worst, no guard', [WORST[0], GUARD], guardHolds) && !redBy('[18] worst, guarded (control)', WORST, guardHolds));
+  T('[18] mutation "the trial settles the runs of the state itself" turns the nothing-written check red', redBy('[18] trial on the originals', [[' return { fam: o.fam, h: hT, r: hT.runs[o.h.runs.indexOf(o.r)] }; });', ' return { fam: o.fam, h: o.h, r: o.r }; });']], (m) => untouched(m, q402World)));
+  T('[18] mutation "the picks are not written into the pass context" turns the Q402 check red', redBy('[18] picks not applied', [['    ctx.order.set(p, orders[i]);\n', '']], q402Holds));
+  T('[18] mutation "the row\'s skill goes when a run seen later is settled before" (the line before the fix) turns the row check red', redBy('[18] row over a later run', [['    if (j === ix || (ix >= 0 && j > ix) || fs0 > at) continue;', '    if (j === ix || (ix >= 0 ? j > ix : fs0 > at)) continue;']], rowLaterHolds));
+}
+
 if (failN) { console.log('FAIL (endless-rating) ' + failN); process.exit(1); } else console.log('ALL PASS (endless-rating)');
