@@ -1,6 +1,6 @@
 'use strict';
 // O717 placement matches of a season (companion mvp/KNIFE_O717_SEASON_PLACEMENT_PLAN.md of the client repo, sections 3.1-3.3, 7):
-//   from season 1 on every player's first PLACEMENT_TARGET (5) settled matches of a season are placement matches -- the promotion
+//   from season 1 on every player's first PLACEMENT_TARGET (3 since 2026-11-18) settled matches of a season are placement matches -- the promotion
 //   series as ever, NO relegation series, the points held under the master line (PLACE_CAP 5999) -- counted on his row's receipt
 //   ring (points-plan.js placementOf; validate.js placementMode). The preseason (season 0) keeps its rules.
 //   [1] the season gate: placementMode never places in season 0; season 1 places a player whose ring holds fewer than 5 settled
@@ -100,26 +100,29 @@ function seedErrors(M) {
 }
 function countErrors(M) {
   const errs = [];
-  const P = (flags, t) => M.placementOf(ringDet(M, flags), t);
+  // the counting cases name their target (5: the cases as first written); the last two read the default (PLACEMENT_TARGET)
+  const P = (flags, t) => M.placementOf(ringDet(M, flags), t == null ? 5 : t), TG = M.PLACEMENT_TARGET;
   const c = [
     [P(SETTLED(4)), false, 4], [P(SETTLED(5)), true, 5], [P([F.VOID, F.LEAVE, 0, 0, 0, F.SEEDED]), false, 4],
     [P([0, 0, 0, F.SEEDED | F.LEAVE]), false, 3], [P([F.VOID, F.VOID, F.VOID, F.VOID, 0, 0, 0, 0]), true, null],
     [P([F.VOID, F.VOID, F.VOID, F.VOID, 0, 0, 0, F.SEEDED]), false, 4], [M.placementOf([]), true, null], [M.placementOf(null), true, null],
     [P(SETTLED(3), 3), true, 3],
+    [M.placementOf(ringDet(M, SETTLED(TG - 1))), false, TG - 1], [M.placementOf(ringDet(M, SETTLED(TG))), true, TG],
   ];
   c.forEach(([r, placed, n], i) => { if (r.placed !== placed || r.n !== n) errs.push([i, r]); });
   return errs;
 }
 
 console.log('=== O717 placement matches of a season (points-plan.js settleLine mode / placementOf, validate.js placementMode) ===');
-T('PLACEMENT_TARGET 5 and PLACE_CAP 5999 (one under the master line), exported by both the module and the job',
-  PP.PLACEMENT_TARGET === 5 && PP.PLACE_CAP === PP.LP_SEG[5].min - 1 && PP.PLACE_CAP === 5999 && v.PLACEMENT_TARGET === 5 && v.placementOf === PP.placementOf);
+const TG = PP.PLACEMENT_TARGET;   // the placement length (3 since 2026-11-18, was 5): the cases below are built from it
+T('PLACEMENT_TARGET 3 and PLACE_CAP 5999 (one under the master line), exported by both the module and the job',
+  PP.PLACEMENT_TARGET === 3 && PP.PLACE_CAP === PP.LP_SEG[5].min - 1 && PP.PLACE_CAP === 5999 && v.PLACEMENT_TARGET === 3 && v.placementOf === PP.placementOf);
 // [1]
 {
-  const m0 = v.placementMode(0, false, ringDet(PP, SETTLED(2))), m1 = v.placementMode(1, false, ringDet(PP, SETTLED(2))), m2 = v.placementMode(2, false, ringDet(PP, SETTLED(4)));
-  const done = v.placementMode(1, false, ringDet(PP, SETTLED(5))), seeded = v.placementMode(1, true, null);
-  T('[1] season 0 never places (the preseason keeps its rules); season 1 / 2 place a ring of 2 / 4 settled; 5 settled is placed; the seed settle is seeded, not placing',
-    !m0.placing && m0.n === 2 && m1.placing && m1.n === 2 && m2.placing && m2.n === 4 && !done.placing && seeded.seeded && !seeded.placing && seeded.n === 0, J([m0, m1, m2, done, seeded]));
+  const m0 = v.placementMode(0, false, ringDet(PP, SETTLED(2))), m1 = v.placementMode(1, false, ringDet(PP, SETTLED(2))), m2 = v.placementMode(2, false, ringDet(PP, SETTLED(TG - 1)));
+  const done = v.placementMode(1, false, ringDet(PP, SETTLED(TG))), seeded = v.placementMode(1, true, null);
+  T('[1] season 0 never places (the preseason keeps its rules); season 1 / 2 place a ring of 2 / ' + (TG - 1) + ' settled; ' + TG + ' settled is placed; the seed settle is seeded, not placing',
+    !m0.placing && m0.n === 2 && m1.placing && m1.n === 2 && m2.placing && m2.n === TG - 1 && !done.placing && seeded.seeded && !seeded.placing && seeded.n === 0, J([m0, m1, m2, done, seeded]));
 }
 // [2]..[6]
 let e = relegErrors(PP);
@@ -168,14 +171,14 @@ const C = H.SID(7171), D = H.SID(7172), A = H.SID(7173), B = H.SID(7174), E = H.
 const X1 = H.SID(7176), X2 = H.SID(7177), X3 = H.SID(7178), Y1 = H.SID(7179), Y2 = H.SID(7180), Y3 = H.SID(7181);
 const row = (M, score, n) => ({ score, details: ringDet(M, SETTLED(n)) });
 // one 4-seat ranked FFA (mt 2), fair (default ratings: the plain lpDelta): seat 0 first .. seat 3 last
-//   C 5900 placing (2 settled) 1st, D 5900 placed (5) 2nd, A 2050 placing (3) 3rd, B 2050 placed (5) 4th
+//   C 5900 placing (2 settled) 1st, D 5900 placed (5) 2nd, A 2050 placing (1 settled) 3rd, B 2050 placed (5) 4th
 const m1 = match(2, 0x7171, [C, D, A, B]);
-const rowsOf = (M, board) => { const r = { [C]: row(M, 5900, 2), [D]: row(M, 5900, 5), [A]: row(M, 2050, 3), [B]: row(M, 2050, 5) }; return board === 's1' ? { points: {}, s1: r } : { points: r, s1: {} }; };
+const rowsOf = (M, board) => { const r = { [C]: row(M, 5900, 2), [D]: row(M, 5900, 5), [A]: row(M, 2050, 1), [B]: row(M, 2050, 5) }; return board === 's1' ? { points: {}, s1: r } : { points: r, s1: {} }; };
 const WANT_S1 = { C: 5999, D: 6150, A: 2046, B: 1850 }, WANT_PRE = { C: 6150, D: 6150, A: 1850, B: 1850 };
 const got = (r, board) => ({ C: lastPts(r, board, C), D: lastPts(r, board, D), A: lastPts(r, board, A), B: lastPts(r, board, B) });
-// E twice in one run: 2050 with 4 settled -> the 5th placement match (natural -17: 2033), then a normal one in the band (forced 1850)
+// E twice in one run: 2050 with 2 settled -> the 3rd (last) placement match (natural -17: 2033), then a normal one in the band (forced 1850)
 const mX = match(2, 0x7172, [X1, X2, X3, E]), mY = match(2, 0x7173, [Y1, Y2, Y3, E]);
-const rowsE = (M) => ({ points: {}, s1: { [E]: row(M, 2050, 4) } });
+const rowsE = (M) => ({ points: {}, s1: { [E]: row(M, 2050, 2) } });
 const E_STEPS = [[0, mX.S, S1], [5 * MIN, mX.S.concat(mY.S), S1], [6 * MIN, mX.all.concat(mY.all), S1]];
 // the newest receipt on the row the runs wrote for sid (season 1 board), or null
 function receiptOf(r, sid) { for (const rr of r.rs) for (const p of H.postsOf(rr, S1B, sid)) return PP.lpDetailsOf(p.details).ring[0]; return null; }
@@ -192,12 +195,12 @@ function jobCases(script, M) {
   T('[8] season 1: placing C (diamond 5900, 1st) held at 5999, placed D promoted to 6150, placing A (gold 2050, 3rd) natural 2046, placed B forced to 1850',
     J(j.s1) === J(WANT_S1), J(j.s1));
   const plog = (sid) => v.pid(String(sid)).slice(0, 8);
-  T('[8] the settle log names the placement matches: C [PLACEMENT 3/5, held under master], A [PLACEMENT 4/5], D / B none',
-    new RegExp(plog(C) + '[^\\n]*\\[PLACEMENT 3/5, held under master\\]').test(j.r1.out) && new RegExp(plog(A) + '[^\\n]*\\[PLACEMENT 4/5\\]').test(j.r1.out)
+  T('[8] the settle log names the placement matches: C [PLACEMENT 3/3, held under master], A [PLACEMENT 2/3], D / B none',
+    new RegExp(plog(C) + '[^\\n]*\\[PLACEMENT 3/3, held under master\\]').test(j.r1.out) && new RegExp(plog(A) + '[^\\n]*\\[PLACEMENT 2/3\\]').test(j.r1.out)
     && !new RegExp(plog(D) + '[^\\n]*\\[PLACEMENT').test(j.r1.out) && !new RegExp(plog(B) + '[^\\n]*\\[PLACEMENT').test(j.r1.out), j.r1.out.split('\n').filter((l) => / settle /.test(l)).join(' | ').slice(0, 900));
   T('[8] the same match in the preseason settles by the old rules: C / D promoted to 6150, A / B forced to 1850', J(j.pre) === J(WANT_PRE), J(j.pre));
-  T('[8] E\'s two matches settled in one run (one write, the third run): the 5th placement match natural (2033), then a normal one in the band forced down: 1850 (the first match\'s receipt counted)',
-    j.e === 1850 && J(j.eRun) === '[0,0,1]' && new RegExp(v.pid(String(E)).slice(0, 8) + '[^\\n]*\\[PLACEMENT 5/5\\]').test(j.r2.out), String(j.e) + ' writes per run ' + J(j.eRun));
+  T('[8] E\'s two matches settled in one run (one write, the third run): the 3rd (last) placement match natural (2033), then a normal one in the band forced down: 1850 (the first match\'s receipt counted)',
+    j.e === 1850 && J(j.eRun) === '[0,0,1]' && new RegExp(v.pid(String(E)).slice(0, 8) + '[^\\n]*\\[PLACEMENT 3/3\\]').test(j.r2.out), String(j.e) + ' writes per run ' + J(j.eRun));
   // the receipt of C's capped placement match: no SERIES (the cap took the promotion back: nothing landed; his client reads
   //   clamped && !capped the same way), not LEAVE / VOID (it counts), delta 99. D, placed and promoted in the same match: SERIES.
   const cp = receiptOf(j.r1, C), dp = receiptOf(j.r1, D);

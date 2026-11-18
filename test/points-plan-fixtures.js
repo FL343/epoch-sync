@@ -69,8 +69,8 @@ T('[3] the settle composes its plan and its points line through the module (matc
       && pl.some((c) => PP.isTeamMt(c.in.mt)) && outs.some((x) => x.p.lp > PP.PLACE_CAP && x.o.capped && x.o.d === 0)
       && doc.cases.some((c) => c.kind === 'match' && !c.in.parts.some((p) => p.placing) && c.in.parts.some((p) => p.lp === 5900 && c.out[p.id].nv > PP.PLACE_CAP)));
     const pc = doc.cases.filter((c) => c.kind === 'placement').map((c) => c.out);
-    T('[4] placementOf (O717): placing, placed at 5, VOID / LEAVE not counted, a full ring without its seed entry, no ring, a target parameter',
-      pc.some((o) => !o.placed && o.n === 3) && pc.some((o) => o.placed && o.n === 5) && pc.some((o) => o.n === 4 && o.seen === 6)
+    T('[4] placementOf (O717; the target is ' + PP.PLACEMENT_TARGET + '): placing one under the target, placed at it and past it, VOID / LEAVE not counted, a full ring without its seed entry, no ring, a target parameter',
+      PP.PLACEMENT_TARGET === 3 && pc.some((o) => !o.placed && o.n === 2) && pc.some((o) => o.placed && o.n === 3) && pc.some((o) => o.placed && o.n === 5) && pc.some((o) => !o.placed && o.n === 2 && o.seen === 4)
       && pc.some((o) => o.placed && o.n === null && o.ring) && pc.some((o) => o.placed && !o.ring) && doc.cases.some((c) => c.kind === 'placement' && (c.in.target | 0) > 0));
   }
   // O728: the endless cases call the endless functions only (the replay is PP[fn]), each of them, and the settle shapes the rules name

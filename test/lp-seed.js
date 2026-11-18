@@ -24,16 +24,17 @@ const eq = (label, got, exp) => {
 const t = (label, cond) => cond ? ok(label) : bad(label);
 
 console.log('=== seedLp formula ===');
-// O786 (2026-11-09): BASE 1000 -> 1250 (an average player after the 15 unlock matches seeds silver, not gold; test/seed-calibration.js)
-eq('constants', LP_SEED, { BASE: 1250, SLOPE: 4, CAP: 3200 });
+// O786 (2026-11-09): BASE 1000 -> 1250 (an average player after the 15 unlock matches seeds silver, not gold); 2026-11-18: 1250 -> 1050 with the
+//   unlock at 5 quick matches (the same spread for a player who goes to ranked as soon as it opens; test/seed-calibration.js)
+eq('constants', LP_SEED, { BASE: 1050, SLOPE: 4, CAP: 3200 });
 eq('new player (display 1000) -> 0', seedLp(1000), 0);
 eq('below base (weak, 900) -> clamp 0', seedLp(900), 0);
 eq('display 0 (no skill entry path) -> 0', seedLp(0), 0);
-eq('at the base 1250 -> 0', seedLp(1250), 0);
-eq('average-ish 1450 -> 800 (silver)', seedLp(1450), 800);
-eq('good 1750 -> 2000 (gold floor)', seedLp(1750), 2000);
-eq('strong 1990 -> 2960 (gold top)', seedLp(1990), 2960);
-eq('elite 2050 -> cap 3200 (platinum)', seedLp(2050), 3200);
+eq('at the base 1050 -> 0', seedLp(1050), 0);
+eq('average-ish 1250 -> 800 (silver)', seedLp(1250), 800);
+eq('good 1550 -> 2000 (gold floor)', seedLp(1550), 2000);
+eq('strong 1790 -> 2960 (gold top)', seedLp(1790), 2960);
+eq('elite 1850 -> cap 3200 (platinum)', seedLp(1850), 3200);
 eq('super elite 3000 -> still cap 3200', seedLp(3000), 3200);
 eq('non-numeric -> 0 (|0 coercion)', seedLp(undefined), 0);
 

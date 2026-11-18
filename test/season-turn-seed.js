@@ -4,7 +4,7 @@
 //   [1] a previous-season finish drops one tier, 60 under its line: gold 2500 -> 1940, silver 1999 -> 540, grandmaster 8500 -> 5940
 //       (reveal at most diamond), bronze 300 kept
 //   [2] a player with no previous-season row (new to ranked) is measured with the same ruler: his display seed soft-resets
-//       (display 1650 -> seed 1600 -> 540), not the plain seed 1600
+//       (display 1450 -> seed 1600 -> 540; BASE 1050 since 2026-11-18), not the plain seed 1600
 //   [3] the same new player in the preseason keeps the plain seed (1600): the one-ruler branch is a season 1+ rule
 //   [4] every seed landing past bronze sits in a promotion band (the first match of the season is a promotion match)
 const path = require('path');
@@ -48,8 +48,8 @@ const displayLine = (out, sid) => (new RegExp('seed [^\\n]*' + plog(sid) + ' fir
 
 console.log('=== O786 the first settle of season 1 seeds with the new rules (real job, stubbed Steam) ===');
 const G = H.SID(7861), S = H.SID(7862), GM = H.SID(7863), N = H.SID(7864), B = H.SID(7865);
-// N: display 1650 = (mu - 3 sigma) * 40 + 1000 with sigma 2 -> mu 22.25 (the seed reads his stored rating)
-const files = { SKILL_FILE: { [v.pid(N)]: { mu: 22.25, sigma: 2 } } };
+// N: display 1450 = (mu - 3 sigma) * 40 + 1000 with sigma 2 -> mu 17.25 (the seed reads his stored rating)
+const files = { SKILL_FILE: { [v.pid(N)]: { mu: 17.25, sigma: 2 } } };
 {
   const m = match(2, 0x7861, [G, S, GM, N]);
   const rows = { points: { [G]: { score: 2500 }, [S]: { score: 1999 }, [GM]: { score: 8500 } }, s1: {} };
@@ -58,7 +58,7 @@ const files = { SKILL_FILE: { [v.pid(N)]: { mu: 22.25, sigma: 2 } } };
   T('[1] gold 2500 -> 1940, silver 1999 -> 540, grandmaster 8500 -> 5940 (one tier down, 60 under the line; reveal at most diamond)',
     J(resetLine(r.out, G)) === '[2500,1940]' && J(resetLine(r.out, S)) === '[1999,540]' && J(resetLine(r.out, GM)) === '[8500,5940]',
     J([resetLine(r.out, G), resetLine(r.out, S), resetLine(r.out, GM)]));
-  T('[2] new to ranked in season 1: display 1650 -> 540 (his seed 1600 soft-reset: one ruler with the players who played)', J(displayLine(r.out, N)) === '[1650,540]', J(displayLine(r.out, N)) + ' ' + r.out.slice(-600));
+  T('[2] new to ranked in season 1: display 1450 -> 540 (his seed 1600 soft-reset: one ruler with the players who played)', J(displayLine(r.out, N)) === '[1450,540]', J(displayLine(r.out, N)) + ' ' + r.out.slice(-600));
   T('[4] every landing past bronze is in a promotion band', [1940, 540, 5940].every((x) => PP.boundaryOf(x) === 'promotion'));
 }
 {
@@ -69,7 +69,7 @@ const files = { SKILL_FILE: { [v.pid(N)]: { mu: 22.25, sigma: 2 } } };
 {
   const m = match(2, 0x7863, [B, N]);
   const r = run([[0, m.S, PRE], [5 * MIN, m.all, PRE]], { points: { [B]: { score: 300 } }, s1: {} }, files);
-  T('[3] the same new player in the preseason keeps the plain seed: display 1650 -> 1600', r.okAll && J(displayLine(r.out, N)) === '[1650,1600]', J(displayLine(r.out, N)) + ' ' + r.out.slice(-600));
+  T('[3] the same new player in the preseason keeps the plain seed: display 1450 -> 1600', r.okAll && J(displayLine(r.out, N)) === '[1450,1600]', J(displayLine(r.out, N)) + ' ' + r.out.slice(-600));
 }
 
 console.log(failN ? ('season-turn-seed: ' + failN + ' FAIL') : 'season-turn-seed: all ok');

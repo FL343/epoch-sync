@@ -101,15 +101,17 @@ const CASES = [
     parts: [PL('a0', 0, 1500, 1, 1950), PL('a1', 1, 1500, 2, 1920), PL('b2', 2, 1500, 3, 2050), P('b3', 3, 1500, 4, 2060)], team: { scores: [300, 250, 200, 180], leaverSeats: [], winTeam: 0 } },
   { name: 'placement: already over the cap (out of reach from a season turn): a win holds his points, a loss in the band is natural', kind: 'match', mt: 2, parts: [PL('a', 0, 1300, 1, 6100), PL('b', 1, 1300, 2, 6100)] },
   // ---- O717 placementOf: the settled matches of a season on a row's receipt ring ----
-  { name: 'placementOf: three entries, the first seeded (3, placing)', kind: 'placement', det: RING(0, 0, 16), target: 0 },
-  { name: 'placementOf: five entries (placed)', kind: 'placement', det: RING(0, 0, 0, 0, 16), target: 0 },
-  { name: 'placementOf: a void and a leaver fine do not count (6 entries, 4)', kind: 'placement', det: RING(32, 4, 0, 0, 0, 16), target: 0 },
-  { name: 'placementOf: the first match a leave (SEEDED + LEAVE does not count)', kind: 'placement', det: RING(0, 0, 0, 16 | 4), target: 0 },
+  //   (PLACEMENT_TARGET 3 since 2026-11-18, was 5: the cases below sit around 3; the parameter case keeps a 5)
+  { name: 'placementOf: two entries, the first seeded (2, placing)', kind: 'placement', det: RING(0, 16), target: 0 },
+  { name: 'placementOf: three entries (placed at the target)', kind: 'placement', det: RING(0, 0, 16), target: 0 },
+  { name: 'placementOf: five entries (placed, past the target)', kind: 'placement', det: RING(0, 0, 0, 0, 16), target: 0 },
+  { name: 'placementOf: a void and a leaver fine do not count (4 entries, 2: placing)', kind: 'placement', det: RING(32, 4, 0, 16), target: 0 },
+  { name: 'placementOf: the first match a leave (SEEDED + LEAVE does not count: 2, placing)', kind: 'placement', det: RING(0, 0, 16 | 4), target: 0 },
   { name: 'placementOf: a full ring whose seed entry was pushed out (placed, n null)', kind: 'placement', det: RING(32, 32, 32, 32, 0, 0, 0, 0), target: 0 },
-  { name: 'placementOf: a full ring still holding the seed entry (4 settled, placing)', kind: 'placement', det: RING(32, 32, 32, 32, 0, 0, 0, 16), target: 0 },
+  { name: 'placementOf: a full ring still holding the seed entry (2 settled, placing)', kind: 'placement', det: RING(32, 32, 32, 32, 32, 32, 0, 16), target: 0 },
   { name: 'placementOf: a row with no ring (before O480: placed, ring false)', kind: 'placement', det: [], target: 0 },
   { name: 'placementOf: a row with the reveal slot only (placed, ring false)', kind: 'placement', det: [0xC5, 1, 2, 3, 4, 5], target: 0 },
-  { name: 'placementOf: the target as a parameter (3 of 3: placed)', kind: 'placement', det: RING(0, 0, 16), target: 3 },
+  { name: 'placementOf: the target as a parameter (5: four settled are still placing)', kind: 'placement', det: RING(0, 0, 0, 16), target: 5 },
   { name: 'placementOf: the seed match only (1)', kind: 'placement', det: RING(16), target: 0 },
   // ---- the board bounds ----
   { name: 'clamp: the top of the board (9999)', kind: 'match', mt: 2, parts: [P('a', 0, 2600, 1, 9990), P('b', 1, 2600, 2, 9500)] },

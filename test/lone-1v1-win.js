@@ -335,13 +335,13 @@ console.log('=== a ranked 1V1 only its winner wrote: counted on the silent seat,
   const rc = pay1(O[7], 0x8415, atGate([M], M, O[0]));
   T('[2c] a winner with no points this season: seeded as on his first settle, no series clamp (' + seed + ' -> ' + want + ')', allOk(rc, 3) && JSON.stringify(ptsIn(rc, O[7])) === JSON.stringify([want]),
     JSON.stringify(ptsIn(rc, O[7])));
-  // a seed 48 under the gold line (display 1738 -> 1952; O786 BASE 1250, the rating moved up by the same 250): a seeded first
+  // a seed 48 under the gold line (display 1538 -> 1952; BASE 1050 since 2026-11-18 -- the rating moves with the base, as it did for O786): a seeded first
   //   settle skips the series clamp (1996, not 2150)
   LP0 = { [O[9]]: null };
-  const sk9 = { [v.pid(O[9])]: { mu: 24.45, sigma: 2 }, [v.pid(M)]: { mu: 24.45, sigma: 2 } };
+  const sk9 = { [v.pid(O[9])]: { mu: 19.45, sigma: 2 }, [v.pid(M)]: { mu: 19.45, sigma: 2 } };
   const rc2 = pay1(O[9], 0x8418, Object.assign(atGate([M], M, O[0]), { SKILL_FILE: sk9 }));
   T('[2c] ... a seed 48 under the gold line stays a plain win on that first settle (1952 -> 1996, the clamp would give 2150)',
-    allOk(rc2, 3) && v.seedLp(TS.displayRating(24.45, 2)) === 1952 && JSON.stringify(ptsIn(rc2, O[9])) === '[1996]', JSON.stringify(ptsIn(rc2, O[9])));
+    allOk(rc2, 3) && v.seedLp(TS.displayRating(19.45, 2)) === 1952 && JSON.stringify(ptsIn(rc2, O[9])) === '[1996]', JSON.stringify(ptsIn(rc2, O[9])));
   LP0 = {};
   // a strong winner against a weak silent seat: the mismatch compression of a normal settle (not the plain 38)
   const skill = { [v.pid(O[8])]: { mu: 45, sigma: 2 }, [v.pid(M)]: { mu: 10, sigma: 2 } };

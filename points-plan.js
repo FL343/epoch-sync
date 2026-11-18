@@ -23,7 +23,7 @@
   else if (root) root.POINTS_PLAN = api;
 })(typeof module === 'object' && !!module && typeof exports === 'object' && this === exports, typeof window !== 'undefined' ? window : null, function () {
   const RULES_VER = 2;
-  const FIXTURES_HASH = 'b8fa1c809cd9a2d1';
+  const FIXTURES_HASH = '46655049f5fe7392';
   // the knobs configure() can move (production runs these defaults)
   const DEFAULTS = Object.freeze({ RS_THRESHOLD: 400, RS_UPSET_BONUS: 1.0, RS_STRONG_UPSET_LOSS: 0.5, RS_SOLO_VS_TRIO: 0.6, RS_TRIO_WIN: 0.7, LEAVER_LP_PENALTY: 100 });
   const LP_MAX = 9999;
@@ -61,7 +61,12 @@
   //   simulation (real trueskill.js) seeds weak / below average / average / above average / top players at a median of
   //   700 / 1300 / 1620 / 1890 / 2300 (average 88 % silver, top 76 % gold); playing many quick matches before ranked still
   //   seeds higher (sigma keeps shrinking), by at most about one tier.
-  const LP_SEED = { BASE: 1250, SLOPE: 4, CAP: 3200 };
+  // 2026-11-18 (user call; the quick matches that unlock ranked go from 15 to 5 -- a client-side gate): BASE 1250 -> 1050. After
+  //   only 5 quick matches sigma is still ~3.8 and the display about 300 lower, so 1250 would seed 34 % bronze / 56 % silver /
+  //   11 % gold with 15 % at 0 points. 1050 gives back the spread chosen on 2026-11-09 for a player who goes to ranked as soon
+  //   as it unlocks (10 % / 49 % / 35 % / 6 % platinum, 4 % at 0; medians by skill fifth 804 / 1396 / 1812 / 2116 / 2596). Known
+  //   and accepted: a player who plays 15 quick matches first seeds about a tier higher (30 % platinum), still under CAP.
+  const LP_SEED = { BASE: 1050, SLOPE: 4, CAP: 3200 };
   function seedLp(display) { return Math.max(0, Math.min(LP_SEED.CAP, Math.round(((display | 0) - LP_SEED.BASE) * LP_SEED.SLOPE))); }
   // Soft-reset landing per tier index: null = keep in place, else land at the target (min() guards against a mis-edited
   // table ever RAISING points).
@@ -487,10 +492,13 @@
   //   matches -> placed, n null; a row with no ring at all (written before O480, test boards only) -> placed, n null, ring false.
   //   The client reads everyone's row through this (the "calibrating" state of others, O782) and its own at the read-back, so
   //   the job and both ends count one way. No new persistent field: the ring was there already (architecture decision 9).
-  //   Known deviations (architecture decision 10's side: early, never a loss): RECEIPT_CAP - PLACEMENT_TARGET + 1 (4) or more
-  //   VOID / LEAVE entries among the first RECEIPT_CAP (8) of a season count a player placed before five settled matches (his
-  //   tier shows early, a relegation series can come early); a fine refunded later (the refund clears LEAVE) counts as a match.
-  const PLACEMENT_TARGET = 5;
+  //   Known deviations (architecture decision 10's side: early, never a loss): RECEIPT_CAP - PLACEMENT_TARGET + 1 (6) or more
+  //   VOID / LEAVE entries among the first RECEIPT_CAP (8) of a season count a player placed before PLACEMENT_TARGET settled
+  //   matches (his tier shows early, a relegation series can come early); a fine refunded later (the refund clears LEAVE)
+  //   counts as a match.
+  //   2026-11-18 (user call): 5 -> 3 matches. The ONE number of the placement length: the job and the client (its copy of this
+  //   file; the "n / 3" on screen is drawn from it) read it here, so changing it again is this line on both sides.
+  const PLACEMENT_TARGET = 3;
   const PLACE_CAP = LP_SEG[5].min - 1;   // 5999: one under the master line (the reveal of a placement is at most diamond)
   function placementOf(det, target) {
     const t = (target | 0) > 0 ? (target | 0) : PLACEMENT_TARGET;
