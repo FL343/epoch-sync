@@ -1752,6 +1752,117 @@ console.log('-- [18] Q402 / Q403: around the placement line, the order his play 
     eq('[18] review round 1 -- a teammate whose copy of a team run settles in a later pass: the level the run froze under the job\'s own orders (1100: target 12, a pass, +53, 1742 in the end)', [b.p2, b.lp], [{ T: 12, pass: true, d: 53, teamH: 1100 }, 1742]);
     T('[18] ... the picks that would freeze that run higher (1550: target 16, a miss) are given up: the late teammate settles exactly as under the job\'s own orders (the guard gave ' + a.dropped + ' pick(s) up over the world\'s ' + LATE.passes.length + ' passes)', lateHolds(v) && canon([a.p2, a.lp]) === canon([b.p2, b.lp]) && a.dropped >= 1);
   }
+  // the local review (2026-11-19): the branch "one side froze a team level, the other froze none" was pinned by nothing -- with it
+  //   turned off every check here stayed green. A level that turns into NO level cannot be compared by its line (there is none): the
+  //   run is then read on the silver line, which is HIGHER than the line of a low level. The stored world (the local review's
+  //   generator fuzz-late.js, world 2828, --late=0.3, its first four passes as that tool feeds the lane; found under three placement
+  //   runs): in pass 1 the picks of p2 and p0 would settle duo run 164747 before either member holds a skill -- it freezes with no
+  //   level (target 12) where the job's own orders freeze 200 (target 4); p1's copy of the run settles one pass later. The guard
+  //   gives the picks up whenever the two sides differ there.
+  const ONE = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'elp-onesided-2828.json'), 'utf8')), ONE_RUN = 164747;
+  const onePlay = (m, opt) => {
+    const st = { hist: {} }, got = { picks: 0, dropped: 0, p1: null };
+    ONE.passes.forEach((at, j) => {
+      for (const o of ONE.ops[j]) {
+        if (o[0] === 'up') m.ratingHistUpsert(st, o[1], o[2], 0, o[3], o[4], at, o[5], o[3]);
+        else if (o[0] === 'team') m.elpTeamNote(st, o[1], o[2], o[3], 0, at);
+        else { const h = st.hist[m.ratingHistKey(o[1], o[2], 0)], r = h && Array.isArray(h.runs) ? h.runs.find((x) => (x[0] >>> 0) === (o[3] >>> 0)) : null; if (r && !((r[7] | 0) & 1)) r[7] = 1; }   // the run ended, seen from a teammate's final segment
+      }
+      const out = m.elpSettleAll(st, 0, at, opt);
+      for (const x of out) if (x.k === 'p1|duo|0' && (x.runId >>> 0) === ONE_RUN) got.p1 = { T: x.T, pass: x.pass, d: x.d, teamH: x.teamH };
+      got.picks += out.picks.length; got.dropped += out.dropped;
+    });
+    return got;
+  };
+  const oneHolds = (m) => { const a = onePlay(m, undefined), b = onePlay(m, NONE); return !!a.p1 && !!b.p1 && a.p1.T <= b.p1.T && canon(a.p1) === canon(b.p1); };
+  { const a = onePlay(v, undefined), b = onePlay(v, NONE);
+    eq('[18] the local review -- a team run that freezes a LOW level under the job\'s own orders (200: the late teammate reads target 4, a pass, +119)', b.p1, { T: 4, pass: true, d: 119, teamH: 200 });
+    T('[18] ... and NO level under the picks (the silver line: target 12): the picks are given up (' + a.dropped + '), the late teammate settles exactly as under the job\'s own orders', oneHolds(v) && a.dropped >= 1 && a.picks === 0);
+  }
+  // random worlds ACROSS passes (the local review's oracle): two to five players, team runs whose members' copies arrive in the same
+  //   pass, one or several passes later, a day or two later, or never; parked runs; passes half an hour to eight hours apart. At every
+  //   pass that applied picks the world forks: that pass in the job's own orders (A) or as the job settles it (B), every later pass in
+  //   the job's own orders in both. H1 = a team run settled in a LATER pass reads a higher target in B (the late-teammate class);
+  //   H4 = a picked player ends the fork pass lower in B; H3 = a pass whose picks were given up differs from the job's own settle.
+  function lateWorlds(m, seed0, iters, plate, stopAtH1) {
+    const SZ = { solo: 1, duo: 2, trio: 3, quad: 4 }, clone = (o) => JSON.parse(JSON.stringify(o));
+    const res = { H1: 0, H3: 0, H4: 0, forks: 0, dropped: 0, lower: 0, worlds: 0, first: null };
+    for (let it = 0; it < iters; it++) {
+      let s = ((seed0 + it) * 2654435761 + 12345) >>> 0;
+      const rnd = () => { s = (Math.imul(s, 1103515245) + 12345) >>> 0; return s / 4294967296; }, ri = (n) => Math.floor(rnd() * n);
+      const NP = 2 + ri(4), PL = Array.from({ length: NP }, (x, i) => 'p' + i), busy = {}; for (const p of PL) busy[p] = T0;
+      const runs = []; let clock = T0; const idBase = 1000 + ri(1e6);
+      for (let i = 0, NR = 8 + ri(18); i < NR; i++) {
+        clock += ri(30) * MIN;
+        const fams = ['solo', 'duo', 'duo', 'trio', 'trio', 'quad'].filter((f) => SZ[f] <= NP), fam = fams[ri(fams.length)];
+        const roster = PL.slice().sort(() => rnd() - 0.5).slice(0, SZ[fam]);
+        const start = Math.max(clock, ...roster.map((p) => busy[p]));
+        const dur = (8 + ri(40)) * MIN, kind = rnd(), D = 3 + ri(35);
+        const segs = [{ t: start, depth: 1 + ri(4), fl: 0 }];
+        if (kind < 0.72) { if (rnd() < 0.5) segs.push({ t: start + Math.floor(dur / 2), depth: Math.max(2, D >> 1), fl: 0 }); segs.push({ t: start + dur, depth: D, fl: F }); }
+        else if (kind < 0.88) segs.push({ t: start + dur, depth: D, fl: SUS });   // parked: a newer run of the family gives it up
+        else segs.push({ t: start + Math.floor(dur / 2), depth: D, fl: 0 });       // never ended: settles idle
+        for (const p of roster) busy[p] = start + dur + MIN;
+        const delay = {};
+        for (const p of roster) { const r = rnd(); delay[p] = (fam === 'solo' || r >= plate) ? { x: 0 } : (r < plate * 0.3 ? { x: 1 } : r < plate * 0.55 ? { x: 2 + ri(6) } : r < plate * 0.8 ? { ms: (1 + ri(2)) * DAY + ri(6) * HR } : { never: 1 }); }
+        const from = {}; for (const p of roster) from[p] = (delay[p].x === 0 || rnd() < 0.6) ? 0 : ri(segs.length);
+        runs.push({ id: (idBase + i * 7919) >>> 0, fam, roster, segs, delay, from });
+      }
+      const last = Math.max(...runs.map((r) => r.segs[r.segs.length - 1].t)), passes = []; let t = T0 + 20 * MIN;
+      while (t < last + 4 * DAY) { passes.push(t); t += rnd() < 0.3 ? (1 + ri(8)) * HR : 30 * MIN; if (t > last + DAY) t += 6 * HR; }
+      const idxAt = (ms) => { let lo = 0; while (lo < passes.length && passes[lo] < ms) lo++; return lo; };
+      const del = [], byPass = {};
+      for (const r of runs) r.segs.forEach((g, si) => { for (const p of r.roster) { const dl = si < r.from[p] ? { x: 0 } : r.delay[p]; if (dl.never) continue; const j = dl.ms ? idxAt(g.t + dl.ms) : idxAt(g.t) + (dl.x | 0); if (j < passes.length) del.push({ j, r, si, p }); } });
+      del.sort((a, b) => a.j - b.j || a.r.segs[a.si].t - b.r.segs[b.si].t || a.r.id - b.r.id || (a.p < b.p ? -1 : 1));
+      for (const d of del) (byPass[d.j] = byPass[d.j] || []).push(d);
+      // a pass fed as the lane feeds it: per segment the new writers upserted at the pass tick, the roster noted, a final marks the run
+      //   ended in the copy of a member who did not write that segment himself
+      const feed = (st, j, wrote) => {
+        const groups = new Map();
+        for (const d of byPass[j] || []) { const k = d.r.id + ':' + d.si; if (!groups.has(k)) groups.set(k, { r: d.r, si: d.si, ps: [] }); groups.get(k).ps.push(d.p); }
+        for (const g of groups.values()) {
+          const seg = g.r.segs[g.si], key = g.r.id + ':' + g.si, ws = wrote.get(key) || new Set(); wrote.set(key, ws);
+          for (const p of g.ps) { m.ratingHistUpsert(st, p, g.r.fam, 0, g.r.id, seg.depth, passes[j], seg.fl, g.r.id); ws.add(p); }
+          if (g.r.roster.length > 1) m.elpTeamNote(st, g.r.id, g.r.roster, g.r.fam, 0, passes[j]);
+          if (seg.fl & F) for (const q of g.r.roster) if (!ws.has(q)) { const h = st.hist[m.ratingHistKey(q, g.r.fam, 0)], r = h && Array.isArray(h.runs) ? h.runs.find((x) => (x[0] >>> 0) === (g.r.id >>> 0)) : null; if (r && !((r[7] | 0) & 1)) r[7] = 1; }
+        }
+      };
+      const copyW = (w) => new Map([...w].map(([k, x]) => [k, new Set(x)]));
+      const st = { hist: {} }, wrote = new Map(), forks = [];
+      for (let j = 0; j < passes.length; j++) {
+        feed(st, j, wrote);
+        const pre = clone(st), preWrote = copyW(wrote), out = m.elpSettleAll(st, 0, passes[j]);
+        if (out.dropped) { res.dropped += out.dropped; const a = clone(pre); m.elpSettleAll(a, 0, passes[j], NONE); if (canon([a.hist, a.elpTeam || null]) !== canon([st.hist, st.elpTeam || null])) res.H3++; }
+        if (out.picks.length) forks.push({ j, pre, preWrote, picked: out.picks.map((x) => x[0]) });
+      }
+      for (const fk of forks) {
+        res.forks++;
+        const branch = (first) => {
+          const s2 = clone(fk.pre), wr = copyW(fk.preWrote), recs = new Map();
+          m.elpSettleAll(s2, 0, passes[fk.j], first);
+          const lpAt = {}; for (const p of PL) lpAt[p] = lpOf(s2, p);
+          for (let j = fk.j + 1; j < passes.length; j++) { feed(s2, j, wr); for (const x of m.elpSettleAll(s2, 0, passes[j], NONE)) recs.set(x.k + '#' + (x.runId >>> 0), x); }
+          return { recs, lpAt };
+        };
+        const A = branch(NONE), B = branch(undefined);
+        for (const p of fk.picked) if (B.lpAt[p] < A.lpAt[p]) res.H4++;
+        for (const [key, x] of B.recs) {
+          const y = A.recs.get(key);
+          if (!y || x.teamH === undefined || y.teamH === undefined) continue;
+          if (x.T > y.T) { res.H1++; if (!res.first) res.first = { world: seed0 + it, fork: fk.j, key, own: [y.T, y.pass, y.d, y.teamH], picked: [x.T, x.pass, x.d, x.teamH] }; }
+          else if (x.T < y.T) res.lower++;
+        }
+      }
+      res.worlds++;
+      if (stopAtH1 && res.H1) break;
+    }
+    return res;
+  }
+  const LATE_WORLDS = 150, lateWorldsHold = (m) => lateWorlds(m, 1, LATE_WORLDS, 0.3, true).H1 === 0;
+  { const r = lateWorlds(v, 1, LATE_WORLDS, 0.3);
+    T('[18] ' + LATE_WORLDS + ' random worlds across passes (members\' copies of a team run arriving passes or days apart, or never): no team run settled in a later pass reads a higher target because of an earlier pass\'s picks (' + r.H1 + '), no picked player ends his pass lower (' + r.H4 + '), a pass whose picks were given up is the job\'s own settle byte for byte (' + r.H3 + ' differ)', r.H1 === 0 && r.H4 === 0 && r.H3 === 0, JSON.stringify(r.first));
+    T('[18] ... and the worlds are not trivial: picks applied in ' + r.forks + ' passes, given up ' + r.dropped + ' times; ' + r.lower + ' later team-run settles read a LOWER target after a pick', r.forks >= 10 && r.dropped >= 3);
+  }
   // random worlds: four players, four families, team runs, parked runs, ties -- nobody ever ends a pass below what the job's own orders leave him; the result does not depend on the key order of the file
   function worlds(m, seed0, iters) {
     let seed = seed0;
@@ -1802,7 +1913,11 @@ console.log('-- [18] Q402 / Q403: around the placement line, the order his play 
     && /const own = elpPassOrder\(st, p, s, nowMs\)/.test(v.elpPassOrders.toString()) && /const out = \[own\]/.test(v.elpPassOrders.toString())
     && /the order of this pass taken among/.test(SRC) && /picked order\(s\) given up/.test(SRC));
   // mutations
-  T('[18] baseline holds for the mutations below', q402Holds(v) && q403Holds(v) && ownBestHolds(v) && sameAsOwn(v, placedWorld) && untouched(v, q402World) && rowLaterHolds(v) && guardHolds(v) && lateHolds(v));
+  T('[18] baseline holds for the mutations below', q402Holds(v) && q403Holds(v) && ownBestHolds(v) && sameAsOwn(v, placedWorld) && untouched(v, q402World) && rowLaterHolds(v) && guardHolds(v) && lateHolds(v) && oneHolds(v));
+  T('[18] mutation "a level on one side, none on the other, is not a difference" turns the one-sided check red: the late teammate reads the silver line (target 12) where the job\'s own orders gave him target 4',
+    redBy('[18] one-sided', [['return (la === null || lb === null) ? a.h !== b.h : la > lb;', 'return (la === null || lb === null) ? false : la > lb;']], oneHolds));
+  T('[18] mutation "the guard compares the points of the pass only" turns the random worlds across passes red too (a class check, not only the two stored worlds)',
+    redBy('[18] points only (worlds across passes)', [['    if (raised || pids.some((p) => got(p) < own(p))) {', '    if (pids.some((p) => got(p) < own(p))) {']], lateWorldsHold));
   T('[18] mutation "the guard compares the points of the pass only" (the guard before the review) turns the late-teammate check red: his target goes up a level, a pass becomes a miss',
     redBy('[18] points only', [['    if (raised || pids.some((p) => got(p) < own(p))) {', '    if (pids.some((p) => got(p) < own(p))) {']], lateHolds));
   T('[18] mutation "a level frozen LOWER gives the picks up, a higher one passes" turns the late-teammate check red (the direction: a higher level is the one that hurts)',
