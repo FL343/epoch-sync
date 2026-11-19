@@ -12,6 +12,11 @@
 //       history branch, has no step named "test", and the official workflow scans (test/workflow-push-retry.js,
 //       test/channel-workflows.js) stay green with it
 //   [6] the CLI writes the history + summary files and exits 0
+//   [7] the season clock: by default the official one (validate.js seasonAt); with no next season scheduled (the official
+//       table since O844) the runner stays in one season, keeps one final, the preset prior and an unbroken EMA chain;
+//       every read of the official clock in shadow/*.js is the default of a clock the caller can replace
+// The season table of [1] is MADE UP here (FAKE_S1), never the official one: O844 (2026-11-18) left season 1 without a
+//   date, and [1], which had walked the official table across 2026-12-01, went red the day that landed on main.
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -21,21 +26,27 @@ const F = require(path.join(__dirname, '..', 'fake-state.js'));
 const R = require(path.join(__dirname, '..', 'elp-shadow.js'));
 const S = require(path.join(__dirname, '..', 'elp-shadow-plan.js'));
 const PP = require(path.join(ROOT, 'points-plan.js'));
+const V = require(path.join(ROOT, 'validate.js'));
+
+// the made-up season table: season 1 opens 2026-12-01 00:00 UTC (the instant the official table had until O844), day 15
+//   of the 17 made-up days of [1]
+const FAKE_S1 = Date.UTC(2026, 11, 1), fakeSeasonAt = (ms) => (ms >= FAKE_S1 ? 1 : 0);
 
 let failN = 0;
 const T = (label, cond, detail) => { if (cond) console.log('  ok    ' + label); else { failN++; console.log('  FAIL  ' + label + (detail ? ' -- ' + detail : '')); } };
 const W = fs.mkdtempSync(path.join(os.tmpdir(), 'elp-shadow-'));
 const near = (a, b, tol) => Math.abs(a - b) <= tol;
 
-// run a made-up season through the runner; returns { days, results, ids }
-function season(opt, sub) {
+// run a made-up season through the runner; returns { days, results, ids }. clock: the season table of both the made-up
+//   history and the runner (ms -> season id); none = the official one
+function season(opt, sub, clock) {
   const dir = path.join(W, sub); fs.mkdirSync(dir, { recursive: true });
-  const D = F.fakeDays(opt), results = [];
+  const D = F.fakeDays(Object.assign({}, opt, clock ? { seasonAt: clock } : null)), results = [];
   let hist = null, prev = null;
   for (const x of D) {
     const sf = path.join(dir, 'state-' + x.day + '.json');
     fs.writeFileSync(sf, JSON.stringify(x.state));
-    const res = R.run({ state: sf, prev, history: hist, now: x.ms + 3600000 });
+    const res = R.run({ state: sf, prev, history: hist, now: x.ms + 3600000, seasonAt: clock });
     hist = path.join(dir, 'history.json');
     fs.writeFileSync(hist, JSON.stringify(res.hist));
     results.push(res);
@@ -54,7 +65,7 @@ function leaks(text, ids) {
 }
 
 console.log('-- [1] a made-up season, day by day');
-const A = season({ days: 17, arrive: 40, seed: 3 }, 'a');
+const A = season({ days: 17, arrive: 40, seed: 3 }, 'a', fakeSeasonAt);
 {
   const last = A.results[A.results.length - 1].hist;
   T('[1] one history entry a day (' + last.days.length + ' / ' + A.D.length + ')', last.days.length === A.D.length);
@@ -78,7 +89,7 @@ const A = season({ days: 17, arrive: 40, seed: 3 }, 'a');
   T('[1] pass lines rise by at least 1 per tier', last.days.every((e) => PP.ELP_FAMS.every((f) => e.fams[f].pass.every((v, k) => !k || v > e.fams[f].pass[k - 1]))));
   // a rerun of the last day replaces its entry
   const lastX = A.D[A.D.length - 1], sf = path.join(A.dir, 'state-' + lastX.day + '.json');
-  const again = R.run({ state: sf, prev: null, history: A.hist, now: lastX.ms + 7200000 });
+  const again = R.run({ state: sf, prev: null, history: A.hist, now: lastX.ms + 7200000, seasonAt: fakeSeasonAt });
   T('[1] a rerun of a day replaces its entry (still ' + again.hist.days.length + ')', again.hist.days.length === A.D.length && again.hist.days[again.hist.days.length - 1].ms === lastX.ms + 7200000);
 }
 
@@ -101,7 +112,7 @@ console.log('-- [2] privacy');
     m.filename = path.join(__dirname, '..', 'elp-shadow.js'); m.paths = Module._nodeModulePaths(path.dirname(m.filename));
     m._compile(src.replace(anchor, 'season: s, stateMs: st.ms || null, prevState: !!prevSt,'), m.filename);
     const lastX = A.D[A.D.length - 1], sf = path.join(A.dir, 'state-' + lastX.day + '.json');
-    const mut = m.exports.run({ state: sf, now: lastX.ms + 3600000 });
+    const mut = m.exports.run({ state: sf, now: lastX.ms + 3600000, seasonAt: fakeSeasonAt });
     T('[2] mutation: copying the state\'s pid-keyed "ms" into the entry is caught', leaks(m.exports.histText(mut.hist), A.ids).length > 0);
   }
 }
@@ -180,6 +191,48 @@ console.log('-- [6] the CLI');
   T('[6] the first (empty) history of the branch is read as a start', R.run({ state: path.join(A.dir, 'state-' + A.D[6].day + '.json'), history: (() => { const f = path.join(W, 'h0.json'); fs.writeFileSync(f, '{\n "v": 1,\n "days": [],\n "finals": {}\n}\n'); return f; })(), now: A.D[6].ms + 3600000 }).hist.days.length === 1);
   const bad = cp.spawnSync(process.execPath, [path.join(ROOT, 'shadow', 'elp-shadow.js'), '--state', path.join(W, 'missing.json')], { cwd: ROOT, encoding: 'utf8' });
   T('[6] an unreadable state file fails loudly (exit != 0)', bad.status !== 0);
+}
+
+console.log('-- [7] the season clock');
+{
+  const x5 = A.D[5], sf5 = path.join(A.dir, 'state-' + x5.day + '.json'), now5 = x5.ms + 3600000;
+  T('[7] no clock passed: the runner uses the official one (season ' + V.seasonAt(now5) + ')', R.run({ state: sf5, now: now5 }).entry.season === V.seasonAt(now5));
+  T('[7] a clock passed is the one the runner uses', R.run({ state: sf5, now: now5, seasonAt: () => 5 }).entry.season === 5);
+  const f5 = F.fakeDays({ days: 2, arrive: 10, seed: 1, seasonAt: () => 5 }), k5 = Object.keys(f5[1].state.hist);
+  T('[7] ... and the one the made-up history is settled in (' + k5.length + ' entries, all of season 5)', k5.length > 0 && k5.every((k) => k.endsWith('|5')) && f5.every((x) => x.season === 5));
+  const f0 = F.fakeDays({ days: 1, arrive: 10, seed: 1 });
+  T('[7] no clock passed: the made-up history follows the official one', f0[0].season === V.seasonAt(F.EA_START));
+
+  // no next season scheduled (the official table since O844): the same 17 days, the clock never leaves season 0
+  const NS = season({ days: 17, arrive: 40, seed: 3 }, 'n', () => 0), last = NS.results[NS.results.length - 1].hist;
+  T('[7] no next season: one history entry a day, all of season 0', last.days.length === NS.D.length && last.days.every((e) => e.season === 0));
+  T('[7] no next season: one final kept (season 0), seven lines a family', Object.keys(last.finals).join() === '0' && PP.ELP_FAMS.every((f) => last.finals['0'][f].length === 7 && last.finals['0'][f].every((v) => isFinite(v) && v > 0)));
+  T('[7] no next season: the prior stays the preset every day', last.days.every((e) => PP.ELP_FAMS.every((f) => e.fams[f].prior.src === 'preset' && e.fams[f].prior.lines.join() === PP.ELP.PRIOR[f].join())));
+  T('[7] no next season: every day after the first is smoothed with the day before (no restart)', last.days.every((e, i) => PP.ELP_FAMS.every((f) => e.fams[f].prevDay === (i ? last.days[i - 1].day : null))));
+  let emaBad = 0, checked = 0;
+  for (let i = 1; i < last.days.length; i++) for (const f of ['solo', 'duo']) for (let k = 0; k < 7; k++) { checked++; if (!near(last.days[i].fams[f].smooth[k], S.SHADOW.EMA_ALPHA * last.days[i].fams[f].raw[k] + (1 - S.SHADOW.EMA_ALPHA) * last.days[i - 1].fams[f].smooth[k], 0.002)) emaBad++; }
+  T('[7] no next season: EMA continuity over all ' + (last.days.length - 1) + ' day pairs (' + checked + ' line-days)', emaBad === 0 && checked === (last.days.length - 1) * 14, emaBad + ' off');
+  const nMid = last.days[13].fams.solo.N, nEnd = last.days[last.days.length - 1].fams.solo.N;
+  T('[7] no next season: the placed players keep counting past the day the made-up table changes season (N ' + nMid + ' -> ' + nEnd + ')', nEnd > nMid && nMid >= S.SHADOW.SHOW_MIN);
+  T('[7] no next season: pass lines rise by at least 1 per tier, the summary renders', last.days.every((e) => PP.ELP_FAMS.every((f) => e.fams[f].pass.every((v, k) => !k || v > e.fams[f].pass[k - 1]))) && NS.results.every((r) => /season 0\. SHADOW ONLY/.test(r.text)));
+
+  // every read of the official clock in the shadow's own code (shadow/*.js, not the tests) is the default of a clock the
+  //   caller can replace: a made-up history that has to cross a season never depends on the dates of the official table
+  const clockScan = (src) => { const all = (src.match(/V\.seasonAt/g) || []).length, dflt = (src.match(/[A-Za-z]\.seasonAt \|\| V\.seasonAt/g) || []).length; return { all, dflt, ok: all === dflt }; };
+  const own = fs.readdirSync(path.join(__dirname, '..')).filter((f) => f.endsWith('.js'));
+  const reads = own.map((f) => [f, clockScan(fs.readFileSync(path.join(__dirname, '..', f), 'utf8'))]).filter(([, c]) => c.all > 0);
+  T('[7] every read of the official clock in shadow/*.js is a replaceable default (' + reads.map(([f, c]) => f + ' ' + c.dflt + '/' + c.all).join(', ') + ')', reads.length === 2 && reads.every(([, c]) => c.ok));
+  // mutation: the runner reading the official clock directly (the state before this fix)
+  const src = fs.readFileSync(path.join(__dirname, '..', 'elp-shadow.js'), 'utf8'), anchor = 's = (opt.seasonAt || V.seasonAt)(nowMs),';
+  if (src.indexOf(anchor) < 0) T('[7] mutation anchor present', false, anchor);
+  else {
+    const Module = require('module'), m = new Module(path.join(__dirname, '..', 'elp-shadow.js'), module), mutSrc = src.replace(anchor, 's = V.seasonAt(nowMs),');
+    m.filename = path.join(__dirname, '..', 'elp-shadow.js'); m.paths = Module._nodeModulePaths(path.dirname(m.filename));
+    m._compile(mutSrc, m.filename);
+    const mut = m.exports.run({ state: sf5, now: now5, seasonAt: () => 5 }).entry;
+    T('[7] mutation: a runner that reads the official clock directly is caught (the scan red; a passed clock ignored: season ' + mut.season + ')',
+      !clockScan(mutSrc).ok && mut.season === V.seasonAt(now5) && mut.season !== 5);
+  }
 }
 
 fs.rmSync(W, { recursive: true, force: true });

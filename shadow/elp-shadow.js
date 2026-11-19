@@ -135,7 +135,9 @@ function run(opt) {
   const hist0 = readJson(opt.history);
   const hist = (hist0 && hist0.v === SH.VER && Array.isArray(hist0.days)) ? hist0 : { v: SH.VER, days: [], finals: {} };
   hist.finals = hist.finals || {};
-  const nowMs = opt.now != null ? +opt.now : Date.now(), s = V.seasonAt(nowMs), day = dayOf(nowMs);
+  // the season: the official clock (validate.js seasonAt). opt.seasonAt is for the tests only (a made-up season table to
+  //   walk a season change; the official table has no date for season 1 since O844) -- the command line never sets it.
+  const nowMs = opt.now != null ? +opt.now : Date.now(), s = (opt.seasonAt || V.seasonAt)(nowMs), day = dayOf(nowMs);
   // nothing of the state file is copied as it is (its fields are keyed by salted pids): only what this file computes
   const entry = { day, ms: nowMs, season: s, prevState: !!prevSt, fams: {}, gm: {} };
   for (const fam of FAMS) { entry.fams[fam] = lineDay(st, fam, s, nowMs, hist); entry.gm[fam] = gmDay(st, prevSt, fam, s, nowMs); }

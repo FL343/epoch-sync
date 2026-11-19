@@ -21,7 +21,8 @@
 //   4. smooth day over day (EMA_ALPHA of today, the rest yesterday's smoothed line; restarts on a season change),
 //   5. round + the official monotone fix (each line >= the one below + 1, >= 1).
 //   The prior: season 0 the static preset (points-plan.js ELP.PRIOR); season 1 the season-0 final mixed with the preset
-//   (S0 is two weeks: PRIOR_MIX_S1 of the final); season 2+ the previous season's final smoothed lines.
+//   (PRIOR_MIX_S1 of the final -- chosen when S0 was planned as two weeks; since O844 season 1 has no date and S0 is
+//   open-ended, so review the share when a date is set); season 2+ the previous season's final smoothed lines.
 // O759 (grandmaster calibration, off by default, opens by itself): per family the grandmaster pool (points >= 8000),
 //   ranked by hidden skill; a player's deserved points = 8000 + percentile x 1999. The switch would open when
 //   ① the effective pool (grandmasters with a full window of WINDOW settled runs) >= GM_POOL_MIN and

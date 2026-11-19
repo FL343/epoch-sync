@@ -37,8 +37,13 @@ curve instead:
 4. EMA over days (`EMA_ALPHA` of today), restarting on a season change;
 5. round + the official monotone fix.
 
-Prior: season 0 = the static preset; season 1 = the season-0 final mixed 50/50 with the preset (S0 is two
-weeks); season 2+ = the previous season's final.
+Prior: season 0 = the static preset; season 1 = the season-0 final mixed 50/50 with the preset; season 2+ =
+the previous season's final. The 50/50 mix was chosen when season 0 was planned as two weeks. Since O844
+(2026-11-18) season 1 has no date: the official season table (validate.js `SEASONS`) keeps the clock in season
+0, so the shadow runs with the preset prior and one unbroken EMA chain until a date is set -- review the mix
+then (a long season 0 gives a final that deserves more than half). The shadow reads the season from the
+official clock; its tests bring their own made-up table to walk a season change (`run({ seasonAt })`,
+`fakeDays({ seasonAt })`), so they do not depend on the dates of the official one.
 
 **O759 -- grandmaster calibration (off, opens by itself).** (O825, 2026-11-10: a player has ONE points value a
 season, on the entry `pid|all|season`; the family entries keep the runs. The pool of a family = the players at

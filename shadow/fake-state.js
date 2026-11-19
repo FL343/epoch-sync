@@ -10,7 +10,11 @@
 //   2 % by true level are fast-forwarded once placed (points 8000..9999 by their level), so the O759 pool has members.
 // Ids are random hex in the shape of the salted pids (16 hex): no real account, no salted pid of anyone. The other top-level
 //   fields of the real file that are keyed by pids (ms, runs) are filled too, so a test catches any field copied as it is.
-// Usage (a module): fakeDays({ seed, days, start, families, arrive }) -> [{ day, ms, state }] (each state a deep copy)
+// The season of a day comes from the official clock (validate.js seasonAt) unless the caller passes its own
+//   (opt.seasonAt: ms -> season id). The official table has had no date for season 1 since 2026-11-18 (O844: the first
+//   season is open-ended), so a made-up history that has to cross a season boundary brings a made-up clock; the official
+//   functions used here all take the season as an argument and never read the clock themselves.
+// Usage (a module): fakeDays({ seed, days, start, families, arrive, seasonAt }) -> [{ day, ms, season, state }] (each state a deep copy)
 //        node shadow/fake-state.js <dir> [days] [arrive]   -> writes <dir>/state-<YYYYMMDD>.json for every day
 // ============================================================
 const fs = require('fs');
@@ -30,8 +34,9 @@ function fakeDays(opt) {
   const o = opt || {}, r = B.rng(o.seed || 7), days = o.days || 30, start = o.start || EA_START;
   const fams = o.families || { solo: 1, duo: 0.35 }, arrive = o.arrive == null ? 14 : o.arrive, grow = o.grow == null ? 0.4 : o.grow;
   const st = { runs: {}, ms: {}, hist: {}, elpTab: [] }, players = [], out = [];
+  const seasonAt = o.seasonAt || V.seasonAt;
   for (let d = 0; d < days; d++) {
-    const t0 = start + d * DAY, season = V.seasonAt(t0);
+    const t0 = start + d * DAY, season = seasonAt(t0);
     const n = Math.round(arrive + grow * d);
     for (let i = 0; i < n; i++) {
       for (const [fam, share] of Object.entries(fams)) {
@@ -67,7 +72,7 @@ function fakeDays(opt) {
     const byFam = {};
     for (const [fam] of V.RATING_FAMS) byFam[fam] = V.elpLinesOf(Object.values(V.elpHiddensOf(st, fam, season)), PP.ELP.PRIOR[fam]);
     V.elpTabRecord(st, season, dayOf(tEnd), tEnd, byFam);
-    out.push({ day: dayOf(tEnd), ms: tEnd, state: JSON.parse(JSON.stringify(st)) });
+    out.push({ day: dayOf(tEnd), ms: tEnd, season, state: JSON.parse(JSON.stringify(st)) });
   }
   return out;
 }
@@ -81,6 +86,6 @@ if (require.main === module) {
   const days = fakeDays({ days: +(process.argv[3] || 30), arrive: process.argv[4] != null ? +process.argv[4] : undefined });
   for (const x of days) fs.writeFileSync(path.join(dir, 'state-' + x.day + '.json'), JSON.stringify(x.state));
   const last = days[days.length - 1].state;
-  for (const fam of ['solo', 'duo']) console.log(fam + ': placed ' + Object.keys(V.elpHiddensOf(last, fam, V.seasonAt(days[days.length - 1].ms))).length);
+  for (const fam of ['solo', 'duo']) console.log(fam + ': placed ' + Object.keys(V.elpHiddensOf(last, fam, days[days.length - 1].season)).length);
   console.log('wrote ' + days.length + ' states to ' + dir);
 }
