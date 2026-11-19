@@ -26,6 +26,7 @@ window.PERKS = (() => {
     safe: 'other', couponDiscount: 'other', couponFree: 'other', dualBag: 'other',
     clGoldSmall: 'gold', clGoldMid: 'gold', clGoldLarge: 'gold', clGoldHuge: 'gold', clDiamond: 'gem', clBone: 'bone', clSkull: 'bone',
     clRockSmall: 'rock', clRockLarge: 'rock', clMysteryBag: 'other', clTnt: 'other',
+    stewFood: 'other', stewDish: 'other', stewPlate: 'other',
   };
   function clsOfItem(key) { const c = ITEM_CLS[key]; return c == null ? CLS.other : CLS[c]; }
   function clsOfCreature() { return CLS.creature; }
