@@ -1993,6 +1993,10 @@ console.log('-- [19] ELP version 6: the players the three-run rule finds unplace
     const out = m.elpSettleAll(st, 0, now + 7 * DAY + MIN), x = out.find((y) => y.runId === 250), y = out.find((z) => z.runId === 251);
     return !!x && x.d === 0 && x.held === true && !!y && y.d > 0 && c.lp === lp0 + y.d;
   };
+  // rolling audit 56: a five-run build's record still verifies until its key has been retired KEY_RETIRE_GRACE_MS (attest.js), and a
+  //   run whose uploads all failed is first seen when the retry sends it -- the window must outlast that grace (a miss first seen
+  //   at the end of the grace is still held)
+  const graceHeld = (m) => { const st = seeded3(m, now), c = st.hist['W|all|0'], lp0 = c.lp, x = missAt(m, st, 204, now + attest.KEY_RETIRE_GRACE_MS); return m.RATING.OLD_CLIENT_MS > attest.KEY_RETIRE_GRACE_MS && x.d === 0 && x.held === true && c.lp === lp0; };
   const passAdds = (m) => { const st = seeded3(m, now), c = st.hist['W|all|0'], lp0 = c.lp; m.ratingHistUpsert(st, 'W', 'solo', 0, 204, 30, now + HR, F, 9204); const x = m.elpSettleAll(st, 0, now + HR + MIN)[0]; return x.pass && x.d > 0 && !x.held && c.lp === lp0 + x.d; };
   if (OLD) {
     const r = windowRuns(v);
@@ -2000,6 +2004,7 @@ console.log('-- [19] ELP version 6: the players the three-run rule finds unplace
       windowHolds(v) && r.rc && r.rc.delta === 0 && (r.rc.flags & 0xff) === 0 && r.n === 6, JSON.stringify(r));
     T('[19] ... a pass inside the window still adds; without the stamp (the pure rule) and for a run first seen after the window the same miss loses; a run parked before the rule came keeps its first tick -- given up a week later it still takes nothing',
       passAdds(v) && noStampLoses(v) && afterLoses(v) && parkedHeld(v));
+    T('[19] ... the window outlasts the grace a retired build key still verifies (' + (attest.KEY_RETIRE_GRACE_MS / DAY) + ' d; window ' + (WIN / DAY) + ' d): a five-run client\'s miss first seen then (its uploads all failed, the retry sent it after the update) is still held (rolling audit 56)', graceHeld(v));
     eq('[19] elpOldUntil / elpMins: no stamp = no window; inside the window the readings also take the old count (5)', [v.elpOldUntil({}), v.elpOldUntil({ elp3: { at: 1000 } }), v.elpMins({ oldUntil: 2000 }, 1999), v.elpMins({ oldUntil: 2000 }, 2000), v.elpMins({}, 5), v.elpMins(null, 5)], [-Infinity, 1000 + WIN, [undefined, 5], [undefined], [undefined], [undefined]]);
   }
   // (c) the readings of a five-run client inside the window: five solo runs at 12, then 4, 4, 20 (the newest), two own duo runs (10, 30).
@@ -2093,6 +2098,7 @@ console.log('-- [19] ELP version 6: the players the three-run rule finds unplace
     T('[19] mutation "a miss inside the window takes points" turns the window check red', redBy('[19] no hold', [[HELD, '    held = false;']], windowHolds));
     T('[19] mutation "every miss inside the window takes nothing" (the count dropped) turns the window check red (the sixth run must lose)', redBy('[19] hold without the count', [[HELD, '    held = mins.length > 1 && best.sl.nv < cur;']], windowHolds));
     T('[19] mutation "the window never closes" turns the after-the-window check red', redBy('[19] window for good', [['return a > 0 ? a + RATING.OLD_CLIENT_MS : -Infinity; }', 'return a > 0 ? Infinity : -Infinity; }']], afterLoses));
+    T('[19] mutation "the window is 72 h again" (shorter than the key grace) turns the grace check red', redBy('[19] window 72 h', [['  OLD_CLIENT_MS: attest.KEY_RETIRE_GRACE_MS + 24 * 3600000,', '  OLD_CLIENT_MS: 72 * 3600000,']], graceHeld));
     T('[19] mutation "the window opens without a stamp" turns the pure-rule check red', redBy('[19] window without a stamp', [['return a > 0 ? a + RATING.OLD_CLIENT_MS : -Infinity; }', 'return Infinity; }']], noStampLoses));
     const MINS = "function elpMins(ctx, at) { return (ctx && ctx.oldUntil > at) ? [undefined, ELP.MIN_RUNS_OLD] : [undefined]; }";
     T('[19] mutation "the readings never take the old count" turns the old-dial checks red (the run a five-run client showed passed would miss; the team would freeze the higher line)', redBy('[19] no old count', [[MINS, 'function elpMins(ctx, at) { return [undefined]; }']], oldDialHolds) && redBy('[19] no old count (team)', [[MINS, 'function elpMins(ctx, at) { return [undefined]; }']], teamOldHolds));

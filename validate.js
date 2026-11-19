@@ -7080,7 +7080,11 @@ const RATING = {
   HIST_SEASONS: 2,                            // history kept for the current and the previous season
   IDLE_MS: Number(process.env.ELP_IDLE_MS || 24 * 3600000),   // a run with no segment for this long and no save point settles at its depth
   TAB_DAYS: 14,                               // tables kept in the chain memory (the settle reads the one in force at the run's start)
-  OLD_CLIENT_MS: 72 * 3600000,                // version 6: how long after the rule came a newly seen run may still be a five-run client's (elpOldUntil)
+  OLD_CLIENT_MS: attest.KEY_RETIRE_GRACE_MS + 24 * 3600000,   // version 6: how long after the rule came a newly seen run may still be a five-run client's (elpOldUntil):
+                                              //   a five-run build's records verify until its key has been retired KEY_RETIRE_GRACE_MS (7 d), and a run
+                                              //   whose uploads all failed is first seen when the retry sends it (back at the menu / the next start) -- a
+                                              //   window shorter than the grace read such a run with three and could take points his dial showed as
+                                              //   "placement run, no points" (rolling audit 56; the window only ever leaves a player more)
   TC_MAGIC: 0xEC,                             // tier-cut carrier details[0] low byte (= points-plan.js ELP.TC_MAGIC, test/endless-rating.js)
   TC_VER: 2,                                  // O728: version 2 (pass lines; = ELP.TC_VER); O199 (knife 5.5b-2) version byte in bits 8-15 (architecture decision 9)
   // versions the readers take without an error (the companion repo's version registry, architecture decision 9): v2 is the table;
