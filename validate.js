@@ -3539,7 +3539,10 @@ function endlessRerollCanon(g) {
   for (const [, ks] of bySid) { if (ks.size > 1) { split = true; for (const k of ks) if (!votes.has(k)) votes.set(k, 0); continue; } n++; const k = [...ks][0]; votes.set(k, (votes.get(k) || 0) + 1); }
   if (!split && votes.size <= 1) return null;
   const classic = !!((t0.flags | 0) & attest.SEG_CLASSIC);
-  const reach = (k) => { const [hi, lo] = k.split(':').map(Number); return classic ? !(hi || lo) : !rerollChain({ rerollLo: lo | 0, rerollHi: hi | 0, endDepth: t0.endDepth | 0 }, null); };
+  // Q417 (O920, 2026-11-19): the same slack the lanes apply -- a casual co-op session (no SEG_COMP) may ask its reroll ahead of its
+  //   passed count by its failed levels (CASUAL_LIVES), a team competitive segment (one life) may not
+  const rrSlack = ((t0.flags | 0) & attest.SEG_COMP) ? 0 : CASUAL_LIVES;
+  const reach = (k) => { const [hi, lo] = k.split(':').map(Number); return classic ? !(hi || lo) : !rerollChain({ rerollLo: lo | 0, rerollHi: hi | 0, endDepth: t0.endDepth | 0 }, null, rrSlack); };
   const k0 = endlessNzTail(g[0]) ? rrOf(g[0]) : null;
   let best = null, bestN = -1;
   for (const [k, c] of votes) { if (!reach(k)) continue; if (c > bestN || (c === bestN && k === k0)) { best = k; bestN = c; } }
@@ -13949,7 +13952,11 @@ async function main() {
       }
       // casual co-op: a shared perk build (co-op draw pool) must still replay from its pick log -- no run chain here, so
       //   only perk_forge applies (a forged build word inflates every writer's score alike; consensus alone cannot see it)
-      const rcC = rerollChain({ rerollLo: t.rerollLo >>> 0, rerollHi: t.rerollHi >>> 0, endDepth: t.endDepth | 0 }, null);
+      // Q417 (O920, 2026-11-19): a failed level moves the depth on without the passed count the tail carries (endDepth), and the
+      //   reroll window opens at the end of a passed level -- an honest team that failed before its last paid reroll asks about a
+      //   target past endDepth + 1 (launch night: a duo 0->76 rerolled 78, then lost its last lives). Same slack as the solo /
+      //   couch casual lane (O218): before, every such run was rejected whole, nobody settled
+      const rcC = rerollChain({ rerollLo: t.rerollLo >>> 0, rerollHi: t.rerollHi >>> 0, endDepth: t.endDepth | 0 }, null, CASUAL_LIVES);
       if (rcC) {   // Q314: the bitmap every honest writer copies from the host -- rejected as before, nobody flagged
         RUN.endlessRrRej = (RUN.endlessRrRej | 0) + 1;
         ghWarn('match=' + c.m + ': endless reroll bitmap sanity REJECT (' + rcC + ') depth ' + t.startDepth + '->' + t.endDepth + ' -- nobody flagged (Q314)');

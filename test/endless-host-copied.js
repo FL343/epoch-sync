@@ -13,11 +13,14 @@
 //   [3] team competitive duo checkpoint, build 4 with no pick log (perk_forge): rejected (processed), nobody flagged
 //   [4] casual duo / casual trio, the same build: rejected (processed), nobody flagged
 //   [5] casual duo, both writers carry an out-of-reach reroll bitmap: rejected (processed), nobody flagged
+//   [5b] (Q417 / O920) casual duo, both carry the bitmap an honest team that lost lives before its last paid reroll
+//       carries (target past endDepth + 1, within the run's lives): settles, both credited, nobody flagged
 //   [6] untouched: casual trio with the same seat table settles; clean team competitive / casual / team classic groups
 //       settle; team competitive duo with an out-of-reach bitmap rejected, nobody flagged (as before); tokens keep the
 //       whole-group flag (Q305); a writer's own negative duration still flags only him (Q306)
 //   [7] the run summary counts the held / rejected groups
-//   [8] wiring pins + mutation self-check: a flag put back in a check -> its case flags every writer again
+//   [8] wiring pins + mutation self-check: a flag put back in a check -> its case flags every writer again; the casual
+//       lane's lives slack dropped -> [5b] is rejected again (Q417)
 // State isolation is structural (every *_FILE var scanned and redirected, cwd = temp dir), like test/absence-grace.js.
 const { spawnSync } = require('child_process');
 const fs = require('fs'), path = require('path'), os = require('os');
@@ -150,7 +153,9 @@ const CLS = [0, 5, 0, 0, 0, attest.SEG_CLASSIC, 0, 0, 0, 0, 0];
 //   every joiner then writes ('0' at seat 2, result-reporter)
 const HOLE = [A, B, '0'];
 // build 4 = one perk in slot 0 with an empty pick log: structurally valid, never replays (perk_forge build-without-picks);
-//   reroll bit 2 (lo 4) = target depth 9, out of reach of a segment ending at depth 5 / 6 (reroll-ahead)
+//   reroll bit 2 (lo 4) = target depth 9, out of reach of a team competitive segment ending at depth 5 (one life: reroll-ahead) but
+//   NOT of a casual session ending at passed 6 (Q417: levels 2 and 3 lost, 4..8 passed, 9 rerolled then lost = over with 6 passed);
+//   reroll bit 3 (lo 8) = target depth 12, out of reach of the casual session too (12 > 6 + 1 + 3 lives)
 const X = (sid, seat, tail, o) => ({ sid, seat, tail, o });
 let hashN = 0x3140;
 // one group in one cron run; every writer copies the same values (an honest joiner copies the host's frames)
@@ -187,9 +192,13 @@ T('[4] casual trio, the same build: rejected, nobody flagged', rejected(c4b) && 
 
 // ---- [5] the casual reroll bitmap ----
 console.log('-- [5] the casual reroll bitmap out of reach on every record --');
-const c5 = caseRun(DUO, [X(A, 0, CAS(0, 4)), X(B, 1, CAS(0, 4))]);
-T('[5] casual duo, both carry bitmap 4: rejected (processed, nothing credited), nobody flagged', rejected(c5) && flagged0(c5)
+const c5 = caseRun(DUO, [X(A, 0, CAS(0, 8)), X(B, 1, CAS(0, 8))]);
+T('[5] casual duo, both carry bitmap 8: rejected (processed, nothing credited), nobody flagged', rejected(c5) && flagged0(c5)
   && new RegExp('::warning::match=' + c5.m + ': endless reroll bitmap sanity REJECT \\(reroll-ahead\\) depth 0->6 -- nobody flagged \\(Q314\\)').test(c5.r.out), show(c5));
+// Q417 (O920): the honest shape -- a target past endDepth + 1 but within the run's lives
+const c5b = caseRun(DUO, [X(A, 0, CAS(0, 4)), X(B, 1, CAS(0, 4))]);
+T('[5b] casual duo, both carry bitmap 4 (target 9 at passed 6: lost lives before the last paid reroll): settles, both credited, nobody flagged (Q417)',
+  processedOf(c5b.r).has(c5b.m) && c5b.ws.every((s) => credited(c5b.r, s)) && flagged0(c5b) && !/reroll bitmap sanity REJECT/.test(c5b.r.out), show(c5b));
 
 // ---- [6] untouched ----
 console.log('-- [6] untouched --');
@@ -220,6 +229,7 @@ console.log('-- [7] run summary --');
   T('[7] [5] counts the out-of-reach bitmap (0 / 1)', rowQ(c5.r) === '0/1', rowQ(c5.r));
   T('[7] [3] / [4] stay on the perk replay row (1 each), the Q314 row 0 / 0', rowP(c3.r) === '1' && rowP(c4.r) === '1' && rowQ(c3.r) === '0/0' && rowQ(c4.r) === '0/0', [rowP(c3.r), rowP(c4.r), rowQ(c3.r), rowQ(c4.r)].join(' '));
   T('[7] a clean run counts nothing', rowQ(c6a.r) === '0/0', rowQ(c6a.r));
+  T('[7] [5b] the honest bitmap counts nothing (Q417)', rowQ(c5b.r) === '0/0', rowQ(c5b.r));
 }
 
 // ---- [8] wiring + mutation self-check ----
@@ -250,6 +260,18 @@ console.log('-- [8] wiring pins + mutation self-check --');
       fs.writeFileSync(script, SRC.replace(from, 'recordFlag(signals, g, c.m, nowMs); sigDirty = true; ' + from));
       const r = run(c.xs.map((x) => row(c.h, c.roster, x)), attested(c.h, c.roster), script);
       T('[8] ' + label, flagSet(r, c.ws) === want, flagSet(r, c.ws));
+    } finally { try { fs.unlinkSync(script); } catch (e) {} }
+  }
+  // Q417 (O920): the casual lane's lives slack dropped -> the honest [5b] shape is rejected whole again
+  const fromS = 'endDepth: t.endDepth | 0 }, null, CASUAL_LIVES);';
+  if (SRC.split(fromS).length !== 2) bad('[8] Q417 mutation anchor not found exactly once');
+  else {
+    const script = path.join(__dirname, '..', '.mutant-endless-copied-q417-' + process.pid + '.js');
+    try {
+      fs.writeFileSync(script, SRC.replace(fromS, 'endDepth: t.endDepth | 0 }, null);'));
+      const r = run(c5b.xs.map((x) => row(c5b.h, c5b.roster, x)), attested(c5b.h, c5b.roster), script);
+      T('[8] the casual lane\'s lives slack dropped -> [5b] is rejected again (processed, nothing credited; Q417)', processedOf(r).has(c5b.m) && noWrite(r, c5b.ws)
+        && /reroll bitmap sanity REJECT \(reroll-ahead\)/.test(r.out), warnOf(r, c5b.m).slice(0, 300));
     } finally { try { fs.unlinkSync(script); } catch (e) {} }
   }
 }

@@ -12,7 +12,11 @@
 //       record's out of reach: both settle; neither reachable: rejected as before (processed, nothing written), and since
 //       Q314 nobody flagged (the bitmap every honest writer carries is the host's)
 //   [3] the run summary counts the group
-//   [4] wiring pin + mutation self-check: the vote removed -> [2] is rejected again (processed, nothing written)
+//   [4] wiring pin + mutation self-check: the vote removed -> [2] is rejected again (processed, nothing written); the
+//       casual reach slack dropped -> [1] the honest casual bitmap loses its tie again (Q417)
+// Q417 (O920, 2026-11-19): a casual co-op session (no SEG_COMP) reaches as far as its lane checks -- the run's lives past
+//   endDepth + 1 (a failed level moves the depth on without the passed count); a team competitive segment (one life) does not.
+//   With end depth 6 a casual session reaches bits 0..2 (targets 3, 6, 9), a team competitive segment bits 0..1.
 // State isolation is structural (every *_FILE var scanned and redirected, cwd = temp dir), like test/absence-grace.js.
 const { spawnSync } = require('child_process');
 const fs = require('fs'), path = require('path'), os = require('os');
@@ -144,23 +148,28 @@ const G = (rows) => rows.map((x) => { const pc = x.d[8] | 0; return { steamID: x
 // ---- [1] unit: endlessRerollCanon ----
 console.log('-- [1] unit: endlessRerollCanon --');
 {
-  const RR = (lo, hi) => [0, 6, 0, 0, 0, 0, 0, 0, 0, lo, hi || 0];   // end depth 6: bits 0 and 1 reachable (targets 3 and 6), bit 2 (4) not
+  const RR = (lo, hi) => [0, 6, 0, 0, 0, 0, 0, 0, 0, lo, hi || 0];   // casual, end depth 6: bits 0..2 reachable (targets 3, 6, 9; Q417 lives slack), bit 3 (8) not
   const grp = (bits, extra) => { const rs = TRIO.map((sid, seat) => row(0x3110, TRIO, { sid, seat, tail: RR(bits[seat]) })); return G(rs.concat(extra || [])); };
   const duo = (a, b) => G(DUO.map((sid, seat) => row(0x3111, DUO, { sid, seat, tail: RR(seat ? b : a) })));
   T('[1] the writers agree -> null', v.endlessRerollCanon(grp([1, 1, 1])) === null);
   T('[1] one record -> null', v.endlessRerollCanon(G([row(0x3110, TRIO, { sid: A, seat: 0, tail: RR(4) })])) === null);
-  let g = grp([4, 0, 0]);
+  let g = grp([8, 0, 0]);
   let c = v.endlessRerollCanon(g);
-  T('[1] trio, A (first) names 4 (out of reach), B and C 0: 0:0 moves to the front', c && c.canon === '0:0' && c.moved && c.minority === 1 && String(g[0].steamID) === B && v.endlessTail(g[0].d).rerollLo === 0, JSON.stringify(c));
+  T('[1] trio, A (first) names 8 (out of reach), B and C 0: 0:0 moves to the front', c && c.canon === '0:0' && c.moved && c.minority === 1 && String(g[0].steamID) === B && v.endlessTail(g[0].d).rerollLo === 0, JSON.stringify(c));
   g = grp([2, 1, 1]); c = v.endlessRerollCanon(g);
   T('[1] trio, A (first) names 2, B and C 1 (all reachable): the most votes win, 0:1 first', c && c.canon === '0:1' && c.moved && String(g[0].steamID) === B, JSON.stringify(c));
-  g = grp([0, 0, 4]); c = v.endlessRerollCanon(g);
-  T('[1] trio, C names 4: the first record\'s already, nothing moved', c && c.canon === '0:0' && !c.moved && String(g[0].steamID) === A);
+  g = grp([0, 0, 8]); c = v.endlessRerollCanon(g);
+  T('[1] trio, C names 8: the first record\'s already, nothing moved', c && c.canon === '0:0' && !c.moved && String(g[0].steamID) === A);
   g = duo(1, 0); c = v.endlessRerollCanon(g);
   T('[1] duo, two reachable bitmaps (a tie): the first record\'s kept, as before', c && c.canon === '0:1' && !c.moved && String(g[0].steamID) === A, JSON.stringify(c));
-  g = duo(4, 0); c = v.endlessRerollCanon(g);
+  g = duo(8, 0); c = v.endlessRerollCanon(g);
   T('[1] duo, the first record\'s out of reach: the other one read', c && c.canon === '0:0' && c.moved && String(g[0].steamID) === B, JSON.stringify(c));
-  g = duo(4, 8); c = v.endlessRerollCanon(g);
+  g = duo(4, 0); c = v.endlessRerollCanon(g);
+  T('[1] casual duo, the first record names 4 (target 9 at passed 6: an honest team that lost lives before rerolling): reachable, the tie keeps it (Q417)', c && c.canon === '0:4' && !c.moved && String(g[0].steamID) === A, JSON.stringify(c));
+  const CM = (lo) => [0, 6, 0, 0, 0, attest.SEG_COMP, 0, 0, 0, lo, 0];
+  g = G(DUO.map((sid, seat) => row(0x3114, DUO, { sid, seat, tail: CM(seat ? 0 : 4) }))); c = v.endlessRerollCanon(g);
+  T('[1] team competitive duo, the first record names 4: one life, out of reach, the other (0) read (Q417 slack is casual only)', c && c.canon === '0:0' && c.moved && String(g[0].steamID) === B, JSON.stringify(c));
+  g = duo(8, 16); c = v.endlessRerollCanon(g);
   T('[1] duo, none reachable: nothing moved (the lanes reject as before)', c && c.canon === null && !c.moved && String(g[0].steamID) === A, JSON.stringify(c));
   const CL = (lo) => [0, 5, 0, 0, 0, attest.SEG_CLASSIC, 0, 0, 0, lo, 0];
   g = G(DUO.map((sid, seat) => row(0x3113, DUO, { sid, seat, tail: CL(seat ? 0 : 1) }))); c = v.endlessRerollCanon(g);
@@ -177,17 +186,17 @@ const r11 = (() => {
   const RR = (lo) => [0, 6, 0, 0, 0, 0, 0, 0, 0, lo, 0];
   const h = 0x312A, m = h + '_5_7';
   // C's record lands on shard 0 (read first), A on 1, B on 2
-  const rows = [row(h, TRIO, { sid: C, seat: 2, shard: 0, tail: RR(4) }), row(h, TRIO, { sid: A, seat: 0, shard: 1, tail: RR(0) }), row(h, TRIO, { sid: B, seat: 1, shard: 2, tail: RR(0) })];
+  const rows = [row(h, TRIO, { sid: C, seat: 2, shard: 0, tail: RR(8) }), row(h, TRIO, { sid: A, seat: 0, shard: 1, tail: RR(0) }), row(h, TRIO, { sid: B, seat: 1, shard: 2, tail: RR(0) })];
   const r = run(rows, attested(h, TRIO));
   T('[2] trio, C\'s out-of-reach bitmap read first: 0:0 read, all three settle, nobody flagged', processedOf(r).has(m) && TRIO.every((s) => writes(r, BOARD.trio, s).length === 1) && flagSet(r, TRIO) === '0/0/0' && !/reroll bitmap sanity REJECT/.test(r.out)
     && new RegExp('::warning::match=' + m + ': the endless writers name 2 affix reroll bitmaps -- the reachable 0:0 read \\(its record moved first\\), nobody flagged \\(Q306\\)').test(r.out), flagSet(r, TRIO) + ' ' + r.out.slice(-600));
   const h2 = 0x312B, m2 = h2 + '_5_7';
-  const rows2 = [row(h2, DUO, { sid: A, seat: 0, tail: RR(4) }), row(h2, DUO, { sid: B, seat: 1, tail: RR(0) })];
+  const rows2 = [row(h2, DUO, { sid: A, seat: 0, tail: RR(8) }), row(h2, DUO, { sid: B, seat: 1, tail: RR(0) })];
   const r2 = run(rows2, attested(h2, DUO));
   T('[2] duo, the first record\'s out of reach: the other one read, both settle, nobody flagged', processedOf(r2).has(m2) && DUO.every((s) => writes(r2, BOARD.duo, s).length === 1) && flagSet(r2, DUO) === '0/0' && !/reroll bitmap sanity REJECT/.test(r2.out),
     flagSet(r2, DUO) + ' ' + r2.out.slice(-400));
   const h3 = 0x312C, m3 = h3 + '_5_7';
-  const r3 = run([row(h3, DUO, { sid: A, seat: 0, tail: RR(4) }), row(h3, DUO, { sid: B, seat: 1, tail: RR(8) })], attested(h3, DUO));
+  const r3 = run([row(h3, DUO, { sid: A, seat: 0, tail: RR(8) }), row(h3, DUO, { sid: B, seat: 1, tail: RR(16) })], attested(h3, DUO));
   T('[2] duo, neither reachable: rejected as before (processed, nothing written), nobody flagged (Q314)', processedOf(r3).has(m3) && flagSet(r3, DUO) === '0/0' && DUO.every((s) => writes(r3, BOARD.duo, s).length === 0)
     && /reroll bitmap sanity REJECT[^\n]*nobody flagged \(Q314\)/.test(r3.out) && /none reachable, the first record's read as before \(Q306\)/.test(r3.out),
     flagSet(r3, DUO) + ' ' + r3.out.slice(-400));
@@ -216,6 +225,19 @@ console.log('-- [4] mutation self-check --');
       const r = runCron(world(r11.rows), attested(r11.h, TRIO), null, script);
       T('[4] the vote removed -> [2] is rejected again (processed, nothing written; nobody flagged since Q314)', processedOf(r).has(m) && flagSet(r, TRIO) === '0/0/0' && /reroll bitmap sanity REJECT/.test(r.out) && TRIO.every((s) => writes(r, BOARD.trio, s).length === 0),
         flagSet(r, TRIO) + ' processed=' + processedOf(r).has(m));
+    } finally { try { fs.unlinkSync(script); } catch (e) {} }
+  }
+  // Q417: the casual reach slack dropped (back to the zero slack it had) -> the honest casual 4 loses the tie to 0 again
+  const fromS = "const rrSlack = ((t0.flags | 0) & attest.SEG_COMP) ? 0 : CASUAL_LIVES;";
+  if (SRC.split(fromS).length !== 2) bad('[4] Q417 anchor not found exactly once');
+  else {
+    const script = path.join(__dirname, '..', '.mutant-endless-rr-q417-' + process.pid + '.js');
+    try {
+      fs.writeFileSync(script, SRC.replace(fromS, 'const rrSlack = 0;'));
+      const mv = (() => { const k = Object.keys(require.cache).find((x) => /\.mutant-endless-rr-q417-/.test(x)); if (k) delete require.cache[k]; return require(script); })();
+      const g = G(DUO.map((sid, seat) => row(0x3111, DUO, { sid, seat, tail: [0, 6, 0, 0, 0, 0, 0, 0, 0, seat ? 0 : 4, 0] })));
+      const c = mv.endlessRerollCanon(g);
+      T('[4] the casual reach slack dropped -> the honest casual 4 is out of reach again, the other one read (Q417)', c && c.canon === '0:0' && c.moved, JSON.stringify(c));
     } finally { try { fs.unlinkSync(script); } catch (e) {} }
   }
 }
