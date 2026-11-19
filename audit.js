@@ -22,6 +22,36 @@ const { readBoardAll, pid, decodeDetails, getJson, BASE, TRUST_LB, REPORT_LB, ST
   ENDLESS_LB_CLASSIC_SOLO, ENDLESS_LB_CLASSIC_DUO, ENDLESS_LB_CLASSIC_TRIO, ENDLESS_LB_CLASSIC_QUAD, ENDLESS_LB_CLASSIC_OVERALL, ENDLESS_CUP_HONOR_LB, ENDLESS_COMP_LB_COUCH, ENDLESS_LB_COUCH,
   LIKE_BOX_LB, LIKE_COUNT_LB } = require('./validate.js');
 const v = require('./validate.js');   // O348 (3): shardPlan / LEDGER_SHARDS / sandboxOn
+const campaign = require('./campaign.js');   // O919: re-verify the campaign box (the campaign-clear grant lane keeps no state)
+// O919 (2026-11-19; audit red 11-18 / 11-19, 2 then 6 grant rows "outside cron state"): the grant box has FOUR writer lanes in
+//   validate.js, and only the first matches the closure below (skill / xp / leavers / signals.players) -- the old comment's
+//   "a granted player necessarily had wallet balance" was true while redeems were the only writer:
+//     processRedeems         a CP wallet = settled matchmade play                    -> already in the closure
+//     processCampaignGrants  a guard-signed campaign clear on the campaign box       -> campaign-only players have no settled match
+//     processSupporters      a DLC owner probed as a writer / roster of a fresh record -> that record may never settle (launch night:
+//                            two owners' 0->76 duo run was sanity-rejected, they got the supporter bit and nothing else)
+//     processClassicOwners   a classic owner probed from the same candidate set      -> same
+//   The grant label therefore gets three extra sources (grantClosureExtra), for that label only: a rating / points / xp row of a
+//   player known only to these lanes is still a foreign entry. A new grant-box writer lane must be added here with its source
+//   (test/audit-invariants.js counts the write sites in validate.js against this list).
+const GRANT_LANES = Object.freeze(['processRedeems', 'processCampaignGrants', 'processSupporters', 'processClassicOwners']);
+// a campaign box row explains its owner's grant row when it would be granted today (verified, sealed key, owner = embedded id), or
+//   when it is signed by a build key since retired (held): the signature still verifies, the lane only stops re-granting from it
+function campaignRowExplains(details, owner, pubTable, allowDevKey) {
+  const vd = campaign.verifyCampaignRecord(details, pubTable);
+  if (vd.ok) return campaign.campaignGrantPlan(vd, { owner, allowDevKey }).bits.length > 0;
+  return !!(vd.pending && /^key-/.test(String(vd.reason || '')) && vd.fields && String(vd.fields.steamId) === String(owner));
+}
+// pure: the extra closure of the grant label. sup = supporters.json (an ever-detected owner keeps f > 0 after a refund; the bit is
+//   never taken back), classic = classic.json (no ever-owned marker and the revocable bit leaves a row behind -> every probed key),
+//   campaignRows = [{ steamID, details }] of the campaign box, explains(details, steamID) -> bool.
+function grantClosureExtra(sup, classic, campaignRows, explains) {
+  const out = { supporter: 0, classic: 0, campaign: 0, set: new Set() };
+  for (const h of Object.keys(sup || {})) { const e = sup[h]; if (e && ((e.f | 0) > 0 || (e.o | 0) === 1)) { out.set.add(h); out.supporter++; } }
+  for (const h of Object.keys(classic || {})) { out.set.add(h); out.classic++; }
+  for (const r of campaignRows || []) if (explains(r.details, String(r.steamID))) { out.set.add(pid(String(r.steamID))); out.campaign++; }
+  return out;
+}
 // O520 likes lane (client knife 5.4d, W79): the like box (client-writable, friends-reads) is inventory only, like the report
 //   box; the like counts are a trusted board in the closure -- the lane counts a like only for a player with settled XP
 //   (validate.js processLikes `known`; xp.json is never pruned), so a row for anybody else is a foreign write.
@@ -56,17 +86,20 @@ function loadJson(file, dflt) { try { return JSON.parse(fs.readFileSync(file, 'u
 // the union of state keys -- the cron persists state for every player it ever writes boards
 // for (skill on rating, skill/leavers on points, xp state on xp, signals.players on trust).
 // stateOnly counts the benign inverse (state without a board entry: normal after a wipe).
-function auditTrusted(boards, state) {
+// extraByLabel (O919): { label: Set of pids } -- more players a given board's own writer lanes legitimately reach (grant only, today);
+//   they cover that label alone and do not enter `known` / stateOnly.
+function auditTrusted(boards, state, extraByLabel) {
   const known = new Set([].concat(
     Object.keys(state.skill || {}), Object.keys(state.xp || {}),
     Object.keys(state.leavers || {}), Object.keys((state.signals && state.signals.players) || {})));
   const violations = [];
   const onBoard = new Set();
   for (const label of Object.keys(boards)) {
+    const extra = (extraByLabel && extraByLabel[label]) || null;
     for (const sid of boards[label]) {
       const h = pid(String(sid));
       onBoard.add(h);
-      if (!known.has(h)) violations.push(label + ' entry ' + h.slice(0, 8) + ' outside cron state (foreign writer / lost state)');
+      if (!known.has(h) && !(extra && extra.has(h))) violations.push(label + ' entry ' + h.slice(0, 8) + ' outside cron state (foreign writer / lost state)');
     }
   }
   let stateOnly = 0;
@@ -125,9 +158,9 @@ async function main() {
   // cp/endless entries hash into the closure via signals.players: the settle path records an
   // endless participation signal for every roster member (including debited non-writers), and
   // every CP-credited player is a settled matchmade participant.
-  // grant entries hash into the closure the same way cp does: a granted player necessarily had
-  // wallet balance, i.e. settled matchmade participation. The redeem box itself is client-
-  // writable by design (like report/mirror) and is inventory-only above.
+  // grant entries: CP redeems hash into the closure the same way cp does (wallet balance = settled matchmade play); the
+  // other three grant lanes reach players outside it -> the grant label's extra sources below (O919, see GRANT_LANES).
+  // The redeem box itself is client-writable by design (like report/mirror) and is inventory-only above.
   const trustedWant = [[RANKED_LB, 'rating'], [LP_LB, 'points'], [TRUST_LB, 'trust'], [CP_LB, 'cp'], [ENDLESS_LB, 'endless'], [GRANT_LB, 'grant']];
   if (XP_LB) trustedWant.push([XP_LB, 'xp']);
   for (const n of ENDLESS_TRUSTED) trustedWant.push([n, n]);   // O276: the other cron-written endless ladders (absent ones are skipped below)
@@ -149,7 +182,23 @@ async function main() {
     trusted[label] = br.ents.map(e => String(e.steamID));
     console.log(label + ': ' + trusted[label].length + ' entries');
   }
-  const res = auditTrusted(trusted, state);
+  // O919: the grant label's extra closure (supporter / classic lane state + the campaign box re-verified)
+  const extraByLabel = {};
+  if (trusted.grant && trusted.grant.length) {
+    let campaignRows = [];
+    if (byName[v.CAMPAIGN_LB] && byName[v.CAMPAIGN_LB].entries > 0) {
+      const cb = await readBoardAll(byName[v.CAMPAIGN_LB].id, 'campaign box');
+      if (!cb.complete) ghWarn('campaign box read incomplete -- a grant row of a player on a page not read shows up as outside cron state');
+      campaignRows = cb.ents.map(e => ({ steamID: String(e.steamID), details: decodeDetails(e.detailData) }));
+    }
+    const pubTable = v.loadJobPubTable(Date.now()) || {};
+    const allowDevKey = /_test$/.test(v.CAMPAIGN_LB);   // same rule as the lane (validate.js processCampaignGrants)
+    const gx = grantClosureExtra(loadJson(v.SUPPORTERS_FILE, {}), loadJson(v.CLASSIC_FILE, {}), campaignRows,
+      (d, owner) => campaignRowExplains(d, owner, pubTable, allowDevKey));
+    extraByLabel.grant = gx.set;
+    console.log('grant closure extra: supporter owners ' + gx.supporter + ', classic probed ' + gx.classic + ', campaign clears ' + gx.campaign + ' (of ' + campaignRows.length + ' campaign box rows)');
+  }
+  const res = auditTrusted(trusted, state, extraByLabel);
   for (const v of res.violations) violations.push(v);
   console.log('closure: ' + res.entries + ' board pids vs ' + res.known + ' state pids; state-only (benign, e.g. post-wipe) ' + res.stateOnly);
 
@@ -204,4 +253,4 @@ async function main() {
 if (require.main === module) {
   main().catch(e => { ghErr('audit failed: ' + (e && e.stack || e)); process.exit(1); });
 }
-module.exports = { auditTrusted, ENDLESS_TRUSTED, seasonTwinOf, LIKE_BOARDS, LIKE_TRUSTED };
+module.exports = { auditTrusted, ENDLESS_TRUSTED, seasonTwinOf, LIKE_BOARDS, LIKE_TRUSTED, GRANT_LANES, grantClosureExtra, campaignRowExplains };
