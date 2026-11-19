@@ -131,7 +131,9 @@ console.log('-- [3] the live-shaped state with nobody placed');
 
 console.log('-- [4] O759 on a large made-up season');
 {
-  const L = season({ days: 13, arrive: 350, seed: 7, families: { solo: 1 } }, 'l');
+  // arrive 450: room over the gate. With 350 the three-run placement (ELP version 6) left the effective pool at exactly
+  //   GM_POOL_MIN (20; 28 under five runs) -- one more change of the settle rules and this check would have been red for no reason
+  const L = season({ days: 13, arrive: 450, seed: 7, families: { solo: 1 } }, 'l');
   const e = L.results[L.results.length - 1].entry.gm.solo;
   T('[4] solo grandmaster pool ' + e.pool + ', full window ' + e.effective + ', correlation ' + e.corr + ' over ' + e.pairs + ': the gate would open', e.gate.open && e.effective >= S.SHADOW.GM_POOL_MIN && e.corr >= S.SHADOW.GM_CORR_MIN);
   T('[4] the distribution is shown (pool >= 5) and the runs of the last day counted', e.gap && e.ifOn && e.ifOn.runs > 0 && e.ifOn.plus + e.ifOn.minus + e.ifOn.zero === e.ifOn.runs);
