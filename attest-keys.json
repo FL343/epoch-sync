@@ -466,6 +466,18 @@
         }
       }
     },
+    "2026112101": {
+      "pubs": [
+        "0a9eb3205256d92b623f378c6e5fade6d48c4fea734c7c46e787d532188d8c06"
+      ],
+      "sealed": true,
+      "at": "2026-11-20T18:33:57.437Z",
+      "pubInfo": {
+        "0a9eb3205256d92b623f378c6e5fade6d48c4fea734c7c46e787d532188d8c06": {
+          "ch": "ea"
+        }
+      }
+    },
     "dev": {
       "pubs": [
         "f341d48777a90ad4ca0db15deb16824c7162c872fd48fa8c07b9b0458844d835"
