@@ -15,7 +15,8 @@
 //   [5] team competitive trio segment, late record: held, then settled in full (chain advanced once)
 //   [6] team classic trio segment, late record: held, then settled in full
 //   [7] casual co-op quad: one late seat holds the group of three writers
-//   [8] 2-seat run: unchanged (a lone record never settles; both records settle at once, no hold)
+//   [8] 2-seat run: unchanged (a lone record does not settle here -- only after ENDLESS_LONE.WAIT_MS with the other seat's
+//       own start on file, Q406, test/endless-lone-stayer.js; both records settle at once, no hold)
 //   [9] a writer seen agreeing earlier whose record is gone (shard rotation) is not waited for
 //   [10] wiring pins
 //   [11] mutation self-checks (each lane's gate removed -> its late-record scenario goes red)
@@ -231,7 +232,7 @@ console.log('-- [8] 2-seat run (unchanged) --');
 {
   const h = 0x4780, m = h + '_5_7';
   const r1 = runCron(world(rowsOf(h, DUO, CASUAL, [B])), attested(h));
-  T('[8] one record of two: lone, not settled, no hold logged', !processedOf(r1).has(m) && !/absent-hold/.test(r1.out) && writes(r1, BOARD.duo).length === 0);
+  T('[8] one record of two: lone, not settled (Q406 waits ENDLESS_LONE.WAIT_MS first), no hold logged', !processedOf(r1).has(m) && !/absent-hold/.test(r1.out) && writes(r1, BOARD.duo).length === 0);
   const r2 = runCron(world(rowsOf(h, DUO, CASUAL)), advance(r1.state, MIN));
   T('[8] both records: settled at once, no hold', processedOf(r2).has(m) && !/absent-hold/.test(r2.out) && writes(r2, BOARD.duo).length === 2);
 }

@@ -2455,7 +2455,7 @@ const TEAM2 = { SCORE_MULT: Number(process.env.TEAM2_SCORE_MULT || 10) };
 // Invite-only private rooms earn SMALL XP (well below matchmade) so friend-only players still
 // progress. XP is the ONLY surface: no TrueSkill/LP/CP/career/leaver conviction/B6 pair signals.
 // Anti-farm = three layers (user-directed: TIME is the proof of work):
-//   1. structural: the ordinary >=2-consistent-writers settle gate (lone records never pay -- one exception, a friends' room whose other seat(s) started and never wrote a result: Q316, privateLoneVerdicts below);
+//   1. structural: the ordinary >=2-consistent-writers settle gate (lone records never pay -- one exception, a friends' room whose other seat(s) started and never wrote a result: Q316, privateLoneVerdicts below; endless co-op has the same, Q406);
 //   2. time-as-work: a claimed lv-level room cannot settle before lv*LEVEL_SECONDS*PACE_FRAC
 //      of REAL wall time on this job's own clock (endless pacing family; floor MIN_START_AGE);
 //   3. per-UTC-day XP cap (dayCapXp) -- even a wall-clock-honest farm is bounded per day.
@@ -2544,6 +2544,102 @@ function privateLoneVerdicts(pending, groups, processed, consistentKeys, now, co
     if (!(Number(p.absentAt) > 0)) p.absentAt = p.pl;   // only now (see above): a group that turns consistent first keeps its own grace
     res.due.push({ m, g: groups[m], void: false, pvLone: true });
     console.log('  private-lone ' + m + ': only ' + plog(c.w) + ' wrote a result for ' + Math.round((now - p.pl) / 60000) + ' min, the other seat(s) started and wrote nothing -- settles for him alone, base XP (Q316)');
+  }
+  return res;
+}
+// ---- an endless co-op segment only one of its players wrote a result for (cloud audit Q406, R3-A3-02) ----
+// An endless co-op key (type 7, two to four seats) settles only with two consistent writers: one writer is a `lone` group
+// (groupRecords) and never settles. The start pass keeps its entry as the pacing anchor and drops it after
+// ENDLESS.PENDING_TTL_MS (30 days) or once its rows are gone (Q144), paying nothing; Q47's absent-seat hold only covers a
+// seat missing beside two writers. Live channel, launch day (2026-11-17T12:26Z .. 11-18T00:51Z): 36 two-seat segments had
+// both starts and exactly one result writer (85 had two), 34 of them with the host (seat 0) silent -- he left the run
+// (endless writes nothing for a quit), crashed, or his result never landed. The player who stayed lost the segment's XP,
+// his best and (team competitive) its milestones, although his results page showed them. No modified client needed.
+// So such a key settles for its one writer (endlessLoneVerdicts, main: after the start pass, beside Q316) once all of this
+// holds:
+//   - one account wrote its results, all from one seat of a 2..ENDLESS_MAX_PC-seat co-op record (never the solo or couch
+//     lane), the same consistency vector, none sanity-flagged, each a finish (0 / Q68's 10) or the end the stayer's client
+//     writes when the others are gone: peers-gone (1: the host whose partner left) or host-left (2: the joiner whose host
+//     left and did not come back -- mp.js, the lone survivor settles with the run so far);
+//   - the key's start roster is registered and final (not provisional, not split, no contest note, never lent), has a seat
+//     for each of the record's pc seats, and his results name exactly that roster;
+//   - every other seat of it wrote its OWN start for the key (no account can write another account's start: a lone
+//     account cannot make up a partner), and what those records told about his seat is this roster with him at it (p.tst,
+//     Q113; the writer's own testimony too), and none of them wrote any result for it (p.settled) or a confession; nor did he;
+//   - that has been so for ENDLESS_LONE.WAIT_MS on this job's clock (from the first run that saw it, p.el) and this run read
+//     every record shard. WAIT_MS is an hour past the client's endless resend window (result-reporter OB.TTL_ENDLESS_MS,
+//     72 hours; the game's ledger-schema-lockstep test pins CLIENT_TTL_MS to it): a silent seat whose result was only late
+//     still makes a normal two-writer group first, so no player who would be paid today is paid less.
+// The group then goes through the normal endless settle of its lane (co-op / team competitive / team classic: the chain,
+// pacing, one match at a time per account, boards, XP, milestones) with one writer, marked enLone. The silent seats are left
+// as they are today: a lone settle charges nobody but its writer -- no continue debit and no resume fee on one player's word
+// about another (architecture decision 10: one voice must not cost a partner CP, nor end his rating run; his run's own idle
+// rule still does), and its other effects on them are what any settle with a seat that wrote no result already does (co-op
+// co-presence, the starter wallet). Their continues stay on the price ladder, so the writer pays what he would beside a second
+// writer. Two colluding accounts get two settles by both writing and one by one writing, so this opens nothing to them but
+// the continues of the seat that does not write (counted: endlessLoneUncharged; a client that skips its own start dodges its
+// continues the same way today, Q78).
+// Residuals (README of Q406): the segment's depth / scores are his word only (pacing, the score bound and seedcap as for any
+// co-op group -- a gain only for a modified client whose partner's result was lost, the same class as Q316's); a writer who
+// writes about 47 more records inside the wait has his result overwritten on its shard and the key goes as today (Q144); a
+// result of a silent seat that lands after this settle reaches a processed key (only past his client's window).
+const ENDLESS_LONE = { WAIT_MS: 73 * 3600000, CLIENT_TTL_MS: 72 * 3600000, DISPS: [0, 1, 2, DISP_NOSUMMARY] };   // CLIENT_TTL_MS: the game's OB.TTL_ENDLESS_MS (its lockstep test pins it)
+// p: the key's starts entry; g: groups[key]. Returns { m, w, seat, pc } or null.
+function endlessLoneClaim(p, key, g, pending, processed, confState, confSeen, vecOf) {
+  if (!p || !g || !g.length || processed.has(key) || processed.has(splitMark(key))) return null;
+  if (!isEndlessMt(g[0].d[2] | 0) || !isEndlessMt(p.mt)) return null;
+  const pc = g[0].d[8] | 0;
+  if (pc < 2 || pc > ENDLESS_MAX_PC) return null;   // pc 1 is the signed solo lane (it settles alone already)
+  const ro = seatGateRoster(p);
+  if (!ro || p.prov || p.lent) return null;
+  const cn = pending['~' + key];
+  if (cn && (cn.c || cn.lent)) return null;
+  const seats = Object.keys(ro);
+  if (seats.length !== pc) return null;
+  const w = String(g[0].steamID), wp = pid(w), seat = g[0].d[5] | 0, v0 = vecOf(g[0]);
+  if (ro[seat] !== wp || String(v0).indexOf('BAD') === 0) return null;
+  for (const r of g) {
+    if (String(r.steamID) !== w || (r.d[5] | 0) !== seat || (r.d[8] | 0) !== pc || ENDLESS_LONE.DISPS.indexOf(r.dispCode | 0) < 0) return null;
+    if (isCouchRec(r) || vecOf(r) !== v0 || sanityFlags([r]).length) return null;
+    const rr = r.roster || {};
+    if (Object.keys(rr).length !== pc || seats.some((s) => rr[s] == null || pid(String(rr[s])) !== ro[s])) return null;
+  }
+  const said = (h) => !!((confState && confState[h + '|' + key]) || (confSeen && confSeen.has(h + '|' + key)));
+  if (said(wp)) return null;
+  const tst = (p.tst && typeof p.tst === 'object' && !Array.isArray(p.tst)) ? p.tst : {};
+  if (tst[wp] != null && tst[wp] !== testimonyOf(pc, seat, g[0].roster)) return null;   // he told another story once (Q113)
+  for (const s of seats) {
+    if ((s | 0) === seat) continue;
+    const h = ro[s];
+    if (h === wp || !hasOwnStart(p, h) || (p.settled || []).indexOf(h) >= 0 || said(h)) return null;
+    if (tst[h] !== testimonyOf(pc, s, g[0].roster)) return null;   // his own start said this roster, him at this seat
+  }
+  return { m: key, w, seat, pc };
+}
+// Called once per run, after reconcileStarts (p.settled / p.started / p.tst are cumulative and include this run's records).
+// Stamps p.el the first run a claim holds, drops it when the claim stops holding (on a complete read), and returns the groups
+// that are due ({ m, g, void: false, enLone: true }) for main to append to the consistent groups. Returns { due, waiting,
+// held }. The absence stamp the endless absent-seat hold reads (p.absentAt, Q47) is set only on the due run, to p.el, so its
+// grace is already over -- not earlier: a 3- or 4-seat run whose other results land late inside the wait turns consistent
+// first, and its grace for the last of them must start then (as Q316 review R6).
+function endlessLoneVerdicts(pending, groups, processed, consistentKeys, now, confState, confSeen, readComplete, vecOf) {
+  const res = { due: [], waiting: 0, held: 0 };
+  for (const m of Object.keys(pending)) {
+    const p = pending[m];
+    if (m.charAt(0) === '~' || !p || typeof p !== 'object' || !isEndlessMt(p.mt) || consistentKeys.has(m)) continue;
+    const c = groups[m] ? endlessLoneClaim(p, m, groups[m], pending, processed, confState, confSeen, vecOf) : null;
+    if (!c) { if (p.el != null && readComplete !== false) delete p.el; continue; }   // gone or changed: the wait starts over (a partial read keeps it)
+    if (!(Number(p.el) > 0) || p.el > now) p.el = now;   // a stamp from the future (foreign state) restarts the wait
+    const left = ENDLESS_LONE.WAIT_MS - (now - p.el);
+    if (left > 0) {
+      res.waiting++;
+      if (now === p.el) console.log('  endless-lone ' + m + ': only ' + plog(c.w) + ' (seat ' + c.seat + ' of ' + c.pc + ') wrote a result, the other seat(s) started and wrote nothing -- settles for him alone in ' + Math.round(left / 3600000) + ' h unless theirs land (Q406)');
+      continue;
+    }
+    if (readComplete === false) { res.held++; console.log('  endless-lone ' + m + ': due, held (incomplete shard read) (Q406)'); continue; }
+    if (!(Number(p.absentAt) > 0)) p.absentAt = p.el;   // only now (see above)
+    res.due.push({ m, g: groups[m], void: false, enLone: true });
+    console.log('  endless-lone ' + m + ': only ' + plog(c.w) + ' (seat ' + c.seat + ' of ' + c.pc + ') wrote a result for ' + Math.round((now - p.el) / 3600000) + ' h, the other seat(s) started and wrote nothing -- settles for him alone (Q406)');
   }
   return res;
 }
@@ -4279,6 +4375,7 @@ function writeRunSummary() {
       '| win streak events landing before matches already counted (a late settle; its own tier counts what came before it) / stale (older than the fold, ignored) / absences frozen (the first in a week) / absences that broke a streak (O181) | ' + s('streakLate', 0) + ' / ' + s('streakStale', 0) + ' / ' + s('streakAbsFreeze', 0) + ' / ' + s('streakAbsBreak', 0) + ' |',
       '| ranked 1V1s only the winner wrote (Q184): counted on the silent seat / waiting for a second opponent / paid (points written) / not counted, no signals of his own / over the weekly cap | ' + s('lone1v1', '0 / 0 / 0 / 0 / 0') + ' (' + s('lone1v1Paid', 0) + ') |',
       '| friends\' rooms only one player wrote a result for, the other seat(s) started (Q316): due / waiting / held (incomplete read) (settled for him alone) | ' + s('pvLone', '0 / 0 / 0') + ' (' + s('pvLonePaid', 0) + ') |',
+      '| endless co-op segments only one player wrote a result for, the other seat(s) started (Q406): due / waiting / held (incomplete read) (settled for him alone) / CP of the silent seats not charged | ' + s('enLone', '0 / 0 / 0') + ' (' + s('enLonePaid', 0) + ') / ' + s('endlessLoneUncharged', 0) + ' |',
       '| quick 1V1s whose other player quit and confessed, only the stayer wrote a result (W103): due / waiting / held (incomplete read) (settled for him) | ' + s('quitLone', '0 / 0 / 0') + ' (' + s('quitLonePaid', 0) + ') |',
       '| those keys whose quitter\'s own result came in after the settle, his leave forgiven (W113): due / not paid (shape) (his share paid) | ' + s('quitLoneLate', '0 / 0') + ' (' + s('quitLoneLatePaid', 0) + ') |',
       '| team-gamble host charges / at trust threshold | ' + s('t2lh', '0/0') + ' |',
@@ -11029,6 +11126,12 @@ async function main() {
   const plRes = privateLoneVerdicts(startsPending, groups, processed, consistentKeys, nowMs, confState, confSeen, shardsComplete, vecOf);
   for (const c of plRes.due) consistentMatches.push(c);
   RUN.pvLone = plRes.due.length + ' / ' + plRes.waiting + ' / ' + plRes.held;
+  // Q406: an endless co-op segment only one player wrote a result for (the others started, wrote nothing, for
+  //   ENDLESS_LONE.WAIT_MS) joins the consistent groups and settles for him alone in its endless lane. Same place and
+  //   reasons as Q316 (p.el goes to disk with the start side).
+  const elRes = endlessLoneVerdicts(startsPending, groups, processed, consistentKeys, nowMs, confState, confSeen, shardsComplete, vecOf);
+  for (const c of elRes.due) consistentMatches.push(c);
+  RUN.enLone = elRes.due.length + ' / ' + elRes.waiting + ' / ' + elRes.held;
   // W103 (O507): a quick 1V1 whose other player quit and confessed, only the stayer wrote a result (quitLoneVerdicts) -- joins
   //   the consistent groups and settles for him as a matchmade win. Same place and reasons as Q316; not a consistent key for
   //   the confession pass (the quitter wrote no record to be absolved by: his confession counts as today).
@@ -13702,6 +13805,9 @@ async function main() {
       //   each lane has its start entry (ahead of its pacing gate): settled in full once the record lands, or without the seat
       //   once a complete read still lacks it after the grace. Never a flag, never a conviction (endless has no leaver economy).
       //   A 2-seat run needs both writers to be consistent at all; the solo lane (pc=1) never reaches this block.
+      //   Q406: a key only one player wrote a result for comes here once it has waited out ENDLESS_LONE.WAIT_MS (c.enLone, see
+      //   endlessLoneVerdicts): the hold below lets it through (its absence stamp is that old), and each lane charges only him.
+      const loneSilent = (sid) => !!c.enLone && writerSids.indexOf(String(sid)) < 0;   // Q406: a seat a lone settle leaves untouched
       const endlessAbsence = (pendE) => {
         const agreedE = pendE.agreed || (pendE.agreed = []);   // writers seen agreeing earlier: a record lost to shard rotation is not a gap
         for (const sid of writerSids) { const h = pid(sid); if (agreedE.indexOf(h) < 0) agreedE.push(h); }
@@ -13804,7 +13910,7 @@ async function main() {
         if (plan.ok === null) { console.log('  endless-classic ' + c.m + ': depth ' + f.startDepth + '->' + f.endDepth + ' waiting for its chain (' + plan.reason + ')'); continue; }
         if (plan.ok === false) {
           RUN.soloRej = (RUN.soloRej | 0) + 1;
-          noteResumeRule(plan.reason, true, rosterSids[0]);   // seat 0 = the host (resumed rosters are re-seated host-first) = the row's box
+          noteResumeRule(plan.reason, true, loneSilent(rosterSids[0]) ? null : rosterSids[0]);   // seat 0 = the host (resumed rosters are re-seated host-first) = the row's box; Q406: not on one writer's word about him
           ghWarn('match=' + c.m + ': team classic segment chain REJECT (' + plan.reason + ') depth ' + f.startDepth + '->' + f.endDepth + ' ' + rosterSids.map(plog).join('+'));
           processed.add(c.m);
           continue;
@@ -13836,7 +13942,8 @@ async function main() {
         }
         if (xpId) creditXpEndless(g, { startDepth: Math.max(f.startDepth | 0, plan.proven | 0), endDepth: f.endDepth | 0 }, xp, changedXp, spSet, CLASSIC.XP_MUL);
         if (xpId && (plan.overlap == null || (f.endDepth | 0) > (plan.proven | 0))) creditCareerEndless(g, { startDepth: Math.max(f.startDepth | 0, plan.proven | 0), endDepth: f.endDepth | 0, flags: f.flags | 0 }, xpState, careerTouched, { segmented: true, forced: true });   // 5.4a: classic = default miner
-        console.log('  endless-classic settle ' + c.m + ': pc ' + pc7 + ' depth ' + f.startDepth + '->' + f.endDepth + ' team ' + teamK + ' flags ' + f.flags + ' proven ' + plan.proven + (plan.revive ? ' (revived by a classic token resume)' : '') + (plan.overlap != null ? ' (overlap from ' + plan.overlap + ')' : ''));
+        console.log('  endless-classic settle ' + c.m + ': pc ' + pc7 + ' depth ' + f.startDepth + '->' + f.endDepth + ' team ' + teamK + ' flags ' + f.flags + ' proven ' + plan.proven + (plan.revive ? ' (revived by a classic token resume)' : '') + (plan.overlap != null ? ' (overlap from ' + plan.overlap + ')' : '') + (c.enLone ? ' (one writer, the other seat(s) wrote no result: for him alone, Q406)' : ''));
+        if (c.enLone) RUN.enLonePaid = (RUN.enLonePaid | 0) + 1;
         processed.add(c.m); settledEndlessClassic++;
         continue;
       }
@@ -13907,7 +14014,10 @@ async function main() {
         }
         if (plan.consume) {
           const host = rosterSids[0];
-          if (isOwnE(host)) {
+          if (loneSilent(host)) {   // Q406: the one writer's word does not charge the host who wrote no result
+            RUN.endlessLoneUncharged = (RUN.endlessLoneUncharged || 0) + COMP.RESUME_CP;
+            console.log('  endless-comp cp ' + c.m + ': host ' + plog(host) + ' resume fee ' + COMP.RESUME_CP + ' not charged -- he wrote no result, the one writer\'s word only (Q406)');
+          } else if (isOwnE(host)) {
             cp[host] = (cp[host] == null ? 0 : cp[host]) - COMP.RESUME_CP; changedCp[host] = cp[host];
             console.log('  endless-comp cp ' + c.m + ': host ' + plog(host) + ' -' + COMP.RESUME_CP + ' resume (save@' + plan.consume + ') -> ' + cp[host]);
           } else {
@@ -13939,14 +14049,16 @@ async function main() {
         // O803: the run's roster by run id (team families): the first settle of the run reads every member's skill for the one team target
         if (!PT_MODE) elpTeamNote(soloState, ratingRunId(key), rosterSids.map((x) => pid(String(x))), fam.low, t.seasonId, nowMs);
         // O728: the team's final segment ends the run for every roster member, a member who dropped too (he settles at the depth he wrote with the team)
-        if (!PT_MODE && ((f.flags | 0) & attest.SEG_FINAL)) for (const sidR of rosterSids) { if (writerSids.indexOf(sidR) >= 0) continue; if (ratingHistFinal(soloState, pid(sidR), fam.low, t.seasonId, ratingRunId(key))) ratingTouched.add(sidR); }
+        //   Q406: not on a lone settle -- one writer's final segment does not end the silent members' runs (their idle rule does)
+        if (!PT_MODE && !c.enLone && ((f.flags | 0) & attest.SEG_FINAL)) for (const sidR of rosterSids) { if (writerSids.indexOf(sidR) >= 0) continue; if (ratingHistFinal(soloState, pid(sidR), fam.low, t.seasonId, ratingRunId(key))) ratingTouched.add(sidR); }
         // audit B-F2: an overlap credits new depth only -- Q237: from each writer's own floor (teamXpStarts), never less than that rule
         if (xpId) creditXpEndless(catchUp ? g.filter((r) => catchUp.has(String(r.steamID))) : g, { startDepth: f.startDepth | 0, endDepth: f.endDepth | 0, startOf: (sid) => xpFrom[String(sid)] }, xp, changedXp, spSet);
         // 5.4a career: the same writers as the XP credit (a catch-up = only the writers behind; the rest got this segment before)
         if (xpId) creditCareerEndless(catchUp ? g.filter((r) => catchUp.has(String(r.steamID))) : g, { startDepth: f.startDepth | 0, endDepth: f.endDepth | 0, flags: f.flags | 0 }, xpState, careerTouched, { segmented: true, forced: false });
         teamXpMark(soloState.runs[key], g, f, headT0);
         if (catchUp) console.log('  endless-comp catch-up ' + c.m + ': pc ' + pc7 + ' depth ' + f.startDepth + '->' + f.endDepth + ' at the head ' + plan.proven + ' (' + plan0.reason + ') for ' + [...catchUp].map(plog).join('+') + ' -- chain left as it is');
-        else console.log('  endless-comp settle ' + c.m + ': pc ' + pc7 + ' depth ' + f.startDepth + '->' + f.endDepth + ' team ' + teamT + ' flags ' + f.flags + ' proven ' + plan.proven + (plan.overlap != null ? ' (overlap from ' + plan.overlap + ')' : ''));
+        else console.log('  endless-comp settle ' + c.m + ': pc ' + pc7 + ' depth ' + f.startDepth + '->' + f.endDepth + ' team ' + teamT + ' flags ' + f.flags + ' proven ' + plan.proven + (plan.overlap != null ? ' (overlap from ' + plan.overlap + ')' : '') + (c.enLone ? ' (one writer, the other seat(s) wrote no result: for him alone, Q406)' : ''));
+        if (c.enLone) RUN.enLonePaid = (RUN.enLonePaid | 0) + 1;
         processed.add(c.m); settledEndlessComp++;
         continue;
       }
@@ -14064,6 +14176,11 @@ async function main() {
           console.log('  endless cp ' + c.m + ': seat ' + seat + ' ' + plog(sid) + ' ' + endlessNib(t.continuesUsed, seat) + ' continues (' + debitsAll[seat] + ') not charged -- never wrote an own record for this run (Q78)');
         }
         if (!sid || !debits[seat]) continue;
+        if (loneSilent(sid)) {   // Q406: a lone settle charges only its writer; this seat's continues stay on the ladder above
+          RUN.endlessLoneUncharged = (RUN.endlessLoneUncharged || 0) + debits[seat];
+          console.log('  endless cp ' + c.m + ': seat ' + seat + ' ' + plog(sid) + ' ' + endlessNib(t.continuesUsed, seat) + ' continues (' + debits[seat] + ') not charged -- he wrote no result, the one writer\'s word only (Q406)');
+          continue;
+        }
         const debit = debits[seat];
         if (!attestE.has(pid(sid))) {
           RUN.endlessOthersWord = (RUN.endlessOthersWord | 0) + 1;
@@ -14101,7 +14218,8 @@ async function main() {
       //   made the claimed gain cost real time, so the rate is bounded without a day cap.
       if (xpId) creditXpEndless(g, t, xp, changedXp, spSet);
       if (xpId) creditCareerEndless(g, t, xpState, careerTouched, { segmented: false, forced: false });   // 5.4a career: one casual co-op record = one session
-      console.log('  endless settle ' + c.m + ': pc ' + pc7 + ' depth ' + t.startDepth + '->' + t.endDepth + ' team ' + teamScore + (c.void ? ' (void disp majority -- settled anyway: co-op has no outcome to void)' : ''));
+      console.log('  endless settle ' + c.m + ': pc ' + pc7 + ' depth ' + t.startDepth + '->' + t.endDepth + ' team ' + teamScore + (c.void ? ' (void disp majority -- settled anyway: co-op has no outcome to void)' : '') + (c.enLone ? ' (one writer, the other seat(s) wrote no result: for him alone, Q406)' : ''));
+      if (c.enLone) RUN.enLonePaid = (RUN.enLonePaid | 0) + 1;
       processed.add(c.m); settledEndless++;
       continue;
     }
@@ -15786,6 +15904,7 @@ Object.assign(module.exports, { V54B3_STREAK, streakPlan, streakApply, streakAbs
 Object.assign(module.exports, { QUIT_LONE, quitLoneClaim, quitLoneVerdicts });   // W103 / O507 a quick 1V1 whose other player quit and confessed (test/quit-lone-1v1.js)
 Object.assign(module.exports, { quitLoneLateDue });   // W113 the quitter's own result after that settle (test/quit-lone-late.js)
 Object.assign(module.exports, { PRIVATE_LONE, privateLoneClaim, privateLoneVerdicts });   // cloud audit Q316 a friends' room only one player wrote a result for (test/private-lone-stayer.js)
+Object.assign(module.exports, { ENDLESS_LONE, endlessLoneClaim, endlessLoneVerdicts });   // cloud audit Q406 an endless co-op segment only one player wrote a result for (test/endless-lone-stayer.js)
 Object.assign(module.exports, { START_PROOF_ENFORCE, startProof, proofState, proofTable, proofOwnsId, applyStartProof, screenLateStarts, seenNote, startSeenId, startSig });   // O462 matchmade start proof (test/start-proof-step.js)
 Object.assign(module.exports, { LIKE: likePlan.LIKE, LIKES_FILE, LIKE_BOX_LB, LIKE_COUNT_LB, loadLikes, saveLikes });   // O520 likes lane (client knife 5.4d, W79; test/likes-lane.js)
 Object.assign(module.exports, { rankedSeatMaskOf, mtSansSeats, seatAppliesLp, anyAppliesLp, SEAT_MASK_BASES });   // O716 one queue for quick + ranked: the ranked-seat mask (test/seat-mask.js)
