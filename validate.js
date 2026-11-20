@@ -8973,14 +8973,16 @@ const REROLL_EVERY = 3;
 //   CAND_N = 3), so replaying the whole log with d[4] shows other cards for the pre-save draws -> perk_forge for practically every
 //   honest resume (launch to 2026-11-19: at least 24 rejected, 1 settled). Until the client stores the seed (and its records can
 //   be told apart) or the reconcile tries the 3 candidate sets per pre-save draw, a resumed casual co-op session settles despite
-//   a failed replay when: the failure depends on the cards shown (a log that is malformed is still rejected), and the resume
-//   starts no deeper than the team has already settled on this ladder (chainMax; an unbacked start stays rejected). Logged +
-//   counted (RUN.perkResumeLoose); seedcap still steps aside on these groups (it cannot replay the segment-start build).
+//   a failed replay when the failure depends on the cards shown (a log that is malformed is still rejected). The start depth is
+//   not required to be backed by the ladder (O922 review 1): the commonest live shape is a host who left the saved session with
+//   Esc (nothing is written for that seat, so that session never settles -- Q406's lone shape) and resumed from the save later; a backing
+//   rule costs a cheater nothing (any settled level backs a resume at 1). Time is still paid: the chain rule below credits
+//   only the depth the ladder vouches for (endlessRequiredMs: an unbacked start waits out the full span). Logged + counted
+//   (RUN.perkResumeLoose); seedcap still steps aside on these groups (it cannot replay the segment-start build).
 const PERK_SHAPE_WHY = Object.freeze(['picks-shape', 'picks-count', 'build-shape', 'build-without-picks']);
-function coopResumePerkLoose(pv, startDepth, chainMax) {
+function coopResumePerkLoose(pv, startDepth) {
   if (!pv || pv.ok || pv.reason !== 'perk_forge') return false;
-  const sd = startDepth | 0;
-  if (sd <= 0 || sd > (chainMax | 0)) return false;
+  if ((startDepth | 0) <= 0) return false;
   return PERK_SHAPE_WHY.indexOf(String(pv.why || '').split('@')[0]) < 0;
 }
 function rerollChain(f, run, slackDepth, casualResumeAt) {
@@ -14144,15 +14146,16 @@ async function main() {
         processed.add(c.m);
         continue;
       }
-      // chain max (read here, before the perk check: O922 bounds its resume tolerance by it; the chain rule below uses the same value)
+      // chain max (read here, before the perk check: O922's resume line logs it; the chain rule below uses the same value)
       let chainMax = 0;
       for (const sid of ownRosterSids) {
         if (bBest[sid] != null) chainMax = Math.max(chainMax, unpackEndlessScore(bBest[sid]).depth);
       }
       const pvC = perks.verifyPerkPicks({ build: t.build >>> 0, picksLo: t.picksLo | 0, picksHi: t.picksHi | 0, seasonId: t.seasonId | 0, endDepth: t.endDepth | 0, runSeed: g[0].d[4] | 0 }, null, pc7, PERK_CH);
-      if (!pvC.ok && coopResumePerkLoose(pvC, t.startDepth, chainMax)) {   // O922: a resumed session's pre-save draws used the old run seed
-        RUN.perkResumeLoose = (RUN.perkResumeLoose | 0) + 1;
-        console.log('  endless perk resume-loose ' + c.m + ': ' + pvC.reason + ': ' + pvC.why + ' build ' + (t.build >>> 0) + ' depth ' + t.startDepth + '->' + t.endDepth + ' (chain ' + chainMax + ') -- settled, perk build not verified (O922)');
+      let perkLoose = false;   // O922: counted when the session settles (a deferred one is logged again next run)
+      if (!pvC.ok && coopResumePerkLoose(pvC, t.startDepth)) {   // O922: a resumed session's pre-save draws used the old run seed
+        perkLoose = true;
+        console.log('  endless perk resume-loose ' + c.m + ': ' + pvC.reason + ': ' + pvC.why + ' build ' + (t.build >>> 0) + ' depth ' + t.startDepth + '->' + t.endDepth + ' (chain ' + chainMax + ') -- perk build not verified, on to the chain rule (O922)');
       } else if (!pvC.ok) {   // Q314: the build / pick log every writer copies from the host -- rejected as before, nobody flagged
         RUN.perkRej = (RUN.perkRej | 0) + 1;
         ghWarn('match=' + c.m + ': endless perk REJECT (' + pvC.reason + ': ' + pvC.why + ') build ' + (t.build >>> 0) + ' depth ' + t.startDepth + '->' + t.endDepth + ' -- nobody flagged (Q314)');
@@ -14288,6 +14291,7 @@ async function main() {
           }
         }
       }
+      if (perkLoose) RUN.perkResumeLoose = (RUN.perkResumeLoose | 0) + 1;   // O922: this session settles below
       // progress XP (2026-09-05): writers only, depth gain of THIS session; the pacing gate above already
       //   made the claimed gain cost real time, so the rate is bounded without a day cap.
       if (xpId) creditXpEndless(g, t, xp, changedXp, spSet);

@@ -9,8 +9,10 @@
 //   [1] resumed duo (start 25), pick log drawn under another seed, team settled 25 (the save point) on this ladder: settles, both credited,
 //       resume-loose line, no REJECT, nobody flagged
 //   [1b] [1] again with the live seedcap switches on (validate.yml): still settles
-//   [2] the same record, nobody settled on this ladder: rejected as before (perk REJECT build-mismatch)
-//   [3] the same record, team settled only 20 (< start 25): rejected
+//   [2] the same record, nobody settled on this ladder (the host left the saved session with Esc, Q406 shape): settles once the
+//       full span has passed (O922 review 1) -- [2b] started 10 min ago: deferred by the chain rule (full span 28 levels = 17.5 min);
+//       [2c] [2] again with the live seedcap switches on: still settles
+//   [3] the same record, team settled only 20 (< start 25): settles
 //   [4] not a resume (start 0), the same mismatching build: rejected (unchanged)
 //   [5] resumed + backed, but a malformed log (more picks than the depth allows): rejected (shape checks stay strict)
 //   [6] resumed + backed, a log that replays under the record seed: settles on the normal path (no resume-loose line)
@@ -119,18 +121,18 @@ function world(rows, best) {
     { id: BOARD.duo, name: 'endless_board', entries: ladder }, { id: 11, name: 'endless_board_trio', entries: [] }, { id: 12, name: 'endless_board_quad', entries: [] });
   return boards;
 }
-const attested = (hash) => { const s = {}; s[hash + '_5_7'] = { t0: Date.now() - 90 * 60000, mt: 7, roster: { 0: v.pid(A), 1: v.pid(B) }, settled: [] }; return { STARTS_FILE: s }; };
+const attested = (hash, ageMin) => { const s = {}; s[hash + '_5_7'] = { t0: Date.now() - (ageMin || 90) * 60000, mt: 7, roster: { 0: v.pid(A), 1: v.pid(B) }, settled: [] }; return { STARTS_FILE: s }; };
 let hashN = 0x9220;
-function caseRun(tail, best, script, extraEnv) {
+function caseRun(tail, best, script, extraEnv, ageMin) {
   const h = hashN++, m = h + '_5_7';
   const rows = [{ shard: 0, sid: A, d: rec7(h, 0, DUO, tail) }, { shard: 1, sid: B, d: rec7(h, 1, DUO, tail) }];
-  return { r: runCron(world(rows, best), attested(h), script, extraEnv), m };
+  return { r: runCron(world(rows, best), attested(h, ageMin), script, extraEnv), m };
 }
 const credited = (c, sid) => writes(c.r, BOARD.duo, sid).length > 0 && writes(c.r, BOARD.progress, sid).length > 0;
 const nobodyFlagged = (c) => flagsOf(c.r, A) === 0 && flagsOf(c.r, B) === 0;
 const settledBoth = (c) => processedOf(c.r).has(c.m) && credited(c, A) && credited(c, B);
 const rejected = (c) => processedOf(c.r).has(c.m) && !credited(c, A) && !credited(c, B);
-const looseLine = (c) => new RegExp('endless perk resume-loose ' + c.m + ': perk_forge: [a-z-]+(@\\d+)? build \\d+ depth 25->28 \\(chain \\d+\\) -- settled, perk build not verified \\(O922\\)').test(c.r.out);
+const looseLine = (c) => new RegExp('endless perk resume-loose ' + c.m + ': perk_forge: [a-z-]+(@\\d+)? build \\d+ depth 25->28 \\(chain \\d+\\) -- perk build not verified, on to the chain rule \\(O922\\)').test(c.r.out);
 const rejectLine = (c) => new RegExp('::warning::match=' + c.m + ': endless perk REJECT \\(perk_forge: [^)]*\\)').test(c.r.out);
 const show = (c) => 'processed=' + processedOf(c.r).has(c.m) + ' credited=' + [A, B].filter((s) => credited(c, s)).length + ' flags=' + flagsOf(c.r, A) + '/' + flagsOf(c.r, B) + ' loose=' + looseLine(c) + ' reject=' + rejectLine(c) + ' exit=' + c.r.code;
 
@@ -160,9 +162,14 @@ T('[1] resumed duo, team settled 25 (the save point) on this ladder: settles, bo
 const c1b = caseRun(TAIL(START, END, buildOrig, pk.lo, pk.hi), { [A]: START, [B]: START }, null, { SEEDCAP_ENFORCE: '1', SEEDCAP_REJECT: '1' });
 T('[1b] the same as [1] with the live seedcap switches on (SEEDCAP_ENFORCE / SEEDCAP_REJECT = 1): still settles, both credited', settledBoth(c1b) && looseLine(c1b) && !rejectLine(c1b) && nobodyFlagged(c1b), show(c1b));
 const c2 = caseRun(TAIL(START, END, buildOrig, pk.lo, pk.hi), {});
-T('[2] the same record, nobody settled on this ladder: rejected (perk REJECT), nobody credited', rejected(c2) && rejectLine(c2) && !looseLine(c2) && nobodyFlagged(c2), show(c2));
+T('[2] the same record, nobody settled on this ladder: settles after the full span, resume-loose line, no REJECT, nobody flagged', settledBoth(c2) && looseLine(c2) && !rejectLine(c2) && nobodyFlagged(c2), show(c2));
+const c2b = caseRun(TAIL(START, END, buildOrig, pk.lo, pk.hi), {}, null, null, 10);
+const paced = (c) => !processedOf(c.r).has(c.m) && !credited(c, A) && !rejectLine(c) && new RegExp('endless-pacing ' + c.m + ': depth 25->28 \\(chain 0\\) needs 1050s').test(c.r.out);
+T('[2b] the same record, nobody settled, started 10 min ago: deferred by the chain rule (full span 28 x 37.5 s), not rejected, not settled', paced(c2b), show(c2b));
+const c2c = caseRun(TAIL(START, END, buildOrig, pk.lo, pk.hi), {}, null, { SEEDCAP_ENFORCE: '1', SEEDCAP_REJECT: '1' });
+T('[2c] the same as [2] with the live seedcap switches on (SEEDCAP_ENFORCE / SEEDCAP_REJECT = 1): still settles, both credited', settledBoth(c2c) && looseLine(c2c) && !rejectLine(c2c) && nobodyFlagged(c2c), show(c2c));
 const c3 = caseRun(TAIL(START, END, buildOrig, pk.lo, pk.hi), { [A]: 20, [B]: 20 });
-T('[3] the same record, team settled only 20 (< start 25): rejected', rejected(c3) && rejectLine(c3) && !looseLine(c3), show(c3));
+T('[3] the same record, team settled only 20 (< start 25): settles', settledBoth(c3) && looseLine(c3) && !rejectLine(c3), show(c3));
 const c4 = caseRun(TAIL(0, END, buildOrig, pk.lo, pk.hi), { [A]: 30, [B]: 30 });
 T('[4] not a resume (start 0), the same mismatching build: rejected (unchanged)', rejected(c4) && rejectLine(c4) && !looseLine(c4), show(c4));
 const many = [1, 2, 3, 1, 2, 3, 1]; while (many.length < 20) many.push(0);
@@ -174,15 +181,15 @@ T('[6] resumed + backed, a log that replays under the record seed: settles on th
 
 console.log('-- [7] run summary --');
 const sumRow = (c) => (c.r.summary.split('\n').find((l) => l.indexOf('(O922)') >= 0) || '(no O922 row, ' + c.r.summary.length + ' chars)');
-T('[7] the summary counts the tolerated resume (1 in [1], 0 in [2])', /\| co-op resumes settled without a perk replay \(O922\) \| 1 \|/.test(c1.r.summary) && /\| co-op resumes settled without a perk replay \(O922\) \| 0 \|/.test(c2.r.summary),
-  '[1] ' + sumRow(c1) + ' / [2] ' + sumRow(c2));
+T('[7] the summary counts the tolerated resume when it settles (1 in [1], 0 in [4], 0 in the deferred [2b])', /\| co-op resumes settled without a perk replay \(O922\) \| 1 \|/.test(c1.r.summary) && /\| co-op resumes settled without a perk replay \(O922\) \| 0 \|/.test(c4.r.summary) && /\| co-op resumes settled without a perk replay \(O922\) \| 0 \|/.test(c2b.r.summary),
+  '[1] ' + sumRow(c1) + ' / [4] ' + sumRow(c4) + ' / [2b] ' + sumRow(c2b));
 
 console.log('-- [8] unit + class pins + mutations --');
 const L = v.coopResumePerkLoose, F = (why) => ({ ok: false, reason: 'perk_forge', why });
-T('[8] truth table: card-dependent failure on a backed resume -> tolerated; unbacked / start 0 / shape / perk_chain / ok -> not',
-  L(F('build-mismatch'), 25, 30) && L(F('pick-range@2'), 25, 25) && !L(F('build-mismatch'), 25, 24) && !L(F('build-mismatch'), 0, 30)
-  && !L(F('picks-count@7'), 25, 30) && !L(F('picks-shape'), 25, 30) && !L(F('build-shape'), 25, 30) && !L(F('build-without-picks'), 25, 30)
-  && !L({ ok: false, reason: 'perk_chain', why: 'prefix' }, 25, 30) && !L({ ok: true }, 25, 30) && !L(null, 25, 30));
+T('[8] truth table: card-dependent failure on a resume -> tolerated; start 0 / shape / perk_chain / ok -> not',
+  L(F('build-mismatch'), 25) && L(F('pick-range@2'), 25) && L(F('build-mismatch'), 1) && !L(F('build-mismatch'), 0)
+  && !L(F('picks-count@7'), 25) && !L(F('picks-shape'), 25) && !L(F('build-shape'), 25) && !L(F('build-without-picks'), 25)
+  && !L({ ok: false, reason: 'perk_chain', why: 'prefix' }, 25) && !L({ ok: true }, 25) && !L(null, 25));
 // class pin: every "why" verifyPerkPicks returns before it replays, and every "why" the vendor replay returns before its walk, is a
 //   shape why (they do not depend on the run seed) -- a new structural check must be classified here
 const pkSrc = fs.readFileSync(path.join(ROOT, 'perks.js'), 'utf8');
@@ -194,7 +201,7 @@ const rpPre = venSrc.slice(rpStart, venSrc.indexOf('_walkV2(', rpStart));
 const pre = Array.from(new Set(Array.from(vpBody.matchAll(/reason: 'perk_forge', why: '([a-z-]+)'/g), (m) => m[1]).concat(Array.from(rpPre.matchAll(/why: '([a-z-]+)'/g), (m) => m[1]))));
 T('[8] every seed-independent why before the replay is a shape why (' + pre.join(', ') + ')', pre.length >= 4 && pre.every((w) => v.PERK_SHAPE_WHY.indexOf(w) >= 0) && v.PERK_SHAPE_WHY.every((w) => pre.indexOf(w) >= 0));
 const calls = SRC.split('coopResumePerkLoose(').length - 1;
-const callAt = SRC.indexOf('coopResumePerkLoose(pvC, t.startDepth, chainMax)');
+const callAt = SRC.indexOf('coopResumePerkLoose(pvC, t.startDepth)');
 const lane0 = SRC.indexOf("ghWarn('match=' + c.m + ': endless reroll bitmap sanity REJECT ("), lane1 = SRC.indexOf('// chain rule: startDepth credit only up to the deepest end depth');
 T('[8] one call site (+ the definition), on the casual co-op lane between its reroll check and its chain rule', calls === 2 && callAt > lane0 && callAt < lane1 && lane0 > 0);
 
@@ -209,14 +216,13 @@ function mutant(good, badS) {
 // control: an unchanged copy loads the same way and keeps the truth table
 {
   const mu = mutant('function coopResumePerkLoose(', 'function coopResumePerkLoose(');
-  let okC = false; try { const M = mu.mod(); okC = M.coopResumePerkLoose(F('build-mismatch'), 25, 30) && !M.coopResumePerkLoose(F('build-mismatch'), 25, 24); } catch (e) { okC = false; } finally { mu.done(); }
+  let okC = false; try { const M = mu.mod(); okC = M.coopResumePerkLoose(F('build-mismatch'), 25) && !M.coopResumePerkLoose(F('build-mismatch'), 0); } catch (e) { okC = false; } finally { mu.done(); }
   T('[8] mutation control: an unchanged copy loads and keeps the truth table', okC);
 }
 const pure = [
-  ['the chain bound dropped (an unbacked resume tolerated)', 'if (sd <= 0 || sd > (chainMax | 0)) return false;', 'if (sd <= 0) return false;', (M) => M.coopResumePerkLoose(F('build-mismatch'), 25, 24)],
-  ['the resume test dropped (a fresh run tolerated)', 'if (sd <= 0 || sd > (chainMax | 0)) return false;', 'if (sd > (chainMax | 0)) return false;', (M) => M.coopResumePerkLoose(F('build-mismatch'), 0, 30)],
-  ['the shape guard dropped (a malformed log tolerated)', "return PERK_SHAPE_WHY.indexOf(String(pv.why || '').split('@')[0]) < 0;", 'return true;', (M) => M.coopResumePerkLoose(F('picks-count@7'), 25, 30)],
-  ['the "@" suffix not cut (a shape why with a position slips through)', "String(pv.why || '').split('@')[0]", "String(pv.why || '')", (M) => M.coopResumePerkLoose(F('picks-count@7'), 25, 30)],
+  ['the resume test dropped (a fresh run tolerated)', 'if ((startDepth | 0) <= 0) return false;', '', (M) => M.coopResumePerkLoose(F('build-mismatch'), 0)],
+  ['the shape guard dropped (a malformed log tolerated)', "return PERK_SHAPE_WHY.indexOf(String(pv.why || '').split('@')[0]) < 0;", 'return true;', (M) => M.coopResumePerkLoose(F('picks-count@7'), 25)],
+  ['the "@" suffix not cut (a shape why with a position slips through)', "String(pv.why || '').split('@')[0]", "String(pv.why || '')", (M) => M.coopResumePerkLoose(F('picks-count@7'), 25)],
 ];
 for (const [name, good, badS, isRed] of pure) {
   const mu = mutant(good, badS);
@@ -224,10 +230,15 @@ for (const [name, good, badS, isRed] of pure) {
   T('[8] mutation "' + name + '" is caught', red);
 }
 {
-  const mu = mutant('if (!pvC.ok && coopResumePerkLoose(pvC, t.startDepth, chainMax)) {', 'if (false) {');
+  const mu = mutant('if (!pvC.ok && coopResumePerkLoose(pvC, t.startDepth)) {', 'if (false) {');
   let red = false; try { const c = caseRun(TAIL(START, END, buildOrig, pk.lo, pk.hi), { [A]: START, [B]: START }, mu.path); red = rejected(c) && rejectLine(c); } finally { mu.done(); }
   T('[8] mutation "the lane does not ask coopResumePerkLoose" is caught end-to-end ([1] rejected again)', red);
 }
 
+{
+  const mu = mutant('const reqMs = endlessRequiredMs(t, chainMax);', 'const reqMs = endlessRequiredMs(t, t.startDepth);');
+  let red = false; try { const c = caseRun(TAIL(START, END, buildOrig, pk.lo, pk.hi), {}, mu.path, null, 10); red = !paced(c); } finally { mu.done(); }
+  T('[8] mutation "the lane credits the claimed start of an unbacked resume (no full span)" is caught end-to-end ([2b] settles at once)', red);
+}
 console.log(failN ? '=== FAIL -- ' + failN + ' fail (coop-resume-perk-loose) ===' : '=== PASS -- 0 fail (coop-resume-perk-loose) ===');
 process.exit(failN ? 1 : 0);
