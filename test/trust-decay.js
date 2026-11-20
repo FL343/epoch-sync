@@ -215,13 +215,14 @@ function between(state, ms) {
   return files;
 }
 const sidPair = (sid) => { const b = BigInt(sid); return [Number(b & 0xFFFFFFFFn) | 0, Number((b >> 32n) & 0xFFFFFFFFn) | 0]; };
-// a friends'-room 3P settle record (type 10); each seat's copy disagrees on its own score (seat s adds 1 to seat s's score).
+// a quick-brawl 3P settle record (type 1); each seat's copy disagrees on its own score (seat s adds 1 to seat s's score).
 //   Three writers who disagree are flagged once each. Two voices no longer are -- a quick / ranked 1V1 (this fixture first,
-//   Q289, test/pair-dispute-1v1.js), a friends' room of two (this fixture next, Q291, test/two-voice-dispute.js) -- so this
-//   fixture is a friends' room of three now; the flag bookkeeping it tests is the same
+//   Q289, test/pair-dispute-1v1.js), a friends' room of two (this fixture next, Q291, test/two-voice-dispute.js) -- nor a
+//   friends' room / bot match of three or more (this fixture next, Q407, test/room-dispute.js) -- so this fixture is a
+//   quick brawl of three now; the flag bookkeeping it tests is the same
 function mm(hash, seat) {
   const sc = [9000, 4000, 3000]; if (seat) sc[seat] += 1;
-  const d = [0xB1, 3, 10, hash | 0, 1234, seat, seat + 1, (6 << 1) | (seat === 0 ? 1 : 0), 3, 720].concat(sc, [0]);
+  const d = [0xB1, 3, 1, hash | 0, 1234, seat, seat + 1, (6 << 1) | (seat === 0 ? 1 : 0), 3, 720].concat(sc, [0]);
   for (const s of [A, B, C]) { const p = sidPair(s); d.push(p[0], p[1]); }
   return d;
 }

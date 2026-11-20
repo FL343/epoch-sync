@@ -423,11 +423,12 @@ const settledHonest = (tag, rs, key, settleRun) => {
   } finally { try { fs.unlinkSync(script); } catch (e) {} }
 }
 {
-  // control: an unsettled key whose three records disagree (no start roster) still flags every writer once. A friends' room
-  //   of three (type 10): two voices no longer flag their writers for disagreeing -- a quick / ranked 1V1 (Q289,
-  //   test/pair-dispute-1v1.js), a friends' room of two (Q291, test/two-voice-dispute.js)
+  // control: an unsettled key whose three records disagree (no start roster) still flags every writer once. A quick brawl
+  //   of three (type 1): two voices no longer flag their writers for disagreeing -- a quick / ranked 1V1 (Q289,
+  //   test/pair-dispute-1v1.js), a friends' room of two (Q291, test/two-voice-dispute.js) -- nor does a friends' room / bot
+  //   match of three or more (Q407, test/room-dispute.js; this control's room before it)
   const h = 0x9031, R = [P1, P2, P3];
-  const room = (seat, sc) => rec(0xB1, 10, h, seat, seat + 1, seat === 0, R, sc);
+  const room = (seat, sc) => rec(0xB1, 1, h, seat, seat + 1, seat === 0, R, sc);
   const recs = [{ sid: P1, d: room(0, [7000, 5000, 4000]) }, { sid: P2, d: room(1, [7000, 5100, 4000]) }, { sid: P3, d: room(2, [7000, 5000, 4100]) }];
   const rs = timeline([[0, recs], [6 * MIN, recs]]);
   T('[5] control: an inconsistent group on an unsettled key flags its writers once, as before', allOk(rs, 2) && R.every((s) => fOf(last(rs), s) === 1)
@@ -447,7 +448,7 @@ const settledHonest = (tag, rs, key, settleRun) => {
     && /const sig = \(r\) => \(r\.d\[8\] \| 0\) \+ '\|' \+ rosterCanon\(r\.roster\);/.test(SRC));
   const main = SRC.slice(SRC.indexOf('const registeredEarly = registerStartRosters('));
   T('[6] main: registration (and the later-start check) runs before the seat gate', main.indexOf('registerStartRosters(') < main.indexOf('applySeatGate('));
-  T('[6] main: the inconsistent-group flag loop skips settled keys before recordFlag (Q317: endless runs of three writers or more, Q128: ungated endless keys between; Q289 / Q291: disputes of two voices)',
+  T('[6] main: the inconsistent-group flag loop skips settled keys before recordFlag (Q317: endless runs of three writers or more, Q128: ungated endless keys between; Q289 / Q291: disputes of two voices; Q407: friends\' rooms / bot matches of three writers or more)',
     /for \(const \{ m, g \} of inconsistentGroups\) \{[\s\S]{0,700}?if \(processed\.has\(m\)\) \{[\s\S]{0,300}?continue;\n\s+\}\n[\s\S]{0,6400}?if \(recordFlag\(signals, g, m, nowMs\)\)/.test(main));
   T('[6] summary rows', /start rosters split by a later start \/ confirmed \(Q118\)/.test(SRC) && /settled keys with records that disagree, nobody flagged \(Q114\)/.test(SRC));
 }

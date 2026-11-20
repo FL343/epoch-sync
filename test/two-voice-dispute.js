@@ -22,8 +22,9 @@
 //       writes, ranked party bit, a team code, an empty third seat, an out-of-range seat index for the joiner, a seat count
 //       of three on the joiner's broadcast only -- the honest joiner never flagged, the host neither, paid as before;
 //       mutants (the rules before) -> the joiner flagged
-//   [4] what stays: three voices that disagree flag every writer, as before (a friends' room of three, a quick brawl of
-//       three, the host's alt on the table writing a record of its own -- a residual, README); a writer whose own
+//   [4] what stays: three voices that disagree flag every writer, as before (a quick brawl of three, the host's alt on the
+//       table writing a record of its own -- a residual, README; a friends' room of three flags nobody since Q407,
+//       test/room-dispute.js); a writer whose own
 //       duration breaks its bound is flagged alone
 //   [5] two accounts of one owner disputing friends' rooms / bot matches: nothing paid, nothing to gain
 //   [6] an old key the job before flagged: no flag removed, counted once
@@ -305,7 +306,9 @@ for (const [name, jo] of [['friends\' room 1V1 (10)', { mt: 10, ros: [H, J] }], 
 {
   // three writers: H claims the win, J and X write the honest result; every writer is flagged (as before -- the majority
   //   question is not this fix's: README residual). sc: H's / J's / X's scores
-  const three = (mt, hsh, ros, label) => {
+  // want: [now, the job before]; Q407 (test/room-dispute.js): a friends' room / bot match of three writers or more flags nobody
+  //   for the disagreement -- now and under this file's 'loop' mutant alike (that mutant takes only the two-voice lane out)
+  const three = (mt, hsh, ros, label, want) => {
     const pc = ros.length, scH = [7000, 4000, 1000].slice(0, pc), scT = [4000, 7000, 1000].slice(0, pc);
     const st = [H, J, X].map((sid, i) => ({ sid, d: rec(0xB2, mt, hsh, i, 0, false, ros, null, pc) }));
     const re = [{ sid: H, d: rec(0xB1, mt, hsh, 0, 1, true, ros, scH, pc) }, { sid: J, d: rec(0xB1, mt, hsh, 1, 1, true, ros, scT, pc) }, { sid: X, d: rec(0xB1, mt, hsh, 2, 3, false, ros, scT, pc) }];
@@ -316,10 +319,10 @@ for (const [name, jo] of [['friends\' room 1V1 (10)', { mt: 10, ros: [H, J] }], 
     const now = [fOf(last(rs), H), fOf(last(rs), J), fOf(last(rs), X)];
     withMutant(['loop'], tag, (sc) => {
       const ms = timeline(steps, sc), old = [fOf(last(ms), H), fOf(last(ms), J), fOf(last(ms), X)];
-      eq(tag + ': every writer flagged once, exactly as before', [now, old], [[1, 1, 1], [1, 1, 1]]);
+      eq(tag + (want ? ': nobody flagged (Q407)' : ': every writer flagged once, exactly as before'), [now, old], want || [[1, 1, 1], [1, 1, 1]]);
     });
   };
-  three(10, 0x2940, [H, J, X], 'a friends\' room of three (10)');
+  three(10, 0x2940, [H, J, X], 'a friends\' room of three (10)', [[0, 0, 0], [0, 0, 0]]);
   three(1, 0x2941, [H, J, X], 'a quick brawl of three (1)');
   three(1, 0x2942, [H, J, X], 'the host\'s alt X on the broadcast table writing the host\'s claim (a 1V1 the host made three: residual)');
   // the duration stays the writer's own: the host's result past DUR_CAP flags him alone

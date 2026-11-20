@@ -736,7 +736,7 @@ for (const late of [false, true]) {
     JSON.stringify([V, W, Y].map(s => flagsOf(p, s))) + ' ' + JSON.stringify(pendOf(p.last, h)));
 }
 {
-  T('[7] wiring: after the settled-key skip (and the Q317 rule for runs of three writers or more), before recordFlag; summary row', /RUN\.lateMismatch = [\s\S]{0,300}?continue;\n\s+\}\n(?:[\s\S]{0,400}?const ed = seatGateRoster\(startsPending\[m\]\) \? endlessDispute\(g, vecOf\) : null;[\s\S]{0,1200}?continue;\n\s+\}\n)?[\s\S]{0,900}?if \(isEndlessMt\(g\[0\]\.d\[2\] \| 0\) && !seatGateRoster\(startsPending\[m\]\)\) \{[\s\S]{0,300}?continue;\n\s+\}\n(?:[\s\S]{0,400}?const pd1 = pairDispute1v1\(g\);[\s\S]{0,1600}?continue;\n\s+\}\n)?\s+if \(recordFlag\(signals, g, m, nowMs\)\)/.test(SRC)
+  T('[7] wiring: after the settled-key skip (and the Q317 rule for runs of three writers or more), before recordFlag; summary row', /RUN\.lateMismatch = [\s\S]{0,300}?continue;\n\s+\}\n(?:[\s\S]{0,400}?const ed = seatGateRoster\(startsPending\[m\]\) \? endlessDispute\(g, vecOf\) : null;[\s\S]{0,1200}?continue;\n\s+\}\n)?[\s\S]{0,900}?if \(isEndlessMt\(g\[0\]\.d\[2\] \| 0\) && !seatGateRoster\(startsPending\[m\]\)\) \{[\s\S]{0,300}?continue;\n\s+\}\n(?:[\s\S]{0,400}?const pd1 = pairDispute1v1\(g\);[\s\S]{0,1600}?continue;\n\s+\}\n)?(?:[\s\S]{0,400}?const rd = roomDispute\(g, vecOf\);\n\s+if \(rd\) \{[\s\S]{0,1600}?\n\s+continue;\n\s+\}\n)?\s+if \(recordFlag\(signals, g, m, nowMs\)\)/.test(SRC)
     && /'\| endless keys without a seat gate whose records disagree, nobody flagged \(Q128\) \| ' \+ s\('endlessUngated', 0\)/.test(SRC));
   const from = 'if (isEndlessMt(g[0].d[2] | 0) && !seatGateRoster(startsPending[m])) {';
   if (SRC.split(from).length !== 2) bad('[7] mutant: anchor not found exactly once');

@@ -436,9 +436,10 @@ for (const [mt, name] of [[2, 'ranked'], [1, 'quick']]) {
 // ---- [10] wiring pins ----
 {
   const loop = SRC.slice(SRC.indexOf('for (const { m, g } of inconsistentGroups) {'));
-  T('[10] the flag loop: settled keys (Q114), (endless runs of three writers or more, Q317,) then ungated endless keys (Q128), then the 1V1 dispute, before recordFlag',
-    /if \(processed\.has\(m\)\) \{[\s\S]{0,300}?continue;\n\s+\}\n(?:[\s\S]{0,400}?const ed = seatGateRoster\(startsPending\[m\]\) \? endlessDispute\(g, vecOf\) : null;[\s\S]{0,1200}?continue;\n\s+\}\n)?[\s\S]{0,900}?if \(isEndlessMt\(g\[0\]\.d\[2\] \| 0\) && !seatGateRoster\(startsPending\[m\]\)\) \{[\s\S]{0,300}?continue;\n\s+\}\n[\s\S]{0,400}?const pd1 = pairDispute1v1\(g\);\n\s+if \(pd1\) \{[\s\S]{0,1600}?\n\s+continue;\n\s+\}\n\s+if \(recordFlag\(signals, g, m, nowMs\)\) sigDirty = true;/.test(loop));
-  const blk = loop.slice(loop.indexOf('const pd1 = pairDispute1v1(g);'), loop.indexOf('if (recordFlag(signals, g, m, nowMs)) sigDirty = true;'));
+  T('[10] the flag loop: settled keys (Q114), (endless runs of three writers or more, Q317,) then ungated endless keys (Q128), then the 1V1 dispute, (then friends\' rooms / bot matches of three writers or more, Q407,) before recordFlag',
+    /if \(processed\.has\(m\)\) \{[\s\S]{0,300}?continue;\n\s+\}\n(?:[\s\S]{0,400}?const ed = seatGateRoster\(startsPending\[m\]\) \? endlessDispute\(g, vecOf\) : null;[\s\S]{0,1200}?continue;\n\s+\}\n)?[\s\S]{0,900}?if \(isEndlessMt\(g\[0\]\.d\[2\] \| 0\) && !seatGateRoster\(startsPending\[m\]\)\) \{[\s\S]{0,300}?continue;\n\s+\}\n[\s\S]{0,400}?const pd1 = pairDispute1v1\(g\);\n\s+if \(pd1\) \{[\s\S]{0,1600}?\n\s+continue;\n\s+\}\n(?:[\s\S]{0,400}?const rd = roomDispute\(g, vecOf\);\n\s+if \(rd\) \{[\s\S]{0,1600}?\n\s+continue;\n\s+\}\n)?\s+if \(recordFlag\(signals, g, m, nowMs\)\) sigDirty = true;/.test(loop));
+  const blkEnd = loop.indexOf('const rd = roomDispute(g, vecOf);') >= 0 ? loop.indexOf('const rd = roomDispute(g, vecOf);') : loop.indexOf('if (recordFlag(signals, g, m, nowMs)) sigDirty = true;');   // Q407: its own branch follows (test/room-dispute.js)
+  const blk = loop.slice(loop.indexOf('const pd1 = pairDispute1v1(g);'), blkEnd);
   T('[10] the dispute branch: only the own-field writers reach recordFlag, the count dirties the signals, no other write',
     (blk.match(/recordFlag\(/g) || []).length === 1 && /recordFlag\(signals, \[\]\.concat\(\.\.\.pd1\.own\.map\(\(x\) => x\.recs\)\), m, nowMs\)/.test(blk)
     && /if \(cnt\.n\) sigDirty = true;/.test(blk) && !/creditXp|writeLp|postForm|processed\.add|flagPlayer/.test(blk));

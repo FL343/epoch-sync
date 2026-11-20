@@ -30,6 +30,10 @@
 //   Q292 (cloud audit): a blank start flags nobody any more -- [7] / [8] write the blank flags with the job before it on
 //       their first run (the flags on file in production) and pin how those prune; [7] then counts nothing new (f stays,
 //       the flags drain by their writer), [8] under this job from the start flags nobody
+//   Q407 (cloud audit): a friends' room of three writers or more whose records disagree flags nobody any more -- [3]-[6]
+//       write their flags with the job before it (OLD_ROOM; the launch-night room's six flags are on file in production)
+//       and the runs after are this job's, so the expectations are as before; [3] under this job from the start flags
+//       nobody
 // State isolation is structural (every *_FILE var redirected, cwd = temp dir), like test/state-prune.js.
 const { spawnSync } = require('child_process');
 const fs = require('fs'), path = require('path'), os = require('os'), crypto = require('crypto');
@@ -135,6 +139,16 @@ const OLD_BLANK = path.join(TREE, '.old-blank-rule.js');
   if (src.split(from).length !== 2) { console.log('  FAIL  OLD_BLANK anchor not found exactly once'); process.exit(1); }
   fs.writeFileSync(OLD_BLANK, src.replace(from, '      if (recordFlag(signals, [r], k, Date.now())) sigDirty = true;\n'));
 }
+// cloud audit Q407: a friends' room / bot match of three writers or more whose records disagree flags nobody any more
+//   (roomDispute). OLD_ROOM = the job before it, which flagged every writer once: those flags are on file in production
+//   (the launch-night room of six) and still prune by their key, so [3]-[6] write theirs with it
+const OLD_ROOM = path.join(TREE, '.old-room-rule.js');
+{
+  const from = '    const rd = roomDispute(g, vecOf);\n';
+  const src = fs.readFileSync(VALIDATE, 'utf8');
+  if (src.split(from).length !== 2) { console.log('  FAIL  OLD_ROOM anchor not found exactly once'); process.exit(1); }
+  fs.writeFileSync(OLD_ROOM, src.replace(from, '    const rd = null;\n'));
+}
 const FILE_VARS = Array.from(new Set(Array.from(SRC.matchAll(/process\.env\.([A-Z0-9_]+_FILE)\b/g), m => m[1]))).filter((k) => k !== 'RECOVER_FILE');
 const STUB = [
   "const fs = require('fs');",
@@ -212,9 +226,10 @@ function advance(state, ms) {
 const SID = (n) => '7656119800' + String(n).padStart(7, '0');
 const sidPair = (sid) => { const b = BigInt(sid); return [Number(b & 0xFFFFFFFFn) | 0, Number((b >> 32n) & 0xFFFFFFFFn) | 0]; };
 // a friends'-room result (type 10, one seat per account of `ros`) written by the player at `seat`, with the score vector he
-//   claims: three of them that disagree flag every writer once. Two voices no longer flag anybody for disagreeing -- a
-//   ranked 1V1 (this fixture first, Q289, test/pair-dispute-1v1.js), a friends' room of two (this fixture next, Q291,
-//   test/two-voice-dispute.js) -- so the keys here have three writers; the flag bookkeeping tested here is the same
+//   claims: three of them that disagree flagged every writer once under the job before Q407 (OLD_ROOM, which [3]-[6] write
+//   their flags with). Two voices no longer flag anybody for disagreeing -- a ranked 1V1 (this fixture first, Q289,
+//   test/pair-dispute-1v1.js), a friends' room of two (this fixture next, Q291, test/two-voice-dispute.js) -- so the keys
+//   here have three writers; the flag bookkeeping tested here is the same
 function result(hash, seat, ros, scores) {
   const pc = ros.length;
   const d = [0xB1, 3, 10, hash | 0, 1234, seat, 1 + seat, (6 << 1) | (seat === 0 ? 1 : 0), pc, 720].concat(scores.slice(0, pc), [0]);
@@ -284,14 +299,15 @@ const keyOf = (d) => d[3] + '_' + d[4] + '_' + d[2];
   const trio = (h, a, b, c) => [a, b, c].map((sid, i) => ({ sid, d: result(h, i, [a, b, c], [6100, 3900 - 100 * i, 2000]) }));
   const K1 = 0x166a1, K2 = 0x166b2;
   const kept = trio(K2, C, D, E);
+  // runs 0 and 5 write the flags with the job before Q407 (OLD_ROOM); every other run is this job's
   const steps = [
-    [0, trio(K1, P, Q, R).concat(kept)],            // 0: both keys flagged
-    [30 * MIN, trio(K1, P, Q, R).concat(kept)],     // 1: still on the shards
-    [30 * MIN, kept],                               // 2: K1's records gone -> armed
-    [30 * MIN, kept],                               // 3: 30 minutes into the hour -> kept
-    [40 * MIN, kept],                               // 4: 70 minutes -> dropped
-    [5 * MIN, trio(K1, P, Q, R).concat(kept)],      // 5: all three write K1 back -> flagged again, not counted again (Q98)
-    [60 * MIN, trio(K1, P, Q, R).concat(kept)],     // 6: still on the shards
+    [0, trio(K1, P, Q, R).concat(kept), null, OLD_ROOM],          // 0: both keys flagged
+    [30 * MIN, trio(K1, P, Q, R).concat(kept)],                   // 1: still on the shards
+    [30 * MIN, kept],                                             // 2: K1's records gone -> armed
+    [30 * MIN, kept],                                             // 3: 30 minutes into the hour -> kept
+    [40 * MIN, kept],                                             // 4: 70 minutes -> dropped
+    [5 * MIN, trio(K1, P, Q, R).concat(kept), null, OLD_ROOM],    // 5: all three write K1 back -> flagged again, not counted again (Q98)
+    [60 * MIN, trio(K1, P, Q, R).concat(kept)],                   // 6: still on the shards
   ];
   const rs = timeline(steps);
   if (!brk(rs, steps.length, '[3]/[4]')) {
@@ -303,6 +319,9 @@ const keyOf = (d) => d[3] + '_' + d[4] + '_' + d[2];
     eq('[4] f of K1\'s players per run (not counted again when they wrote it back: Q98, one match flags a player once)', rs.map((r) => [fOf(r, P), fOf(r, Q), fOf(r, R)]), [[1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1]]);
     T('[4] no flagOff field before anything was armed', !('flagOff' in sigOf(rs[0])) && !('flagOff' in sigOf(rs[1])));
   }
+  // Q407: the same records under this job from the start flag nobody
+  const ns = timeline(steps.slice(0, 2).map(([ms, recs]) => [ms, recs]));
+  if (!brk(ns, 2, '[3] Q407')) eq('[3] Q407: the same records under this job from the start: neither key flagged, f 0', [ns.map((r) => flags(r).length), [P, Q, R, C, D, E].map((x) => fOf(ns[1], x))], [[0, 0], [0, 0, 0, 0, 0, 0]]);
 }
 
 // ---- [5] main(): the records leave while a shard fails to read ----
@@ -312,7 +331,7 @@ const keyOf = (d) => d[3] + '_' + d[4] + '_' + d[2];
   const both = [P, Q, R].map((sid, i) => ({ sid, d: result(K, i, [P, Q, R], [6100, 3900 - 100 * i, 2000]) }));
   const fail = { STUB_FAIL: JSON.stringify({ shard_7: 500 }) };
   const steps = [
-    [0, both],
+    [0, both, null, OLD_ROOM],   // flagged by the job before Q407
     [60 * MIN, [], fail],     // gone, incomplete read -> nothing
     [120 * MIN, [], fail],    // gone, incomplete read -> nothing
     [60 * MIN, []],           // the first complete read -> armed
@@ -337,7 +356,7 @@ const keyOf = (d) => d[3] + '_' + d[4] + '_' + d[2];
   fs.writeFileSync(rf, JSON.stringify({ channel: 'demo', until: '2099-01-01T00:00:00Z', boards: ['lbtest_pool'], keys: ['2026100101'] }));
   const rec = { DEMO_APPID: '1', RECOVER_FILE: rf };
   const steps = [
-    [0, both, rec],
+    [0, both, rec, OLD_ROOM],   // flagged by the job before Q407
     [60 * MIN, [], rec],      // gone, recovery pools configured -> nothing
     [90 * MIN, [], rec],      // the same
     [5 * MIN, []],            // no recovery file: armed
