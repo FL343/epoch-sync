@@ -2879,12 +2879,32 @@ function botXpGain(lv, n, rankEff, tierMult, loneMult, bm, cls) {
 //   (min with the record's progress bits). Every other gate of the lane stays as it is: the time-as-work floor, one match at
 //   a time per account, sanity, the table split, the seedcap reject window. What the signature cannot vouch for: whether the
 //   bots really played (their inputs come from the host renderer) and the tier bits -- the time floor is still the rate bound.
-//   No block / a block this job cannot judge yet / a broken block = the 0.6 lane as before (a broken block is only counted,
-//   never flagged, in this phase: a key table pushed wrong must not mark honest players).
+//   No block / a broken block = the 0.6 lane as before (a broken block is only counted, never flagged, in this phase: a key
+//   table pushed wrong must not mark honest players); a block this job cannot judge yet (pending) waits for its key up to
+//   BOT_KEY_WAIT_MS, then the 0.6 lane (Q408).
 //   MSIG_BOTS='1' turns the x1.0 credit on (the three reconcile jobs set it); unset = count only.
 //   MSIG_PAIR (client knife 5.8b, the two-voice lane below): 'record' = count and log what the signatures would settle, change
 //   nothing; 'enforce' = settle a disputed 1V1 by its one usable signed side; unset = the lane is off (not even counted).
 const MSIG = { BOTS: process.env.MSIG_BOTS === '1', PAIR: (process.env.MSIG_PAIR === 'record' || process.env.MSIG_PAIR === 'enforce') ? process.env.MSIG_PAIR : '' };
+// cloud audit Q408 (round 3, R3-A4-02): a lone bot record whose block this job cannot judge YET -- a 'pending' block: its key not in
+//   the table (a push late or lost, a table copied from a tree without it), retired past its grace or held for another channel, a
+//   block version this job does not read -- waits for the key (the bot lane in main), as a solo segment does (R1-A5-07). Before,
+//   it settled at once on the x0.6 lane and was processed: the key pushed an hour later could not lift it, an honest player lost
+//   40% of the match's XP for good. Only with MSIG_BOTS (the x1.0 credit on).
+//   BOT_KEY_WAIT_MS = the longest it waits from its first hold; then it settles on the x0.6 lane as before (a block naming a key
+//   nobody pushes earns what no block earns). At most half the kept-record window (KEPT_REC_MAX_MS, Q373): while it waits, the
+//   records it read are kept (keptKeep; a player who keeps playing overwrites his row after about 25 matches), and the copy must
+//   still be there when the wait runs out, with room for a job outage of hours on top.
+//   The writer's slot (writerPaced) is claimed on the first hold, in the match's real-time order, and not asked for again while
+//   it waits or when it settles: asked again each run, it would claim the writer's time again and push his later matches behind
+//   this one. A held key whose group is no longer one writer (another human's record came in) is paced as any other.
+const BOT_KEY_WAIT_MS = Math.min(Number(process.env.BOT_KEY_WAIT_MS || 12 * 3600 * 1000), Math.floor(KEPT_REC_MAX_MS / 2));
+// a lone bot group the key may still lift (botSignedOf kinds): every record's block usable or pending, one at least pending. A
+//   group with a record without a block, or with a broken / untrusted one, cannot become usable: it settles at once, as before.
+function botKeyPending(kinds) {
+  return Array.isArray(kinds) && kinds.length > 0 && kinds.some((k) => String(k).indexOf('pending') === 0)
+    && kinds.every((k) => k === 'ok' || String(k).indexOf('pending') === 0);
+}
 // the block verdict of a lone bot group -> { use, lv, kinds } (use only when EVERY record of the group carries a usable block)
 function botSignedOf(g, pubTable, allowDevKey) {
   let use = g.length > 0, lv = -1;
@@ -4443,6 +4463,7 @@ function writeRunSummary() {
       '| unsettled records by layout version (O199: attestation / endless tail ints / ledger header) | ' + s('persistPending', '-') + ' |',
       '| solo segments held for an attestation layout not read yet (att-ver; their runs wait with them) | ' + s('attVerHeld', 0) + ' |',
       '| guard match signature blocks on lone bot records settling this run (knife 5.8a): with a block / usable / verified but not trusted / broken or not verifiable / pending (key, version) -- bot matches credited at x1.0' + (MSIG.BOTS ? '' : ' (MSIG_BOTS off: counted only)') + ' | ' + (RUN.msig ? [RUN.msig.block, RUN.msig.ok, RUN.msig.untrusted, RUN.msig.bad, RUN.msig.pending].join(' / ') + ' -- ' + RUN.msig.bots1 : '0 / 0 / 0 / 0 / 0 -- 0') + ' |',
+      '| lone bot matches waiting for a signing key this job cannot judge yet (Q408): held this run / newly held / settled at x' + BOT_XP.loneMult + ' after ' + Math.round(BOT_KEY_WAIT_MS / 3600000) + ' h' + (MSIG.BOTS ? '' : ' (MSIG_BOTS off: nothing waits)') + ' | ' + s('botKeyHeld', 0) + ' / ' + s('botKeyHeldNew', 0) + ' / ' + s('botKeyWaitOut', 0) + ' |',
       '| guard match signature on multiplayer records (knife 5.8b, MSIG_PAIR ' + (MSIG.PAIR || 'off') + '): disputed 1V1 keys with one usable signed side / of them settled by it this run (enforce) / with a broken block on the other side / both sides signed, still disagreeing / pending -- agreeing 1V1 keys signed on both / one / no side -- agreeing keys of 3+ seats, rooms, bot matches signed on all / some / no writer | '
         + (RUN.msigPair ? [RUN.msigPair.one, RUN.msigPair.moved, RUN.msigPair.oneBad, RUN.msigPair.dual, RUN.msigPair.pending].join(' / ') : '0 / 0 / 0 / 0 / 0') + ' -- ' + (RUN.msigCov ? RUN.msigCov.pair.join(' / ') + ' -- ' + RUN.msigCov.multi.join(' / ') : '0 / 0 / 0 -- 0 / 0 / 0') + ' |',
       '| one-match-at-a-time deferrals (waited past the own floor: < 5 min / < 30 min / < 4 h / 4 h+) | ' + s('writerPaced', 0) + ' (' + (RUN.writerPacedWait || [0, 0, 0, 0]).join(' / ') + ') |',
@@ -13234,7 +13255,8 @@ async function main() {
   };
   let scPendingRestore = null;
   // one match at a time per account (writerReadyAt): true = defer this group; false = the writers' slot is claimed
-  //   (call it only where the group settles on this run -- every path after it ends in processed.add)
+  //   (call it only where the group settles on this run -- every path after it ends in processed.add; one exception, a lone
+  //   bot record that starts waiting for its signing key, claims the slot once on its first hold and never asks again, Q408)
   const writerPaced = (m, wSids, t0, reqMs) => {
     const readyAt = writerReadyAt(signals, wSids, t0, reqMs, nowMs);
     if (readyAt > nowMs) {
@@ -14622,7 +14644,26 @@ async function main() {
         console.log('  bots-pacing ' + c.m + ': lv ' + lvB + ' needs ' + Math.round(reqMsB / 1000) + 's real time, seen ' + Math.round((nowMs - (pendB.t0 || 0)) / 1000) + 's -- deferred');
         continue;
       }
-      if (writerPaced(c.m, writerSids, pendB.t0, reqMsB)) continue;   // one match at a time per account (a lone writer cannot run parallel bot matches, R1-A2-01)
+      // Q408: a lone record whose block this job cannot judge yet (pending) waits for its key, at most BOT_KEY_WAIT_MS from its
+      //   first hold, its records kept meanwhile; the writer's slot is claimed once, on that first hold (see BOT_KEY_WAIT_MS)
+      const heldB = Number(pendB.bw) > 0 && !!c.botLone;
+      if (!heldB && writerPaced(c.m, writerSids, pendB.t0, reqMsB)) continue;   // one match at a time per account (a lone writer cannot run parallel bot matches, R1-A2-01)
+      if (MSIG.BOTS && c.botLone && botKeyPending(sigB.kinds)) {
+        if (!heldB) {
+          pendB.bw = nowMs; RUN.botKeyHeldNew = (RUN.botKeyHeldNew | 0) + 1;
+          ghWarn('match=' + c.m + ': lone bot record of ' + plog(writerSids[0]) + ' carries a guard signature block this job cannot judge yet (' + sigB.kinds.join(',') + ') -- it waits up to '
+            + Math.round(BOT_KEY_WAIT_MS / 3600000) + ' h for the key (push the key table from the client repo), then settles at x' + BOT_XP.loneMult + ' as before (Q408)');
+        }
+        const waitedB = nowMs - Number(pendB.bw);
+        if (waitedB < BOT_KEY_WAIT_MS) {
+          RUN.botKeyHeld = (RUN.botKeyHeld | 0) + 1;
+          RUN.keptKeep = (RUN.keptKeep | 0) + keptKeep(pendB, g.concat(dropRecs), nowMs, keptKeys(SALT));   // Q373: what it read, should the shards lose it
+          console.log('  bots-key-wait ' + c.m + ': [msig ' + sigB.kinds.join(',') + '] -- held ' + Math.round(waitedB / 60000) + ' of ' + Math.round(BOT_KEY_WAIT_MS / 60000) + ' min for the key, not settled (Q408)');
+          continue;
+        }
+        RUN.botKeyWaitOut = (RUN.botKeyWaitOut | 0) + 1;
+        console.log('  bots-key-wait ' + c.m + ': [msig ' + sigB.kinds.join(',') + '] -- waited ' + Math.round(waitedB / 60000) + ' min, the key still cannot be judged: settles on the x' + BOT_XP.loneMult + ' lane as before (Q408)');
+      }
       countDay();
       if (xpId) creditXpBot(g, lvB, xp, changedXp, xpState, today, spSet, !!c.botLone, sigB.use && MSIG.BOTS);
       if (sigB.use && MSIG.BOTS) RUN.msig.bots1++;
@@ -15934,6 +15975,7 @@ module.exports = { ED_MAGIC, ED_VER, ED_LEN, EAC_EXCUSE, EAC_NOTE_DISP, eacDropM
   RECOVER_FILE, loadRecover, recoverPick, readRecoverRows };   // client knife 5.0i one-shot pool recovery
 Object.assign(module.exports, { KEY_CHANNEL, loadJobPubTable, soloKeyHeld, soloRunHasHeld });   // cloud audit R1-A5-07 per-channel key policy (test/playtest-key-policy.js)
 Object.assign(module.exports, { MSIG, botSignedOf, signedPairOf, signedPairSynth, applySignedPair, msigCoverage, dualSignedCount });   // client knife 5.8a / 5.8b: the guard match signature (test/match-sig.js, test/signed-pair-1v1.js)
+Object.assign(module.exports, { BOT_KEY_WAIT_MS, botKeyPending });   // cloud audit Q408 a lone bot record with a pending signature block waits for its key (test/bot-key-wait.js)
 Object.assign(module.exports, { flagPlayer, flagsInWindow, stampLegacyFlags, TRUST_F_WINDOW_MS, SIG_FLAG_KEYS_CAP });   // cloud audit Q98 forgery flags age out of the trust tier (test/trust-decay.js)
 Object.assign(module.exports, { endlessHostOnly, SANITY_ENDLESS_HOST_SLUGS });   // cloud audit Q305 endless sanity on host-copied fields flags nobody (test/endless-host-fields.js)
 Object.assign(module.exports, { endlessRecordSplit, endlessRerollCanon, SANITY_ENDLESS_OWN_SLUGS, SANITY_ENDLESS_REC_SLUGS, SANITY_ENDLESS_GROUP_HOST });   // cloud audit Q306 endless: one record's own fields drop that record (test/endless-own-fields.js)

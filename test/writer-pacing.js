@@ -331,7 +331,8 @@ const FLOOR = v.SANITY.MIN_START_AGE_MS;
     SRC.indexOf('if (pacingDefer(pend, nowMs, SANITY.MIN_START_AGE_MS))', gate) > gate);
   T('[9] matchmade lanes apply the one-match rule right after the floor', /if \(!isPrivateMt\(matchType\) && !isBotMt\(matchType\) && writerPaced\(c\.m, pacedSids, pend\.t0, SANITY\.MIN_START_AGE_MS\)\) continue;/.test(SRC));
   T('[9] private lane applies it after its own floor', /if \(writerPaced\(c\.m, writerSids, pendP\.t0, reqMsP\)\) continue;/.test(SRC));
-  T('[9] bot lane applies it after its own floor', /if \(writerPaced\(c\.m, writerSids, pendB\.t0, reqMsB\)\) continue;/.test(SRC));
+  T('[9] bot lane applies it after its own floor (Q408: not again while a lone record waits for its signing key -- claimed on its first hold)',
+    /const heldB = Number\(pendB\.bw\) > 0 && !!c\.botLone;\n\s*if \(!heldB && writerPaced\(c\.m, writerSids, pendB\.t0, reqMsB\)\) continue;/.test(SRC));
   T('[9] the old unconstrained "no attestation" pass is gone', !/if \(!pend\) for \(const sid of writerSids\)/.test(SRC));
   T('[9] exports', typeof v.writerReadyAt === 'function' && typeof v.writerClaim === 'function' && typeof v.freshOrderPaced === 'function');
   T('[9] run summary reports the deferrals', /one-match-at-a-time deferrals/.test(SRC));
@@ -339,7 +340,7 @@ const FLOOR = v.SANITY.MIN_START_AGE_MS;
   T('[9] per-day count once per settle: matchmade at the gate, private / bot only after their floor and the one-match rule',
     /if \(!isPrivateMt\(matchType\) && !isBotMt\(matchType\)\) countDay\(\);/.test(SRC) &&
     /writerPaced\(c\.m, writerSids, pendP\.t0, reqMsP\)\) continue;[^\n]*\n\s*countDay\(\);/.test(SRC) &&
-    /writerPaced\(c\.m, writerSids, pendB\.t0, reqMsB\)\) continue;[^\n]*\n\s*countDay\(\);/.test(SRC));
+    /writerPaced\(c\.m, writerSids, pendB\.t0, reqMsB\)\) continue;[^\n]*\n\s*if \(MSIG\.BOTS && c\.botLone && botKeyPending\(sigB\.kinds\)\) \{(?:(?!countDay|processed\.add)[\s\S]){0,2500}?lane as before \(Q408\)'\);\n\s*\}\n\s*countDay\(\);/.test(SRC));   // Q408: the key wait sits between (its hold continues before the count)
   T('[9] the closure clamps stored marks to this run', /writerReadyAt\(signals, wSids, t0, reqMs, nowMs\)/.test(SRC));
   // O348 (1) (knife 5.5b-1 S5): the endless lanes, each right after its own depth-scaled gate
   T('[9] team classic lane applies it after its own floor', /-- deferred'\);\s*continue;\s*\}\s*if \(writerPaced\(c\.m, writerSids, pendK\.t0, reqK\)\) continue;/.test(SRC));

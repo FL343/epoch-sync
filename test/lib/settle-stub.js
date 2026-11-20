@@ -98,6 +98,7 @@ function advance(state, ms) {
   const files = JSON.parse(JSON.stringify(state));
   const st = files.STARTS_FILE || {};
   for (const k of Object.keys(st)) {
+    if (st[k] && st[k].bw) st[k].bw -= ms;   // Q408: when a lone bot record first waited for its signing key
     if (st[k] && st[k].t0) st[k].t0 -= ms;
     if (st[k] && st[k].absentAt) st[k].absentAt -= ms;
     if (st[k] && st[k].pl) st[k].pl -= ms;   // Q316: when a lone friends'-room claim was first seen

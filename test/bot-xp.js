@@ -198,7 +198,7 @@ eq('abandoner -> nothing', credit([mk11(A, 0, { disp: 5 })], 6, {}, {}, 20000, t
 // -- settle-branch structure pins (XP is the ONLY surface) --
 {
   const src = fs.readFileSync(path.join(__dirname, '..', 'validate.js'), 'utf8');
-  const branch = src.match(/if \(isBotMt\(matchType\)\) \{[\s\S]{0,2400}?\n    \}/);
+  const branch = src.match(/if \(isBotMt\(matchType\)\) \{[\s\S]{0,4400}?\n    \}/);   // Q408: + the key wait (was 2400)
   if (!branch) bad('bot settle branch missing');
   else {
     const b = branch[0];
