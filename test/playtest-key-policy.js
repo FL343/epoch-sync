@@ -166,7 +166,9 @@ console.log('== C) job channel from the workflow environment ==');
   assert('PT_MODE=1 without DEMO_APPID -> null (binding off, retirement still on)', probe({ PT_MODE: '1', APPID: '222' }) === 'null');
   const wf = (f) => fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', f), 'utf8');
   assert('playtest.yml and demo.yml both export DEMO_APPID + PT_MODE (what KEY_CHANNEL relies on)', ['playtest.yml', 'demo.yml'].every(f => /DEMO_APPID:/.test(wf(f)) && /PT_MODE: '1'/.test(wf(f))));
-  assert('seedcap.yml names every job channel (SEEDCAP_CHANNEL ea / playtest / demo)', ['ea', 'playtest', 'demo'].every(c => new RegExp('SEEDCAP_CHANNEL: ' + c + '\\b').test(wf('seedcap.yml'))));
+  // 2026-11-20: the playtest / demo seedcap twins are retired -> one job, ea (the key table it loads follows SEEDCAP_CHANNEL)
+  const scY = wf('seedcap.yml'), scCh = (scY.match(/^ {10}SEEDCAP_CHANNEL: (\w+)/gm) || []).map((x) => x.trim().split(' ')[1]);
+  assert('seedcap.yml names every job channel: SEEDCAP_CHANNEL ea on its one job (playtest / demo twins retired)', scCh.join() === 'ea' && scCh.length === (scY.match(/^ {8}run: node seedcap\.js[ \t]*$/gm) || []).length, scCh.join());
 }
 
 console.log('== D) wiring ==');

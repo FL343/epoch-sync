@@ -196,8 +196,10 @@ absent, so a run is unaffected before it is provisioned.
 - `.github/workflows/playtest.yml` / `demo.yml` — the pre-release channel jobs: the same
   reconcile pointed at a second/third app id in restricted-channel mode (`PT_MODE=1`: no
   rating/points/redeem surface, channel boards provisioned idempotently, forbidden boards
-  fail the run) with disjoint `pt-*.json` / `demo-*.json` state. `feedback.yml`,
-  `sanctions.yml` and `seedcap.yml` carry per-channel twin jobs for the same app ids;
+  fail the run) with disjoint `pt-*.json` / `demo-*.json` state. `feedback.yml` and
+  `sanctions.yml` carry per-channel twin jobs for the same app ids (`seedcap.yml` carried them
+  too until 2026-11-20: both apps are closed, so its twins were retired and `pt-seedcap.json` /
+  `demo-seedcap.json` stay as the frozen final record the two channel jobs read);
   `test/channel-workflows.js` pins the twins to their template so they cannot drift apart;
   `test/channel-state-files.js` runs the real reconcile under each twin's own state-file names
   and fails when a twin writes a file it does not persist with data in it (the rating-side

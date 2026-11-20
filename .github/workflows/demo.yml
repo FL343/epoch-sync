@@ -95,7 +95,8 @@ jobs:
           ERR_STATE_FILE: demo-err-reports.json
           SUPPORTERS_FILE: demo-supporters.json
           PENDING_WRITES_FILE: demo-pending-writes.json
-          # O124 seedcap consult (read-only; seedcap.yml's demo twin owns the file). Enforce on
+          # O124 seedcap consult (read-only; seedcap.yml's demo twin wrote the file until it was
+          # retired on 2026-11-20 -- the file is the frozen final record since). Enforce on
           # from day one: the demo inherits the playtest enforce soak (0 over-cap, 0 suspects);
           # SEEDCAP_REJECT armed 2026-09-18 together with playtest (twin env): the bounded
           # 24h/3d/7d/14d per-account window, never permanent; veto alone already blocks over-cap.

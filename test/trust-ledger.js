@@ -195,9 +195,15 @@ console.log('=== trust ledger (O198 v1, knife 5.5b-1) ===');
     T('[7] ' + wf + ': TRUST_FILE ' + pre + 'trust.json + SN_STATE_FILE ' + pre + 'sanctions.json', y.indexOf('TRUST_FILE: ' + pre + 'trust.json') >= 0 && y.indexOf('SN_STATE_FILE: ' + pre + 'sanctions.json') >= 0);
     T('[7] ' + wf + ': persists ' + pre + 'trust.json', new RegExp('for f in [^;]*\\b' + pre + 'trust\\.json[^;]*; do').test(y));
   }
-  for (const wf of ['seedcap.yml', 'sanctions.yml']) {
+  for (const wf of ['sanctions.yml']) {
     const y = read('.github/workflows/' + wf);
     T('[7] ' + wf + ': every job reads its channel trust file', ['TRUST_FILE: trust.json', 'TRUST_FILE: pt-trust.json', 'TRUST_FILE: demo-trust.json'].every((x) => y.indexOf(x) >= 0));
+  }
+  {
+    // seedcap.yml: its playtest / demo twins are retired (2026-11-20) -> one job, and it still reads its channel's trust file
+    const y = read('.github/workflows/seedcap.yml');
+    const tf = (y.match(/^ {10}TRUST_FILE: \S+/gm) || []).map((x) => x.trim());
+    T('[7] seedcap.yml: every job reads its channel trust file (one job left, ea: trust.json)', tf.join() === 'TRUST_FILE: trust.json' && tf.length === (y.match(/^ {8}run: node seedcap\.js[ \t]*$/gm) || []).length, tf.join());
   }
   T('[7] maintainTrust = ledger begin + board + ledger end (finally), the ledger fail-open', /const maintainTrust = async \(\) => \{\s*let led = null;\s*try \{ led = trustLedgerBegin\(\); \} catch \(e\) \{ ghWarn\([^\n]*\n\s*try \{ await maintainTrustBoard\(led\); \} finally \{ if \(led\) \{ try \{ await trustLedgerEnd\(led\); \} catch \(e\) \{ ghWarn\(/.test(VJ));
   T('[7] maintainTrust on every exit path (2 quiet + main)', (VJ.match(/await maintainTrust\(\);/g) || []).length === 3);

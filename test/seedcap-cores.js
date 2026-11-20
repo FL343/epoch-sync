@@ -95,10 +95,13 @@ const live = { v: 1, channels: {
 // ---- [4] wiring pins ----
 {
   const yml = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'seedcap.yml'), 'utf8');
-  const chans = (yml.match(/SEEDCAP_CHANNEL: (\w+)/g) || []).map(x => x.split(' ')[1]).sort();
-  ok('seedcap.yml: every job names its channel (ea / playtest / demo)', chans.join() === 'demo,ea,playtest', chans.join());
-  const clis = (yml.match(/SEEDCAP_CLI: /g) || []).length, dists = (yml.match(/SEEDCAP_DIST_DIR: \.\/authority-dist/g) || []).length;
-  ok('seedcap.yml: every job hands the artifact directory over', clis === 3 && dists === 3, clis + '/' + dists);
+  // 2026-11-20: the playtest / demo twin jobs are retired -> one job, ea. "Every job" is still every job, counted by its run
+  //   step (an empty SEEDCAP_CHANNEL would read no live.json window and replay on the v1 perk rules); structural lines only.
+  const runs = (yml.match(/^ {8}run: node seedcap\.js[ \t]*$/gm) || []).length;
+  const chans = (yml.match(/^ {10}SEEDCAP_CHANNEL: (\w+)/gm) || []).map(x => x.trim().split(' ')[1]).sort();
+  ok('seedcap.yml: every job names its channel, and the one job left is ea (playtest / demo twins retired)', runs === 1 && chans.length === runs && chans.join() === 'ea', runs + ' job(s): ' + chans.join());
+  const clis = (yml.match(/^ {10}SEEDCAP_CLI: \S/gm) || []).length, dists = (yml.match(/^ {10}SEEDCAP_DIST_DIR: \.\/authority-dist[ \t]*$/gm) || []).length;
+  ok('seedcap.yml: every job hands the artifact directory over', runs > 0 && clis === runs && dists === runs, clis + '/' + dists + ' of ' + runs);
   const src = fs.readFileSync(path.join(__dirname, '..', 'seedcap.js'), 'utf8');
   ok('main(): root CLI existence stays the hard precondition (fallback for every selection miss)', /if \(!fs\.existsSync\(SEEDCAP_CLI\)\)/.test(src));
   ok('auditPending(): capability probes run against the primary core', /cliSupportsRerolls\(runPrimary\)/.test(src) && /cliSupportsBuild\(runPrimary\)/.test(src) && /cliSupportsClassic\(runPrimary\)/.test(src) && /const capsPrimary = \{ builds: cliSupportsBuilds\(runPrimary\), fee: cliSupportsFee\(runPrimary\), rv: cliSupportsRv\(runPrimary\) \};/.test(src) &&

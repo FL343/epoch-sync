@@ -94,7 +94,8 @@ jobs:
           ERR_STATE_FILE: pt-err-reports.json
           SUPPORTERS_FILE: pt-supporters.json
           PENDING_WRITES_FILE: pt-pending-writes.json
-          # O124 seedcap consult (read-only; seedcap.yml owns the file). ENFORCE armed
+          # O124 seedcap consult (read-only; seedcap.yml's playtest twin wrote the file until it was
+          # retired on 2026-11-20 -- the file is the frozen final record since). ENFORCE armed
           # 2026-09-01 after a clean 80-match observation soak (0 over-cap, 0 suspects).
           # SEEDCAP_REJECT armed 2026-09-18 after the 2-week enforce soak (173 audited groups:
           # 0 over-cap, 0 veto, 0 suspects; the anomaly-alert mail never fired). The lever is a bounded

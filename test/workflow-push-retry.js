@@ -83,7 +83,8 @@ function scanPushes(src) {
   // the reconcile job persists state and (every 14 days) a heartbeat: both pushes must be in the loop
   const vy = fs.readFileSync(path.join(WF, 'validate.yml'), 'utf8');
   T('[2] validate.yml: persist + heartbeat both retry', vy.split('\n').filter(L => LOOP_HEAD.test(L)).length === 2);
-  T('[2] retry loops in total >= 13 (no persist step silently dropped)', loops >= 13, 'loops=' + loops);
+  // 12 since 2026-11-20 (was 14 live, floor 13): seedcap.yml's playtest / demo twin jobs were retired, one persist loop each
+  T('[2] retry loops in total >= 12 (no persist step silently dropped)', loops >= 12, 'loops=' + loops);
 }
 
 // ---- [3] state workflows check this repository out at the branch tip ----
@@ -117,7 +118,8 @@ function staleCheckouts(src) {
     pinned += (src.match(/ref: \$\{\{ github\.ref_name \}\}/g) || []).length;
     T('[3] ' + f + ': every self checkout takes the branch tip', st.length === 0, st.map(x => 'L' + x.line).join(', '));
   }
-  T('[3] pinned self checkouts >= 12 (none silently dropped)', pinned >= 12, 'pinned=' + pinned);
+  // 11 since 2026-11-20 (was 13 live, floor 12): the retired seedcap twin jobs took their pinned checkout with them
+  T('[3] pinned self checkouts >= 11 (none silently dropped)', pinned >= 11, 'pinned=' + pinned);
 }
 
 console.log(failN ? ('FAIL x' + failN) : 'ALL OK (workflow-push-retry)');

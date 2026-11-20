@@ -18,12 +18,15 @@ const T = (label, cond, detail) => { if (cond) console.log('  ok    ' + label); 
 console.log('-- state / config classification --');
 const state = H.stateFiles(ROOT);
 {
-  for (const f of ['processed.json', 'starts.json', 'demo-starts.json', 'pt-starts.json', 'seedcap.json', 'demo-seedcap.json', 'feedback.json', 'feedback-demo.json', 'sanctions.json', 'demo-sanctions.json', 'campaign-endless.json', '.heartbeat']) {
+  for (const f of ['processed.json', 'starts.json', 'demo-starts.json', 'pt-starts.json', 'seedcap.json', 'feedback.json', 'feedback-demo.json', 'sanctions.json', 'demo-sanctions.json', 'campaign-endless.json', '.heartbeat']) {
     T('state (written back by a workflow): ' + f, state.has(f));
   }
   for (const f of ['validate.js', 'attest-keys.json', 'gr-caps.json']) T('not state: ' + f, !state.has(f));
   const rootJson = H.lsFiles(ROOT).split('\n').filter(Boolean).map((l) => l.split('\t')[1]).filter((p) => /^[^/]+\.json$/.test(p));
   T('tracked root json found', rootJson.length > 20, String(rootJson.length));
+  // 2026-11-20: seedcap.yml's playtest / demo twins are retired -> their state files are the frozen final record: still tracked,
+  //   written back by no workflow, hashed as hand-kept config
+  for (const f of ['pt-seedcap.json', 'demo-seedcap.json']) T('retired seedcap twin state frozen (tracked, no writer, CONFIG_JSON): ' + f, rootJson.includes(f) && !state.has(f) && H.CONFIG_JSON.includes(f));
   const neither = rootJson.filter((p) => !state.has(p) && !H.CONFIG_JSON.includes(p));
   const both = rootJson.filter((p) => state.has(p) && H.CONFIG_JSON.includes(p));
   T('every root json is state (a workflow writes it back) or CONFIG_JSON -- classify a new one in tools/code-hash.js', neither.length === 0, neither.join(' '));

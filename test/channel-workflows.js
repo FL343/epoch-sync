@@ -1,6 +1,7 @@
 'use strict';
-// Channel workflow twins: the playtest and demo channels run the SAME reconcile/feedback/sanctions/
-// seedcap pipelines against their own app id with disjoint state files. Each twin is a hand-copied
+// Channel workflow twins: the playtest and demo channels run the SAME reconcile/feedback/sanctions
+// pipelines against their own app id with disjoint state files (seedcap's twins were retired on
+// 2026-11-20 -- section 2a pins them gone and its one job left). Each twin is a hand-copied
 // block, so this test pins every twin to its template: same env keys (only the app-id secret, the
 // state-file names and the digest tag may differ), state files prefixed with the channel prefix,
 // every produced state file persisted, no cron collision between the 5-minute-class workflows.
@@ -100,7 +101,8 @@ console.log('-- reconcile twins --');
       }
     }
     // every produced (persisted-class) state file is persisted; rating-side files are deliberately not.
-    //   SC_STATE_FILE: a read-only consult here (seedcap.yml's twin jobs persist it). SKILL_FILE / GROUPS_FILE: PT_MODE
+    //   SC_STATE_FILE: a read-only consult here (seedcap.yml's twin jobs persisted it until they were retired on 2026-11-20;
+    //   the file is frozen since, see 2a). SKILL_FILE / GROUPS_FILE: PT_MODE
     //   skips the rating update and group decay, so both stay empty -- verified, not trusted: test/channel-state-files.js
     //   runs the real reconcile under each twin's env and goes red the day a file a twin does not persist carries data.
     //   SN_STATE_FILE (O198 v1, knife 5.5b-1): the sanctions twin's file, a read-only consult of its event queue (sanctions.yml
@@ -132,12 +134,28 @@ console.log('-- reconcile twins --');
   T('demo.yml runs the playtest + channel test set', /for f in test\/playtest-\*\.js test\/channel-\*\.js/.test(dm));
 }
 
-// ---- 2) feedback / sanctions / seedcap twins ----
-console.log('-- twin jobs in feedback / sanctions / seedcap --');
+// ---- 2a) seedcap: the playtest / demo twins retired 2026-11-20 ----
+// The playtest app closed for good on 10-23, the demo app was disabled in Steamworks on 11-16 and both channel reconciles
+//   are disabled on GitHub (M772 item 6): the twins only fetched the repo and committed pt- / demo-seedcap.json every
+//   10 minutes. Pinned here: exactly one job is left, the main channel's, on the main app id, untagged, persisting only its
+//   own state file. A twin coming back under any job name (or app id) fails this section and seedcap-audit [7].
+console.log('-- seedcap: the main job only (twins retired) --');
+{
+  const sc = read('seedcap.yml');
+  const at = sc.indexOf('\njobs:\n');
+  const jobs = at < 0 ? [] : (sc.slice(at).match(/^  [a-z][a-z0-9-]*:[ \t]*$/gm) || []).map((s) => s.trim().slice(0, -1));
+  T('seedcap.yml: exactly one job, seedcap (playtest / demo twins retired)', jobs.join() === 'seedcap', jobs.join());
+  const e = jobEnv(sc, 'seedcap');
+  T('seedcap.yml: the job runs on the main app id, no twin app id anywhere', !!e && e.APPID === SECRET('APPID') && !/secrets\.(PLAYTEST|DEMO)_APPID/.test(sc), e && e.APPID);
+  T('seedcap.yml: SEEDCAP_CHANNEL ea, mail untagged (the twins tagged theirs [playtest] / [demo])', !!e && e.SEEDCAP_CHANNEL === 'ea' && !('FB_DIGEST_TAG' in e), e && e.SEEDCAP_CHANNEL);
+  T('seedcap.yml: the job persists exactly its own state file', !!e && e.SC_STATE_FILE === 'seedcap.json' && JSON.stringify(persisted(sc, 'seedcap')) === '["seedcap.json"]', JSON.stringify(persisted(sc, 'seedcap')));
+}
+
+// ---- 2) feedback / sanctions twins (seedcap's: retired, 2a) ----
+console.log('-- twin jobs in feedback / sanctions --');
 for (const [file, tmpl, ptJob, dmJob] of [
   ['feedback.yml', 'feedback', 'playtest-feedback', 'demo-feedback'],
   ['sanctions.yml', 'sanctions', 'playtest-sanctions', 'demo-sanctions'],
-  ['seedcap.yml', 'seedcap', 'playtest-seedcap', 'demo-seedcap'],
 ]) {
   const src = read(file);
   const eT = jobEnv(src, tmpl), ePt = jobEnv(src, ptJob), eDm = jobEnv(src, dmJob);

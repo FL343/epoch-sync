@@ -221,10 +221,17 @@ const SIDA = '76561198000000001', SIDB = '76561198000000002', SIDX = '7656119800
   const yml = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'seedcap.yml'), 'utf8');
   ok('[7] seedcap.yml windows runner (MSVC CLI)', /runs-on: windows-latest/.test(yml));
   ok('[7] seedcap.yml fetches the artifact repo via deploy key', /gmt-authority-dist/.test(yml) && /SEEDCAP_DIST_KEY/.test(yml));
-  // main + playtest twin + demo twin (third app id, 2026-09-05): every channel job keeps its own state file
-  const SC_JOBS = 3;
-  ok('[7] seedcap.yml has main + playtest + demo twins with isolated state', /SC_STATE_FILE: seedcap\.json/.test(yml) && /SC_STATE_FILE: pt-seedcap\.json/.test(yml) && /SC_STATE_FILE: demo-seedcap\.json/.test(yml));
-  ok('[7] seedcap.yml persists ONLY its own state files', /git add -- seedcap\.json/.test(yml) && /git add -- pt-seedcap\.json/.test(yml) && /git add -- demo-seedcap\.json/.test(yml) && !/git add -- [^\n]*processed/.test(yml));
+  // main + playtest twin + demo twin (third app id, 2026-09-05) -> 2026-11-20: the twins are retired (playtest closed 10-23,
+  //   demo disabled in Steamworks 11-16, both channel reconciles disabled on GitHub; M772 item 6). One job is left, the main
+  //   channel's, still with its own state file. Structural lines only: the file's header note names the retired files.
+  const SC_JOBS = 1;
+  const scAt = yml.indexOf('\njobs:\n');
+  const scJobs = scAt < 0 ? [] : (yml.slice(scAt).match(/^  [a-z][a-z0-9-]*:[ \t]*$/gm) || []).map((s) => s.trim().slice(0, -1));
+  const scLines = (re) => (yml.match(re) || []).map((s) => s.trim());
+  ok('[7] seedcap.yml runs one job, seedcap (the playtest / demo twins retired 2026-11-20)', scJobs.join() === 'seedcap' && scLines(/^ {8}run: node seedcap\.js[ \t]*$/gm).length === SC_JOBS, scJobs.join());
+  ok('[7] seedcap.yml: the main app id only (no twin app id left)', scLines(/^ {10}APPID: .*$/gm).join() === 'APPID: ${{ secrets.APPID }}' && !/secrets\.(PLAYTEST|DEMO)_APPID/.test(yml), scLines(/^ {10}APPID: .*$/gm).join());
+  ok('[7] seedcap.yml keeps its own state file (seedcap.json; no twin state file)', scLines(/^ {10}SC_STATE_FILE: .*$/gm).join() === 'SC_STATE_FILE: seedcap.json', scLines(/^ {10}SC_STATE_FILE: .*$/gm).join());
+  ok('[7] seedcap.yml persists ONLY its own state file', scLines(/^ +git add .*$/gm).join() === 'git add -- seedcap.json' && !/git add -- [^\n]*processed/.test(yml), scLines(/^ +git add .*$/gm).join());
   ok('[7] seedcap.yml 3-retry rebase persist (one per job)', (yml.match(/until git pull --rebase/g) || []).length === SC_JOBS);
   const vjs = fs.readFileSync(path.join(__dirname, '..', 'validate.js'), 'utf8');
   ok('[7] validate consults veto under SEEDCAP_ENFORCE (dont-settle shape)', /SEEDCAP_ENFORCE && seedcap && seedcap\.veto/.test(vjs));
@@ -241,7 +248,8 @@ const SIDA = '76561198000000001', SIDB = '76561198000000002', SIDX = '7656119800
   ok('[7] seedcap.yml carries the mail channel on every job',
     (yml.match(/RESEND_API_KEY: \$\{\{ secrets\.RESEND_API_KEY \}\}/g) || []).length === SC_JOBS &&
     (yml.match(/FB_DIGEST_TO: \$\{\{ secrets\.FB_DIGEST_TO \}\}/g) || []).length === SC_JOBS);
-  ok('[7] playtest / demo seedcap jobs tag their mail', /FB_DIGEST_TAG: '\[playtest\] '/.test(yml) && /FB_DIGEST_TAG: '\[demo\] '/.test(yml));
+  // the twins tagged their mail '[playtest] ' / '[demo] '; the main job mails untagged, and no tag is left with them gone
+  ok('[7] seedcap.yml: no digest tag left (the retired twins tagged theirs [playtest] / [demo])', !/^ {10}FB_DIGEST_TAG:/m.test(yml));
   const ptyml = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'playtest.yml'), 'utf8');
   ok('[7] playtest reconcile ENFORCE armed (2026-09-01; flipping back is a deliberate act)', /SEEDCAP_ENFORCE: '1'/.test(ptyml));
   ok('[7] playtest REJECT armed (2026-09-18, after the clean 2-week enforce soak; flipping back is a deliberate act)', /SEEDCAP_REJECT: '1'/.test(ptyml));

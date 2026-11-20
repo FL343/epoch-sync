@@ -38,7 +38,9 @@ console.log('=== [2] seedcap.js channel wiring ===');
   assert('buildAt / buildsOf get the channel', /perks\.buildAt\(tail, tail\.startDepth \| 0, pc, PERK_CH\)/.test(s) && /perks\.buildsOf\(tail, pc, PERK_CH\)/.test(s));
   assert('tails carry the run seed (d[4])', /if \(t && t\.runSeed == null\) t\.runSeed = d\[4\] \| 0;/.test(s));
   const wf = src('.github/workflows/seedcap.yml');
-  assert('the three seedcap jobs set SEEDCAP_CHANNEL ea / playtest / demo', /SEEDCAP_CHANNEL: ea/.test(wf) && /SEEDCAP_CHANNEL: playtest/.test(wf) && /SEEDCAP_CHANNEL: demo/.test(wf));
+  // 2026-11-20: the playtest / demo twins are retired -> the one seedcap job left names ea (empty would replay on the v1 rules)
+  const scCh = (wf.match(/^ {10}SEEDCAP_CHANNEL: (\w+)/gm) || []).map((x) => x.trim().split(' ')[1]);
+  assert('every seedcap job sets SEEDCAP_CHANNEL, and the one job left is ea (playtest / demo twins retired)', scCh.join() === 'ea' && scCh.length === (wf.match(/^ {8}run: node seedcap\.js[ \t]*$/gm) || []).length);
 }
 
 console.log('=== [3] replay behaviour by channel ===');
