@@ -13499,6 +13499,8 @@ async function main() {
     }
     // perk replay (2026-09-07): the pick log must reproduce the build (perk_forge) and extend the run's previous log (perk_chain).
     //   A causal contradiction, not a statistical one -> reject + processed, like a chain reject.
+    //   O903: a casual token resume (f.flags SEG_RESUMED + SEG_CASUAL) extends the previous log only up to its checkpoint (perks.chainCutOf),
+    //   the same cut rerollChain makes above -- the dead timeline's picks past the checkpoint are not part of the resumed run.
     const pv = perks.verifyPerkPicks(f, soloState.runs[key], cc ? 2 : 1, PERK_CH);   // f = attest fields (carries runSeed); O606: a couch run draws from the co-op pool with the competitive rules (SEG_COMP)
     if (!pv.ok) {
       recordFlag(signals, c.g, m, nowMs); sigDirty = true; trustTouched.add(sid); RUN.perkRej = (RUN.perkRej | 0) + 1;

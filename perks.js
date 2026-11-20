@@ -8,7 +8,8 @@
 // the log fully determines the build: this module replays the log with the SAME table + RNG the
 // client ships (perks-vendor/, comment-stripped byte copies locked by the companion repo's tests)
 // and rejects any record whose build the log cannot produce (perk_forge). Inside a run the log only
-// grows, so a later segment's log must extend the previous one (perk_chain).
+// grows, so a later segment's log must extend the previous one (perk_chain) -- except that a casual
+// token resume goes back to a checkpoint and extends the previous log only up to there (chainCutOf, O903).
 //
 // Fail-closed: a malformed log, a build without picks, more draws than the depth allows, or a
 // build the replay does not reproduce -> reject (processed, never healed). A record with neither
@@ -40,14 +41,30 @@ function load() {
 // draw pool by seat count: a solo run draws from the solo pool, a shared team build from the co-op pool
 function modeOf(pc) { return (pc | 0) >= 2 ? 'coop' : 'solo'; }
 
-// prev log (lo, hi) is a prefix of cur log (lo, hi)
-function isPrefix(prevLo, prevHi, curLo, curHi) {
+// prev log (lo, hi) is a prefix of cur log (lo, hi); upTo (optional, O903) = only the first upTo picks of prev must match
+function isPrefix(prevLo, prevHi, curLo, curHi, upTo) {
   const P = load();
   const a = P.unpackPicks(prevLo | 0, prevHi | 0), b = P.unpackPicks(curLo | 0, curHi | 0);
-  const n = P.picksCount(a);
+  let n = P.picksCount(a);
   if (n < 0) return false;
+  if (upTo != null) n = Math.min(n, Math.max(0, upTo | 0));
   for (let k = 0; k < n; k++) if ((a[k] | 0) !== (b[k] | 0)) return false;
   return true;
+}
+// O903 (2026-11-18): how much of the run's previous pick log a segment must extend. A casual token resume (SEG_RESUMED + SEG_CASUAL:
+//   the guard's casual save row, solo O218 or couch C3a) restarts from the CHECKPOINT snapshot: it carries the pick of every draw at or
+//   before the resume depth (draw k sits at passed depth (k+1) x DRAW_EVERY; the checkpoint level's own draw is written into the snapshot
+//   once it settles -- client endless-run.js perkPick cp.perk) and none after. Picks the dead timeline made past the checkpoint are not
+//   part of the resumed run (the resumed session reaches those draws again and may choose differently), so only the first
+//   maxDrawsByDepth(resume depth) picks of the previous log must match -- the reading rerollChain's casualResumeAt already uses for the
+//   reroll bitmap. Before this, a resume from a checkpoint older than the run's last draw (bought the token, played on past the next draw,
+//   died, then used it) was a perk_chain prefix reject + a "suspected forgery" flag on an honest player (live 11-17, one couch casual run).
+//   Every other segment (a competitive resume consumes a save written at the save depth: full log; classic carries no picks) = the whole
+//   previous log, as before. null = no cut.
+function chainCutOf(f) {
+  const A = require('./attest.js'), fl = (f && f.flags) | 0;
+  if (!(fl & A.SEG_RESUMED) || !(fl & A.SEG_CASUAL)) return null;
+  return load().maxDrawsByDepth((f && f.startDepth) | 0);
 }
 
 // Candidate rules by release channel + season (knife 5.10a, 2026-10-19): the EA appid uses rules v2 from its first season, playtest /
@@ -62,7 +79,8 @@ function isPrefix(prevLo, prevHi, curLo, curHi) {
 function casualOf(f, pc) { return (pc | 0) >= 2 && !(((f && f.flags) | 0) & require('./attest.js').SEG_COMP); }
 function replayOpts(f, pc, ch) { return { mode: modeOf(pc), seasonId: (f && f.seasonId) | 0, channel: ch, runSeed: (f && f.runSeed) | 0, casual: casualOf(f, pc) }; }
 
-// f: tail fields { build, picksLo, picksHi, seasonId, endDepth, runSeed }; run: chain memory ({ pk: {lo, hi} } or null); pc: seats; ch: channel
+// f: tail fields { build, picksLo, picksHi, seasonId, endDepth, runSeed, flags?, startDepth? }; run: chain memory ({ pk: {lo, hi} } or null); pc: seats; ch: channel
+//   (flags + startDepth decide how much of run.pk the log must extend: chainCutOf, O903)
 //   -> { ok: true, n, build } | { ok: false, reason: 'perk_forge' | 'perk_chain', why }
 function verifyPerkPicks(f, run, pc, ch) {
   const P = load();
@@ -71,7 +89,7 @@ function verifyPerkPicks(f, run, pc, ch) {
   const n = P.picksCount(arr);
   if (n < 0) return { ok: false, reason: 'perk_forge', why: 'picks-shape' };
   if (!P.buildValid(build)) return { ok: false, reason: 'perk_forge', why: 'build-shape' };
-  if (run && run.pk && !isPrefix(run.pk.lo | 0, run.pk.hi | 0, lo, hi)) return { ok: false, reason: 'perk_chain', why: 'prefix' };
+  if (run && run.pk && !isPrefix(run.pk.lo | 0, run.pk.hi | 0, lo, hi, chainCutOf(f))) return { ok: false, reason: 'perk_chain', why: 'prefix' };   // O903: a casual token resume extends the log up to its checkpoint
   if (n === 0) return build === 0 ? { ok: true, n: 0, build: 0 } : { ok: false, reason: 'perk_forge', why: 'build-without-picks' };
   // seasonId also selects the season window of the pool (client knife 3.5d: table entries may carry seasons {from, until};
   //   a perk that opens next season is not offered when replaying this season's log, exactly like the client drew it)
@@ -143,4 +161,4 @@ function debtCashOf(f, pc, ch, fromDepth, toDepth) {
 //   CLI's rv= token (the high-roller coin envelope takes the table max of that version)
 function rulesVerOf(f, ch) { const P = load(); return (P.rulesVer(ch, (f && f.seasonId) | 0) | 0) || 1; }
 
-module.exports = { PERKS_CFG, VENDOR_DIR, VENDOR_FILES, load, modeOf, isPrefix, casualOf, replayOpts, verifyPerkPicks, buildAt, buildsOf, debtCashOf, rulesVerOf };
+module.exports = { PERKS_CFG, VENDOR_DIR, VENDOR_FILES, load, modeOf, isPrefix, chainCutOf, casualOf, replayOpts, verifyPerkPicks, buildAt, buildsOf, debtCashOf, rulesVerOf };
