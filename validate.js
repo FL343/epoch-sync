@@ -4434,6 +4434,7 @@ function writeRunSummary() {
       '| endless seats priced by their own continue-rung block / blocks set aside / blocks sharing a rung (Q120) | ' + s('endlessRungPriced', 0) + ' / ' + s('endlessRungBad', 0) + ' / ' + s('endlessRungShared', 0) + ' |',
       '| seedcap veto / reject-window discards | ' + s('seedcapVeto', 0) + ' / ' + s('seedcapReject', 0) + ' |',
       '| perk replay rejects | ' + s('perkRej', 0) + ' |',
+      '| co-op resumes settled without a perk replay (O922) | ' + s('perkResumeLoose', 0) + ' |',
       '| endless co-op checks on values every writer copies from the host, nobody flagged (Q314): seat table short of the seat count (held) / reroll bitmap out of reach (rejected) | ' + s('endlessRosterShort', 0) + ' / ' + s('endlessRrRej', 0) + ' |',
       '| token resumes: replays caught / burnt-run segments / untagged settled / untagged refused | ' + s('resumeReplay', 0) + ' / ' + s('runBurnt', 0) + ' / ' + s('resumeUntagged', 0) + ' / ' + s('resumeUntaggedRej', 0) + ' |',
       '| solo same-key forks (another signed record under a settled segment key) | ' + s('soloKeyFork', 0) + ' |',
@@ -8966,6 +8967,22 @@ const REROLL_EVERY = 3;
 //   perk pick included, the NEXT level's paid reroll not (the bank was snapped before that payment too). Bits for targets beyond the
 //   resume depth were decided in the dead timeline; the resumed timeline replays those levels unrerolled and unpaid, so only bits for
 //   targets <= the resume depth must survive (competitive rows are written in the shop after the reroll page: full monotone rule).
+// O922 (2026-11-20): a casual co-op save-slot resume does not carry the run seed back (client private-lobby.js `_sv`; only the
+//   competitive resume `_cr` restores it), so the resumed session draws on under a NEW runSeed (record d[4]) while its pick log
+//   still holds the draws made before the save under the OLD one. Rules v2 pick each draw's candidate set by runSeed (one of
+//   CAND_N = 3), so replaying the whole log with d[4] shows other cards for the pre-save draws -> perk_forge for practically every
+//   honest resume (launch to 2026-11-19: at least 24 rejected, 1 settled). Until the client stores the seed (and its records can
+//   be told apart) or the reconcile tries the 3 candidate sets per pre-save draw, a resumed casual co-op session settles despite
+//   a failed replay when: the failure depends on the cards shown (a log that is malformed is still rejected), and the resume
+//   starts no deeper than the team has already settled on this ladder (chainMax; an unbacked start stays rejected). Logged +
+//   counted (RUN.perkResumeLoose); seedcap still steps aside on these groups (it cannot replay the segment-start build).
+const PERK_SHAPE_WHY = Object.freeze(['picks-shape', 'picks-count', 'build-shape', 'build-without-picks']);
+function coopResumePerkLoose(pv, startDepth, chainMax) {
+  if (!pv || pv.ok || pv.reason !== 'perk_forge') return false;
+  const sd = startDepth | 0;
+  if (sd <= 0 || sd > (chainMax | 0)) return false;
+  return PERK_SHAPE_WHY.indexOf(String(pv.why || '').split('@')[0]) < 0;
+}
 function rerollChain(f, run, slackDepth, casualResumeAt) {
   const lo = (f.rerollLo | 0) >>> 0, hi = (f.rerollHi | 0) >>> 0;
   // slackDepth (O218 casual solo): a failed level advances the depth without advancing the passed count the tail carries, so the ask
@@ -14127,8 +14144,16 @@ async function main() {
         processed.add(c.m);
         continue;
       }
+      // chain max (read here, before the perk check: O922 bounds its resume tolerance by it; the chain rule below uses the same value)
+      let chainMax = 0;
+      for (const sid of ownRosterSids) {
+        if (bBest[sid] != null) chainMax = Math.max(chainMax, unpackEndlessScore(bBest[sid]).depth);
+      }
       const pvC = perks.verifyPerkPicks({ build: t.build >>> 0, picksLo: t.picksLo | 0, picksHi: t.picksHi | 0, seasonId: t.seasonId | 0, endDepth: t.endDepth | 0, runSeed: g[0].d[4] | 0 }, null, pc7, PERK_CH);
-      if (!pvC.ok) {   // Q314: the build / pick log every writer copies from the host -- rejected as before, nobody flagged
+      if (!pvC.ok && coopResumePerkLoose(pvC, t.startDepth, chainMax)) {   // O922: a resumed session's pre-save draws used the old run seed
+        RUN.perkResumeLoose = (RUN.perkResumeLoose | 0) + 1;
+        console.log('  endless perk resume-loose ' + c.m + ': ' + pvC.reason + ': ' + pvC.why + ' build ' + (t.build >>> 0) + ' depth ' + t.startDepth + '->' + t.endDepth + ' (chain ' + chainMax + ') -- settled, perk build not verified (O922)');
+      } else if (!pvC.ok) {   // Q314: the build / pick log every writer copies from the host -- rejected as before, nobody flagged
         RUN.perkRej = (RUN.perkRej | 0) + 1;
         ghWarn('match=' + c.m + ': endless perk REJECT (' + pvC.reason + ': ' + pvC.why + ') build ' + (t.build >>> 0) + ' depth ' + t.startDepth + '->' + t.endDepth + ' -- nobody flagged (Q314)');
         processed.add(c.m);
@@ -14143,10 +14168,7 @@ async function main() {
       //   own set). A deep player the writers merely NAME used to lend his best depth, so two accounts could claim a resume at
       //   his depth and wait out one level instead of the whole span. A legit resume's deep player wrote his start
       //   attestation when level 1 began; if even that is missing the run just waits the full span (deferred, never flagged).
-      let chainMax = 0;
-      for (const sid of ownRosterSids) {
-        if (bBest[sid] != null) chainMax = Math.max(chainMax, unpackEndlessScore(bBest[sid]).depth);
-      }
+      //   (chainMax is read above the perk check, O922)
       let pend7 = startsPending[c.m];
       if (!pend7) {
         // no attestation ever sighted (job outage / failed client write): the settle's own first
@@ -15963,3 +15985,4 @@ Object.assign(module.exports, { LIKE: likePlan.LIKE, LIKES_FILE, LIKE_BOX_LB, LI
 Object.assign(module.exports, { rankedSeatMaskOf, mtSansSeats, seatAppliesLp, anyAppliesLp, SEAT_MASK_BASES });   // O716 one queue for quick + ranked: the ranked-seat mask (test/seat-mask.js)
 Object.assign(module.exports, { pwSealName, pwOpenName, pwMapNames, pwKeys });   // O807 (test/pending-writes-no-names.js; the test harnesses open the file with pwMapNames)
 Object.assign(module.exports, { GONE_RETRY_MS, goneHolds, PENDING_W_MAX_MS, PENDING_W_FIELDS });   // O775 waiting writes of accounts answered result 27 (test/pending-writes-gone.js)
+Object.assign(module.exports, { coopResumePerkLoose, PERK_SHAPE_WHY });   // O922 casual co-op resume tolerance (test/coop-resume-perk-loose.js)
