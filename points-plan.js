@@ -578,7 +578,7 @@
   //   older client may have started (validate.js, the old-client window); a call without it reads this version.
   const ELP = Object.freeze({
     WINDOW: 10, MIN_RUNS: 3, TRIM: 1, GAP_UP: 1500, GAP_DOWN: 500, STAKE_STEP: 100, SPREAD: 2, SEED_CAP: 2800, VER: 6,
-    MIN_RUNS_OLD: 5,               // MIN_RUNS of versions 1..5: what a client built before version 6 counts with (the job's old-client window reads through it; the client never does)
+    MIN_RUNS_OLD: 5,               // MIN_RUNS of versions 1..5: what a client built before version 6 counts with. Read in two places: the job's old-client window (validate.js), and a version 6 client while the published pass-line table still carries an older rule version (the job not pushed yet, or rolled back: the client then counts and reads as this job does). Keep it while either may happen.
     MUL: Object.freeze([850, 850, 1500, 3100, 2800, 2800, 2800]), TARGET_Q: 990, SWING_CAP: 119, GATE_TIER: 5,
     TEAM_GAIN: 1300,               // O825: per mille; a team run below master: a pass x TEAM_GAIN / 1000, a miss x 1000 / TEAM_GAIN
     TEAM_GATE: 110,                // O825: per cent of the master / grandmaster line a team family's skill must reach (solo: 100)
