@@ -83,7 +83,7 @@ function sSolo(m, out) {
     if (!r || r[3] !== 2) { e.push('run ' + id + ' did not settle'); break; }
     if ((r[5] | 0) !== Tt) e.push('run ' + id + ' target ' + r[5] + ' != ' + Tt);
     if ((r[4] | 0) !== d) e.push('run ' + id + ' points ' + r[4] + ' != ' + d);
-    if (J(r[10]) !== J(arr(before, placing)) || J(r[11]) !== J(arr(x, placing))) e.push('run ' + id + ' states ' + J([r[10], r[11]]) + ' != ' + J([arr(before, placing), arr(x, placing)]));
+    if (J(r[10].slice(0, 6)) !== J(arr(before, placing)) || (r[10][6] | 0) !== Tt || J(r[11]) !== J(arr(x, placing))) e.push('run ' + id + ' states ' + J([r[10], r[11]]) + ' != ' + J([arr(before, placing).concat([Tt]), arr(x, placing)]));
     if (!c || J(c.lv && c.lv.solo) !== J(x)) e.push('run ' + id + ' level ' + J(c && c.lv) + ' != ' + J(x));
     if (n + 1 >= PP.ELP.MIN_RUNS && (!c.placed || (c.lp | 0) !== lp)) e.push('run ' + id + ' lp ' + (c && c.lp) + ' != ' + lp);
     if (n + 1 < PP.ELP.MIN_RUNS && c.placed) e.push('placed before the last placement run');
@@ -117,7 +117,7 @@ function sV6(m) {
   m.ratingHistUpsert(st, p, 'solo', 0, 210, Tt, T0 + 20 * MIN, F, seed, { v7: true, quit: false });
   m.elpSettleAll(st, 0, T0 + 21 * MIN);
   const r = runOf(st, p, 'solo', 210);
-  if (!r || J(r[10]) !== J(arr(x0, -1)) || (r[5] | 0) !== Tt) e.push('first version 7 run: ' + J(r && [r[5], r[10]]) + ' != ' + J([Tt, arr(x0, -1)]));
+  if (!r || J(r[10].slice(0, 6)) !== J(arr(x0, -1)) || (r[5] | 0) !== Tt) e.push('first version 7 run: ' + J(r && [r[5], r[10]]) + ' != ' + J([Tt, arr(x0, -1)]));
   return e;
 }
 
@@ -133,6 +133,7 @@ function sTeam(m, out) {
   for (const q of [A, B]) m.ratingHistUpsert(st, q, 'duo', 0, RID, Tt, at, F, seed, { v7: true, quit: false });
   m.elpSettleAll(st, 0, at + MIN);
   const rA = runOf(st, A, 'duo', RID), rB = runOf(st, B, 'duo', RID), tm = st.elpTeam && st.elpTeam[String(RID)];
+  if (!tm || J(tm.lvLns) !== J([PP.elpLineOfL(line)])) e.push('team lines ' + J(tm && tm.lvLns) + ' != [' + PP.elpLineOfL(line) + '] (nothing else is plausible: one state each)');
   if (!tm || tm.lvL !== line) e.push('team line ' + (tm && tm.lvL) + ' != the highest ' + line + ' (' + xA.L + ' / ' + xB.L + ')');
   if (!rA || !rB || (rA[5] | 0) !== Tt || (rB[5] | 0) !== Tt) e.push('targets ' + J([rA && rA[5], rB && rB[5]]) + ' != ' + Tt);
   const sA = PP.elpLevelStep(xA, { pass: true, depth: Tt, T: Tt, placing: -1 }), sB = PP.elpLevelStep(xB, { pass: true, depth: Tt, T: Tt, placing: -1 });
@@ -177,7 +178,7 @@ function sReplay(m) {
   m.ratingHistRemove(st, p, 'solo', 0, gone[0] >>> 0);
   const c = C(st, p);
   if (J(c.lv.solo) !== J(exp)) e.push('replayed level ' + J(c.lv.solo) + ' != ' + J(exp));
-  if (J(last[10]) !== J(arr(start, -1))) e.push('the later run\'s before-state ' + J(last[10]) + ' != ' + J(arr(start, -1)));
+  if (J(last[10].slice(0, 6)) !== J(arr(start, -1))) e.push('the later run\'s before-state ' + J(last[10]) + ' != ' + J(arr(start, -1)));
   if (last[4] !== lastPts) e.push('the later run\'s points moved');
   return e;
 }
@@ -292,6 +293,131 @@ function sIntakeReal(m) {
   return e;
 }
 
+// ---- [11]..[15] (second opinion 2026-11-21 night): the readings of a level that may differ from his client's ----
+// a placed version 6 player of family fam with these depths (solo runs), settled; then his row is made to carry skill rowH for fam
+//   (the skill his client reads off the row: computed another day, under another table) -- the job's own reading of the same runs
+//   stays the trimmed mean. Returns { st, p, own: the job's own start, row: the row's start }.
+const FAMI = (fam) => PP.ELP_FAMS.indexOf(fam);
+function placedWith(m, n, fam, depths, rowH, t0) {
+  const st = { hist: {} }, p = P(m, n);
+  depths.forEach((dd, i) => m.ratingHistUpsert(st, p, 'solo', 0, 9000 + 100 * n + i, dd, t0 + i * MIN, F, 6000 + 100 * n + i));
+  m.elpSettleAll(st, 0, t0 + 10 * MIN);
+  const c = C(st, p);
+  const runs = depths.slice().reverse().map((dd) => ['solo', dd]);
+  const own = PP.elpLevelInit(PP.elpHiddenFor(fam, runs, LINES), LINES[fam]);
+  if (rowH != null) c.h[FAMI(fam)] = rowH;
+  return { st, p, c, own, row: rowH == null ? null : PP.elpLevelInit(rowH, LINES[fam]) };
+}
+function placedInto(m, st, n, depths, rowH, fam, t0) {
+  const p = P(m, n);
+  depths.forEach((dd, i) => m.ratingHistUpsert(st, p, 'solo', 0, 9000 + 100 * n + i, dd, t0 + i * MIN, F, 6000 + 100 * n + i));
+  return { p, rowH, fam };
+}
+const outcomesOf = (Tc) => [{ pass: true, d: Tc }].concat([...new Set([0, 1, Tc >> 1, Tc - 2, Tc - 1])].filter((d) => d >= 0 && d < Tc).map((d) => ({ pass: false, d })), [{ pass: false, d: Tc >> 1, quit: true }]);
+
+// [11] solo: his first version 7 run with two readings (the job's own and the row's); his client started from either. Every outcome
+//   of that run, then a run back to back that his client shows passed at its own next target: the job never judges a miss (on
+//   either run), and the depth rules out a reading below it (a death under his client's target is not turned into a pass by it)
+function sCarry(m) {
+  const e = [];
+  const t0 = T0 + 2000 * MIN, seed1 = 7301, seed2 = 7302;
+  for (const rowH of [700, 900, 1000, 1400, 1700]) for (const truthRow of [false, true]) {
+    const base = placedWith(m, 31, 'solo', [10, 12, 14], rowH, t0);
+    const xc0 = truthRow ? base.row : base.own, Tc1 = PP.elpTargetOfL(xc0.L, seed1);
+    for (const o of outcomesOf(Tc1)) {
+      const w = placedWith(m, 31, 'solo', [10, 12, 14], rowH, t0), at1 = t0 + 20 * MIN, quit = !!o.quit;
+      m.ratingHistUpsert(w.st, w.p, 'solo', 0, 501, o.d, at1, F, seed1, { v7: true, quit });
+      m.elpSettleAll(w.st, 0, at1 + 1000);
+      const r1 = runOf(w.st, w.p, 'solo', 501);
+      if (!r1 || r1[3] !== 2) { e.push('run 1 did not settle'); continue; }
+      const tag = 'row ' + rowH + (truthRow ? ' (his client read the row)' : ' (his client read the job\'s own)') + ', run 1 ' + (o.pass ? 'pass' : (quit ? 'quit' : 'death')) + '@' + o.d;
+      if (o.pass && (r1[5] | 0) > o.d) e.push(tag + ': run 1 his pass judged a miss (T ' + r1[5] + ')');
+      const xo = PP.elpTargetOfL(base.own.L, seed1), xr = PP.elpTargetOfL(base.row.L, seed1);
+      if (!o.pass && (r1[5] | 0) <= o.d && !(xo === o.d || xr === o.d)) e.push(tag + ': a reading the depth rules out turned his miss into a pass (T ' + r1[5] + ')');
+      // his client goes on from its own state, without the row coming back; the next run passes at the target his client shows
+      const xc1 = PP.elpLevelStep(xc0, { pass: o.pass, depth: o.d, T: Tc1, quit, placing: -1 }), Tc2 = PP.elpTargetOfL(xc1.L, seed2), at2 = at1 + 30 * MIN;
+      m.ratingHistUpsert(w.st, w.p, 'solo', 0, 502, Tc2, at2, F, seed2, { v7: true, quit: false });
+      m.elpSettleAll(w.st, 0, at2 + 1000);
+      const r2 = runOf(w.st, w.p, 'solo', 502);
+      if (!r2 || r2[3] !== 2) { e.push(tag + ': run 2 did not settle'); continue; }
+      if ((r2[5] | 0) > Tc2) e.push(tag + ': run 2, his pass at ' + Tc2 + ' judged against ' + r2[5]);
+    }
+  }
+  return e;
+}
+
+// [12] team: one member read above what his client sent must not lift the whole team's target. P's level reads line ~10 (one
+//   reading); Q's first version 7 duo run: the job's own reading of his runs reads line ~14, his row (his client) ~8. The host took
+//   the highest of what was sent (P's) and the run ended there: a pass for every seat
+function sTeamOver(m) {
+  const e = [], st = { hist: {} }, t0 = T0 + 3000 * MIN, RID = 950, seed = 7401;
+  const Pp = placedInto(m, st, 41, [9, 10, 11], null, 'duo', t0), Qp = placedInto(m, st, 42, [13, 14, 15], 800, 'duo', t0);
+  m.elpSettleAll(st, 0, t0 + 10 * MIN);
+  C(st, Qp.p).h[FAMI('duo')] = 800;   // his row carries a lower duo skill (his client reads it)
+  const lv = (ds) => PP.elpLevelInit(PP.elpHiddenFor('duo', ds.slice().reverse().map((dd) => ['solo', dd]), LINES, 1), LINES.duo);
+  const xP = lv([9, 10, 11]), xQ = lv([13, 14, 15]), xQr = PP.elpLevelInit(800, LINES.duo);
+  const host = Math.max(xP.L, xQr.L), Th = PP.elpTargetOfL(host, seed), at = t0 + 20 * MIN;
+  if (!(xQ.L > xP.L && xP.L > xQr.L) || PP.elpTargetOfL(xQ.L, seed) <= Th) return ['the world is not a real test: ' + J([xP.L, xQ.L, xQr.L])];
+  m.elpTeamNote(st, RID, [Pp.p, Qp.p], 'duo', 0, at);
+  for (const q of [Pp.p, Qp.p]) m.ratingHistUpsert(st, q, 'duo', 0, RID, Th, at, F, seed, { v7: true, quit: false });
+  m.elpSettleAll(st, 0, at + MIN);
+  for (const q of [Pp.p, Qp.p]) { const r = runOf(st, q, 'duo', RID); if (!r || r[3] !== 2 || (r[5] | 0) > Th) e.push('seat ' + q.slice(-4) + ': the team\'s pass at ' + Th + ' judged against ' + (r && r[5])); }
+  return e;
+}
+
+// [13] one pass or two: P and Q play two duo runs back to back; the first a miss that lowers Q (the higher of the two). Settled in
+//   one pass or in two, the second run reads the same lines and every seat ends the same
+function sTwoPasses(m) {
+  const e = [], t0 = T0 + 4000 * MIN, seeds = [7501, 7502], R1 = 960, R2 = 961;
+  const world = () => {
+    const st = { hist: {} }, A = placedInto(m, st, 43, [8, 9, 10], null, 'duo', t0).p, B = placedInto(m, st, 44, [14, 15, 16], null, 'duo', t0).p;
+    m.elpSettleAll(st, 0, t0 + 10 * MIN);
+    return { st, A, B };
+  };
+  const play = (w, k, depth, at) => { m.elpTeamNote(w.st, k ? R2 : R1, [w.A, w.B], 'duo', 0, at); for (const q of [w.A, w.B]) m.ratingHistUpsert(w.st, q, 'duo', 0, k ? R2 : R1, depth, at, F, seeds[k], { v7: true, quit: false }); };
+  const a1 = t0 + 20 * MIN, a2 = t0 + 40 * MIN, d1 = 3, d2 = 6;
+  const one = world(); play(one, 0, d1, a1); play(one, 1, d2, a2); m.elpSettleAll(one.st, 0, a2 + MIN);
+  const two = world(); play(two, 0, d1, a1); m.elpSettleAll(two.st, 0, a1 + MIN); play(two, 1, d2, a2); m.elpSettleAll(two.st, 0, a2 + MIN);
+  const view = (w) => J({ tm: (({ lvL, lvLns }) => ({ lvL, lvLns }))(w.st.elpTeam[String(R2)] || {}), a: (runOf(w.st, w.A, 'duo', R2) || []).slice(3, 6).concat([(runOf(w.st, w.A, 'duo', R2) || [])[11]]), b: (runOf(w.st, w.B, 'duo', R2) || []).slice(3, 6).concat([(runOf(w.st, w.B, 'duo', R2) || [])[11]]), la: C(w.st, w.A).lv, lb: C(w.st, w.B).lv });
+  const r1B = runOf(two.st, two.B, 'duo', R1);
+  if (!r1B || !Array.isArray(r1B[10]) || !(r1B[11][0] < r1B[10][0])) e.push('the world is not a real test: the first run did not lower Q ' + J(r1B && [r1B[10], r1B[11]]));
+  if (view(one) !== view(two)) e.push('one pass ' + view(one) + ' != two passes ' + view(two));
+  return e;
+}
+
+// [14] a run that stood parked (save point) is judged with every reading: its client may have read its target again on resume
+//   (the remembered target is kept on that machine only) -- here the row's lower one after a save past it; it passed there
+function sResumed(m) {
+  const e = [], t0 = T0 + 5000 * MIN, seed = 7601;
+  const w = placedWith(m, 45, 'solo', [10, 12, 14], 700, t0);
+  const Tr = PP.elpTargetOfL(w.row.L, seed), To = PP.elpTargetOfL(w.own.L, seed), at = t0 + 20 * MIN;
+  if (!(Tr + 2 < To)) return ['the world is not a real test: ' + J([Tr, To])];
+  m.ratingHistUpsert(w.st, w.p, 'solo', 0, 601, Tr + 1, at, SUS, seed, { v7: true, quit: false });   // saved past the row's target
+  m.ratingHistUpsert(w.st, w.p, 'solo', 0, 601, Tr + 2, at + 30 * MIN, F, seed);                      // resumed: the line ends it at the next pass
+  m.elpSettleAll(w.st, 0, at + 31 * MIN);
+  const r = runOf(w.st, w.p, 'solo', 601);
+  if (!r || r[3] !== 2 || !Array.isArray(r[9]) || (r[5] | 0) > Tr + 2) e.push('the resumed pass at ' + (Tr + 2) + ' judged against ' + (r && r[5]) + ' (own ' + To + ', row ' + Tr + ')');
+  return e;
+}
+
+// [15] a conviction's replay steps each later run with the target its CARRIED step read (r[10][6]), which may differ from the one
+//   its points came from (r[5]): here one says pass, the other miss
+function sReplayCarry(m) {
+  const e = [], o = {};
+  const e0 = sSolo(m, o);
+  if (e0.length) return ['the solo world: ' + e0[0]];
+  const { st, p } = o, h = H(st, p), v7runs = h.runs.filter((r) => r[3] && ((r[7] | 0) & m.ELP_R_V7));
+  const gone = v7runs[v7runs.length - 2], last = v7runs[v7runs.length - 1];
+  if (!((last[1] | 0) >= (last[5] | 0))) return ['the world is not a real test: the last run is not a pass'];
+  last[10][6] = (last[1] | 0) + 2;   // its carried step read a target above its depth: a miss
+  const start = PP.elpLevelOf({ L: gone[10][0], Lm: gone[10][1], s: gone[10][2], last: gone[10][3], run: gone[10][4] });
+  const exp = PP.elpLevelStep(start, { pass: false, depth: last[1] | 0, T: last[10][6], quit: !!((last[7] | 0) & m.ELP_R_QUIT), placing: -1 });
+  m.ratingHistRemove(st, p, 'solo', 0, gone[0] >>> 0);
+  if (J(C(st, p).lv.solo) !== J(exp)) e.push('replayed ' + J(C(st, p).lv.solo) + ' != ' + J(exp) + ' (stepped with the carried target)');
+  if ((last[10][6] | 0) !== (last[1] | 0) + 2) e.push('the replay lost the carried target ' + J(last[10]));
+  return e;
+}
+
 const SCEN = [['[1] intake: the version bit stays, the quit bit only with the final segment, elpSegLv', sIntake],
   ['[2] solo: placement walks the level and seeds from it, points runs by endlessSettleLv + lambda, R1 / R2 leave the level, states / receipts / row v3', sSolo],
   ['[2b] the tiers read the smoothed level (here the demotion protection), not the jumpy one', sTiers],
@@ -301,7 +427,12 @@ const SCEN = [['[1] intake: the version bit stays, the quit bit only with the fi
   ['[6] a conviction of a version 7 run replays the family\'s level from the state before it', sReplay],
   ['[7] tables: the version of a recorded table, version 6 readings skip version 7 tables, the published version / priors follow PUB_VER', sTables],
   ['[9] the live pass lines read the smoothed level once the published table is version 7 (the hidden skill under version 6)', sLines],
-  ['[10] real intake: a signed solo record carries its key\'s rules version into the version bit (elp 7 / old key 6 / dev key ELP_DEV_VER); team LINE segments (a final one ending at a checkpoint depth, a save one) pass sanity at 2..4 seats, LINE + classic / unknown bits do not', sIntakeReal]];
+  ['[10] real intake: a signed solo record carries its key\'s rules version into the version bit (elp 7 / old key 6 / dev key ELP_DEV_VER); team LINE segments (a final one ending at a checkpoint depth, a save one) pass sanity at 2..4 seats, LINE + classic / unknown bits do not', sIntakeReal],
+  ['[11] solo, two readings of his first version 7 level: no outcome of that run and no pass his client shows on the run after it is judged a miss; the depth rules out a reading below it', sCarry],
+  ['[12] team: one member read above what his client sent does not lift the team\'s target (a pass for every seat)', sTeamOver],
+  ['[13] two team runs back to back: one pass or two, the second reads the same lines and every seat ends the same', sTwoPasses],
+  ['[14] a run that stood parked is judged with every reading (its client may have read its target again on resume)', sResumed],
+  ['[15] a conviction\'s replay steps a later run with the target its carried step read (r[10][6])', sReplayCarry]];
 console.log('-- O942 version 7: the job --');
 for (const [label, fn] of SCEN) { const e = fn(v); T(label, e.length === 0, e.slice(0, 3).join(' | ')); }
 {
@@ -321,17 +452,24 @@ function mutantOf(pairs) {
 }
 const MUTS = [
   ['a version 7 run settles by the version 6 rules (no dispatch)', [['  if ((r[7] | 0) & ELP_R_V7) return elpSettleRunLv(st, p, c, h, r, fam, s, nowMs, ctx);', '  if (false) return elpSettleRunLv(st, p, c, h, r, fam, s, nowMs, ctx);']], sSolo],
-  ['the team line is the LOWEST level', [['tm.lvL = pointsPlan.elpTeamLine(tm.r.map(', 'tm.lvL = Math.min.apply(null, tm.r.map(']], sTeam],
-  ['every member takes the team line (the ratchet)', [['const after = pointsPlan.elpLevelStep(pick.x, { pass, depth, T, quit, placing });', 'const after = pointsPlan.elpLevelStep(teamL !== undefined ? Object.assign({}, pick.x, { L: teamL }) : pick.x, { pass, depth, T, quit, placing });']], sTeam],
+  ['the team line is the LOWEST level', [['tm.lvL = pointsPlan.elpTeamLine(sets.map((xs) => xs[0]));', 'tm.lvL = Math.min.apply(null, sets.map((xs) => xs[0]));']], sTeam],
+  ['every member takes the team line (the ratchet)', [['const after = pointsPlan.elpLevelStep(a.rd.x, { pass: depth >= a.t, depth, T: a.t, quit, placing });', 'const after = pointsPlan.elpLevelStep(Object.assign({}, a.rd.x, { L: a.rd.L }), { pass: depth >= a.t, depth, T: a.t, quit, placing });']], sTeam],
   ['the cutover never comes', [['const cut = RATING.CUTOVER_MS > 0 && nowMs != null', 'const cut = false && nowMs != null']], sCut],
   ['the cutover also cuts runs still being played (no parked check)', [[' && !((r[7] | 0) & ELP_R_V7) && !!((r[7] | 0) & 2);', ' && !((r[7] | 0) & ELP_R_V7);']], sCut],
   ['a conviction does not replay the level', [['  if (lvGone && c) elpLevelReplay(c, h, fam, lvGone);', '  if (false) elpLevelReplay(c, h, fam, lvGone);']], sReplay],
   ['a later segment drops the version bit', [['| ((r[7] | 0) & (ELP_R_V7 | ELP_R_QUIT)) |', '| ((r[7] | 0) & ELP_R_QUIT) |']], sIntake],
   ['a version 6 reading takes version 7 tables', [['const mv = maxVer == null ? 6 : maxVer;', 'const mv = maxVer == null ? Infinity : maxVer;']], sTables],
-  ['the placement seeds from the level BEFORE the last placement run', [['const lp = Math.max.apply(null, tabs.map((tb) => pointsPlan.elpLevelSeed(after.L, tb[fam], tb.solo)));', 'const lp = Math.max.apply(null, tabs.map((tb) => pointsPlan.elpLevelSeed(pick.x.L, tb[fam], tb.solo)));']], sSolo],
-  ['a points run reads the jumpy level for its tiers (not Lm)', [['sl = pointsPlan.endlessSettleLv(cur, depth >= t, x.Lm, tb[fam], off, fam, pointsPlan.elpLineOfL(L));', 'sl = pointsPlan.endlessSettleLv(cur, depth >= t, x.L, tb[fam], off, fam, pointsPlan.elpLineOfL(L));']], sTiers],
+  ['the placement seeds from the level BEFORE the last placement run', [['lp = Math.max(lp, pointsPlan.elpLevelSeed(x.L, tb[fam], tb.solo));', 'lp = Math.max(lp, pointsPlan.elpLevelSeed(ch.carry.rd.x.L, tb[fam], tb.solo));']], sSolo],
+  ['a points run reads the jumpy level for its tiers (not Lm)', [['pointsPlan.endlessSettleLv(cur, depth >= a.t, a.rd.x.Lm, tb[fam], off, fam, pointsPlan.elpLineOfL(a.rd.L));', 'pointsPlan.endlessSettleLv(cur, depth >= a.t, a.rd.x.L, tb[fam], off, fam, pointsPlan.elpLineOfL(a.rd.L));']], sTiers],
   ['the row stays v2 (no level states)', [['placed: 1, h, lv: c.lv || null }, c.ring || []);', 'placed: 1, h }, c.ring || []);']], sSolo],
   ['the team sanity drops SEG_LINE from the accepted bits', [['| attest.SEG_CLASSIC | attest.SEG_LINE)) !== 0 || ((fl & attest.SEG_LINE) && (fl & attest.SEG_CLASSIC))) out.push(\'flags\');', '| attest.SEG_CLASSIC)) !== 0 || ((fl & attest.SEG_LINE) && (fl & attest.SEG_CLASSIC))) out.push(\'flags\');']], sIntakeReal],
+  ['the job carries the reading its points came from (rule (a))', [['  return { pick, carry, outs };\n}', '  return { pick, carry: { rd: pick.rd, t: pick.t, after: pointsPlan.elpLevelStep(pick.rd.x, { pass: depth >= pick.t, depth, T: pick.t, quit, placing }) }, outs };\n}']], sCarry],
+  ['the depth rules out nothing', [['  let keep = resumed ? all : all.filter((a) => a.t >= depth);', '  let keep = all;']], sCarry],
+  ['a first version 7 run reads the job\'s own start only', [['  if (rs != null) xs.push(pointsPlan.elpLevelInit(rs, lines[fam]));\n  return elpLvUniq(xs);', '  return elpLvUniq(xs.slice(0, 1));']], sCarry],
+  ['the team reads one state per member (its own line only)', [['    for (const xs of sets) for (const L of xs) if (L >= floor) lns.add(pointsPlan.elpLineOfL(L));', '']], sTeamOver],
+  ['the pass walks player by player', [['const t = leftAt(x); if (!q || t < qt) { q = x; qt = t; }', 'const t = 0; if (!q) { q = x; qt = t; }']], sTwoPasses],
+  ['a resumed run is filtered by its depth too', [['  const resumed = Array.isArray(r[9]) && r[9].length > 0;', '  const resumed = false;']], sResumed],
+  ['the replay steps with the points target (r[5])', [['t = r[10].length > 6 ? (r[10][6] | 0) : (r[5] | 0);', 't = (r[5] | 0);']], sReplayCarry],
   ['the version 7 lines keep reading the depth mean', [['    if (RATING.PUB_VER >= 7) {\n      const c = elpAllOf(st, p, seasonId)', '    if (false) {\n      const c = elpAllOf(st, p, seasonId)']], sLines],
 ];
 console.log('-- [8] mutations --');

@@ -805,8 +805,10 @@ console.log('-- [12] Q395: two runs of a team in one settle pass = in two passes
     };
     const fixedPointSame = (m) => ['XY', 'YX'].every((o) => { const ord = o.split(''); const a = twoRuns(m, ord, FIX, RUN, true), b = twoRuns(m, ord, FIX, RUN, false); return a.lvlB === b.lvlB && a.Tb === b.Tb; });
     let red = false;
-    try { const mm = mutant([['    const ok = j != null && (ix < 0 || j < ix);', '    const ok = false;']]); red = !fixedPointSame(mm) && sweep(mm, 200).diff > 0; } catch (e) { red = /anchor missing/.test(e.message) ? (bad('[12] ' + e.message), false) : true; }
-    T('[12] mutation "only the runs settled already count" (the code before the fix) turns the fixed point and the sweep red', red);
+    // O942: the pass now walks every player's runs by first seen, which settles a member's earlier run before the next team run
+    //   freezes (one pass = two passes on its own): the reading's own fix is shown on the walk player by player it was made for
+    try { const mm = mutant([['    const ok = j != null && (ix < 0 || j < ix);', '    const ok = false;'], ['const t = leftAt(x); if (!q || t < qt) { q = x; qt = t; }', 'const t = 0; if (!q) { q = x; qt = t; }']]); red = !fixedPointSame(mm) && sweep(mm, 200).diff > 0; } catch (e) { red = /anchor missing/.test(e.message) ? (bad('[12] ' + e.message), false) : true; }
+    T('[12] mutation "only the runs settled already count" (the code before the fix, on the walk player by player) turns the fixed point and the sweep red', red);
     let red2 = false;
     try { const mm = mutant([['    const ok = j != null && (ix < 0 || j < ix);', '    const ok = j != null;']]); const one = twoRuns(mm, ['X', 'Y'], FIX, RUN, 'tie'); red2 = one.a[0].teamH !== PP.teamHiddenOf(['X', 'Y'].map((p) => PP.hiddenOf(FIX[p].slice().reverse()))); } catch (e) { red2 = /anchor missing/.test(e.message) ? (bad('[12] ' + e.message), false) : true; }
     T('[12] mutation "no cut at the run\'s place in the list" counts B inside A\'s level when both came at the same instant -> red', red2);
@@ -1232,8 +1234,12 @@ console.log('-- [16] O825 review round --');
     m.ratingHistUpsert(st, 'A', 'duo', 0, 999, 20, t0 + HR, 0, 999); m.elpTeamNote(st, 999, ['A', 'B'], 'duo', 0, t0 + HR);          // A's copy: the lane sees the run
     m.ratingHistUpsert(st, 'B', 'solo', 0, 300, 60, t0 + 2 * HR, F, 300); m.ratingHistUpsert(st, 'B', 'solo', 0, 301, 60, t0 + 3 * HR, F, 301);   // B plays two deep solo runs meanwhile
     m.elpSettleAll(st, 0, t0 + 4 * HR);
-    m.ratingHistUpsert(st, 'B', 'duo', 0, 999, 20, t0 + 5 * HR, F, 999); m.elpTeamNote(st, 999, ['A', 'B'], 'duo', 0, t0 + 5 * HR); m.ratingHistFinal(st, 'A', 'duo', 0, 999);   // B's records arrive late
-    const out = m.elpSettleAll(st, 0, t0 + 6 * HR);
+    m.ratingHistUpsert(st, 'B', 'duo', 0, 999, 20, t0 + 5 * HR, F, 999); m.elpTeamNote(st, 999, ['A', 'B'], 'duo', 0, t0 + 5 * HR);   // B's records arrive late
+    // O942: the pass walks the runs by first seen -- A's copy (seen first) settles first whenever both are final; B goes first when
+    //   A's final segment comes a pass later
+    let out;
+    if (aFirst) { m.ratingHistFinal(st, 'A', 'duo', 0, 999); out = m.elpSettleAll(st, 0, t0 + 6 * HR); }
+    else { out = m.elpSettleAll(st, 0, t0 + 6 * HR); m.ratingHistFinal(st, 'A', 'duo', 0, 999); out = out.concat(m.elpSettleAll(st, 0, t0 + 7 * HR)); }
     return { h: st.elpTeam['999'].h, t0: st.elpTeam['999'].t0 === t0 + HR, at: st.elpTeam['999'].at === t0 + 5 * HR, T: out.filter((x) => x.runId === 999).map((x) => x.T), first: out[0] && out[0].k.slice(0, 1) };
   }
   const lateSame = (m) => { const a = lateCopy(m, true), b = lateCopy(m, false); return a.first === 'A' && b.first === 'B' && a.h === b.h && JSON.stringify(a.T) === JSON.stringify(b.T) && a.T.length === 2 && a.T[0] === a.T[1]; };
@@ -1578,7 +1584,7 @@ console.log('-- [17] RC2-02 / RC2-03: a family that borrows -- what the client m
     } }
   // wiring pins
   T('[17] wiring: the settle takes the pass context (order + the rows as the pass began), the member readings and the team pick; the log line says when more than one target was read; the stamp is written where the skills are (the pass end, a seed without a new run, a late raise)',
-    /const x = elpSettleRun\(st, p, c, o\.h, o\.r, o\.fam, seasonNow \| 0, nowMs, ctx\);/.test(SRC) && /const ctx = \{ order: new Map\(\), h0: new Map\(\), oldUntil: elpOldUntil\(st\) \};/.test(SRC) && /ctx\.h0\.set\(p, \{ h: c0\.h\.slice\(\), ht: Number\(c0\.ht\), lv: c0\.lv \? JSON\.parse\(JSON\.stringify\(c0\.lv\)\) : null \}\);/.test(SRC)
+    /const x = elpSettleRun\(st, q\.p, q\.c, o\.h, o\.r, o\.fam, seasonNow \| 0, nowMs, ctx\);/.test(SRC) && /const ctx = \{ order: new Map\(\), h0: new Map\(\), oldUntil: elpOldUntil\(st\) \};/.test(SRC) && /ctx\.h0\.set\(p, \{ h: c0\.h\.slice\(\), ht: Number\(c0\.ht\), lv: c0\.lv \? JSON\.parse\(JSON\.stringify\(c0\.lv\)\) : null \}\);/.test(SRC)
     && /\(x\.alts > 1 \? ' \(best of ' \+ x\.alts \+ ' targets his client may have shown\)' : ''\)/.test(SRC) && (SRC.match(/c\.ht = nowMs;/g) || []).length === 3 && !/\bht \| 0\b/.test(SRC)
     && [v.elpSaveAt, v.elpOpenAt, v.elpBeforeItems, v.elpBeforeLists, v.elpRowSkill, v.elpMemberReadings, v.elpTeamPick].every((f) => typeof f === 'function'));
   // mutations
@@ -2330,9 +2336,11 @@ console.log('-- [20] Q426: a family short of its own runs borrows the newest run
     T('[20] the points (the code itself, the picks on): ' + p.checked + ' runs his client read from its own history -- no placement run reads a target above his dial, no points run leaves him less than the reading his client took (' + p.worse + '; ' + p.other + ' runs the job placed otherwise than his client, left to [18])', p.worse === 0 && p.checked > 0, JSON.stringify(p.first));
   }
   // wiring: both readers pass the counts of the settle
-  T('[20] wiring: the settle and the member reading pass elpMins(ctx, at) to elpBeforeLists (the counts the borrowing is made for), the only two callers; every walk of elpBorrowOrders stops once it holds ELP_BORROW_LEAVES lists (a pass that sees dozens of runs at once stays seconds, not minutes)',
+  T('[20] wiring: the settle, the member reading and (O942) the starts of a first version 7 run pass elpMins(ctx, at) to elpBeforeLists (the counts the borrowing is made for), the only three callers; every walk of elpBorrowOrders stops once it holds ELP_BORROW_LEAVES lists (a pass that sees dozens of runs at once stays seconds, not minutes)',
     SRC.indexOf('elpBeforeLists(st, p, s, fam, r[0] >>> 0, at, (ctx && ctx.order && ctx.order.has(p)) ? ctx.order.get(p) : null, elpMins(ctx, at))') > 0
-    && SRC.indexOf('elpBeforeLists(st, p, s, fam, runId, at, elpOrderOf(ctx, st, p, s, nowMs), elpMins(ctx, at))') > 0 && (SRC.match(/elpBeforeLists\(/g) || []).length === 3
+    && SRC.indexOf('elpBeforeLists(st, p, s, fam, runId, at, elpOrderOf(ctx, st, p, s, nowMs), elpMins(ctx, at))') > 0
+    && SRC.indexOf('const tabs = elpCandidateTabs(st, s, at, nowMs, Infinity), mins = elpMins(ctx, at);') > 0 && SRC.indexOf('elpBeforeLists(st, p, s, fam, runId, at, elpOrderOf(ctx, st, p, s, nowMs), mins)') > 0   // O942: the starts of a family's first version 7 run (elpLevelStarts)
+    && (SRC.match(/elpBeforeLists\(/g) || []).length === 4
     && (v.elpBorrowOrders.toString().match(/out\.length >= ELP_BORROW_LEAVES/g) || []).length === 4);
   // mutations
   if (VX) {

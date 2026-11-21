@@ -7772,23 +7772,45 @@ function elpSettleRun(st, p, c, h, r, fam, s, nowMs, ctx) {
   return { d, T, pass, seeded, teamH, alts, held };   // alts: how many different targets the readings gave (1 = nothing but the job's own); held: a miss the old-client window took no points for
 }
 // ---- O942 version 7: the level rules (points-plan.js ELP7; plan mvp/KNIFE_O942_ELP_LINE_SETTLE_PLAN.md in the companion repo) ----
-// a level state as the run row keeps it ([L, Lm, s, last, run, placing]) / back
+// a level state as the run row keeps it ([L, Lm, s, last, run, placing]; r[10] adds the target its carried step read, elpLvChoose)
+//   / back
 const elpLvArr = (x, placing) => [x.L, x.Lm, x.s, x.last, x.run, placing == null ? -1 : (placing | 0)];
 const elpLvOfArr = (a) => (Array.isArray(a) && a.length >= 5) ? pointsPlan.elpLevelOf({ L: a[0], Lm: a[1], s: a[2], last: a[3], run: a[4] }) : null;
-// player p's level of family fam as it stood before run r (first seen at `at`), by the job's own reading: the state his points entry
-//   holds (c.lv[fam]: every run of the family before this one settled first, in start order), else the start from the version 6
-//   reading of the runs before it (his first version 7 run of the family: the middle of the dial his last version 6 run showed;
-//   a placement player: the plain mean of his runs so far; none: the silver line) under the lines in force at its start
+// distinct level states (null left out), the first kept first
+function elpLvUniq(xs) { const out = [], seen = new Set(); for (const x of xs) { if (!x) continue; const k = JSON.stringify(x); if (!seen.has(k)) { seen.add(k); out.push(x); } } return out; }
+// the states player p's level of family fam may have started from for run runId (first seen at `at`; no version 7 run of the family
+//   settled before it), the job's own first (second opinion 2026-11-21 night: the job read one, a client holding another table or
+//   another list of runs started elsewhere): elpLevelInit of every reading of the version 6 skill his client may have held -- the runs
+//   before it (elpBeforeLists) under each candidate table (any version: a version 7 client reads both) and each count of the
+//   old-client window (elpMins), and the skill his row carried (elpRowSkill). own = the job's own skill (null = none: the silver line
+//   of the lines in force at `at`); minRuns = elpHiddenFor's (a placement player 1)
+function elpLevelStarts(st, p, fam, s, runId, at, nowMs, ctx, own, minRuns) {
+  const lines = elpLinesByFam(st, s, at, Infinity), xs = [pointsPlan.elpLevelInit(own, lines[fam])];
+  if (elpFamEntries(st, p, s).length) {
+    const tabs = elpCandidateTabs(st, s, at, nowMs, Infinity), mins = elpMins(ctx, at);
+    for (const list of elpBeforeLists(st, p, s, fam, runId, at, elpOrderOf(ctx, st, p, s, nowMs), mins)) for (const tb of tabs) for (const mn of mins) {
+      xs.push(pointsPlan.elpLevelInit(list.length ? pointsPlan.elpHiddenFor(fam, list, tb, minRuns, mn) : null, tb[fam]));
+    }
+  }
+  const rs = elpRowSkill(ctx, p, fam, runId, at);
+  if (rs != null) xs.push(pointsPlan.elpLevelInit(rs, lines[fam]));
+  return elpLvUniq(xs);
+}
+// player p's level states of family fam before run r (first seen at `at`), the job's own first: the state his points entry holds
+//   (c.lv[fam]: every run of the family before this one settled first, in start order), else the starts (elpLevelStarts: his first
+//   version 7 run of the family; the job's own = the middle of the dial his last version 6 run showed, a placement player the plain
+//   mean of his runs so far, none the silver line)
 function elpLevelBefore(st, p, c, fam, s, r, at, nowMs, ctx) {
   const have = c && c.lv ? pointsPlan.elpLevelOf(c.lv[fam]) : null;
-  if (have) return have;
-  const lines = elpLinesByFam(st, s, at, Infinity);
+  if (have) return [have];
+  const lines = elpLinesByFam(st, s, at, Infinity), mr = (c && c.placed) ? undefined : 1;
   const b = elpRunsBefore(st, p, s, fam, r[0] >>> 0, at, elpOrderOf(ctx, st, p, s, nowMs));
-  const H = b.runs.length ? pointsPlan.elpHiddenFor(fam, b.runs, lines, (c && c.placed) ? undefined : 1) : null;
-  return pointsPlan.elpLevelInit(H, lines[fam]);
+  const H = b.runs.length ? pointsPlan.elpHiddenFor(fam, b.runs, lines, mr) : null;
+  return elpLevelStarts(st, p, fam, s, r[0] >>> 0, at, nowMs, ctx, H, mr);
 }
-// member q's level of family fam as it stood before team run runId (first seen at `at`): the state after his newest settled version 7
-//   run of the family first seen before it (r[11]), else the start from his version 6 reading before it (elpMemberHiddenBefore)
+// member q's level states of family fam before team run runId (first seen at `at`), the job's own first: the state after his newest
+//   settled version 7 run of the family first seen before it (r[11]) and the one his row carried (elpRowLevel), else the starts from
+//   his version 6 readings before it (elpLevelStarts; the job's own = elpMemberHiddenBefore)
 function elpMemberLevelBefore(st, q, fam, s, runId, at, nowMs, ctx) {
   const h = st && st.hist && st.hist[ratingHistKey(q, fam, s)];
   let last = null;
@@ -7797,21 +7819,30 @@ function elpMemberLevelBefore(st, q, fam, s, runId, at, nowMs, ctx) {
     const lv = elpLvOfArr(x[11]);
     if (lv && (!last || (x[2] || 0) >= last.t)) last = { t: x[2] || 0, lv };
   }
-  if (last) return last.lv;
-  return pointsPlan.elpLevelInit(elpMemberHiddenBefore(st, q, fam, s, runId, at, nowMs, ctx), elpLinesAt(st, fam, s, at, Infinity));
+  if (last) return elpLvUniq([last.lv, elpRowLevel(ctx, q, fam, runId, at)]);
+  return elpLevelStarts(st, q, fam, s, runId, at, nowMs, ctx, elpMemberHiddenBefore(st, q, fam, s, runId, at, nowMs, ctx), 1);
 }
-// D5: the level a version 7 team run's target reads -- the HIGHEST of the roster's levels as they stood before it -- frozen in the
-//   run's team entry at its first settle (lvL; hasLv), so every seat reads the same target whatever order they settle in.
-//   undefined = no roster recorded (solo, the couch pair): the player's own level.
+// D5: the lines a version 7 team run's target may have read, frozen in the run's team entry at its first settle (hasLv), so every
+//   seat reads the same whatever order they settle in. The host took the HIGHEST of the levels the members' clients sent, each one of
+//   that member's states (elpMemberLevelBefore), so the team level is any of them that is at least every member's lowest (second
+//   opinion 2026-11-21 night: one member read above what his client sent must not lift the whole team's target; v6 elpTeamPick):
+//   lvL = the job's own (every member at his own state), lvLns = the distinct lines, the own line first, then the others ascending.
+//   Returns { L: lvL, lns }; undefined = no roster recorded (solo, the couch pair): the player's own level.
 function elpTeamLevel(st, r, fam, s, nowMs, ctx) {
   if (fam === 'solo' || !ELP.PRIOR[fam]) return undefined;
   const tm = st && st.elpTeam && st.elpTeam[String(r[0] >>> 0)];
-  if (!tm || !Array.isArray(tm.r)) return undefined;
-  if (tm.hasLv) return tm.lvL;
-  const at = tm.t0 || (r[2] ? r[2] : nowMs);
-  tm.lvL = pointsPlan.elpTeamLine(tm.r.map((q) => elpMemberLevelBefore(st, q, fam, s, r[0] >>> 0, at, nowMs, ctx).L));
-  tm.hasLv = 1;
-  return tm.lvL;
+  if (!tm || !Array.isArray(tm.r) || !tm.r.length) return undefined;   // no roster (elpTeamNote never writes an empty one): his own level
+  if (!tm.hasLv) {
+    const at = tm.t0 || (r[2] ? r[2] : nowMs);
+    const sets = tm.r.map((q) => elpMemberLevelBefore(st, q, fam, s, r[0] >>> 0, at, nowMs, ctx).map((x) => x.L));
+    tm.lvL = pointsPlan.elpTeamLine(sets.map((xs) => xs[0]));
+    const floor = Math.max.apply(null, sets.map((xs) => Math.min.apply(null, xs))), own = pointsPlan.elpLineOfL(tm.lvL), lns = new Set();
+    for (const xs of sets) for (const L of xs) if (L >= floor) lns.add(pointsPlan.elpLineOfL(L));
+    lns.delete(own);
+    tm.lvLns = [own].concat([...lns].sort((a, b) => a - b));
+    tm.hasLv = 1;
+  }
+  return { L: tm.lvL, lns: (Array.isArray(tm.lvLns) && tm.lvLns.length) ? tm.lvLns : [pointsPlan.elpLineOfL(tm.lvL)] };
 }
 // RC2-03 for version 7: the level state his row carried for family fam (ctx.h0.lv), under elpRowSkill's rule (the row was read
 //   before this run started and no run of his this pass settles before it surely came first); null = no such reading
@@ -7819,60 +7850,86 @@ function elpRowLevel(ctx, p, fam, runId, at) {
   const h0 = elpRowFresh(ctx, p, fam, runId, at);
   return (h0 && h0.lv) ? pointsPlan.elpLevelOf(h0.lv[fam]) : null;
 }
+// O942 (second opinion 2026-11-21 night): the verdict and the level carried, over the readings of one version 7 run, the job's own
+//   first. reads = [{ x: a level state of his (the step, the smoothed level), L: the level of the line it reads (his own; a team run:
+//   a team line) }]. The line rule (the client's computeVerdict) ENDS a run at its client's target, so a reading whose target is below
+//   the depth cannot have been his client's and is left out -- unless the run stood parked (resumed: its client may have read the
+//   target again on resume) or every reading is below the depth (then the highest, a pass). Among the rest, the verdict and points
+//   are the ones best for him (val: a larger score is better; a placement run scores the lowest target), and the level carried to
+//   his next run is the LOWEST any of them leaves, each stepped with its own verdict: his client's state is among them, so the next
+//   target never reads above the one his client shows while he plays on before his row comes back. Carrying the pick instead turned
+//   a pass his client showed into a miss on the next run in 2 % of the cases (brute force on these rules:
+//   archive/ELP_LINE_SETTLE_2026-11-21/sim/o942-carry.js, rule (c) = this one: 0 on the next run; the residual two runs on = plan
+//   section 13). Ties go to the earlier reading. Returns { pick: { rd, t, v }, carry: { rd, t, after }, outs: [after of each kept] }.
+function elpLvChoose(reads, depth, seed, quit, placing, resumed, val) {
+  const all = reads.map((rd) => ({ rd, t: pointsPlan.elpTargetOfL(rd.L, seed) }));
+  let keep = resumed ? all : all.filter((a) => a.t >= depth);
+  if (!keep.length) { let hi = null; for (const a of all) if (!hi || a.rd.L > hi.rd.L) hi = a; keep = [hi]; }
+  let pick = null, carry = null;
+  const outs = [];
+  for (const a of keep) {
+    const v = val(a);
+    if (!pick || v.score > pick.v.score) pick = { rd: a.rd, t: a.t, v };
+    const after = pointsPlan.elpLevelStep(a.rd.x, { pass: depth >= a.t, depth, T: a.t, quit, placing });
+    outs.push(after);
+    if (!carry || after.L < carry.after.L) carry = { rd: a.rd, t: a.t, after };
+  }
+  return { pick, carry, outs };
+}
 // settle version 7 run r (r[7] & ELP_R_V7) of player p onto his points entry c (elpSettleRun's contract). The run ended at its
-//   target (or missed); its target T = the line of the level it read (his own; a team run: the frozen team line) + its offset.
-//   Readings (architecture decision 10): the job's own level and the one his row carried; a placement run takes the lower target, a
-//   points run the reading x candidate table that leaves him the most points. Placement: the level steps PLACE[i] (no points), the
-//   last placement run seeds from the level after it (elpLevelSeed under each candidate table, the best). Points: endlessSettleLv
-//   with the smoothed level before the run and lambda of the run's line. Then the level steps (elpLevelStep; R1 from the quit bit)
-//   from the reading taken; the states before / after stay on the run (r[10] / r[11]) for a member's later team reading and for
-//   a conviction's replay (ratingHistRemove).
+//   target (or missed); its target T = the line of the level it read (his own; a team run: a team line) + its offset.
+//   Readings (architecture decision 10): his level states (elpLevelBefore: the job's own, the starts of a first run) and the one his
+//   row carried, each with his own line or each team line (elpTeamLevel), chosen by elpLvChoose (a placement run the lowest target,
+//   a points run the reading x candidate table that leaves him the most points). Placement: the level steps PLACE[i] (no points),
+//   the last placement run seeds from the best level a kept reading ends on (elpLevelSeed under each candidate table). Points:
+//   endlessSettleLv with the smoothed level before the run and lambda of the run's line. The level carried (elpLevelStep; R1 from
+//   the quit bit) and the state it stepped from stay on the run (r[11] / r[10], with the target that step read) for a member's
+//   later team reading and for a conviction's replay (ratingHistRemove).
 function elpSettleRunLv(st, p, c, h, r, fam, s, nowMs, ctx) {
   const at = r[2] ? r[2] : nowMs, tabs = elpCandidateTabs(st, s, at, nowMs, Infinity);
   const depth = r[1] | 0, seed = r[8] | 0, rid = r[0] >>> 0, quit = !!((r[7] | 0) & ELP_R_QUIT);
-  const own = elpLevelBefore(st, p, c, fam, s, r, at, nowMs, ctx), row = elpRowLevel(ctx, p, fam, rid, at);
-  const reads = [own].concat(row && JSON.stringify(row) !== JSON.stringify(own) ? [row] : []);
-  const teamL = elpTeamLevel(st, r, fam, s, nowMs, ctx);   // D5: the roster's highest level (undefined = his own)
-  const lineOf = (x) => (teamL !== undefined && teamL != null) ? teamL : x.L;
-  let d = 0, T = 0, pass = false, flags = 0, seeded = false, pick = null, placing = -1;
-  const seenT = new Set();
-  if (!c.placed) {
-    placing = Math.min(ELP.MIN_RUNS - 1, c.n | 0);
-    for (const x of reads) { const t = pointsPlan.elpTargetOfL(lineOf(x), seed); seenT.add(t); if (!pick || t < pick.T) pick = { x, T: t }; }
-    T = pick.T; pass = depth >= T;
-  } else {
-    const off = pointsPlan.targetOffset(seed), cur = Math.max(0, Math.min(LP_MAX, c.lp | 0));
-    for (const x of reads) for (const tb of tabs) {
-      const L = lineOf(x), t = pointsPlan.elpTargetOfL(L, seed), sl = pointsPlan.endlessSettleLv(cur, depth >= t, x.Lm, tb[fam], off, fam, pointsPlan.elpLineOfL(L));
-      seenT.add(t);
-      if (!pick || sl.nv > pick.sl.nv) pick = { x, T: t, sl };
-    }
-    T = pick.T; pass = depth >= T; c.lp = pick.sl.nv; d = pick.sl.nv - cur;
-    flags = (pick.sl.protect ? ELP.PROTECT_RS : 0) | (pick.sl.clamped ? RECEIPT_F.SERIES : 0);
-  }
-  const after = pointsPlan.elpLevelStep(pick.x, { pass, depth, T, quit, placing });
-  if (!c.placed && ((c.n | 0) + 1) >= ELP.MIN_RUNS) {
-    const lp = Math.max.apply(null, tabs.map((tb) => pointsPlan.elpLevelSeed(after.L, tb[fam], tb.solo)));
+  const resumed = Array.isArray(r[9]) && r[9].length > 0;   // it stood parked (RC2-02 save points)
+  const xs = elpLvUniq(elpLevelBefore(st, p, c, fam, s, r, at, nowMs, ctx).concat([elpRowLevel(ctx, p, fam, rid, at)]));
+  const team = elpTeamLevel(st, r, fam, s, nowMs, ctx);   // D5: the lines the roster may have read (undefined = his own level)
+  const reads = [];
+  for (const x of xs) { if (team) for (const ln of team.lns) reads.push({ x, L: ln * 100 }); else reads.push({ x, L: x.L }); }
+  const placing = c.placed ? -1 : Math.min(ELP.MIN_RUNS - 1, c.n | 0);
+  const off = pointsPlan.targetOffset(seed), cur = Math.max(0, Math.min(LP_MAX, c.lp | 0));
+  const val = c.placed
+    ? (a) => { let best = null; for (const tb of tabs) { const sl = pointsPlan.endlessSettleLv(cur, depth >= a.t, a.rd.x.Lm, tb[fam], off, fam, pointsPlan.elpLineOfL(a.rd.L)); if (!best || sl.nv > best.sl.nv) best = { score: sl.nv, sl }; } return best; }
+    : (a) => ({ score: -a.t });
+  const ch = elpLvChoose(reads, depth, seed, quit, placing, resumed, val), after = ch.carry.after;
+  let d = 0, flags = 0, seeded = false;
+  const T = ch.pick.t, pass = depth >= T;
+  if (c.placed) {
+    const pk = ch.pick.v.sl;   // (named so: test/placement-rules.js [8] bans the lone 1V1 spelling of the series flag in this file)
+    c.lp = pk.nv; d = pk.nv - cur;
+    flags = (pk.protect ? ELP.PROTECT_RS : 0) | (pk.clamped ? RECEIPT_F.SERIES : 0);
+  } else if (((c.n | 0) + 1) >= ELP.MIN_RUNS) {
+    let lp = 0;
+    for (const x of ch.outs) for (const tb of tabs) lp = Math.max(lp, pointsPlan.elpLevelSeed(x.L, tb[fam], tb.solo));
     c.lp = lp; c.placed = 1; c.seedRun = [fam, rid]; delete c.took; d = lp; flags = RECEIPT_F.SEEDED; seeded = true;
   }
-  r[10] = elpLvArr(pick.x, placing); r[11] = elpLvArr(after, placing);
+  r[10] = elpLvArr(ch.carry.rd.x, placing).concat([ch.carry.t]); r[11] = elpLvArr(after, placing);
   (c.lv = c.lv || {})[fam] = after;
   r[3] = 2; r[4] = d; r[5] = T;
   c.n = (c.n | 0) + 1; c.t = nowMs;
   c.ring = receiptPush(c.ring || [], elpRunRk(s, r[8]), d, flags, 0xff);
-  return { d, T, pass, seeded, teamH: teamL, alts: seenT.size, held: false, lv: [pick.x.L, after.L, after.s] };
+  const alts = new Set(reads.map((rd) => pointsPlan.elpTargetOfL(rd.L, seed))).size;   // how many different targets the readings gave (the job log)
+  return { d, T, pass, seeded, teamH: team ? team.L : undefined, alts, held: false, lv: [ch.carry.rd.x.L, after.L, after.s] };
 }
 // O942: a conviction took version 7 run `gone` (its row kept the states) out of entry h: the family's level is replayed from the state
-//   before it through every later settled version 7 run of the family, each on its own recorded result (pass = depth >= T, its
-//   depth, T, quit, placement index) -- their points stay as settled; their r[10] / r[11] and c.lv[fam] follow the replay
+//   before it through every later settled version 7 run of the family, each on its own recorded result (the target its carried step
+//   read, r[10][6] -- elpLvChoose may carry another reading than the one its points came from (r[5]) --, pass = depth >= it, its
+//   depth, quit, placement index) -- their points stay as settled; their r[10] / r[11] and c.lv[fam] follow the replay
 function elpLevelReplay(c, h, fam, gone) {
   let x = elpLvOfArr(gone && gone[10]);
   if (!x || !c) return;
   for (const r of (h && Array.isArray(h.runs)) ? h.runs : []) {
     if (!r[3] || !((r[7] | 0) & ELP_R_V7) || !Array.isArray(r[10]) || (r[2] || 0) < (gone[2] || 0) || r === gone) continue;
-    const placing = r[10][5] | 0;
-    r[10] = elpLvArr(x, placing);
-    x = pointsPlan.elpLevelStep(x, { pass: (r[1] | 0) >= (r[5] | 0), depth: r[1] | 0, T: r[5] | 0, quit: !!((r[7] | 0) & ELP_R_QUIT), placing }) || x;
+    const placing = r[10][5] | 0, t = r[10].length > 6 ? (r[10][6] | 0) : (r[5] | 0);
+    r[10] = elpLvArr(x, placing).concat([t]);
+    x = pointsPlan.elpLevelStep(x, { pass: (r[1] | 0) >= t, depth: r[1] | 0, T: t, quit: !!((r[7] | 0) & ELP_R_QUIT), placing }) || x;
     r[11] = elpLvArr(x, placing);
   }
   (c.lv = c.lv || {})[fam] = x;
@@ -7966,16 +8023,24 @@ function elpSettleAll(st, seasonNow, nowMs, opt) {
     ctx.order.set(p, orders[i]);
     out.picks.push([p, i, orders.length]);
   }
-  for (const p of pids) {
-    const order = ctx.order.get(p);
-    if (!order.length) continue;
-    const c = elpAllOf(st, p, seasonNow | 0, true);
-    for (const o of order) {
-      const x = elpSettleRun(st, p, c, o.h, o.r, o.fam, seasonNow | 0, nowMs, ctx);
-      out.push(Object.assign({ k: ratingHistKey(p, o.fam, seasonNow), runId: o.r[0] >>> 0 }, x));
-    }
-    c.h = elpSkillsOf(st, p, seasonNow | 0, nowMs); c.ht = nowMs;   // the row's four skills, as of this pass (kept: the row moves with its player only); ht: since when the row carries them (RC2-03)
+  // O942 (second opinion 2026-11-21 night): every player's runs in ONE walk by when they were first seen -- each player's own order
+  //   kept; the next run taken is the head of the player whose remaining runs hold the earliest first-seen instant (ties: the order
+  //   the players came in). A version 7 team run then freezes its lines with every member's earlier run of this pass settled, as two
+  //   passes do (a member's version 7 level is the chain his settled runs left, not a reading of his depths: walked player by
+  //   player, a teammate walked later still showed the level from before his earlier run). Version 6 reads the pass context only:
+  //   the walk order does not move it.
+  const qs = [];
+  for (const p of pids) { const order = ctx.order.get(p); if (order.length) qs.push({ p, order, i: 0, c: elpAllOf(st, p, seasonNow | 0, true) }); }
+  const leftAt = (q) => { let m = Infinity; for (let j = q.i; j < q.order.length; j++) { const t = q.order[j].r[2] || 0; if (t < m) m = t; } return m; };
+  for (;;) {
+    let q = null, qt = Infinity;
+    for (const x of qs) { if (x.i >= x.order.length) continue; const t = leftAt(x); if (!q || t < qt) { q = x; qt = t; } }
+    if (!q) break;
+    const o = q.order[q.i++];
+    const x = elpSettleRun(st, q.p, q.c, o.h, o.r, o.fam, seasonNow | 0, nowMs, ctx);
+    out.push(Object.assign({ k: ratingHistKey(q.p, o.fam, seasonNow), runId: o.r[0] >>> 0 }, x));
   }
+  for (const q of qs) { q.c.h = elpSkillsOf(st, q.p, seasonNow | 0, nowMs); q.c.ht = nowMs; }   // the row's four skills, as of this pass (kept: the row moves with its player only); ht: since when the row carries them (RC2-03)
   // version 6: whoever now holds MIN_RUNS settled runs and no placement is seeded without a new run (elpSeedNow) -- unless a
   //   conviction took his placement back (took: his next settled run seeds, as before)
   for (const p of pids) {
