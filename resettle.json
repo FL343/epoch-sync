@@ -1,0 +1,427 @@
+{
+ "v": 1,
+ "note": "cloud audit Q413 / O920 / O922: keys reopened once by tools/resettle-once.js; validate.js settles them without continue debits until `until`",
+ "until": "2026-11-28T01:07:40Z",
+ "keys": {
+  "-1057409686_261483683_7": {
+   "cp": "free",
+   "set": "o920",
+   "lane": "coop",
+   "how": "reopened",
+   "at": "2026-11-21T01:07:40Z",
+   "closed": "0adf57b73ebb",
+   "closedAt": "2026-11-19T12:41:29Z",
+   "start": "close",
+   "done": {},
+   "depths": [
+    0,
+    55
+   ]
+  },
+  "-2003084531_905572349_7": {
+   "cp": "free",
+   "set": "o920",
+   "lane": "coop",
+   "how": "reopened",
+   "at": "2026-11-21T01:07:40Z",
+   "closed": "94fca286c1dd",
+   "closedAt": "2026-11-19T04:46:10Z",
+   "start": "close",
+   "done": {},
+   "depths": [
+    0,
+    40
+   ]
+  },
+  "-811320951_1979552679_7": {
+   "cp": "free",
+   "set": "o920",
+   "lane": "coop",
+   "how": "reopened",
+   "at": "2026-11-21T01:07:40Z",
+   "closed": "427170df1e6d",
+   "closedAt": "2026-11-18T19:31:09Z",
+   "start": "close",
+   "done": {},
+   "depths": [
+    0,
+    40
+   ]
+  },
+  "1489335873_1715424415_7": {
+   "cp": "free",
+   "set": "o920",
+   "lane": "coop",
+   "how": "reopened",
+   "at": "2026-11-21T01:07:40Z",
+   "closed": "9da3507bafde",
+   "closedAt": "2026-11-17T20:21:08Z",
+   "start": "close",
+   "done": {},
+   "depths": [
+    0,
+    76
+   ]
+  },
+  "225644457_510034975_7": {
+   "cp": "free",
+   "set": "o920",
+   "lane": "coop",
+   "how": "reopened",
+   "at": "2026-11-21T01:07:40Z",
+   "closed": "273d4896a98f",
+   "closedAt": "2026-11-18T20:51:11Z",
+   "start": "close",
+   "done": {},
+   "depths": [
+    0,
+    52
+   ]
+  },
+  "3113371_969983324_7": {
+   "cp": "free",
+   "set": "o920",
+   "lane": "coop",
+   "how": "reopened",
+   "at": "2026-11-21T01:07:40Z",
+   "closed": "2efb28d70feb",
+   "closedAt": "2026-11-18T14:01:27Z",
+   "start": "close",
+   "done": {},
+   "depths": [
+    0,
+    49
+   ]
+  },
+  "37274019_378109844_7": {
+   "cp": "free",
+   "set": "o920",
+   "lane": "coop",
+   "how": "reopened",
+   "at": "2026-11-21T01:07:40Z",
+   "closed": "85d39414c9e6",
+   "closedAt": "2026-11-19T13:26:49Z",
+   "start": "close",
+   "done": {},
+   "depths": [
+    0,
+    72
+   ]
+  },
+  "-1233970540_832965738_7": {
+   "cp": "free",
+   "set": "o922",
+   "lane": "coop",
+   "how": "reopened",
+   "at": "2026-11-21T01:07:40Z",
+   "closed": "8f1260280448",
+   "closedAt": "2026-11-18T12:51:10Z",
+   "start": "close",
+   "done": {},
+   "depths": [
+    45,
+    104
+   ]
+  },
+  "-129533167_1442750312_7": {
+   "cp": "free",
+   "set": "o922",
+   "lane": "coop",
+   "how": "reopened",
+   "at": "2026-11-21T01:07:40Z",
+   "closed": "280298d263f7",
+   "closedAt": "2026-11-19T11:01:21Z",
+   "start": "close",
+   "done": {},
+   "depths": [
+    30,
+    33
+   ]
+  },
+  "-1334332717_1767025495_7": {
+   "cp": "free",
+   "set": "o922",
+   "lane": "coop",
+   "how": "reopened",
+   "at": "2026-11-21T01:07:40Z",
+   "closed": "450d95ffd55b",
+   "closedAt": "2026-11-18T13:06:20Z",
+   "start": "close",
+   "done": {},
+   "depths": [
+    35,
+    48
+   ]
+  },
+  "-1466979320_1152452261_7": {
+   "cp": "free",
+   "set": "o922",
+   "lane": "coop",
+   "how": "reopened",
+   "at": "2026-11-21T01:07:40Z",
+   "closed": "a31eaa5f8b72",
+   "closedAt": "2026-11-18T19:11:01Z",
+   "start": "close",
+   "done": {},
+   "depths": [
+    35,
+    70
+   ]
+  },
+  "-1730405734_228498999_7": {
+   "cp": "free",
+   "set": "o922",
+   "lane": "coop",
+   "how": "reopened",
+   "at": "2026-11-21T01:07:40Z",
+   "closed": "bbfadd9b887b",
+   "closedAt": "2026-11-19T03:16:11Z",
+   "start": "close",
+   "done": {},
+   "depths": [
+    35,
+    41
+   ]
+  },
+  "-2010811816_1389404028_7": {
+   "cp": "free",
+   "set": "o922",
+   "lane": "coop",
+   "how": "reopened",
+   "at": "2026-11-21T01:07:40Z",
+   "closed": "284c2c8b42c8",
+   "closedAt": "2026-11-18T06:01:03Z",
+   "start": "close",
+   "done": {},
+   "depths": [
+    25,
+    35
+   ]
+  },
+  "-2139343137_1434903761_7": {
+   "cp": "free",
+   "set": "o922",
+   "lane": "coop",
+   "how": "reopened",
+   "at": "2026-11-21T01:07:40Z",
+   "closed": "a79e7d80accd",
+   "closedAt": "2026-11-18T12:31:13Z",
+   "start": "close",
+   "done": {},
+   "depths": [
+    25,
+    57
+   ]
+  },
+  "-597337173_1993660537_7": {
+   "cp": "free",
+   "set": "o922",
+   "lane": "coop",
+   "how": "reopened",
+   "at": "2026-11-21T01:07:40Z",
+   "closed": "e2372d53f990",
+   "closedAt": "2026-11-18T16:06:14Z",
+   "start": "close",
+   "done": {},
+   "depths": [
+    70,
+    81
+   ]
+  },
+  "-834917948_975797039_7": {
+   "cp": "free",
+   "set": "o922",
+   "lane": "coop",
+   "how": "reopened",
+   "at": "2026-11-21T01:07:40Z",
+   "closed": "9068a1eda7eb",
+   "closedAt": "2026-11-18T15:36:20Z",
+   "start": "close",
+   "done": {},
+   "depths": [
+    25,
+    35
+   ]
+  },
+  "1027196807_1953124496_7": {
+   "cp": "free",
+   "set": "o922",
+   "lane": "coop",
+   "how": "reopened",
+   "at": "2026-11-21T01:07:40Z",
+   "closed": "85d39414c9e6",
+   "closedAt": "2026-11-19T13:26:49Z",
+   "start": "close",
+   "done": {},
+   "depths": [
+    30,
+    36
+   ]
+  },
+  "1127814238_1135794658_7": {
+   "cp": "free",
+   "set": "o922",
+   "lane": "coop",
+   "how": "reopened",
+   "at": "2026-11-21T01:07:40Z",
+   "closed": "de1a762e17a4",
+   "closedAt": "2026-11-18T15:21:17Z",
+   "start": "close",
+   "done": {},
+   "depths": [
+    10,
+    79
+   ]
+  },
+  "1192484926_1183896444_7": {
+   "cp": "free",
+   "set": "o922",
+   "lane": "coop",
+   "how": "reopened",
+   "at": "2026-11-21T01:07:40Z",
+   "closed": "0dbf4bbe501a",
+   "closedAt": "2026-11-18T17:51:09Z",
+   "start": "close",
+   "done": {},
+   "depths": [
+    85,
+    90
+   ]
+  },
+  "1288751180_1304748171_7": {
+   "cp": "free",
+   "set": "o922",
+   "lane": "coop",
+   "how": "reopened",
+   "at": "2026-11-21T01:07:40Z",
+   "closed": "68690ab46924",
+   "closedAt": "2026-11-18T16:01:08Z",
+   "start": "close",
+   "done": {},
+   "depths": [
+    20,
+    57
+   ]
+  },
+  "1424958748_181263892_7": {
+   "cp": "free",
+   "set": "o922",
+   "lane": "coop",
+   "how": "reopened",
+   "at": "2026-11-21T01:07:40Z",
+   "closed": "7b15f1a91ddf",
+   "closedAt": "2026-11-17T15:11:08Z",
+   "start": "close",
+   "done": {},
+   "depths": [
+    35,
+    40
+   ]
+  },
+  "1848098247_945055590_7": {
+   "cp": "free",
+   "set": "o922",
+   "lane": "coop",
+   "how": "reopened",
+   "at": "2026-11-21T01:07:40Z",
+   "closed": "546b079cff91",
+   "closedAt": "2026-11-18T15:11:19Z",
+   "start": "close",
+   "done": {},
+   "depths": [
+    15,
+    60
+   ]
+  },
+  "300887346_1521342570_7": {
+   "cp": "free",
+   "set": "o922",
+   "lane": "coop",
+   "how": "reopened",
+   "at": "2026-11-21T01:07:40Z",
+   "closed": "2585e8e4fae4",
+   "closedAt": "2026-11-19T04:16:20Z",
+   "start": "close",
+   "done": {},
+   "depths": [
+    20,
+    32
+   ]
+  },
+  "40660911_1913550106_7": {
+   "cp": "free",
+   "set": "o922",
+   "lane": "coop",
+   "how": "reopened",
+   "at": "2026-11-21T01:07:40Z",
+   "closed": "acad8421b353",
+   "closedAt": "2026-11-19T12:11:45Z",
+   "start": "close",
+   "done": {},
+   "depths": [
+    70,
+    86
+   ]
+  },
+  "439618698_659025595_7": {
+   "cp": "free",
+   "set": "o922",
+   "lane": "coop",
+   "how": "reopened",
+   "at": "2026-11-21T01:07:40Z",
+   "closed": "878215942fda",
+   "closedAt": "2026-11-19T12:01:31Z",
+   "start": "close",
+   "done": {},
+   "depths": [
+    75,
+    75
+   ]
+  },
+  "742898848_676045191_7": {
+   "cp": "free",
+   "set": "o922",
+   "lane": "coop",
+   "how": "reopened",
+   "at": "2026-11-21T01:07:40Z",
+   "closed": "85b7ef3c5068",
+   "closedAt": "2026-11-19T14:12:32Z",
+   "start": "close",
+   "done": {},
+   "depths": [
+    60,
+    69
+   ]
+  },
+  "751167286_1572965822_7": {
+   "cp": "free",
+   "set": "o922",
+   "lane": "coop",
+   "how": "reopened",
+   "at": "2026-11-21T01:07:40Z",
+   "closed": "acad8421b353",
+   "closedAt": "2026-11-19T12:11:45Z",
+   "start": "close",
+   "done": {},
+   "depths": [
+    30,
+    34
+   ]
+  },
+  "942714292_1599477546_7": {
+   "cp": "free",
+   "set": "o922",
+   "lane": "coop",
+   "how": "reopened",
+   "at": "2026-11-21T01:07:40Z",
+   "closed": "085d3baaa85f",
+   "closedAt": "2026-11-18T13:41:23Z",
+   "start": "close",
+   "done": {},
+   "depths": [
+    80,
+    88
+   ]
+  }
+ }
+}
