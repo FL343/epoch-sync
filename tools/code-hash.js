@@ -22,7 +22,7 @@ const ROOT = path.join(__dirname, '..');
 // 2026-11-20: pt-seedcap.json / demo-seedcap.json lost their writer (seedcap.yml's playtest / demo twin jobs retired: playtest
 //   closed 10-23, demo disabled 11-16) and stay as the frozen final record (playtest.yml / demo.yml still name them, read-only)
 //   -> no longer state, counted with the hand-kept json.
-const CONFIG_JSON = ['attest-keys.json', 'confirmed-errors.json', 'feedback-mod.json', 'feedback-wordlist.json', 'gr-caps.json', 'recover-shards.json', 'rfduo-caps.json', 'pt-seedcap.json', 'demo-seedcap.json'];
+const CONFIG_JSON = ['attest-keys.json', 'confirmed-errors.json', 'feedback-mod.json', 'feedback-wordlist.json', 'gr-caps.json', 'recover-shards.json', 'resettle.json', 'rfduo-caps.json', 'pt-seedcap.json', 'demo-seedcap.json'];   // resettle.json: Q413 one-shot re-settlement list (tools/resettle-once.js)
 
 // root-level files any workflow writes back (persist loops + literal git add)
 function stateFiles(root) {

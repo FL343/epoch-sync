@@ -3146,6 +3146,29 @@ function loadRecover(file, channel, nowMs) {
   if (!boards.length || !keys.size) return null;
   return { channel: String(j.channel), until, boards, keys };
 }
+// ===== one-shot re-settlement of keys rejected under a rule since fixed (cloud audit Q413 + O920 / O922, 2026-11-20) =====
+// tools/resettle-once.js reopens endless keys this job rejected under a rule a later push fixed (Q410: a casual save resumed
+//   from an earlier checkpoint; Q417 / O920: a casual co-op reroll bitmap; O922: a resumed casual co-op session's new run seed):
+//   a state edit made while this job is paused -- the key leaves the processed list (and the solo done memory), the start entry
+//   it had just before it was rejected comes back -- and the next runs judge it under today's rules like any fresh key. When it
+//   was rejected no continue was charged; the user ruled (mailbox M839, 2026-11-20): settle them, charge nothing. RESETTLE_FILE
+//   lists the reopened keys (written by the tool and committed with the state edit; this job never writes it): a key listed with
+//   cp 'free' before the file's `until` skips its continue debits -- the casual co-op seat debits, the casual solo / casual couch
+//   continue rungs (the rung count still moves on, so the run's next segment is not charged for them either) -- counted
+//   (RUN.resettleCpFree, RUN.resettleCpFreeCp) and logged. Nothing else changes: the key passes every gate as any other, and a
+//   key that is rejected again is rejected as before. Like recover-shards.json: read-only, inert past `until`, not on the
+//   playtest / demo channels; an unreadable file frees nothing.
+const RESETTLE_FILE = process.env.RESETTLE_FILE || require('path').join(__dirname, 'resettle.json');   // (beside the code, as RECOVER_FILE: config, not state)
+function loadResettleFree(file, nowMs) {
+  const none = new Set();
+  if (PT_MODE) return none;
+  let j = null;
+  try { j = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { return none; }
+  if (!j || j.v !== 1 || !j.keys || typeof j.keys !== 'object' || Array.isArray(j.keys)) return none;
+  const until = Date.parse(String(j.until || ''));
+  if (!(until > nowMs)) return none;
+  return new Set(Object.keys(j.keys).filter((m) => /^-?\d+_-?\d+_7$/.test(m) && j.keys[m] && j.keys[m].cp === 'free'));
+}
 // pure: decoded pool rows [{ steamID, board, d }] -> { recs, starts } shaped like the shard reader's output (+ recovered: true)
 function recoverPick(rows, cfg, pubTable) {
   const kept = [], startsByM = {};
@@ -4458,6 +4481,7 @@ function writeRunSummary() {
       '| endless co-op checks on values every writer copies from the host, nobody flagged (Q314): seat table short of the seat count (held) / reroll bitmap out of reach (rejected) | ' + s('endlessRosterShort', 0) + ' / ' + s('endlessRrRej', 0) + ' |',
       '| token resumes: replays caught / burnt-run segments / untagged settled / untagged refused | ' + s('resumeReplay', 0) + ' / ' + s('runBurnt', 0) + ' / ' + s('resumeUntagged', 0) + ' / ' + s('resumeUntaggedRej', 0) + ' |',
       '| solo same-key forks (another signed record under a settled segment key) | ' + s('soloKeyFork', 0) + ' |',
+      '| reopened keys (RESETTLE_FILE): continue debits not charged / their CP (Q413 / O920 / O922) | ' + s('resettleCpFree', 0) + ' / ' + s('resettleCpFreeCp', 0) + ' |',
       '| signed solo segments whose guard clock went back inside the segment, counted and handled as usual (Q242) | ' + s('soloNegDur', 0) + ' |',
       '| endless runs idle past 45 days whose chain memory stays because a save can still bring them back / forgotten by the fuse (Q327) | ' + s('soloRunKept', 0) + ' / ' + s('soloRunFuse', 0) + ' |',
       '| unsettled records by layout version (O199: attestation / endless tail ints / ledger header) | ' + s('persistPending', '-') + ' |',
@@ -11164,6 +11188,14 @@ async function main() {
   //   verdict owns it and voids it at maturity with its records still up (each writer of a result consoled, nobody convicted)
   const heldKeys = new Set(consistentMatches.filter((c) => !c.solo && sanityHeaderHeld(c.g)).map((c) => c.m));
   const nowMs = Date.now();
+  const resettleFree = loadResettleFree(RESETTLE_FILE, nowMs);   // Q413 / O920 / O922: reopened keys settle without continue debits
+  if (resettleFree.size) console.log('resettle: ' + resettleFree.size + ' reopened key(s) listed in ' + RESETTLE_FILE + ' settle without continue debits (Q413 / O920 / O922)');
+  // Q413 / O920 / O922: a continue debit a reopened key does not pay (RESETTLE_FILE) -- counted and logged, the balance untouched
+  const resettleNoCharge = (m, sid, debit, what) => {
+    RUN.resettleCpFree = (RUN.resettleCpFree | 0) + 1;
+    RUN.resettleCpFreeCp = (RUN.resettleCpFreeCp || 0) + (debit | 0);
+    console.log('  resettle cp ' + m + ': ' + plog(sid) + ' ' + what + ' (' + debit + ') not charged -- a reopened key (Q413 / O920 / O922)');
+  };
   // O618: game-error reports (err_sig, client-writable) -> their first sightings by this job + evidence on the confession entries.
   //   Record-only until confirmed-errors.json lists an error (err-refund.js header); a read failure / an absent board changes nothing.
   const errSt = errRefund.loadErrState(ERR_STATE_FILE);
@@ -13587,7 +13619,8 @@ async function main() {
       //   count). No milestones, no cup, no rating history.
       const n = endlessNib(f.continuesUsed, 0), prev = run.contN | 0;
       let debit = 0; for (let k = prev + 1; k <= n; k++) debit += endlessContinueCost(k);
-      if (debit > 0) { cp[sid] = (cp[sid] == null ? 0 : cp[sid]) - debit; changedCp[sid] = cp[sid]; console.log('  couch cp ' + m + ': ' + plog(sid) + ' -' + debit + ' casual continues (rung ' + (prev + 1) + '..' + n + ') -> ' + cp[sid]); }
+      if (debit > 0 && resettleFree.has(m)) resettleNoCharge(m, sid, debit, 'couch casual continues (rung ' + (prev + 1) + '..' + n + ')');   // Q413: a reopened key pays nothing
+      else if (debit > 0) { cp[sid] = (cp[sid] == null ? 0 : cp[sid]) - debit; changedCp[sid] = cp[sid]; console.log('  couch cp ' + m + ': ' + plog(sid) + ' -' + debit + ' casual continues (rung ' + (prev + 1) + '..' + n + ') -> ' + cp[sid]); }
       if (n > prev) run.contN = n;
       if ((f.endDepth | 0) > 0) {
         const packed = packEndlessScore(f.endDepth, f.score);
@@ -13622,7 +13655,8 @@ async function main() {
       //   client RatingStore.continueCost = guard ENDLESS_CONT_COST. No milestones (competitive-only), the ladder is the casual solo pair.
       const n = endlessNib(f.continuesUsed, 0), prev = run.contN | 0;
       let debit = 0; for (let k = prev + 1; k <= n; k++) debit += endlessContinueCost(k);
-      if (debit > 0) { cp[sid] = (cp[sid] == null ? 0 : cp[sid]) - debit; changedCp[sid] = cp[sid]; console.log('  solo cp ' + m + ': ' + plog(sid) + ' -' + debit + ' casual continues (rung ' + (prev + 1) + '..' + n + ') -> ' + cp[sid]); }
+      if (debit > 0 && resettleFree.has(m)) resettleNoCharge(m, sid, debit, 'solo casual continues (rung ' + (prev + 1) + '..' + n + ')');   // Q413: a reopened key pays nothing
+      else if (debit > 0) { cp[sid] = (cp[sid] == null ? 0 : cp[sid]) - debit; changedCp[sid] = cp[sid]; console.log('  solo cp ' + m + ': ' + plog(sid) + ' -' + debit + ' casual continues (rung ' + (prev + 1) + '..' + n + ') -> ' + cp[sid]); }
       if (n > prev) run.contN = n;
       if ((f.endDepth | 0) > 0) {
         const packed = packEndlessScore(f.endDepth, f.score);
@@ -14283,6 +14317,7 @@ async function main() {
           continue;
         }
         const debit = debits[seat];
+        if (resettleFree.has(c.m)) { resettleNoCharge(c.m, sid, debit, 'seat ' + seat + ' ' + endlessNib(t.continuesUsed, seat) + ' continues'); continue; }   // Q413 / O920 / O922: a reopened key pays nothing
         if (!attestE.has(pid(sid))) {
           RUN.endlessOthersWord = (RUN.endlessOthersWord | 0) + 1;
           RUN.endlessOthersWordCp = (RUN.endlessOthersWordCp || 0) + debit;
@@ -16031,6 +16066,7 @@ Object.assign(module.exports, { ENDLESS_LONE, endlessLoneClaim, endlessLoneVerdi
 Object.assign(module.exports, { START_PROOF_ENFORCE, startProof, proofState, proofTable, proofOwnsId, applyStartProof, screenLateStarts, seenNote, startSeenId, startSig });   // O462 matchmade start proof (test/start-proof-step.js)
 Object.assign(module.exports, { LIKE: likePlan.LIKE, LIKES_FILE, LIKE_BOX_LB, LIKE_COUNT_LB, loadLikes, saveLikes });   // O520 likes lane (client knife 5.4d, W79; test/likes-lane.js)
 Object.assign(module.exports, { rankedSeatMaskOf, mtSansSeats, seatAppliesLp, anyAppliesLp, SEAT_MASK_BASES });   // O716 one queue for quick + ranked: the ranked-seat mask (test/seat-mask.js)
+Object.assign(module.exports, { RESETTLE_FILE, loadResettleFree });   // Q413 / O920 / O922 one-shot re-settlement (test/resettle-once.js)
 Object.assign(module.exports, { pwSealName, pwOpenName, pwMapNames, pwKeys });   // O807 (test/pending-writes-no-names.js; the test harnesses open the file with pwMapNames)
 Object.assign(module.exports, { GONE_RETRY_MS, goneHolds, PENDING_W_MAX_MS, PENDING_W_FIELDS });   // O775 waiting writes of accounts answered result 27 (test/pending-writes-gone.js)
 Object.assign(module.exports, { coopResumePerkLoose, PERK_SHAPE_WHY });   // O922 casual co-op resume tolerance (test/coop-resume-perk-loose.js)
