@@ -1578,7 +1578,7 @@ console.log('-- [17] RC2-02 / RC2-03: a family that borrows -- what the client m
     } }
   // wiring pins
   T('[17] wiring: the settle takes the pass context (order + the rows as the pass began), the member readings and the team pick; the log line says when more than one target was read; the stamp is written where the skills are (the pass end, a seed without a new run, a late raise)',
-    /const x = elpSettleRun\(st, p, c, o\.h, o\.r, o\.fam, seasonNow \| 0, nowMs, ctx\);/.test(SRC) && /const ctx = \{ order: new Map\(\), h0: new Map\(\), oldUntil: elpOldUntil\(st\) \};/.test(SRC) && /ctx\.h0\.set\(p, \{ h: c0\.h\.slice\(\), ht: Number\(c0\.ht\) \}\);/.test(SRC)
+    /const x = elpSettleRun\(st, p, c, o\.h, o\.r, o\.fam, seasonNow \| 0, nowMs, ctx\);/.test(SRC) && /const ctx = \{ order: new Map\(\), h0: new Map\(\), oldUntil: elpOldUntil\(st\) \};/.test(SRC) && /ctx\.h0\.set\(p, \{ h: c0\.h\.slice\(\), ht: Number\(c0\.ht\), lv: c0\.lv \? JSON\.parse\(JSON\.stringify\(c0\.lv\)\) : null \}\);/.test(SRC)
     && /\(x\.alts > 1 \? ' \(best of ' \+ x\.alts \+ ' targets his client may have shown\)' : ''\)/.test(SRC) && (SRC.match(/c\.ht = nowMs;/g) || []).length === 3 && !/\bht \| 0\b/.test(SRC)
     && [v.elpSaveAt, v.elpOpenAt, v.elpBeforeItems, v.elpBeforeLists, v.elpRowSkill, v.elpMemberReadings, v.elpTeamPick].every((f) => typeof f === 'function'));
   // mutations

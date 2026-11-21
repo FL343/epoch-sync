@@ -7086,6 +7086,9 @@ const RATING = {
   //   table stays version 6 while those clients may still play; the upload runbook sets ELP_PUB_VER=7 the moment the gate goes up
   //   (the plan, section 3.2 step 4). points-plan.js ELP.VER (7) is never what the job publishes.
   PUB_VER: Number(process.env.ELP_PUB_VER || 6),
+  // O942 D6 lever: the instant (ms) the gate of the version 7 package went up (ELP_CUTOVER_MS; 0 = off): every version 6 run still
+  //   open or parked then settles at the depth it reached under version 6 rules (elpRunReady); set with ELP_PUB_VER=7
+  CUTOVER_MS: Number(process.env.ELP_CUTOVER_MS || 0),
   OLD_CLIENT_MS: attest.KEY_RETIRE_GRACE_MS + 24 * 3600000,   // version 6: how long after the rule came a newly seen run may still be a five-run client's (elpOldUntil):
                                               //   a five-run build's records verify until its key has been retired KEY_RETIRE_GRACE_MS (7 d), and a run
                                               //   whose uploads all failed is first seen when the retry sends it (back at the menu / the next start) -- a
@@ -7183,7 +7186,10 @@ function elpTeamNote(st, runId, pids, fam, s, nowMs) {
 //   while no save point is open. The one predicate of elpSettleAll's loop and of elpPendingSettles (RC2-01: they must not drift).
 function elpRunReady(h, i, nowMs) {
   const r = h.runs[i], newer = i < h.runs.length - 1, idle = nowMs != null && nowMs - (r[6] || r[2] || 0) >= RATING.IDLE_MS;
-  return !!(((r[7] | 0) & 1) || newer || (idle && !((r[7] | 0) & 2)));
+  // O942 D6: once the version 7 package's gate is up (RATING.CUTOVER_MS, the upload runbook sets it), a version 6 run is never
+  //   continued (the new client offers no resume of an old key's save) -- it settles now, parked or not, at the depth it reached
+  const cut = RATING.CUTOVER_MS > 0 && nowMs != null && nowMs >= RATING.CUTOVER_MS && !((r[7] | 0) & ELP_R_V7);
+  return !!(((r[7] | 0) & 1) || newer || (idle && !((r[7] | 0) & 2)) || cut);
 }
 // the unsettled runs of entry h that this settle pass will settle (elpSettleAll: in start order, up to the first run that may not):
 //   the set of their indexes in h.runs
@@ -7591,7 +7597,9 @@ function elpRowFresh(ctx, p, fam, runId, at) {
   return h0;
 }
 // the pass lines of the four families in force at instant t of season s: { solo: [7], duo: [7], trio: [7], quad: [7] }
-function elpLinesByFam(st, s, t) { const out = {}; for (const fam of pointsPlan.ELP_FAMS) out[fam] = elpLinesAt(st, fam, s, t); return out; }
+function elpLinesByFam(st, s, t, maxVer) { const out = {}; for (const fam of pointsPlan.ELP_FAMS) out[fam] = elpLinesAt(st, fam, s, t, maxVer); return out; }
+// O942: the rules version a recorded table was published under (its key's first element; a key before O942 carried ELP.VER: 6 or older)
+function elpTabVer(x) { try { const k = JSON.parse(x && x.key); return Array.isArray(k) ? (Number(k[0]) | 0) : 6; } catch (e) { return 6; } }
 // the hidden skill of each family of player p for his row, [solo, duo, trio, quad] (null = none): points-plan.js elpHiddenFor over
 //   every settled run of the season under the lines in force at instant t
 function elpSkillsOf(st, p, s, t) { const runs = elpSettledRuns(st, p, s), lines = elpLinesByFam(st, s, t); return pointsPlan.ELP_FAMS.map((fam) => pointsPlan.elpHiddenFor(fam, runs, lines)); }
@@ -7686,9 +7694,12 @@ function elpTeamTrim(st, nowMs, pending) {
   return n;
 }
 // the pass lines of family fam (7 levels) in force at instant t of season s: the newest recorded table at or before t, else the prior
-function elpLinesAt(st, fam, s, t) {
+//   O942: maxVer (default 6) = the newest table version a reading may use -- a version 6 run never reads a version 7 table (its
+//   client could not have held one: it reads a version 7 table as "being rated"); a version 7 run passes Infinity
+function elpLinesAt(st, fam, s, t, maxVer) {
   let at = null;
-  for (const x of ((st && st.elpTab) || [])) if ((x.season | 0) === (s | 0) && x.ms <= t && (!at || x.ms > at.ms)) at = x;
+  const mv = maxVer == null ? 6 : maxVer;
+  for (const x of ((st && st.elpTab) || [])) if ((x.season | 0) === (s | 0) && x.ms <= t && (!at || x.ms > at.ms) && elpTabVer(x) <= mv) at = x;
   const p = at && at.byFam && at.byFam[fam] && at.byFam[fam].pass;
   return (Array.isArray(p) && p.length === LP_SEG.length) ? p : ELP.PRIOR[fam];
 }
@@ -7699,9 +7710,9 @@ function elpCandidates(st, fam, s, firstSeen, nowMs) {
   return out;
 }
 // O825: the same three instants as whole tables (the four families: a borrowed run is read through two of them), distinct
-function elpCandidateTabs(st, s, firstSeen, nowMs) {
+function elpCandidateTabs(st, s, firstSeen, nowMs, maxVer) {
   const out = [], seen = new Set();
-  for (const t of [firstSeen - 86400000, firstSeen, nowMs]) { const tb = elpLinesByFam(st, s, t); const key = pointsPlan.ELP_FAMS.map((f) => tb[f].join(',')).join('|'); if (!seen.has(key)) { seen.add(key); out.push(tb); } }
+  for (const t of [firstSeen - 86400000, firstSeen, nowMs]) { const tb = elpLinesByFam(st, s, t, maxVer); const key = pointsPlan.ELP_FAMS.map((f) => tb[f].join(',')).join('|'); if (!seen.has(key)) { seen.add(key); out.push(tb); } }
   return out;
 }
 // settle run r (entry h of family fam, season s) of player p onto his points entry c: placement or points. Mutates c, the run and
@@ -7709,6 +7720,7 @@ function elpCandidateTabs(st, s, firstSeen, nowMs) {
 //   reading (hidden skill of the family over the runs before, target, points line); the one that leaves the player the most is
 //   taken (architecture decision 10). Returns { d, T, pass, seeded, teamH (undefined = the player's own skill) }.
 function elpSettleRun(st, p, c, h, r, fam, s, nowMs, ctx) {
+  if ((r[7] | 0) & ELP_R_V7) return elpSettleRunLv(st, p, c, h, r, fam, s, nowMs, ctx);   // O942: a version 7 run (its first segment's key / SEG_LINE)
   const at = r[2] ? r[2] : nowMs, tabs = elpCandidateTabs(st, s, at, nowMs);
   const depth = r[1] | 0, seed = r[8] | 0;
   // RC2-02: the readings of the runs before it his client may have fixed the target from; befores[0] = the job's own (it wins a tie)
@@ -7909,7 +7921,7 @@ function elpSettleAll(st, seasonNow, nowMs, opt) {
   for (const p of pids) {
     ctx.order.set(p, elpPassOrder(st, p, seasonNow | 0, nowMs));
     const c0 = elpAllOf(st, p, seasonNow | 0);
-    if (c0 && c0.placed && Array.isArray(c0.h) && c0.h.length === pointsPlan.ELP_FAMS.length) ctx.h0.set(p, { h: c0.h.slice(), ht: Number(c0.ht) });
+    if (c0 && c0.placed && Array.isArray(c0.h) && c0.h.length === pointsPlan.ELP_FAMS.length) ctx.h0.set(p, { h: c0.h.slice(), ht: Number(c0.ht), lv: c0.lv ? JSON.parse(JSON.stringify(c0.lv)) : null });   // O942: + the level states his row carried
   }
   // Q402 / Q403: the picked orders go into the pass context before anything settles (every reading of the pass sees them). The
   //   guard: a pick also moves what a teammate's reading counts before a shared team run, so the whole pass is settled on two
@@ -7988,9 +8000,9 @@ function ratingHistRemove(st, p, fam, seasonId, runId) {
   const h = st.hist && st.hist[ratingHistKey(p, fam, seasonId)];
   if (!h) return false;
   runId = runId >>> 0;
-  let hit = false, d = null, mh = 0;
+  let hit = false, d = null, mh = 0, lvGone = null;
   const i = (h.runs || []).findIndex((r) => (r[0] >>> 0) === runId);
-  if (i >= 0) { const r = h.runs[i]; if (r[3] === 2) d = r[4] | 0; mh = elpRunRk(seasonId, r[8]); h.runs.splice(i, 1); hit = true; }
+  if (i >= 0) { const r = h.runs[i]; if (r[3] === 2) d = r[4] | 0; mh = elpRunRk(seasonId, r[8]); if (r[3] && ((r[7] | 0) & ELP_R_V7) && Array.isArray(r[10])) lvGone = r; h.runs.splice(i, 1); hit = true; }
   else { const j = (h.gone || []).findIndex((g) => (g[0] >>> 0) === runId); if (j >= 0) { if (h.gone[j][3]) d = h.gone[j][1] | 0; mh = elpRunRk(seasonId, h.gone[j][2]); h.gone.splice(j, 1); hit = true; } }
   h.old = h.old || [];
   if (hit && h.old.indexOf(runId) < 0) h.old.push(runId);
@@ -8002,6 +8014,7 @@ function ratingHistRemove(st, p, fam, seasonId, runId) {
     else if (c.placed) { const nv = Math.max(0, Math.min(LP_MAX, (c.lp | 0) - d)); c.ring = receiptPush(c.ring || [], mh, nv - (c.lp | 0), RECEIPT_F.VOID, 0); c.lp = nv; }
     else c.ring = receiptPush(c.ring || [], mh, 0, RECEIPT_F.VOID, 0);
   }
+  if (lvGone && c) elpLevelReplay(c, h, fam, lvGone);   // O942: a settled version 7 run left: the family's level again from the state before it (the later runs' points stay)
   if (hit && c) c.h = elpSkillsOf(st, p, seasonId, Infinity);   // a run left his history: the row's skills again (the newest table)
   if (Array.isArray(h.best) && (h.best[0] >>> 0) === runId) { hit = true; h.best = (h.runs || []).reduce((b, r) => ((r[1] | 0) > (b[1] | 0) ? [r[0] >>> 0, r[1] | 0] : b), [0, 0]); }
   return hit;
@@ -8015,7 +8028,7 @@ function ratingScoreOf(st, p, seasonId, nowMs) {
   const lp = Math.max(0, Math.min(LP_MAX, c.lp | 0)), h = {};
   const hs = (Array.isArray(c.h) && c.h.length === pointsPlan.ELP_FAMS.length) ? c.h : elpSkillsOf(st, p, seasonId, nowMs == null ? Infinity : nowMs);
   pointsPlan.ELP_FAMS.forEach((fam, i) => { h[fam] = hs[i] == null ? null : (hs[i] | 0); });
-  const details = pointsPlan.elpRowDetails({ n: c.n | 0, tier: pointsPlan.lpTierIdx(lp), placed: 1, h }, c.ring || []);
+  const details = pointsPlan.elpRowDetails({ n: c.n | 0, tier: pointsPlan.lpTierIdx(lp), placed: 1, h, lv: c.lv || null }, c.ring || []);   // O942: v3 once a family holds a level
   return { score: lp, h, n: c.n | 0, details };
 }
 const sameInts = (a, b) => Array.isArray(a) && Array.isArray(b) && a.length >= b.length && b.every((x, i) => (a[i] | 0) === (x | 0));
@@ -16426,6 +16439,7 @@ Object.assign(module.exports, { teamXpFloor, teamXpStarts, teamXpMark, teamRollb
 Object.assign(module.exports, { RATING, RATING_FAMS, ENDLESS_RATING_LB, ELP_ALL, elpAllKey, elpAllOf, elpEntryOk, elpFamEntries, elpMergeByStart, elpPassOrder, elpPlaceAt, elpLeftOf, elpOldUntil, elpMins, elpSeedNow, ratingOwed, elpPassOrders, elpTryOrder, elpPickOrders, ELP_ORDER_CAP, SEASON_UNSCHEDULED, elpSettledRuns, elpRunsBefore, elpSaveAt, elpOpenAt, elpBeforeItems, elpBeforeLists, elpBorrowCounts, elpBorrowOrders, ELP_BORROW_CAP, elpRowSkill, elpMemberReadings, elpTeamPick, elpLinesByFam, elpSkillsOf, elpCandidateTabs, ENDLESS_RATING_LB_SOLO, ENDLESS_RATING_LB_DUO, ENDLESS_RATING_LB_TRIO, ENDLESS_RATING_LB_QUAD, ENDLESS_TIERCUT_LB, ratingFamOf, fnv32, ratingRunId, ratingHistKey,
   ratingHistUpsert, ratingHistRemove, ratingHistFinal, elpRunRk, ratingScoreOf, ratingPlan, ratingTierOf, tiercutDay, tiercutEncode, tiercutDecode, tiercutDue, pruneRatingHist,
   elpSettledDepths, elpLinesAt, elpCandidates, elpSettleRun, elpTrim, elpSettleAll, elpRunReady, elpPendingSettles, elpTeamNote, elpMemberHiddenBefore, elpTeamHidden, elpTeamTrim, elpLinesOf, elpHiddensOf, elpLinesSkipBanned, elpTableKey, elpTabNewest, elpTabRecord });
+Object.assign(module.exports, { ELP_R_V7, ELP_R_QUIT, elpSegLv, elpTabVer, elpPriorPub, elpLevelBefore, elpMemberLevelBefore, elpTeamLevel, elpRowFresh, elpRowLevel, elpSettleRunLv, elpLevelReplay });   // O942 version 7 (test/endless-level.js)
 Object.assign(module.exports, { CUP, CUP_FAMS, ENDLESS_CUP_LB, ENDLESS_CUP_HONOR_LB, cupWeekId, cupWeekStart, cupWeekBack, cupNextWeek, cupEdition, cupWeekBoardName, teamBlockSids,
   cupStandings, cupPodium, cupPodiumFor, cupVerdict, cupMarksOf, cupHonorEncode, cupHonorDecode, cupHonorPlan, cupHeldMasks, cupCarrierEncode, cupCarrierDecode, cupRevoke, pruneCup, cupId, cupScrub, cupPidVerdict });   // O180 Gold Rush Cup (client knife 5.1c-1; test/endless-cup.js)   // O103 endless competitive rating (client knife 5.1a; test/endless-rating.js)
 Object.assign(module.exports, { BAN_LB, BAN_ACT_MM, banRowFull, fullBanSet, cupSkipBanned, elpLinesSkipBanned, CUP_BAN_WAIT_MS });   // cloud audit Q338 full bans kept off the cup podium / tier cuts / composite ladders (test/ban-skip.js; sanctions.js reads BAN_LB from here)
