@@ -213,6 +213,25 @@ function sTables(m) {
   return e;
 }
 
+// ---- [9] the live pass lines: version 6 published = the hidden skill (depth mean); version 7 = the smoothed level (Lm), a player with
+//   no level yet = TARGET_Q of his hidden skill ----
+function sLines(m) {
+  const e = [], st = { hist: {} }, A = P(m, 9), B = P(m, 10), keep = m.RATING.PUB_VER;
+  [[A, [10, 12, 14]], [B, [6, 7, 8]]].forEach(([q, ds], k) => ds.forEach((dd, i) => m.ratingHistUpsert(st, q, 'solo', 0, 700 + 10 * k + i, dd, T0 + i * MIN, F, 9500 + 10 * k + i)));
+  m.elpSettleAll(st, 0, T0 + 10 * MIN);
+  const cA = C(st, A); (cA.lv = cA.lv || {}).solo = { L: 1500, Lm: 1420, s: 3, last: 1, run: 1 };   // A holds a version 7 level
+  const HA = PP.hiddenOf([14, 12, 10]), HB = PP.hiddenOf([8, 7, 6]);
+  try {
+    m.RATING.PUB_VER = 6;
+    const v6 = m.elpHiddensOf(st, 'solo', 0);
+    if (v6[A] !== HA || v6[B] !== HB) e.push('version 6 readings ' + J([v6[A], v6[B]]) + ' != ' + J([HA, HB]));
+    m.RATING.PUB_VER = 7;
+    const v7 = m.elpHiddensOf(st, 'solo', 0);
+    if (v7[A] !== 1420 || v7[B] !== Math.round(HB * PP.ELP.TARGET_Q / 1000)) e.push('version 7 readings ' + J([v7[A], v7[B]]) + ' != ' + J([1420, Math.round(HB * PP.ELP.TARGET_Q / 1000)]));
+  } finally { m.RATING.PUB_VER = keep; }
+  return e;
+}
+
 const SCEN = [['[1] intake: the version bit stays, the quit bit only with the final segment, elpSegLv', sIntake],
   ['[2] solo: placement walks the level and seeds from it, points runs by endlessSettleLv + lambda, R1 / R2 leave the level, states / receipts / row v3', sSolo],
   ['[2b] the tiers read the smoothed level (here the demotion protection), not the jumpy one', sTiers],
@@ -220,7 +239,8 @@ const SCEN = [['[1] intake: the version bit stays, the quit bit only with the fi
   ['[4] team: the roster\'s highest level is the target (frozen), every member steps his own level', sTeam],
   ['[5] the cutover settles a parked version 6 run at its save depth, never a version 7 one', sCut],
   ['[6] a conviction of a version 7 run replays the family\'s level from the state before it', sReplay],
-  ['[7] tables: the version of a recorded table, version 6 readings skip version 7 tables, the published version / priors follow PUB_VER', sTables]];
+  ['[7] tables: the version of a recorded table, version 6 readings skip version 7 tables, the published version / priors follow PUB_VER', sTables],
+  ['[9] the live pass lines read the smoothed level once the published table is version 7 (the hidden skill under version 6)', sLines]];
 console.log('-- O942 version 7: the job --');
 for (const [label, fn] of SCEN) { const e = fn(v); T(label, e.length === 0, e.slice(0, 3).join(' | ')); }
 {
@@ -249,6 +269,7 @@ const MUTS = [
   ['the placement seeds from the level BEFORE the last placement run', [['const lp = Math.max.apply(null, tabs.map((tb) => pointsPlan.elpLevelSeed(after.L, tb[fam], tb.solo)));', 'const lp = Math.max.apply(null, tabs.map((tb) => pointsPlan.elpLevelSeed(pick.x.L, tb[fam], tb.solo)));']], sSolo],
   ['a points run reads the jumpy level for its tiers (not Lm)', [['sl = pointsPlan.endlessSettleLv(cur, depth >= t, x.Lm, tb[fam], off, fam, pointsPlan.elpLineOfL(L));', 'sl = pointsPlan.endlessSettleLv(cur, depth >= t, x.L, tb[fam], off, fam, pointsPlan.elpLineOfL(L));']], sTiers],
   ['the row stays v2 (no level states)', [['placed: 1, h, lv: c.lv || null }, c.ring || []);', 'placed: 1, h }, c.ring || []);']], sSolo],
+  ['the version 7 lines keep reading the depth mean', [['    if (RATING.PUB_VER >= 7) {\n      const c = elpAllOf(st, p, seasonId)', '    if (false) {\n      const c = elpAllOf(st, p, seasonId)']], sLines],
 ];
 console.log('-- [8] mutations --');
 for (const [label, pairs, fn] of MUTS) {

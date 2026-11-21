@@ -8075,6 +8075,9 @@ function elpLinesOf(hiddens, prior) {
 }
 // the hidden skills of family fam this season (pid -> hidden100), from the chain memory: the players with MIN_RUNS settled runs OF
 //   THAT FAMILY, over their own runs (hiddenOf; no borrowed run -- O825: the lines of a family measure the family)
+//   O942: once the published table is version 7 (RATING.PUB_VER), a version 7 run's depth is cut at its target -- the mean of depths
+//   reads low -- so each player's reading is his smoothed level of the family (c.lv[fam].Lm: the depth he passes half the time =
+//   what a pass line is); a player with no level yet reads TARGET_Q of his hidden skill (the level his first version 7 run starts at)
 function elpHiddensOf(st, fam, seasonId) {
   const out = {};
   const tail = '|' + fam + '|' + (seasonId | 0);
@@ -8085,7 +8088,12 @@ function elpHiddensOf(st, fam, seasonId) {
     const dep = elpSettledDepths(h, null);
     if (dep.length < ELP.MIN_RUNS) continue;
     const H = pointsPlan.hiddenOf(dep);
-    if (H != null) out[k.slice(0, k.length - tail.length)] = H;
+    if (H == null) continue;
+    const p = k.slice(0, k.length - tail.length);
+    if (RATING.PUB_VER >= 7) {
+      const c = elpAllOf(st, p, seasonId), lv = (c && c.lv) ? pointsPlan.elpLevelOf(c.lv[fam]) : null;
+      out[p] = lv ? lv.Lm : Math.round(H * ELP.TARGET_Q / 1000);
+    } else out[p] = H;
   }
   return out;
 }
