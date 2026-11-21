@@ -6,7 +6,8 @@
 //   [0] the constants and exports
 //   [1] units (quitLoneClaim): the honest shapes claim (peers-gone at seat 0, host-left at seat 1, two copies of his); every
 //       condition that is not met claims nothing (a finished or other end, provisional / split / synthetic / lent roster, a
-//       contest note, a processed or split key, ranked, a party queue, a room, three seats, a bot seat, the quitter without
+//       contest note, a processed or split key, ranked, a party queue, a room, three seats one of whose other players did
+//       not confess (Q427: three to six seats claim when every other one did -- test/quit-lone-multi.js), a bot seat, the quitter without
 //       his own start / with a result / without a confession, a confession refunded / convicted / synthetic / already
 //       settled, the writer's own confession, no level or a level out of range, a sanity-flagged result, another table, two
 //       writers, the wrong seat, two copies that disagree)
@@ -46,7 +47,7 @@ const PEERS_GONE = 1, HOST_LEFT = 2, USER_QUIT = 5;
 
 // ---- [0] ----
 console.log('[0] constants and exports');
-T('QUIT_LONE = quick (1), two seats, a 60-second level', v.QUIT_LONE && v.QUIT_LONE.MT === 1 && v.QUIT_LONE.PC === 2 && v.QUIT_LONE.LEVEL_SECONDS === 60, J(v.QUIT_LONE));
+T('QUIT_LONE = quick (1), from two seats (Q427: up to PC_MAX six), a 60-second level', v.QUIT_LONE && v.QUIT_LONE.MT === 1 && v.QUIT_LONE.PC === 2 && v.QUIT_LONE.PC_MAX === 6 && v.QUIT_LONE.LEVEL_SECONDS === 60, J(v.QUIT_LONE));
 T('exported: quitLoneClaim / quitLoneVerdicts', typeof v.quitLoneClaim === 'function' && typeof v.quitLoneVerdicts === 'function');
 T('the floor it replaces is CONSOLATION_XP 50', v.CONSOLATION_XP === 50);
 
@@ -93,7 +94,7 @@ const claim = (p, gg, o) => {
   T('a friends\' room (10): nothing', claim(entry({ mt: 10 }), [res(A, 0, [A, B], PEERS_GONE, { mt: 10 })]) === null);
   {
     const g3 = [res(A, 0, [A, B, X], PEERS_GONE, { sc: [500, 300, 100] })];
-    T('three seats: nothing', claim(entry({ roster: { 0: v.pid(A), 1: v.pid(B), 2: v.pid(X) }, started: [v.pid(A), v.pid(B), v.pid(X)] }), g3) === null);
+    T('three seats, the third player (X) never confessed: nothing (Q427 takes three seats only when every other one quit)', claim(entry({ roster: { 0: v.pid(A), 1: v.pid(B), 2: v.pid(X) }, started: [v.pid(A), v.pid(B), v.pid(X)] }), g3) === null);
   }
   {
     const gb = [res(A, 0, [A, '0'], PEERS_GONE, { sc: [500, 100] })];
@@ -211,8 +212,8 @@ console.log('[3] end to end: the three fixtures');
   T('(a1) host stayed: no start-orphan verdict, no consolation (the key was processed)', !new RegExp('start-orphan ' + m.key).test(t.out) && !/consolation xp /.test(t.out));
   T('(a1) the quitter: no XP, no CP, one leave (his confession)', xpPosts(t, P1).length === 0 && cpPosts(t, P1).length === 0 && leavesOf(t, P1) === 1, J([xpPosts(t, P1), cpPosts(t, P1), leavesOf(t, P1)]));
   T('(a1) nobody rated (no rating or points write)', H.setPosts(t.rs[3], RATING).length === 0 && [].concat(...t.rs.map((r) => H.setPosts(r, POINTS))).length === 0);
-  T('(a1) summary row: 1 due, 1 paid', t.rs.some((r) => /\| quick 1V1s whose other player quit and confessed, only the stayer wrote a result \(W103\)[^|]*\| 1 \/ 0 \/ 0 \(1\) \|/.test(r.summary)),
-    t.rs.map((r) => (/quick 1V1s whose other player quit[^\n]*/.exec(r.summary) || [''])[0]).join(' || '));
+  T('(a1) summary row: 1 due, 1 paid', t.rs.some((r) => /\| quick matches whose other player\(s\) all quit and confessed, only the stayer wrote a result \(W103, 3-6 seats Q427\)[^|]*\| 1 \/ 0 \/ 0 \(1\) \|/.test(r.summary)),
+    t.rs.map((r) => (/quick matches whose other player[^\n]*/.exec(r.summary) || [''])[0]).join(' || '));
 }
 {
   // (a2) the host (seat 0) quit and confessed, the joiner (seat 1) stayed: his client writes host-left (O41)
