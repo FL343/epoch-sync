@@ -23,7 +23,7 @@
   else if (root) root.POINTS_PLAN = api;
 })(typeof module === 'object' && !!module && typeof exports === 'object' && this === exports, typeof window !== 'undefined' ? window : null, function () {
   const RULES_VER = 2;
-  const FIXTURES_HASH = '08892ae4101a6c34';
+  const FIXTURES_HASH = 'ae58555e9b32cfb4';
   // the knobs configure() can move (production runs these defaults)
   const DEFAULTS = Object.freeze({ RS_THRESHOLD: 400, RS_UPSET_BONUS: 1.0, RS_STRONG_UPSET_LOSS: 0.5, RS_SOLO_VS_TRIO: 0.6, RS_TRIO_WIN: 0.7, LEAVER_LP_PENALTY: 100 });
   const LP_MAX = 9999;
@@ -636,9 +636,14 @@
   //       (the O941 money curve makes a team as deep as a solo player of the same level). Published only under version 7.
   const ELP7 = Object.freeze({
     STEP: Object.freeze([1500, 1350, 1250, 1180, 1130, 1100, 1080]), S_START: 2, S_MIN: 1, S_MAX: 6,
-    PLACE: Object.freeze([1800, 1500, 1300]), MISS_FLOOR: 1150,   // pending the user's P1 (the plan, section 0.5 point 3)
+    PLACE: Object.freeze([1800, 1500, 1300]), MISS_FLOOR: 1150,   // the user's P1 (2026-11-21 night): the steps + a miss floored at its depth x 1.15 (closest to 0.6.0's "the worst run dropped")
     ALPHA: 300, L_MIN: 100, RUN_CAP: 15,
-    MUL: Object.freeze([850, 850, 1500, 3100, 2800, 2800, 2800]),   // to be retuned with PROP (test/endless-lp-sim.js) before the push
+    // MUL retuned with lambda (2026-11-21 night, the companion repo's archive/ELP_LINE_SETTLE_2026-11-21/sim/o942-tune7.js against the 0.6.0
+    //   rules played out): hours to diamond v7 / 0.6.0 = 2.86 / 1.96 / 1.39 / 1.19 / 1.00 / 0.82 for players averaging 3 / 5 / 8 / 12 / 18 / 25
+    //   levels (50 / 45 / 33 / 25 / 20 / 14 h), to master 0.99 / 0.81 at 35 / 45; every one of them reaches diamond; a placement in the
+    //   bottom fifth catches the median seed in 1-8 h. The weak are slower: the user's Q1 = B, and 11-21 night "the low ones a bit
+    //   lower is fine -- can they all climb back?" (they can: the numbers above)
+    MUL: Object.freeze([1800, 1800, 2100, 2200, 2800, 2800, 2800]),
     R2_T_MIN: 3, R2_LM_MIN: 500,
     PROP: Object.freeze({ REF: 1000, LO: 250, HI: 2000 }),
     PRIOR: Object.freeze({

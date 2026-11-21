@@ -178,18 +178,20 @@ function sReplay(m) {
   return e;
 }
 
-// ---- [2b] the tiers read the SMOOTHED level: a placed player whose level ran ahead (L at the diamond line, Lm at gold) passes ----
+// ---- [2b] the tiers read the SMOOTHED level: a placed gold player (2050, the relegation band) whose level dropped to the silver line
+//   while his smoothed level still sits on the gold line misses -- read on Lm his skill tier is gold = his points tier: the demotion
+//   protection holds (no forced drop); read on the jumpy L it is silver: forced down through the series clamp ----
 function sTiers(m) {
   const e = [], st = { hist: {} }, p = P(m, 8), seed = 6100;
   const c = m.elpAllOf(st, p, 0, true);
-  Object.assign(c, { placed: 1, lp: 2500, n: 5, seedRun: ['solo', 1], ring: [], lv: { solo: { L: 2400, Lm: 1000, s: 3, last: 1, run: 1 } } });
-  const x = c.lv.solo, Tt = PP.elpTargetOfL(x.L, seed), line = PP.elpLineOfL(x.L), off = PP.targetOffset(seed);
-  const want = PP.endlessSettleLv(2500, true, x.Lm, LINES.solo, off, 'solo', line), jumpy = PP.endlessSettleLv(2500, true, x.L, LINES.solo, off, 'solo', line);
-  if (want.nv === jumpy.nv) e.push('the world does not tell Lm from L (' + want.nv + ')');
-  m.ratingHistUpsert(st, p, 'solo', 0, 600, Tt, T0, F, seed, { v7: true, quit: false });
+  Object.assign(c, { placed: 1, lp: 2050, n: 5, seedRun: ['solo', 1], ring: [], lv: { solo: { L: 600, Lm: 1000, s: 3, last: 0, run: 1 } } });
+  const x = c.lv.solo, Tt = PP.elpTargetOfL(x.L, seed), line = PP.elpLineOfL(x.L), off = PP.targetOffset(seed), depth = Math.max(0, Tt - 1);
+  const want = PP.endlessSettleLv(2050, false, x.Lm, LINES.solo, off, 'solo', line), jumpy = PP.endlessSettleLv(2050, false, x.L, LINES.solo, off, 'solo', line);
+  if (want.nv === jumpy.nv || !want.protect) e.push('the world does not tell Lm from L (' + want.nv + ' / ' + jumpy.nv + ', protect ' + want.protect + ')');
+  m.ratingHistUpsert(st, p, 'solo', 0, 600, depth, T0, F, seed, { v7: true, quit: false });
   m.elpSettleAll(st, 0, T0 + 1000);
   const r = runOf(st, p, 'solo', 600);
-  if (!r || r[3] !== 2 || (r[4] | 0) !== want.nv - 2500) e.push('points ' + (r && r[4]) + ' != ' + (want.nv - 2500) + ' (the jumpy level gives ' + (jumpy.nv - 2500) + ')');
+  if (!r || r[3] !== 2 || (r[4] | 0) !== want.nv - 2050) e.push('points ' + (r && r[4]) + ' != ' + (want.nv - 2050) + ' (the jumpy level gives ' + (jumpy.nv - 2050) + ')');
   return e;
 }
 
@@ -213,7 +215,7 @@ function sTables(m) {
 
 const SCEN = [['[1] intake: the version bit stays, the quit bit only with the final segment, elpSegLv', sIntake],
   ['[2] solo: placement walks the level and seeds from it, points runs by endlessSettleLv + lambda, R1 / R2 leave the level, states / receipts / row v3', sSolo],
-  ['[2b] the tiers read the smoothed level (gap / protection / gate), not the jumpy one', sTiers],
+  ['[2b] the tiers read the smoothed level (here the demotion protection), not the jumpy one', sTiers],
   ['[3] a version 6 player settles as before (no level); his first version 7 run starts from the version 6 reading', sV6],
   ['[4] team: the roster\'s highest level is the target (frozen), every member steps his own level', sTeam],
   ['[5] the cutover settles a parked version 6 run at its save depth, never a version 7 one', sCut],
