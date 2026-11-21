@@ -8,7 +8,7 @@
 //   that come after them -- a closed key is never read again:
 //   o920  8 casual co-op sessions from depth 0: `reroll bitmap sanity REJECT (reroll-ahead)` (fixed by Q417, main f7cf5c09)
 //   o922  24 resumed casual co-op sessions: `endless perk REJECT (perk_forge: build-mismatch)` (fixed by O922, batch B177)
-//   q413  13 casual solo / couch segments resumed from an older checkpoint: `perk REJECT (perk_chain: prefix)` (fixed by Q410 =
+//   q413  20 casual solo / couch segments resumed from an older checkpoint: `perk REJECT (perk_chain: prefix)` (fixed by Q410 =
 //         O903), and every later segment of those runs, closed because the chain memory still followed the old timeline
 //   The players were told to expect them back: settle what the records still on the shards show, take nothing (no continue
 //   debit -- they were never charged; nobody's points go down), never settle a key twice (Q144), shallow starts first (the
@@ -51,7 +51,11 @@
 const fs = require('fs'), path = require('path'), cp = require('child_process'), os = require('os'), zlib = require('zlib'), crypto = require('crypto');
 
 // ---- the lists (from the live run logs: master archive/O922_2026-11-20/live-rejects-since-launch.txt; Q413 = audit
-//      routes/B-verify-03.md). Co-op keys carry the depths the log line printed: the dry run holds a key that settles at other depths
+//      routes/B-verify-03.md, 13 keys to 11-19T12:31Z, + 7 more the run logs since launch name to 11-19T19:40Z, mailbox M825 / M832
+//      / M845: each a solo segment refused `perk REJECT (perk_chain: prefix)`, its writer flagged in the same run; two of the 7,
+//      -744718111_1092615113_7 and 316762177_2127984313_7, closed in one commit with a segment of their run that settled, so `plan`
+//      holds those two for review -- the chain moved at that close -- and reopens nothing of their runs; `flags` still takes theirs).
+//      Co-op keys carry the depths the log line printed: the dry run holds a key that settles at other depths
 //      (a record rewritten since; validate.js itself frees a listed key at any depths -- the list lives a week, review suggestion 1).
 const SETS = {
   o920: { lane: 'coop', fix: 'Q417', why: 'reroll bitmap sanity REJECT (reroll-ahead)', keys: {
@@ -68,9 +72,10 @@ const SETS = {
     '403758307_759833717_7': null, '975899634_1658946997_7': null, '1486926998_637995840_7': null, '-1491556382_1057920599_7': null,
     '1402650951_1057920599_7': null, '-208474472_653389368_7': null, '-1490636725_1092770214_7': null, '-1173129200_541892235_7': null,
     '-474609220_2121171552_7': null, '571362144_138684067_7': null, '5128742_1358336056_7': null, '902435330_28611711_7': null,
-    '715401068_1301077431_7': null } },
+    '715401068_1301077431_7': null, '-482154105_1978245727_7': null, '1955281756_1889606694_7': null, '-744718111_1092615113_7': null,
+    '687288248_1875434390_7': null, '1931428710_880539769_7': null, '-376699473_1538758885_7': null, '316762177_2127984313_7': null } },
 };
-// the flags `flags` takes back: q413 = the 13 segments above (their writers were flagged when the segment was refused);
+// the flags `flags` takes back: q413 = the 20 segments above (their writers were flagged when the segment was refused);
 //   q407 = the two friends' rooms of six (cloud audit Q407; only once its fix is on main, else the old rule flags again)
 const FLAG_SETS = { q413: Object.keys(SETS.q413.keys), q407: ['1436293812_1720557369_10', '333666603_1234671714_10'] };
 const STATE = { processed: 'processed.json', solo: 'endless-solo.json', starts: 'starts.json', signals: 'signals.json', trust: 'trust.json' };

@@ -2,7 +2,8 @@
 // cloud audit Q413 + O920 / O922 (2026-11-20): tools/resettle-once.js reopens endless keys this job rejected under rules fixed
 //   since (a state edit made with the job paused), and validate.js settles a reopened key without continue debits while
 //   resettle.json lists it (RESETTLE_FILE, loadResettleFree).
-//   [1] the lists: 8 + 24 + 13 endless keys, none twice, the co-op depths; the flag lists (13 + 2)
+//   [1] the lists: 8 + 24 + 20 endless keys, none twice, the co-op depths; the flag lists (20 + 2); q413 holds the 13 the state
+//       showed at 11-19T12:31Z and the 7 the run logs added to 11-19T19:40Z (mailbox M825 / M832), and not the perk_forge one
 //   [2] loadResettleFree: a listed key with cp 'free' before `until` -> in the set; until passed / another version /
 //       malformed / not an endless key / no file -> none
 //   [3] main(): a casual co-op run with continues -- charged as before without the file; listed -> settled, no CP write,
@@ -59,12 +60,19 @@ console.log('=== Q413 / O920 / O922 one-shot re-settlement ===');
 // ---- [1] the lists ----
 {
   const n = (s) => Object.keys(R.SETS[s].keys).length;
-  eq('[1] o920 8 / o922 24 / q413 13 keys', [n('o920'), n('o922'), n('q413')], [8, 24, 13]);
+  eq('[1] o920 8 / o922 24 / q413 20 keys', [n('o920'), n('o922'), n('q413')], [8, 24, 20]);
   const all = [].concat(...Object.keys(R.SETS).map((s) => Object.keys(R.SETS[s].keys)));
   T('[1] every key an endless key (type 7), none twice', all.every((m) => R.KEY_RE.test(m)) && new Set(all).size === all.length);
   T('[1] co-op keys carry their logged depths (o920 all from 0)', Object.values(R.SETS.o920.keys).every((d) => d[0] === 0 && d[1] > 0)
     && Object.values(R.SETS.o922.keys).every((d) => Array.isArray(d) && d[0] > 0 && d[1] >= d[0]));
-  eq('[1] flag lists: q413 = its 13 keys, q407 = the two rooms of six', [R.FLAG_SETS.q413.length, R.FLAG_SETS.q407], [13, ['1436293812_1720557369_10', '333666603_1234671714_10']]);
+  eq('[1] flag lists: q413 = its 20 keys, q407 = the two rooms of six', [R.FLAG_SETS.q413.length, R.FLAG_SETS.q407], [20, ['1436293812_1720557369_10', '333666603_1234671714_10']]);
+  // the run logs since launch (mailbox M832 ④): 21 solo keys flagged and closed in one run to 11-19T19:40Z, 20 of them
+  //   `perk REJECT (perk_chain: prefix)` (Q410's class) -- 13 in the first list + these 7; the 21st was `perk_forge:
+  //   picks-count@4`, a replay check Q410 does not touch (reopened, the fixed rule refuses it again): not in this list
+  const LOG7 = ['-482154105_1978245727_7', '1955281756_1889606694_7', '-744718111_1092615113_7', '687288248_1875434390_7',
+    '1931428710_880539769_7', '-376699473_1538758885_7', '316762177_2127984313_7'];
+  T('[1] q413 holds the 7 keys the run logs added (M825 / M832), each in the flag list too', LOG7.every((m) => m in R.SETS.q413.keys && R.FLAG_SETS.q413.includes(m)), LOG7.filter((m) => !(m in R.SETS.q413.keys)).join(' '));
+  T('[1] q413 does not hold the perk_forge key (picks-count, not Q410\'s class)', !('2042096731_536923187_7' in R.SETS.q413.keys));
 }
 
 // ---- [2] loadResettleFree ----
