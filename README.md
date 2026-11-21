@@ -270,11 +270,20 @@ absent, so a run is unaffected before it is provisioned.
   fixed by its first segment: solo / couch by the signing key (`attest-keys.json` pubInfo `elp`, stamped by
   the client's build tool; the dev key reads `ELP_DEV_VER`, default 6), team by the segment flag `SEG_LINE`
   (128); version 6 runs settle exactly as before. The level states ride the points entry (`lv`) and the row
-  (v3, after the four hidden skills). Two levers, both off by default and set by the upload runbook the
-  moment the version 7 package's gate goes up: `ELP_PUB_VER=7` (the published table carries 7, the version 7
-  priors, the live lines from the smoothed levels; a version 6 client reads that table as "being rated", so
-  never before the gate) and `ELP_CUTOVER_MS=<that instant>` (every version 6 run still open or parked then
-  settles at the depth it reached).
+  (v3, after the four hidden skills). Where the job cannot tell which reading of a level the client started
+  from (a family's first version 7 run: every reading of the version 6 skill his client may have held; the
+  row's state), it keeps them all: a reading whose target lies below the run's depth cannot have been the
+  client's (the line would have ended the run there) and is left out (a run that stood parked keeps them
+  all: its target may have been read again on resume), the verdict and points take the best of the rest,
+  and the level CARRIED to the next run is the lowest of their steps (`elpLvChoose`; `r[10]` keeps the
+  target that step read, `r[11]` the state). A team run freezes every line the host may have read
+  (`elpTeam[run].lvLns`: any member's reading that is at least every member's lowest). One pass walks every
+  player's runs in one order by first seen, so a team run's line freezes the same in one pass and in two.
+  Two levers, both off by default and set by the upload runbook the moment the version 7 package's gate
+  goes up: `ELP_PUB_VER=7` (the published table carries 7, the version 7 priors, the live lines from the
+  smoothed levels; a version 6 client reads that table as "being rated", so never before the gate) and
+  `ELP_CUTOVER_MS=<that instant>` (every version 6 run parked at a save point then settles at its save
+  depth; a run still being played waits for its own end).
 - Gold Rush Cup (client knife 5.1c-1, 2026-10-18; `test/endless-cup.js`): every competitive endless settle
   on the EA app id also keeps the player's best of the week on `<competitive ladder>_w<YYYYWW>` (ISO week,
   Monday 00:00 UTC; the week the settle runs in; team rows carry the team block; created at the week's
