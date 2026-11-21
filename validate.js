@@ -7186,9 +7186,12 @@ function elpTeamNote(st, runId, pids, fam, s, nowMs) {
 //   while no save point is open. The one predicate of elpSettleAll's loop and of elpPendingSettles (RC2-01: they must not drift).
 function elpRunReady(h, i, nowMs) {
   const r = h.runs[i], newer = i < h.runs.length - 1, idle = nowMs != null && nowMs - (r[6] || r[2] || 0) >= RATING.IDLE_MS;
-  // O942 D6: once the version 7 package's gate is up (RATING.CUTOVER_MS, the upload runbook sets it), a version 6 run is never
-  //   continued (the new client offers no resume of an old key's save) -- it settles now, parked or not, at the depth it reached
-  const cut = RATING.CUTOVER_MS > 0 && nowMs != null && nowMs >= RATING.CUTOVER_MS && !((r[7] | 0) & ELP_R_V7);
+  // O942 D6: once the version 7 package's gate is up (RATING.CUTOVER_MS, the upload runbook sets it), a version 6 run PARKED at a save
+  //   point is never continued (the new client offers no resume of an old key's save) -- it settles at its save depth. A version 6 run
+  //   still being PLAYED then (an old client mid-run: its checkpoint segments are on the board) is NOT cut: settling it now would read
+  //   the depth of its last checkpoint as a miss while he may still pass (architecture decision 10). It ends on its own -- the final
+  //   segment, the save point the gate makes him take at the next shop (then parked: this rule), a newer run, or IDLE_MS
+  const cut = RATING.CUTOVER_MS > 0 && nowMs != null && nowMs >= RATING.CUTOVER_MS && !((r[7] | 0) & ELP_R_V7) && !!((r[7] | 0) & 2);
   return !!(((r[7] | 0) & 1) || newer || (idle && !((r[7] | 0) & 2)) || cut);
 }
 // the unsettled runs of entry h that this settle pass will settle (elpSettleAll: in start order, up to the first run that may not):

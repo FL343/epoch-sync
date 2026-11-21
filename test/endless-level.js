@@ -148,6 +148,8 @@ function sCut(m) {
     m.RATING.CUTOVER_MS = 0;
     m.ratingHistUpsert(st, p6, 'solo', 0, 400, 7, t, SUS, 9000);                                   // a version 6 run parked at a save point
     m.ratingHistUpsert(st, p7, 'solo', 0, 401, 7, t, SUS, 9001, { v7: true, quit: false });       // a version 7 run parked
+    const p8 = P(m, 11);
+    m.ratingHistUpsert(st, p8, 'solo', 0, 402, 10, t + 1500, 0, 9002);                                // a version 6 run still being played (a checkpoint segment, seconds old, not parked)
     m.elpSettleAll(st, 0, t + 1000);
     if (runOf(st, p6, 'solo', 400)[3] || runOf(st, p7, 'solo', 401)[3]) e.push('a parked run settled before the cutover');
     m.RATING.CUTOVER_MS = t + 500;
@@ -156,6 +158,8 @@ function sCut(m) {
     if (!r6[3]) e.push('the parked version 6 run did not settle at the cutover');
     if (r6[3] && (r6[1] | 0) !== 7) e.push('it settled at ' + r6[1] + ', not its save depth 7');
     if (r7[3]) e.push('a parked version 7 run was force-settled');
+    const r8 = runOf(st, p8, 'solo', 402);
+    if (r8[3]) e.push('an open version 6 run still being played was cut (it may still pass: it must wait for its own end)');
   } finally { m.RATING.CUTOVER_MS = keep; }
   return e;
 }
@@ -237,7 +241,7 @@ const SCEN = [['[1] intake: the version bit stays, the quit bit only with the fi
   ['[2b] the tiers read the smoothed level (here the demotion protection), not the jumpy one', sTiers],
   ['[3] a version 6 player settles as before (no level); his first version 7 run starts from the version 6 reading', sV6],
   ['[4] team: the roster\'s highest level is the target (frozen), every member steps his own level', sTeam],
-  ['[5] the cutover settles a parked version 6 run at its save depth, never a version 7 one', sCut],
+  ['[5] the cutover settles a parked version 6 run at its save depth; never a version 7 one, never one still being played', sCut],
   ['[6] a conviction of a version 7 run replays the family\'s level from the state before it', sReplay],
   ['[7] tables: the version of a recorded table, version 6 readings skip version 7 tables, the published version / priors follow PUB_VER', sTables],
   ['[9] the live pass lines read the smoothed level once the published table is version 7 (the hidden skill under version 6)', sLines]];
@@ -263,6 +267,7 @@ const MUTS = [
   ['the team line is the LOWEST level', [['tm.lvL = pointsPlan.elpTeamLine(tm.r.map(', 'tm.lvL = Math.min.apply(null, tm.r.map(']], sTeam],
   ['every member takes the team line (the ratchet)', [['const after = pointsPlan.elpLevelStep(pick.x, { pass, depth, T, quit, placing });', 'const after = pointsPlan.elpLevelStep(teamL !== undefined ? Object.assign({}, pick.x, { L: teamL }) : pick.x, { pass, depth, T, quit, placing });']], sTeam],
   ['the cutover never comes', [['const cut = RATING.CUTOVER_MS > 0 && nowMs != null', 'const cut = false && nowMs != null']], sCut],
+  ['the cutover also cuts runs still being played (no parked check)', [[' && !((r[7] | 0) & ELP_R_V7) && !!((r[7] | 0) & 2);', ' && !((r[7] | 0) & ELP_R_V7);']], sCut],
   ['a conviction does not replay the level', [['  if (lvGone && c) elpLevelReplay(c, h, fam, lvGone);', '  if (false) elpLevelReplay(c, h, fam, lvGone);']], sReplay],
   ['a later segment drops the version bit', [['| ((r[7] | 0) & (ELP_R_V7 | ELP_R_QUIT)) |', '| ((r[7] | 0) & ELP_R_QUIT) |']], sIntake],
   ['a version 6 reading takes version 7 tables', [['const mv = maxVer == null ? 6 : maxVer;', 'const mv = maxVer == null ? Infinity : maxVer;']], sTables],
