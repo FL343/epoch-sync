@@ -72,8 +72,11 @@ console.log('=== Q327: an endless run a save can still bring back keeps its chai
   // tripwire: the segment flags soloRunKind sorts by -- a new run-kind flag decides how long its chain memory lives
   const segs = (ASRC.match(/^const SEG_[A-Z_]+ = /gm) || []).map((l) => l.slice(6, -3)).sort();
   // O606 (client knife 5c): SEG_COUCH rides with SEG_COMP (a couch competitive run: competitive save points, kind 0 -- [1] pins it)
-  T('[0] attest segment flags are the seven soloRunKind knows (a new kind flag: decide its keep rule in soloRunKept, Q327)',
-    JSON.stringify(segs) === JSON.stringify(['SEG_CASUAL', 'SEG_CLASSIC', 'SEG_COMP', 'SEG_COUCH', 'SEG_FINAL', 'SEG_RESUMED', 'SEG_SUSPENDED']), segs.join(','));
+  // O942 (endless points version 7): SEG_LINE rides TEAM competitive segments only (a client-written consensus record; the solo and
+  //   couch sanity checks reject the bit) -- it never reaches the solo chain memory, so it needs no keep rule here
+  T('[0] attest segment flags are the eight soloRunKind knows (a new kind flag: decide its keep rule in soloRunKept, Q327; SEG_LINE: team only)',
+    JSON.stringify(segs) === JSON.stringify(['SEG_CASUAL', 'SEG_CLASSIC', 'SEG_COMP', 'SEG_COUCH', 'SEG_FINAL', 'SEG_LINE', 'SEG_RESUMED', 'SEG_SUSPENDED'])
+    && /if \(\(fl & ~\(attest\.SEG_SUSPENDED \| attest\.SEG_FINAL \| attest\.SEG_RESUMED \| attest\.SEG_CASUAL \| attest\.SEG_CLASSIC\)\) !== 0/.test(SRC), segs.join(','));
 }
 
 // ---- [1] pure ----

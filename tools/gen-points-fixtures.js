@@ -303,7 +303,7 @@ function endlessCases() {
     E('row read, no skill = null four times, a short ring', 'elpRowOf', [[0xEE | 512, 9, 3, 1, -1, -1, -1, -1, 198, 2, 1, 2, 3]]),
     E('row read, another magic = null', 'elpRowOf', [[0xEF | 512, 7, 1, 1, 950, 1480, -1, -1, 198, 0]]),
     E('row read, the version 1 per-family row = null', 'elpRowOf', [[0xEE | 256, 7, 950, 1, 1, 198, 2, -5, 40, 264, 77, -13, 258]]),
-    E('row read, version 3 = null', 'elpRowOf', [[0xEE | 768, 7, 1, 1, 950, 1480, -1, -1, 198, 0]]),
+    E('row read, a version 3 row cut short before its levels = null', 'elpRowOf', [[0xEE | 768, 7, 1, 1, 950, 1480, -1, -1, 198, 0]]),
     E('row read, short of the header = null', 'elpRowOf', [[0xEE | 512, 7, 1, 1, 950, 1480, -1, -1, 198]]),
     E('row read, the O103 rating row = null', 'elpRowOf', [[12, 850, 6, 0]]),
     E('table details, solo live, the rest prior', 'elpTableDetails', [1, { solo: { N: 30, pass: SOLO }, duo: { N: 4, pass: DUO } }]),
@@ -314,7 +314,77 @@ function endlessCases() {
     E('table read, short = null', 'elpTableOf', [20261201, [0xEC | 512, 1, 1, 1500, 500, 100, 2]]),
   );
   out.push(...onePointsCases(E, SOLO, DUO, TRIO, QUAD, LINES));
+  out.push(...levelCases(E, SOLO, DUO));
   return out;
+}
+
+// O942 (ELP v7): the level -- a run ends at its target, the target follows a per-family level (a staircase), the tiers read the
+//   smoothed level, the placement walks PLACE steps with a miss floored at its depth, R1 / R2, the team line (the highest), lambda
+//   (points grow with the line), the v3 row with the four level states, the table version passed in
+function levelCases(E, SOLO, DUO) {
+  const S = (L, Lm, s, last, run) => ({ L, Lm, s, last, run });
+  return [
+    E('level state, a valid one', 'elpLevelOf', [S(950, 900, 3, 1, 2)]),
+    E('level state, L under L_MIN = null', 'elpLevelOf', [S(99, 900, 3, 1, 2)]),
+    E('level state, s past S_MAX = null', 'elpLevelOf', [S(950, 900, 7, 1, 2)]),
+    E('level state, last 2 = null', 'elpLevelOf', [S(950, 900, 3, 2, 2)]),
+    E('level state, run past RUN_CAP = null', 'elpLevelOf', [S(950, 900, 3, 1, 16)]),
+    E('level state, a fraction = null', 'elpLevelOf', [S(950.5, 900, 3, 1, 2)]),
+    E('level start, no skill = the silver line', 'elpLevelInit', [null, SOLO]),
+    E('level start, skill 10.00 levels = 9.90 (TARGET_Q)', 'elpLevelInit', [1000, SOLO]),
+    E('level start, skill 0.50 = L_MIN', 'elpLevelInit', [50, SOLO]),
+    E('level start, no skill and no lines = L_MIN', 'elpLevelInit', [null, null]),
+    E('line of a level, 6.50 rounds to 7', 'elpLineOfL', [650]),
+    E('line of a level, 1.49 = 1', 'elpLineOfL', [149]),
+    E('target of a level, run seed 7 (offset from the seed)', 'elpTargetOfL', [1250, 7]),
+    E('target of a level, low level and a negative offset stays >= 1', 'elpTargetOfL', [100, 3]),
+    E('team line, the highest of the roster', 'elpTeamLine', [[600, null, 1200, 950]]),
+    E('team line, nobody with a level = null', 'elpTeamLine', [[null, null]]),
+    E('team line, no roster = null', 'elpTeamLine', [[]]),
+    E('step, the first pass (s 2: x1.25)', 'elpLevelStep', [S(600, 600, 2, -1, 0), { pass: true, depth: 6, T: 6 }]),
+    E('step, the second pass in a row (bigger steps: s 2 -> 1)', 'elpLevelStep', [S(750, 645, 2, 1, 1), { pass: true, depth: 8, T: 8 }]),
+    E('step, a reversal (a miss after a pass: smaller steps, s + 1)', 'elpLevelStep', [S(938, 733, 1, 1, 2), { pass: false, depth: 7, T: 9 }]),
+    E('step, a long streak keeps s at S_MIN and run at RUN_CAP', 'elpLevelStep', [S(5000, 4000, 1, 1, 15), { pass: true, depth: 50, T: 50 }]),
+    E('step, a miss at L_MIN stays at L_MIN', 'elpLevelStep', [S(100, 120, 4, 0, 3), { pass: false, depth: 0, T: 1 }]),
+    E('step, R1: a quit miss leaves the level', 'elpLevelStep', [S(1200, 1100, 3, 1, 1), { pass: false, depth: 4, T: 12, quit: true }]),
+    E('step, R1 does not hold for a pass (a quit after the target is a pass)', 'elpLevelStep', [S(1200, 1100, 3, 1, 1), { pass: true, depth: 12, T: 12, quit: true }]),
+    E('step, R2: no level passed, target 12, Lm 11 (leaves the level)', 'elpLevelStep', [S(1200, 1100, 3, 1, 1), { pass: false, depth: 0, T: 12 }]),
+    E('step, R2 not for a target of 2 (moves)', 'elpLevelStep', [S(250, 600, 3, 1, 1), { pass: false, depth: 0, T: 2 }]),
+    E('step, R2 not under Lm 5 (a new player moves)', 'elpLevelStep', [S(450, 450, 3, 1, 1), { pass: false, depth: 0, T: 4 }]),
+    E('step, R2 not once a level was passed (moves)', 'elpLevelStep', [S(1200, 1100, 3, 1, 1), { pass: false, depth: 1, T: 12 }]),
+    E('step, placement 0 pass (x1.8)', 'elpLevelStep', [S(600, 600, 2, -1, 0), { pass: true, depth: 6, T: 6, placing: 0 }]),
+    E('step, placement 0 miss far under (/1.8)', 'elpLevelStep', [S(600, 600, 2, -1, 0), { pass: false, depth: 1, T: 6, placing: 0 }]),
+    E('step, placement 1 miss near the target (floored at depth x1.15)', 'elpLevelStep', [S(1080, 1080, 2, -1, 0), { pass: false, depth: 9, T: 11, placing: 1 }]),
+    E('step, placement 2 (the last) pass starts the staircase', 'elpLevelStep', [S(720, 720, 2, -1, 0), { pass: true, depth: 7, T: 7, placing: 2 }]),
+    E('step, placement quit still moves (R1 is for points runs)', 'elpLevelStep', [S(600, 600, 2, -1, 0), { pass: false, depth: 0, T: 6, quit: true, placing: 0 }]),
+    E('step, an invalid state = null', 'elpLevelStep', [S(50, 600, 2, -1, 0), { pass: true, depth: 6, T: 6 }]),
+    E('seed of a level, solo 12.90', 'elpLevelSeed', [1290, SOLO, SOLO]),
+    E('seed of a level, duo 20.00 read on the solo scale', 'elpLevelSeed', [2000, DUO, SOLO]),
+    E('seed of a level, past the cap', 'elpLevelSeed', [3000, SOLO, SOLO]),
+    E('lambda, line 0 = LO', 'elpPropK', [0]),
+    E('lambda, line 2 = LO 250', 'elpPropK', [2]),
+    E('lambda, line 5 = 500', 'elpPropK', [5]),
+    E('lambda, line 10 = 1000', 'elpPropK', [10]),
+    E('lambda, line 17 = 1700', 'elpPropK', [17]),
+    E('lambda, line 25 = HI 2000', 'elpPropK', [25]),
+    E('delta v7, gold 2500 pass, Lm 10, line 10', 'endlessDeltaLv', [2500, true, 1000, SOLO, 0, 'solo', 10]),
+    E('delta v7, gold 2500 miss, Lm 10, line 10', 'endlessDeltaLv', [2500, false, 1000, SOLO, 0, 'solo', 10]),
+    E('delta v7, gold 2500 pass, Lm 10, line 5 (half)', 'endlessDeltaLv', [2500, true, 1000, SOLO, 0, 'solo', 5]),
+    E('delta v7, platinum 3500 pass, Lm 24, line 25 (lambda 2: the swing cap)', 'endlessDeltaLv', [3500, true, 2400, SOLO, 2, 'solo', 25]),
+    E('delta v7, gold 2500 duo pass, Lm 16, line 16 (team length factor)', 'endlessDeltaLv', [2500, true, 1600, DUO, 0, 'duo', 16]),
+    E('settle v7, gold 2500 pass, Lm 10, line 10', 'endlessSettleLv', [2500, true, 1000, SOLO, 0, 'solo', 10]),
+    E('settle v7, relegation band gold 2050 miss, Lm silver (forced down)', 'endlessSettleLv', [2050, false, 600, SOLO, 0, 'solo', 6]),
+    E('settle v7, diamond 5850 pass, Lm 37 (the master gate held)', 'endlessSettleLv', [5850, true, 3700, SOLO, 2, 'solo', 37]),
+    E('settle v7, diamond 5850 pass, Lm 38 (the master gate open)', 'endlessSettleLv', [5850, true, 3800, SOLO, 2, 'solo', 38]),
+    E('row details v3, a solo level and a duo level', 'elpRowDetails', [{ n: 7, tier: 2, placed: 1, h: { solo: 950, duo: 1480, trio: null, quad: null }, lv: { solo: S(940, 905, 3, 1, 2), duo: S(1500, 1420, 6, 0, 1) } }, [{ mh: -5, delta: 40, flags: 264 }]]),
+    E('row details, levels all invalid = a v2 row', 'elpRowDetails', [{ n: 7, tier: 2, placed: 1, h: { solo: 950 }, lv: { solo: S(50, 905, 3, 1, 2) } }, []]),
+    E('row read v3', 'elpRowOf', [[0xEE | 768, 7, 2, 1, 950, 1480, -1, -1, 940, 905, 3 | (2 << 4) | (2 << 6), 1500, 1420, 6 | (1 << 4) | (1 << 6), -1, -1, -1, -1, -1, -1, 198, 1, -5, 40, 264]]),
+    E('row read v3, a level that is not a state reads as none', 'elpRowOf', [[0xEE | 768, 7, 2, 1, 950, -1, -1, -1, 50, 905, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, 198, 0]]),
+    E('table details, version 6 passed (version 6 priors for the missing families)', 'elpTableDetails', [1, { solo: { N: 30, pass: SOLO } }, 6]),
+    E('table details, version 7 (version 7 priors for the missing families)', 'elpTableDetails', [1, { solo: { N: 30, pass: SOLO } }, 7]),
+    E('table read, version 6 (rulesSame: a version 7 copy reads it)', 'elpTableOf', [20261201, [0xEC | 512, 1, 6, 1500, 500, 100, 2].concat([30], SOLO, [4], DUO, [0], DUO, [0], DUO)]),
+    E('table read, version 5 (rulesSame false)', 'elpTableOf', [20261201, [0xEC | 512, 1, 5, 1500, 500, 100, 2].concat([30], SOLO, [4], DUO, [0], DUO, [0], DUO)]),
+  ];
 }
 
 // O825 (ELP v4): one points value over the four families -- the family test, a depth read on another family's scale, the hidden

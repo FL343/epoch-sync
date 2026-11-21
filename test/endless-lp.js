@@ -272,9 +272,14 @@ console.log('=== O728 endless points (points-plan.js ELP v' + PP.ELP.VER + ') ==
   const tbl = PP.elpTableDetails(1, { solo: { N: 30, pass: SOLO } });
   const tb = PP.elpTableOf(20261201, tbl);
   T('[8] the table round-trips (39 ints; a family without data carries its prior with N 0; rulesSame)', tbl.length === 39 && tb && tb.day === 20261201 && tb.season === 1 && J(tb.byFam.solo.pass) === J(SOLO) && tb.byFam.solo.N === 30
-    && J(tb.byFam.quad.pass) === J(PP.ELP.PRIOR.quad) && tb.byFam.quad.N === 0 && tb.rulesSame === true && tb.ver === PP.ELP.VER);
+    && J(tb.byFam.quad.pass) === J(PP.ELP7.PRIOR.quad) && tb.byFam.quad.N === 0 && tb.rulesSame === true && tb.ver === PP.ELP.VER);
+  // O942: the job publishes version 6 tables until the gate of the version 7 package is raised (ver passed); a missing family then
+  //   carries the version 6 priors, and a version 7 copy reads it as its own (VER_OK)
+  const tbl6 = PP.elpTableDetails(1, { solo: { N: 30, pass: SOLO } }, 6), tb6 = PP.elpTableOf(20261201, tbl6);
+  T('[8] O942: a version 6 table (ver passed) carries 6 and the version 6 priors; a version 7 copy reads it with rulesSame (VER_OK 6 / 7)', tbl6[2] === 6 && tb6 && tb6.ver === 6 && tb6.rulesSame === true
+    && J(tb6.byFam.quad.pass) === J(PP.ELP.PRIOR.quad) && J(PP.ELP.VER_OK) === J([6, 7]) && PP.ELP.VER === 7);
   const v1 = [0xEC | 256, 0].concat(new Array(28).fill(0)), v3 = tbl.slice(); v3[0] = 0xEC | (3 << 8);
-  const other = tbl.slice(); other[2] = PP.ELP.VER - 1;
+  const other = tbl.slice(); other[2] = Math.min.apply(null, PP.ELP.VER_OK) - 1;
   T('[8] a v1 cut table and an unknown v3 read as none; another rules version reads with rulesSame false', PP.elpTableOf(1, v1) === null && PP.elpTableOf(1, v3) === null && PP.elpTableOf(1, other).rulesSame === false && PP.elpTableOf(1, tbl.slice(0, 38)) === null);
   T('[8] the priors: 7 lines a family, rising by at least 1 (the table needs a monotone list)', PP.ELP_FAMS.every((f) => PP.ELP.PRIOR[f].length === 7 && PP.ELP.PRIOR[f].every((x, i, a) => i === 0 || x >= a[i - 1] + 1)));
 }
@@ -530,7 +535,7 @@ function teamGateErrors(M) {
     ['protect: !isPass && ht != null && ht >= cur, team', 'protect: !isPass && (cur < ELP.GATE_TIER || (ht != null && ht >= cur)), team'],
     ['BOUNDARY_MARGIN = 120, PROMO_LAND = 150, RELEG_LAND = 150', 'BOUNDARY_MARGIN = 120, PROMO_LAND = 10, RELEG_LAND = 15'],
   ];
-  T('[11] ELP v6 (O825 v4 + O785 v5 + three placement runs): VER 6, ROW_VER 2, TEAM_GAIN 1300, TEAM_GATE 110 (the table keeps TC_VER 2 and carries the version)', E.VER === 6 && E.ROW_VER === 2 && E.TEAM_GAIN === 1300 && E.TEAM_GATE === 110 && E.TC_VER === 2 && PP.elpTableDetails(0, {})[2] === 6, J([E.VER, E.ROW_VER, E.TEAM_GAIN, E.TEAM_GATE]));
+  T('[11] ELP v7 (O825 v4 + O785 v5 + three placement runs v6 + O942 levels v7): VER 7, ROW_VER 2 (3 with levels), TEAM_GAIN 1300, TEAM_GATE 110 (the table keeps TC_VER 2 and carries the version)', E.VER === 7 && E.ROW_VER === 2 && E.ROW_VER_LV === 3 && E.TEAM_GAIN === 1300 && E.TEAM_GATE === 110 && E.TC_VER === 2 && PP.elpTableDetails(0, {})[2] === 7 && PP.elpTableDetails(0, {}, 6)[2] === 6, J([E.VER, E.ROW_VER, E.TEAM_GAIN, E.TEAM_GATE]));
   const v3 = mut3('the version 3 rules put back', V3_BACK);
   const fe = v3 ? frozenErrors(v3) : ['no v3'];
   T('[11] the family left out or named solo gives every value of version 3 with the two O785 rules and the count of five put back (' + FROZEN.cases.length + ' frozen cases: hidden skill, tiers, the gate, targets, deltas, settles, seeds)', FROZEN.cases.length >= 200 && FROZEN.elpVer === 3 && !fe.length, J(fe.slice(0, 3)));
@@ -590,7 +595,7 @@ function teamGateErrors(M) {
   T('[11] borrowed runs taken at their own depth (not read on this family\'s scale) turn the hidden skill check red', g7 && hiddenForErrors(g7).length > 0);
   const g8 = mut3('a convert by the bronze ratio only', [['if (x < f1 * 100) return t0 * 100 + Math.round((x - f0 * 100) * (t1 - t0) / Math.max(1, f1 - f0));', 'if (x < f1 * 100) return Math.round(x * (passTo[0] | 0) / Math.max(1, passFrom[0] | 0));']]);
   T('[11] a convert that ignores the lines between bronze and grandmaster turns the convert check red', g8 && convertErrors(g8).length > 0);
-  const g10 = mut3('the v1 row read as a row', [['(((det[0] | 0) >>> 8) & 0xff) !== ELP.ROW_VER) return null;\n    const h = {}, ring = [];', '(((det[0] | 0) >>> 8) & 0xff) > ELP.ROW_VER) return null;\n    const h = {}, ring = [];']]);
+  const g10 = mut3('the v1 row read as a row', [['if (ver !== ELP.ROW_VER && ver !== ELP.ROW_VER_LV) return null;', 'if (ver > ELP.ROW_VER_LV) return null;']]);
   T('[11] a v1 per-family row read as a v2 row turns the row check red (its hidden skill would read as the tier)', g10 && g10.elpRowOf([0xEE | 256, 7, 950, 1, 1, 198, 2, -5, 40, 264, 77, -13, 258]) !== null);
 }
 
@@ -605,7 +610,7 @@ function teamGateErrors(M) {
     try { new Function('window', src)(win); } catch (e6) { bad('[12] mutation ' + label + ' does not load: ' + e6.message); return null; }
     return win.POINTS_PLAN;
   };
-  T('[12] version 6: MIN_RUNS 3, VER 6; MIN_RUNS_OLD 5 (what a client built before it counts with: the job\'s old-client window)', E.MIN_RUNS === 3 && E.VER === 6 && E.MIN_RUNS_OLD === 5 && E.WINDOW === 10 && E.TRIM === 1);
+  T('[12] version 6 (kept by version 7): MIN_RUNS 3, VER 7; MIN_RUNS_OLD 5 (what a client built before it counts with: the job\'s old-client window)', E.MIN_RUNS === 3 && E.VER === 7 && E.MIN_RUNS_OLD === 5 && E.WINDOW === 10 && E.TRIM === 1);
   const h5 = hiddenErrors(PP, 5), f5 = hiddenForErrors(PP, 5);
   T('[12] the count as the last argument: hiddenOf(d, minRuns, 5) / elpHiddenFor(.., minRuns, 5) read the five-run rule (400 + 600 random histories against the independent reading); left out = this version ([5] / [11])', !h5.length && !f5.length, J([h5.slice(0, 2), f5.slice(0, 2)]));
   // ... and value for value what the module itself gives with MIN_RUNS 5 (version 5 as it shipped)

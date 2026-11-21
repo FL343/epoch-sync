@@ -74,7 +74,8 @@ T('[3] the settle composes its plan and its points line through the module (matc
       && pc.some((o) => o.placed && o.n === null && o.ring) && pc.some((o) => o.placed && !o.ring) && doc.cases.some((c) => c.kind === 'placement' && (c.in.target | 0) > 0));
   }
   // O728: the endless cases call the endless functions only (the replay is PP[fn]), each of them, and the settle shapes the rules name
-  const ELP_FNS = ['hiddenOf', 'teamHiddenOf', 'elpIsTeam', 'elpConvert', 'elpHiddenFor', 'elpSeedHidden', 'tierOfHidden', 'skillTierOf', 'targetOffset', 'targetLineOf', 'targetOf', 'endlessDelta', 'endlessSettle', 'endlessSeedLp', 'elpRowDetails', 'elpRowOf', 'elpTableDetails', 'elpTableOf'];
+  const ELP_FNS = ['hiddenOf', 'teamHiddenOf', 'elpIsTeam', 'elpConvert', 'elpHiddenFor', 'elpSeedHidden', 'tierOfHidden', 'skillTierOf', 'targetOffset', 'targetLineOf', 'targetOf', 'endlessDelta', 'endlessSettle', 'endlessSeedLp', 'elpRowDetails', 'elpRowOf', 'elpTableDetails', 'elpTableOf',
+    'elpLevelOf', 'elpLevelInit', 'elpLineOfL', 'elpTargetOfL', 'elpTeamLine', 'elpLevelStep', 'elpLevelSeed', 'elpPropK', 'endlessDeltaLv', 'endlessSettleLv'];   // O942 version 7: the level
   const en = doc.cases.filter((c) => c.kind === 'endless');
   T('[4] endless (O728): every endless function has a case, no other function is called', ELP_FNS.every((f) => en.some((c) => c.in.fn === f)) && en.every((c) => ELP_FNS.includes(c.in.fn)));
   // O803: the team level cases the two repos must agree on (the client reads the one team target from the same function)

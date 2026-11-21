@@ -135,8 +135,21 @@ function applyKeyPolicy(keys, policy) {
   return out;
 }
 
+// O942 (endless points version 7, 2026-11-21): the endless rules version of the package a key signs for. The client repo's build /
+//   set-live tools write keys[id].pubInfo[pub].elp = the package's points-plan.js ELP.VER (mvp/scripts/release/attest-key.js); a
+//   sealed key without it is an older package's (version 6: the rules before O942). The dev key (unsealed, tests and the _test
+//   boards) has no pubInfo: process.env.ELP_DEV_VER (default 6) -- a local job that replays a version 7 dev build sets it.
+//   A run's rules version is fixed by the key of its records (validate.js: a version 7 run settles under the level rules).
+function keyElpVer(ent, pub) {
+  if (!ent) return 6;
+  if (!ent.sealed) { const v = Number(process.env.ELP_DEV_VER || 6); return Number.isInteger(v) && v > 0 ? v : 6; }
+  const info = (ent.pubInfo && typeof ent.pubInfo === 'object' && ent.pubInfo[pub]) || null;
+  const v = info ? Number(info.elp) : NaN;
+  return Number.isInteger(v) && v > 0 ? v : 6;
+}
 // details int32[] + pubTable ({keyName: {pubs:[hex], sealed}}) -> verdict
-//   { ok, reason, pending, fields }  (ok=true only when a registered key verifies the signature)
+//   { ok, reason, pending, fields, sealed, pub, elp }  (ok=true only when a registered key verifies the signature; pub = the key that
+//   verified, elp = keyElpVer of it: O942)
 function verifySoloRecord(d, pubTable) {
   if (!Array.isArray(d) || d.length < BASE_LEN_V3 + SIG_INTS) return { ok: false, reason: 'short' };   // shortest accepted layout
   if ((d[0] & 0xff) !== LEDGER_MAGIC) return { ok: false, reason: 'magic' };
@@ -196,7 +209,7 @@ function verifySoloRecord(d, pubTable) {
   for (let i = 0; i < SIG_INTS; i++) sig.writeInt32LE(d[baseLen + i] | 0, i * 4);
   const bytes = toBytes(base);
   for (const pub of ent.pubs) {
-    try { if (crypto.verify(null, bytes, pubKeyObj(pub), sig)) return { ok: true, fields, sealed: !!ent.sealed }; }
+    try { if (crypto.verify(null, bytes, pubKeyObj(pub), sig)) return { ok: true, fields, sealed: !!ent.sealed, pub, elp: keyElpVer(ent, pub) }; }   // O942: + the key and its package's endless rules version
     catch (e) { /* malformed pub entry: try the next */ }
   }
   for (const h of held) {   // a held key's signature: pending (soft), never bad-sig -- see applyKeyPolicy
@@ -262,6 +275,7 @@ function soloSettleGate(verdict, opts) {
 //   Mirrors mvp/test/lib/couch-record.js (the JS reference encoder the guard's C++ is parity-tested against). A layout change =
 //   a new COUCH_ATT_VER with both versions accepted for >= 7 days (architecture decision 9); an unknown one = pending (O199).
 const SEG_COUCH = 64;      // couch segment: guard-written, one account on every seat (client knife 5c O606: with SEG_COMP; knife C3a O278: casual = with SEG_CASUAL, tail continues = the seat-0 nibble)
+const SEG_LINE = 128;      // O942 (endless points version 7): a team competitive segment of a client whose run ends at its target -- every segment of such a run carries it (the consensus vector agrees); a run with it settles under the level rules. Team records only (the solo / couch rules version rides the signing key: keyElpVer)
 const COUCH_MAGIC = 0xE8, COUCH_BLK_VER = 1, COUCH_BLK_LEN = 21, COUCH_ATT_VER = 1;
 const COUCH_LAYOUTS = { 1: {} };   // attVer -> layout (v1: the block above); a new attVer joins here when the reader learns it
 const COUCH_PC_MIN = 2, COUCH_PC_MAX = 4;   // the layout holds up to the registry's ENDLESS_MAX_PC; the settle lane takes competitive N = 2 (O606) and casual N = 2..4 (knife C3a)
@@ -332,7 +346,7 @@ function verifyCouchRecord(d, pubTable) {
   for (let i = 0; i < SIG_INTS; i++) sig.writeInt32LE(d[sigAt + i] | 0, i * 4);
   const bytes = toBytes(d.slice(0, sigAt));
   for (const pub of ent.pubs) {
-    try { if (crypto.verify(null, bytes, pubKeyObj(pub), sig)) return { ok: true, fields, sealed: !!ent.sealed }; }
+    try { if (crypto.verify(null, bytes, pubKeyObj(pub), sig)) return { ok: true, fields, sealed: !!ent.sealed, pub, elp: keyElpVer(ent, pub) }; }   // O942: + the key and its package's endless rules version
     catch (e) { /* malformed pub entry: try the next */ }
   }
   for (const hk of held) {
@@ -562,11 +576,11 @@ module.exports = {
   SEG_SUSPENDED, SEG_FINAL, SEG_RESUMED, SEG_COMP, SEG_CASUAL, SEG_CLASSIC, DISP_FINISHED, DISP_USER_QUIT,
   verifySoloRecord, soloSettleGate, soloTail, toBytes, loadPubTable,
   // A3
-  SEG_COUCH, COUCH_MAGIC, COUCH_BLK_VER, COUCH_BLK_LEN, COUCH_ATT_VER, COUCH_LAYOUTS, COUCH_PC_MIN, COUCH_PC_MAX, COUCH_TAIL_INTS,
+  SEG_COUCH, SEG_LINE, COUCH_MAGIC, COUCH_BLK_VER, COUCH_BLK_LEN, COUCH_ATT_VER, COUCH_LAYOUTS, COUCH_PC_MIN, COUCH_PC_MAX, COUCH_TAIL_INTS,
   verifyCouchRecord, couchSettleGate, couchTail, couchFieldsOf,
   // A2
   verifyMatchSig, matchSigGate,
-  KEY_CHANNELS, KEY_RETIRE_GRACE_MS, keyHoldReason, applyKeyPolicy,
+  KEY_CHANNELS, KEY_RETIRE_GRACE_MS, keyHoldReason, applyKeyPolicy, keyElpVer,
   // B
   CONFESS_MAGIC, CONFESS_VER, CONFESS_MAX_SEATS,
   decodeUnmatched, reconcileUnmatched, pruneUnmatchedState,

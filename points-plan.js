@@ -23,7 +23,7 @@
   else if (root) root.POINTS_PLAN = api;
 })(typeof module === 'object' && !!module && typeof exports === 'object' && this === exports, typeof window !== 'undefined' ? window : null, function () {
   const RULES_VER = 2;
-  const FIXTURES_HASH = '555d8e89d373c8b8';
+  const FIXTURES_HASH = '08892ae4101a6c34';
   // the knobs configure() can move (production runs these defaults)
   const DEFAULTS = Object.freeze({ RS_THRESHOLD: 400, RS_UPSET_BONUS: 1.0, RS_STRONG_UPSET_LOSS: 0.5, RS_SOLO_VS_TRIO: 0.6, RS_TRIO_WIN: 0.7, LEAVER_LP_PENALTY: 100 });
   const LP_MAX = 9999;
@@ -576,8 +576,13 @@
   //   (archive/PLACE3_EVAL_2026-11-16 in the companion repo: every profile seeds at or above the five-run rule). hiddenOf /
   //   elpHiddenFor take the count as an optional last argument: the job reads version 5 (MIN_RUNS_OLD) beside version 6 for runs an
   //   older client may have started (validate.js, the old-client window); a call without it reads this version.
+  // Version 7 (O942, 2026-11-21): the level rules below (ELP7) -- a run ends at its target, the target follows a per-family level.
+  //   ELP.VER is 7; VER_OK = the published table versions this copy reads as its own (6: the job publishes version 6 tables until
+  //   the gate of the version 7 package is raised -- the lines are the same kind; the job passes the version it publishes to
+  //   elpTableDetails, it never takes ELP.VER for it). Runs of version 6 clients still settle under the version 6 functions.
   const ELP = Object.freeze({
-    WINDOW: 10, MIN_RUNS: 3, TRIM: 1, GAP_UP: 1500, GAP_DOWN: 500, STAKE_STEP: 100, SPREAD: 2, SEED_CAP: 2800, VER: 6,
+    WINDOW: 10, MIN_RUNS: 3, TRIM: 1, GAP_UP: 1500, GAP_DOWN: 500, STAKE_STEP: 100, SPREAD: 2, SEED_CAP: 2800, VER: 7,
+    VER_OK: Object.freeze([6, 7]),
     MIN_RUNS_OLD: 5,               // MIN_RUNS of versions 1..5: what a client built before version 6 counts with. Read in two places: the job's old-client window (validate.js), and a version 6 client while the published pass-line table still carries an older rule version (the job not pushed yet, or rolled back: the client then counts and reads as this job does). Keep it while either may happen.
     MUL: Object.freeze([850, 850, 1500, 3100, 2800, 2800, 2800]), TARGET_Q: 990, SWING_CAP: 119, GATE_TIER: 5,
     TEAM_GAIN: 1300,               // O825: per mille; a team run below master: a pass x TEAM_GAIN / 1000, a miss x 1000 / TEAM_GAIN
@@ -600,10 +605,49 @@
       quad: Object.freeze([3, 10, 16, 24, 32, 38, 44]),
     }),
     ROW_MAGIC: 0xEE, ROW_VER: 2,   // the points row (elpRowDetails; v1 = the per-family row before O825, read as no row)
+    ROW_VER_LV: 3,                 // O942 version 7: the row of a player holding a level (elpRowDetails) -- v2 + the four families' level states
     TC_MAGIC: 0xEC, TC_VER: 2,     // the published pass-line table (elpTableDetails; v1 = the O103 cut table, read as no table)
     PROTECT_RS: 2,                 // a protected miss carries the RS value 2 (protected, as a versus row) on its receipt
   });
   const ELP_FAMS = Object.freeze(['solo', 'duo', 'trio', 'quad']);
+  // O942 (version 7, 2026-11-21; the user's calls D1-D13 and Q1 = B that day; plan mvp/KNIFE_O942_ELP_LINE_SETTLE_PLAN.md in the
+  //   companion repo, simulations archive/ELP_LINE_SETTLE_2026-11-21/sim there). A competitive endless run ENDS the moment it passes its
+  //   target (the client ends it at the verdict of level T; the guard's end judges that open level, so the final segment's tail is T).
+  //   A passed run's depth is then its target: a mean of depths only drifts down, so the target follows a per-player, per-family
+  //   LEVEL L (x 100, a staircase) instead of the hidden skill:
+  //     - a pass multiplies L by STEP[s] / 1000, a miss divides it (never under L_MIN); a result unlike the last one (a reversal)
+  //       moves s one step smaller, the second same result in a row (and every further one) one step bigger, between S_MIN and
+  //       S_MAX: aggressive while the level is unknown or a streak runs, settling once the results alternate;
+  //     - Lm = the level smoothed (Lm += (L - Lm) x ALPHA / 1000): the gap factor, the protection, the gate and the skill tier read
+  //       Lm (in the hidden100 place of endlessDelta's reading), never the jumpy L;
+  //     - placement (the season's first MIN_RUNS settled runs, any family): PLACE[i] steps from the start level, big to small (a
+  //       binary search); a missed placement run never leaves L under the depth it reached x MISS_FLOOR / 1000 (a miss's depth is
+  //       exact, the target does not cut it); the last placement step starts the staircase (s = S_START, Lm = L); the seed reads L;
+  //     - R1: a quit (the record's disposition USER_QUIT) misses for the points but leaves the level as it was; R2: a miss with no
+  //       level passed (depth 0), a target >= R2_T_MIN and Lm >= R2_LM_MIN leaves the level too (architecture decision 10: the
+  //       narrow rules, zero effect on an honest player in the simulations) -- placement steps always move;
+  //     - Q1 = B (user 11-21, "points grow with the target's depth"): every run's points x lambda = clamp(the run's line x 100 x 1000 /
+  //       PROP.REF, PROP.LO, PROP.HI) per mille (the line of a 10-level target = x1; a short target is worth less, so short runs on
+  //       purpose farm nothing; HI 2000 keeps a deep player's pass and miss off the swing cap, so "a pass gains more than a miss
+  //       loses" still holds); MUL is retuned with it (to be settled by test/endless-lp-sim.js before the push: see the plan);
+  //     - a team run's line is the HIGHEST level of the roster (D5), every seat then steps his OWN level by the run's result
+  //       (everybody taking the team's level ratchets up: 20 % passes in the simulation; each his own: 50 %);
+  //     - PRIOR = the pass lines (the expected depth of each tier's middle player) of version 7: one line for all four families
+  //       (the O941 money curve makes a team as deep as a solo player of the same level). Published only under version 7.
+  const ELP7 = Object.freeze({
+    STEP: Object.freeze([1500, 1350, 1250, 1180, 1130, 1100, 1080]), S_START: 2, S_MIN: 1, S_MAX: 6,
+    PLACE: Object.freeze([1800, 1500, 1300]), MISS_FLOOR: 1150,   // pending the user's P1 (the plan, section 0.5 point 3)
+    ALPHA: 300, L_MIN: 100, RUN_CAP: 15,
+    MUL: Object.freeze([850, 850, 1500, 3100, 2800, 2800, 2800]),   // to be retuned with PROP (test/endless-lp-sim.js) before the push
+    R2_T_MIN: 3, R2_LM_MIN: 500,
+    PROP: Object.freeze({ REF: 1000, LO: 250, HI: 2000 }),
+    PRIOR: Object.freeze({
+      solo: Object.freeze([2, 6, 10, 16, 25, 35, 45]),
+      duo: Object.freeze([2, 6, 10, 16, 25, 35, 45]),
+      trio: Object.freeze([2, 6, 10, 16, 25, 35, 45]),
+      quad: Object.freeze([2, 6, 10, 16, 25, 35, 45]),
+    }),
+  });
   // the tier index (0 bronze .. 6 grandmaster) of a points value
   function lpTierIdx(lp) { let i = 0; for (let k = 0; k < LP_SEG.length; k++) if ((lp | 0) >= LP_SEG[k].min) i = k; return i; }
   function elpHash(s) { let h = 0x811c9dc5; s = String(s); for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); } return h >>> 0; }
@@ -785,6 +829,99 @@
     lp = Math.max(k === 0 ? 0 : lo + BOUNDARY_MARGIN + 1, Math.min(hi - BOUNDARY_MARGIN - 1, lp));
     return Math.max(0, Math.min(ELP.SEED_CAP, lp));
   }
+  // ---- O942 version 7: the level (ELP7 above) ----
+  // a level state { L, Lm, s, last, run }: L / Lm the level and the smoothed level (x 100, >= L_MIN), s the step index (S_MIN..S_MAX;
+  //   0..S_MAX accepted), last the result of the last stepped run (-1 none, 0 a miss, 1 a pass), run how many stepped runs in a row
+  //   ended that way (0..RUN_CAP). Anything else = not a state (null from elpLevelOf).
+  function elpLevelOf(x) {
+    if (!x || typeof x !== 'object') return null;
+    const ok = (v, lo, hi) => Number.isInteger(v) && v >= lo && v <= hi;
+    if (!ok(x.L, ELP7.L_MIN, 1e7) || !ok(x.Lm, ELP7.L_MIN, 1e7) || !ok(x.s, 0, ELP7.S_MAX) || !ok(x.last, -1, 1) || !ok(x.run, 0, ELP7.RUN_CAP)) return null;
+    return { L: x.L, Lm: x.Lm, s: x.s, last: x.last, run: x.run };
+  }
+  // the state a family's level starts from: L = Lm = TARGET_Q of the hidden skill h100 (the middle of the dial a version 6 client
+  //   showed him last; a placement player: the plain mean of his runs so far, minRuns 1), the silver line of pass with none
+  function elpLevelInit(h100, pass) {
+    const L = Math.max(ELP7.L_MIN, h100 == null ? (elpLinesOk(pass) ? (pass[1] | 0) * 100 : ELP7.L_MIN) : Math.round((h100 | 0) * ELP.TARGET_Q / 1000));
+    return { L, Lm: L, s: ELP7.S_START, last: -1, run: 0 };
+  }
+  // the line (levels) of a level x 100 -- the middle of the dial; the target = the line plus the run's offset, at least 1
+  function elpLineOfL(L100) { return Math.max(1, Math.round((L100 | 0) / 100)); }
+  function elpTargetOfL(L100, runSeed) { return Math.max(1, elpLineOfL(L100) + targetOffset(runSeed)); }
+  // a team run's level x 100: the highest of the roster's levels of the run's family (D5; null = a seat without one leaves; none = null)
+  function elpTeamLine(levels) {
+    const xs = (Array.isArray(levels) ? levels : []).filter((x) => x != null).map((x) => x | 0);
+    return xs.length ? Math.max.apply(null, xs) : null;
+  }
+  // the state after one settled run of the family. o = { pass, depth (levels passed), T (its target), quit (the disposition was
+  //   USER_QUIT), placing (the run's placement index 0..PLACE.length - 1, or null / -1 for a points run) }. Pure: st is not written.
+  //   A placement step always moves (R1 / R2 hold for points runs only: a placement quit must not keep a silver start).
+  function elpLevelStep(st, o) {
+    const x = elpLevelOf(st);
+    if (!x) return null;
+    const a = o || {}, pass = !!a.pass, depth = Math.max(0, a.depth | 0), T = Math.max(1, a.T | 0);
+    const pi = (a.placing == null || (a.placing | 0) < 0) ? -1 : Math.min(ELP7.PLACE.length - 1, a.placing | 0);
+    if (pi >= 0) {
+      const f = ELP7.PLACE[pi];
+      let L = pass ? Math.round(x.L * f / 1000) : Math.round(x.L * 1000 / f);
+      if (!pass) L = Math.max(L, Math.round(depth * 100 * ELP7.MISS_FLOOR / 1000));
+      x.L = Math.max(ELP7.L_MIN, L); x.Lm = x.L;
+      if (pi === ELP7.PLACE.length - 1) { x.s = ELP7.S_START; x.last = -1; x.run = 0; }   // the placement's last step starts the staircase
+      return x;
+    }
+    if (!pass && a.quit) return x;                                                                         // R1
+    if (!pass && depth === 0 && T >= ELP7.R2_T_MIN && x.Lm >= ELP7.R2_LM_MIN) return x;                     // R2
+    const f = ELP7.STEP[Math.max(ELP7.S_MIN, Math.min(ELP7.S_MAX, x.s))];
+    x.L = Math.max(ELP7.L_MIN, pass ? Math.round(x.L * f / 1000) : Math.round(x.L * 1000 / f));
+    const r = pass ? 1 : 0;
+    if (x.last !== -1 && r !== x.last) { x.s = Math.min(ELP7.S_MAX, Math.max(ELP7.S_MIN, x.s) + 1); x.run = 1; }
+    else { x.run = Math.min(ELP7.RUN_CAP, x.run + 1); if (x.run >= 2) x.s = Math.max(ELP7.S_MIN, x.s - 1); }
+    x.last = r;
+    x.Lm = Math.max(ELP7.L_MIN, Math.round(x.Lm + (x.L - x.Lm) * ELP7.ALPHA / 1000));
+    return x;
+  }
+  // the points a finished version 7 placement seeds: the level L100 of the family of the run that completes it, read on the solo
+  //   scale (elpConvert through that family's lines and the solo lines), then endlessSeedLp (capped at SEED_CAP) on the solo lines
+  function elpLevelSeed(L100, famLines, soloLines) {
+    return endlessSeedLp(elpLinesOk(famLines) && elpLinesOk(soloLines) ? elpConvert(L100 | 0, famLines, soloLines) : (L100 | 0), soloLines);
+  }
+  // lambda per mille of a run whose line is `line` levels (Q1 = B): clamp(line x 100 x 1000 / PROP.REF, PROP.LO, PROP.HI)
+  function elpPropK(line) { return Math.max(ELP7.PROP.LO, Math.min(ELP7.PROP.HI, Math.round(Math.max(0, line | 0) * 100 * 1000 / ELP7.PROP.REF))); }
+  // endlessDelta of version 7: the same table, gap factor, stake, team length factor, swing cap and sign floor, read with the
+  //   smoothed level lm100 in the skill's place; the multiplier ELP7.MUL; the whole x elpPropK(line) / 1000 before the cap. Returns
+  //   endlessDelta's shape + k (lambda per mille).
+  function endlessDeltaLv(lpBefore, isPass, lm100, pass, offset, fam, line) {
+    const seg = lpSeg(lpBefore | 0), cur = lpTierIdx(lpBefore), ht = tierOfHidden(lm100, pass), st = skillTierOf(lm100, pass, fam);
+    const o = Math.max(-ELP.SPREAD, Math.min(ELP.SPREAD, offset | 0));
+    const base = isPass ? seg.win : -seg.loss;
+    let gap = 1000;
+    if (ht != null && ht > cur) gap = isPass ? ELP.GAP_UP : ELP.GAP_DOWN;
+    else if (ht != null && ht < cur && cur >= ELP.GATE_TIER) gap = isPass ? ELP.GAP_DOWN : ELP.GAP_UP;
+    const stake = isPass ? 1000 + ELP.STAKE_STEP * o : 1000 - ELP.STAKE_STEP * o, team = elpIsTeam(fam) && cur < ELP.GATE_TIER;
+    const mul = team ? Math.round(isPass ? ELP7.MUL[cur] * ELP.TEAM_GAIN / 1000 : ELP7.MUL[cur] * 1000 / ELP.TEAM_GAIN) : ELP7.MUL[cur];
+    const k = elpPropK(line);
+    let d = Math.round((base * gap * stake / 1000000 + seg.drip) * mul * k / 1000000);
+    d = Math.max(-ELP.SWING_CAP, Math.min(ELP.SWING_CAP, d));
+    d = isPass ? Math.max(1, d) : Math.min(-1, d);
+    return { d, base, gap, stake, drip: seg.drip, mul, k, ht, st, protect: !isPass && ht != null && ht >= cur, team };
+  }
+  // endlessSettle of version 7 (endlessDeltaLv; the series clamp, the protection and the gate as version 6)
+  function endlessSettleLv(lpBefore, isPass, lm100, pass, offset, fam, line) {
+    const cur = Math.max(0, Math.min(LP_MAX, lpBefore | 0));
+    const r = endlessDeltaLv(cur, isPass, lm100, pass, offset, fam, line);
+    const plain = settleLine(cur, { adjDelta: r.d, flag: 0, won: !!isPass }, 0, 0, false);
+    let nv = plain.nv, protect = false, gated = false;
+    if (r.protect) {
+      const pv = Math.max(LP_SEG[lpTierIdx(cur)].min, Math.max(0, Math.min(LP_MAX, cur + r.d)));
+      if (pv !== plain.nv) { nv = pv; protect = true; }
+    }
+    const top = Math.max(ELP.GATE_TIER - 1, r.st == null ? 0 : r.st, lpTierIdx(cur));
+    if (top < LP_SEG.length - 1) {
+      const lineMin = LP_SEG[top + 1].min, cap = lineMin - BOUNDARY_MARGIN - 1;
+      if (cur < lineMin && nv > Math.max(cur, cap)) { nv = Math.max(cur, cap); gated = true; }
+    }
+    return { d0: r.d, d: nv - cur, nv, series: boundaryOf(cur), clamped: !protect && !gated && plain.d !== plain.d0, protect, gated, plan: r };
+  }
   // the points row of a player (O825: one row a season on endless_rating_all[_test][_s<N>]; the job writes it, the client reads
   //   it). score = the points (no row before the placement ends). details = [ROW_MAGIC | ROW_VER << 8, runs settled this season
   //   (every family), points tier 0..6, placed (1), the hidden skill x 100 of solo, duo, trio, quad (elpHiddenFor of each family
@@ -792,26 +929,40 @@
   //   ring of receiptPush with mh = the run seed | 0 (the record's d[4]; both sides know it). Receipt flags: RS bits PROTECT_RS on
   //   a protected miss, SERIES when the clamp moved the delta, SEEDED on the placement's last run, VOID on a run refunded after a
   //   conviction. row = { n, tier, placed, h: { solo, duo, trio, quad } }. 34 ints at most.
+  //   O942 version 7: a row whose player holds a level of any family is ROW_VER_LV (3): the four hidden skills are followed by the
+  //   four families' level states, (L, Lm, bits) each (bits = s | (last + 1) << 4 | run << 6; a family without one = -1, -1, -1),
+  //   before the ring -- 46 ints at most. The client replays its runs still waiting for a receipt on top of them. row.lv = { fam:
+  //   a level state } (elpLevelOf); none = a v2 row exactly as before.
   function elpRowDetails(row, ring) {
-    const r = (ring || []).slice(0, RECEIPT_CAP), x = row || {}, h = x.h || {};
-    const out = [ELP.ROW_MAGIC | (ELP.ROW_VER << 8), x.n | 0, x.tier | 0, x.placed ? 1 : 0];
+    const r = (ring || []).slice(0, RECEIPT_CAP), x = row || {}, h = x.h || {}, lv = x.lv || {};
+    const has = ELP_FAMS.some((fam) => elpLevelOf(lv[fam]));
+    const out = [ELP.ROW_MAGIC | ((has ? ELP.ROW_VER_LV : ELP.ROW_VER) << 8), x.n | 0, x.tier | 0, x.placed ? 1 : 0];
     for (const fam of ELP_FAMS) out.push(h[fam] == null ? -1 : (h[fam] | 0));
+    if (has) for (const fam of ELP_FAMS) { const s = elpLevelOf(lv[fam]); if (s) out.push(s.L, s.Lm, s.s | ((s.last + 1) << 4) | (s.run << 6)); else out.push(-1, -1, -1); }
     out.push(RECEIPT_MAGIC, r.length);
     for (const e of r) out.push(e.mh | 0, e.delta | 0, e.flags | 0);
     return out;
   }
-  // { n, tier, placed, h: { solo, duo, trio, quad } (each hidden100 or null), ring: [{ mh, delta, flags }] newest first } of a
-  //   row's details; another layout (the v1 per-family row too) = null
+  // { n, tier, placed, h: { solo, duo, trio, quad } (each hidden100 or null), lv: { fam: a level state or null } (version 7 rows;
+  //   a v2 row = every family null), ring: [{ mh, delta, flags }] newest first } of a row's details; another layout (the v1
+  //   per-family row too) = null
   function elpRowOf(det) {
-    const at = 4 + ELP_FAMS.length;
-    if (!Array.isArray(det) || det.length < at + 2 || ((det[0] | 0) & 0xff) !== ELP.ROW_MAGIC || (((det[0] | 0) >>> 8) & 0xff) !== ELP.ROW_VER) return null;
-    const h = {}, ring = [];
-    ELP_FAMS.forEach((fam, i) => { h[fam] = (det[4 + i] | 0) < 0 ? null : (det[4 + i] | 0); });
+    if (!Array.isArray(det) || det.length < 1 || ((det[0] | 0) & 0xff) !== ELP.ROW_MAGIC) return null;
+    const ver = ((det[0] | 0) >>> 8) & 0xff, lvAt = 4 + ELP_FAMS.length;
+    if (ver !== ELP.ROW_VER && ver !== ELP.ROW_VER_LV) return null;
+    const at = lvAt + (ver === ELP.ROW_VER_LV ? 3 * ELP_FAMS.length : 0);
+    if (det.length < at + 2) return null;
+    const h = {}, lv = {}, ring = [];
+    ELP_FAMS.forEach((fam, i) => { h[fam] = (det[4 + i] | 0) < 0 ? null : (det[4 + i] | 0); lv[fam] = null; });
+    if (ver === ELP.ROW_VER_LV) ELP_FAMS.forEach((fam, i) => {
+      const o = lvAt + 3 * i, b = det[o + 2] | 0;
+      lv[fam] = b < 0 ? null : elpLevelOf({ L: det[o] | 0, Lm: det[o + 1] | 0, s: b & 15, last: ((b >> 4) & 3) - 1, run: (b >> 6) & 15 });
+    });
     if (((det[at] | 0) & 0xff) === RECEIPT_MAGIC) {
       const n = Math.min(RECEIPT_CAP, Math.max(0, det[at + 1] | 0));
       for (let i = 0; i < n && at + 5 + 3 * i <= det.length; i++) { const o = at + 2 + 3 * i; ring.push({ mh: det[o] | 0, delta: det[o + 1] | 0, flags: det[o + 2] | 0 }); }
     }
-    return { n: det[1] | 0, tier: det[2] | 0, placed: (det[3] | 0) === 1, h, ring };
+    return { n: det[1] | 0, tier: det[2] | 0, placed: (det[3] | 0) === 1, h, lv, ring };
   }
   // the receipt of a run on a points row's details (runId here = the run seed | 0), or null
   function elpReceiptOf(det, runId) { const r = elpRowOf(det); return r ? (r.ring.find((e) => e.mh === (runId | 0)) || null) : null; }
@@ -819,10 +970,13 @@
   //   season, a line or a rules constant moves). score = the UTC day YYYYMMDD; details = [TC_MAGIC | TC_VER << 8, season, VER, GAP_UP,
   //   GAP_DOWN, STAKE_STEP, SPREAD, (N, pass x 7) x ELP_FAMS] = 39 ints; N = the family's players placed this season.
   //   byFam = { fam: { N, pass } } (a missing family writes N 0 and its prior).
-  function elpTableDetails(season, byFam) {
-    const out = [ELP.TC_MAGIC | (ELP.TC_VER << 8), season | 0, ELP.VER, ELP.GAP_UP, ELP.GAP_DOWN, ELP.STAKE_STEP, ELP.SPREAD];
+  //   ver (O942): the rules version the table carries (the job passes the version it publishes: 6 until the gate of the version 7
+  //   package is raised, then 7); left out = ELP.VER. A missing family falls back to that version's priors (7: ELP7.PRIOR).
+  function elpTableDetails(season, byFam, ver) {
+    const v = ver == null ? ELP.VER : (ver | 0);
+    const out = [ELP.TC_MAGIC | (ELP.TC_VER << 8), season | 0, v, ELP.GAP_UP, ELP.GAP_DOWN, ELP.STAKE_STEP, ELP.SPREAD];
     for (const fam of ELP_FAMS) {
-      const c = (byFam || {})[fam] || null, p = (c && elpLinesOk(c.pass)) ? c.pass : ELP.PRIOR[fam];
+      const c = (byFam || {})[fam] || null, p = (c && elpLinesOk(c.pass)) ? c.pass : (v >= 7 ? ELP7.PRIOR[fam] : ELP.PRIOR[fam]);
       out.push(c ? (c.N | 0) : 0);
       for (let k = 0; k < LP_SEG.length; k++) out.push(p[k] | 0);
     }
@@ -836,7 +990,7 @@
     const byFam = {}; let at = 7;
     for (const fam of ELP_FAMS) { byFam[fam] = { N: det[at] | 0, pass: det.slice(at + 1, at + 1 + LP_SEG.length).map((x) => x | 0) }; at += 1 + LP_SEG.length; }
     const t = { day: score | 0, season: det[1] | 0, ver: det[2] | 0, gapUp: det[3] | 0, gapDown: det[4] | 0, stakeStep: det[5] | 0, spread: det[6] | 0, byFam };
-    t.rulesSame = t.ver === ELP.VER && t.gapUp === ELP.GAP_UP && t.gapDown === ELP.GAP_DOWN && t.stakeStep === ELP.STAKE_STEP && t.spread === ELP.SPREAD;
+    t.rulesSame = ELP.VER_OK.indexOf(t.ver) >= 0 && t.gapUp === ELP.GAP_UP && t.gapDown === ELP.GAP_DOWN && t.stakeStep === ELP.STAKE_STEP && t.spread === ELP.SPREAD;   // O942: version 6 and 7 tables both
     return t;
   }
   // ---- the job's pulse (O480): one cron_pulse row per channel ----
@@ -871,6 +1025,7 @@
     PLACEMENT_TARGET, PLACE_CAP, placementOf,
     PULSE_MAGIC, pulseDetails, pulseOf,
     ELP, ELP_FAMS, lpTierIdx, hiddenOf, teamHiddenOf, elpIsTeam, elpConvert, elpHiddenFor, elpSeedHidden, tierOfHidden, skillTierOf, targetOffset, targetLineOf, targetOf, endlessDelta, endlessSettle, endlessSeedLp,
+    ELP7, elpLevelOf, elpLevelInit, elpLineOfL, elpTargetOfL, elpTeamLine, elpLevelStep, elpLevelSeed, elpPropK, endlessDeltaLv, endlessSettleLv,   // O942 version 7
     elpRowDetails, elpRowOf, elpReceiptOf, elpTableDetails, elpTableOf,
   }, knobs());
   return api;
