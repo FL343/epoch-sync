@@ -236,6 +236,62 @@ function sLines(m) {
   return e;
 }
 
+// ---- [10] real intake (second opinion 11-21 night: no record had gone through intake as version 7) ----
+//   solo: a record signed by a key whose table entry says elp 7 -> verifySoloRecord gives elp 7 -> elpSegLv sets the version bit; a key
+//   without it -> 6; the dev key (unsealed) -> ELP_DEV_VER (default 6). team: COMP | LINE segments pass sanity at 2..4 seats, including
+//   the shape that never existed before -- a run that ENDS on a pass exactly at a checkpoint depth ([5..10] final) -- and a save
+//   segment; LINE with classic, or an unknown bit, does not
+const _crypto = require('crypto');
+const PKCS8 = Buffer.from('302e020100300506032b657004220420', 'hex');
+function kp(seedHex) { const priv = _crypto.createPrivateKey({ key: Buffer.concat([PKCS8, Buffer.from(seedHex, 'hex')]), format: 'der', type: 'pkcs8' }); return { priv, pub: _crypto.createPublicKey(priv).export({ type: 'spki', format: 'der' }).slice(-32).toString('hex') }; }
+function soloRec(keyId, k, o) {
+  const sid = BigInt('76561198000000001');
+  const base = [0xB1, 3, 7, attest.hash32('m-o942'), 5, 0, 1, 0, 1, 900, 4000, o.disp | 0, Number(sid & 0xFFFFFFFFn) | 0, Number((sid >> 32n) & 0xFFFFFFFFn) | 0,
+    o.start | 0, o.end | 0, 0, 0, 0, o.flags | 0, keyId | 0, 3, 0, 0, 0];
+  const sig = _crypto.sign(null, attest.toBytes(base), k.priv), d = base.slice();
+  for (let i = 0; i < 16; i++) d.push(sig.readInt32LE(i * 4));
+  return d;
+}
+function mkTeam(writer, seat, o) {
+  const pc = o.pc, d = [0xB1, 3, 7, 222, 9, seat, 0, 0, pc, 1200];
+  for (let i = 0; i < pc; i++) d.push(3000 + 100 * i);
+  d.push(o.disp | 0);
+  const sids = ['76561198000000001', '76561198000000002', '76561198000000003', '76561198000000004'].slice(0, pc);
+  for (const x of sids) { const b = BigInt(x); d.push(Number(b & 0xFFFFFFFFn) | 0, Number((b >> 32n) & 0xFFFFFFFFn) | 0); }
+  d.push(o.start | 0, o.end | 0, 0, 0, 1, o.flags | 0, 0, 0, 0, 0, 0);
+  return { steamID: writer, d, roster: v.decodeRoster(d), dispCode: o.disp | 0 };
+}
+function sIntakeReal(m) {
+  const e = [], k7 = kp('e'.repeat(64)), k6 = kp('f'.repeat(64)), kd = kp('1'.repeat(64));
+  const TABLE = { 2026120101: { pubs: [k7.pub], sealed: true, pubInfo: { [k7.pub]: { ch: 'ea', elp: 7 } } }, 2026112102: { pubs: [k6.pub], sealed: true, pubInfo: { [k6.pub]: { ch: 'ea' } } }, dev: { pubs: [kd.pub], sealed: false } };
+  const keep = process.env.ELP_DEV_VER;
+  try {
+    const a = attest.verifySoloRecord(soloRec(2026120101, k7, { start: 5, end: 10, flags: F, disp: 5 }), TABLE);
+    const lvA = m.elpSegLv(a, a.fields);
+    if (!a.ok || a.elp !== 7 || !lvA.v7 || !lvA.quit) e.push('elp-7 key: ' + J([a.ok, a.reason, a.elp, lvA]));
+    const b = attest.verifySoloRecord(soloRec(2026112102, k6, { start: 0, end: 5, flags: 0, disp: 0 }), TABLE);
+    if (!b.ok || b.elp !== 6 || m.elpSegLv(b, b.fields).v7) e.push('old key: ' + J([b.ok, b.reason, b.elp]));
+    delete process.env.ELP_DEV_VER;
+    const c = attest.verifySoloRecord(soloRec(0, kd, { start: 0, end: 5, flags: 0, disp: 0 }), TABLE);
+    process.env.ELP_DEV_VER = '7';
+    const c7 = attest.verifySoloRecord(soloRec(0, kd, { start: 0, end: 5, flags: 0, disp: 0 }), TABLE);
+    if (!c.ok || c.elp !== 6 || !c7.ok || c7.elp !== 7) e.push('dev key: ' + J([c.ok, c.elp, c7.ok, c7.elp]));
+  } finally { if (keep == null) delete process.env.ELP_DEV_VER; else process.env.ELP_DEV_VER = keep; }
+  const COMP = attest.SEG_COMP, LINE = attest.SEG_LINE, FIN = attest.SEG_FINAL;
+  for (const pc of [2, 3, 4]) {
+    const g = (o) => [mkTeam('76561198000000001', 0, Object.assign({ pc }, o)), mkTeam('76561198000000002', 1, Object.assign({ pc }, o))];
+    const okSeg = m.sanityFlags(g({ start: 5, end: 10, flags: COMP | LINE | FIN }));
+    if (okSeg.length) e.push(pc + ' seats: a version 7 run ending on a pass at a checkpoint depth [5..10] final: ' + J(okSeg));
+    const save = m.sanityFlags(g({ start: 10, end: 13, flags: COMP | LINE | attest.SEG_SUSPENDED }));
+    if (save.length) e.push(pc + ' seats: a version 7 save segment: ' + J(save));
+    const mid = m.sanityFlags(g({ start: 0, end: 5, flags: COMP | LINE }));
+    if (mid.length) e.push(pc + ' seats: a version 7 checkpoint segment: ' + J(mid));
+    if (m.sanityFlags(g({ start: 0, end: 5, flags: attest.SEG_CLASSIC | LINE })).indexOf('flags') < 0) e.push(pc + ' seats: LINE with classic passed');
+    if (m.sanityFlags(g({ start: 0, end: 5, flags: COMP | 256 })).indexOf('flags') < 0) e.push(pc + ' seats: an unknown bit passed');
+  }
+  return e;
+}
+
 const SCEN = [['[1] intake: the version bit stays, the quit bit only with the final segment, elpSegLv', sIntake],
   ['[2] solo: placement walks the level and seeds from it, points runs by endlessSettleLv + lambda, R1 / R2 leave the level, states / receipts / row v3', sSolo],
   ['[2b] the tiers read the smoothed level (here the demotion protection), not the jumpy one', sTiers],
@@ -244,7 +300,8 @@ const SCEN = [['[1] intake: the version bit stays, the quit bit only with the fi
   ['[5] the cutover settles a parked version 6 run at its save depth; never a version 7 one, never one still being played', sCut],
   ['[6] a conviction of a version 7 run replays the family\'s level from the state before it', sReplay],
   ['[7] tables: the version of a recorded table, version 6 readings skip version 7 tables, the published version / priors follow PUB_VER', sTables],
-  ['[9] the live pass lines read the smoothed level once the published table is version 7 (the hidden skill under version 6)', sLines]];
+  ['[9] the live pass lines read the smoothed level once the published table is version 7 (the hidden skill under version 6)', sLines],
+  ['[10] real intake: a signed solo record carries its key\'s rules version into the version bit (elp 7 / old key 6 / dev key ELP_DEV_VER); team LINE segments (a final one ending at a checkpoint depth, a save one) pass sanity at 2..4 seats, LINE + classic / unknown bits do not', sIntakeReal]];
 console.log('-- O942 version 7: the job --');
 for (const [label, fn] of SCEN) { const e = fn(v); T(label, e.length === 0, e.slice(0, 3).join(' | ')); }
 {
@@ -274,6 +331,7 @@ const MUTS = [
   ['the placement seeds from the level BEFORE the last placement run', [['const lp = Math.max.apply(null, tabs.map((tb) => pointsPlan.elpLevelSeed(after.L, tb[fam], tb.solo)));', 'const lp = Math.max.apply(null, tabs.map((tb) => pointsPlan.elpLevelSeed(pick.x.L, tb[fam], tb.solo)));']], sSolo],
   ['a points run reads the jumpy level for its tiers (not Lm)', [['sl = pointsPlan.endlessSettleLv(cur, depth >= t, x.Lm, tb[fam], off, fam, pointsPlan.elpLineOfL(L));', 'sl = pointsPlan.endlessSettleLv(cur, depth >= t, x.L, tb[fam], off, fam, pointsPlan.elpLineOfL(L));']], sTiers],
   ['the row stays v2 (no level states)', [['placed: 1, h, lv: c.lv || null }, c.ring || []);', 'placed: 1, h }, c.ring || []);']], sSolo],
+  ['the team sanity drops SEG_LINE from the accepted bits', [['| attest.SEG_CLASSIC | attest.SEG_LINE)) !== 0 || ((fl & attest.SEG_LINE) && (fl & attest.SEG_CLASSIC))) out.push(\'flags\');', '| attest.SEG_CLASSIC)) !== 0 || ((fl & attest.SEG_LINE) && (fl & attest.SEG_CLASSIC))) out.push(\'flags\');']], sIntakeReal],
   ['the version 7 lines keep reading the depth mean', [['    if (RATING.PUB_VER >= 7) {\n      const c = elpAllOf(st, p, seasonId)', '    if (false) {\n      const c = elpAllOf(st, p, seasonId)']], sLines],
 ];
 console.log('-- [8] mutations --');
