@@ -8,7 +8,7 @@
 //   that come after them -- a closed key is never read again:
 //   o920  8 casual co-op sessions from depth 0: `reroll bitmap sanity REJECT (reroll-ahead)` (fixed by Q417, main f7cf5c09)
 //   o922  24 resumed casual co-op sessions: `endless perk REJECT (perk_forge: build-mismatch)` (fixed by O922, batch B177)
-//   q413  20 casual solo / couch segments resumed from an older checkpoint: `perk REJECT (perk_chain: prefix)` (fixed by Q410 =
+//   q413  35 casual solo / couch segments resumed from an older checkpoint: `perk REJECT (perk_chain: prefix)` (fixed by Q410 =
 //         O903), and every later segment of those runs, closed because the chain memory still followed the old timeline
 //   The players were told to expect them back: settle what the records still on the shards show, take nothing (no continue
 //   debit -- they were never charged; nobody's points go down), never settle a key twice (Q144), shallow starts first (the
@@ -54,7 +54,12 @@ const fs = require('fs'), path = require('path'), cp = require('child_process'),
 //      routes/B-verify-03.md, 13 keys to 11-19T12:31Z, + 7 more the run logs since launch name to 11-19T19:40Z, mailbox M825 / M832
 //      / M845: each a solo segment refused `perk REJECT (perk_chain: prefix)`, its writer flagged in the same run; two of the 7,
 //      -744718111_1092615113_7 and 316762177_2127984313_7, closed in one commit with a segment of their run that settled, so `plan`
-//      holds those two for review -- the chain moved at that close -- and reopens nothing of their runs; `flags` still takes theirs).
+//      holds those two for review -- the chain moved at that close -- and reopens nothing of their runs; `flags` still takes theirs;
+//      + 15 the state shows from 11-19T19:51Z to 11-20T12:11Z, before O903 reached main at 12:13Z: flagged and closed by the solo lane
+//      in one run, the chain casual and (13 of them) ended -- the perk REJECT exit; whether `perk_chain: prefix` or another perk check
+//      is only in the run logs, read before the q413 apply as for the 13 (a key the fixed rule still refuses: the dry run holds it);
+//      928483442_ / 1003282118_ / 413513400_1889606694_7 are later segments of 1955281756_1889606694_7's run, listed for `flags`;
+//      965906560_1420489742_7 and -88966206_1729740589_7 closed with a settle of their run, held for review like the two above).
 //      Co-op keys carry the depths the log line printed: the dry run holds a key that settles at other depths
 //      (a record rewritten since; validate.js itself frees a listed key at any depths -- the list lives a week, review suggestion 1).
 const SETS = {
@@ -73,9 +78,13 @@ const SETS = {
     '1402650951_1057920599_7': null, '-208474472_653389368_7': null, '-1490636725_1092770214_7': null, '-1173129200_541892235_7': null,
     '-474609220_2121171552_7': null, '571362144_138684067_7': null, '5128742_1358336056_7': null, '902435330_28611711_7': null,
     '715401068_1301077431_7': null, '-482154105_1978245727_7': null, '1955281756_1889606694_7': null, '-744718111_1092615113_7': null,
-    '687288248_1875434390_7': null, '1931428710_880539769_7': null, '-376699473_1538758885_7': null, '316762177_2127984313_7': null } },
+    '687288248_1875434390_7': null, '1931428710_880539769_7': null, '-376699473_1538758885_7': null, '316762177_2127984313_7': null,
+    '-1763639302_1263948641_7': null, '-1945114912_731808503_7': null, '119571435_1872693108_7': null, '1672300127_885479509_7': null,
+    '306848399_134454718_7': null, '728021899_1982546866_7': null, '-1888688969_1321976693_7': null, '-843680383_464287609_7': null,
+    '-1448083451_1727966839_7': null, '965906560_1420489742_7': null, '928483442_1889606694_7': null, '1003282118_1889606694_7': null,
+    '413513400_1889606694_7': null, '-88966206_1729740589_7': null, '-1486860584_1056385758_7': null } },
 };
-// the flags `flags` takes back: q413 = the 20 segments above (their writers were flagged when the segment was refused);
+// the flags `flags` takes back: q413 = the 35 segments above (their writers were flagged when the segment was refused);
 //   q407 = the two friends' rooms of six (cloud audit Q407; only once its fix is on main, else the old rule flags again)
 const FLAG_SETS = { q413: Object.keys(SETS.q413.keys), q407: ['1436293812_1720557369_10', '333666603_1234671714_10'] };
 const STATE = { processed: 'processed.json', solo: 'endless-solo.json', starts: 'starts.json', signals: 'signals.json', trust: 'trust.json' };
