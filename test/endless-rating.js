@@ -1224,6 +1224,39 @@ console.log('-- [16] O825 review round --');
   T('[16] T7 fuzz: 240 random histories (4 players, 4 families, shared team runs, first-seen ties, save points, two passes) under 6 key orders each -- the same chain memory every time', fuzzDiffs(v, 1, 80) + fuzzDiffs(v, 7, 80) + fuzzDiffs(v, 13, 80) === 0);
   T('[16] mutation "the member reading switches on his points entry as it is NOW" (placed by later runs of another family -> the default reading; not yet -> the plain mean) makes the frozen team level depend on the walk -- the fuzz turns red',
     redBy('[16] placed switch', [["  return b.runs.length ? pointsPlan.elpHiddenFor(fam, b.runs, elpLinesByFam(st, s, firstSeen), 1) : null;\n}", "  const cNow = elpAllOf(st, p, s);\n  if (cNow && cNow.placed) return pointsPlan.elpHiddenFor(fam, b.runs, elpLinesByFam(st, s, firstSeen));\n  return b.runs.length ? pointsPlan.elpHiddenFor(fam, b.runs, elpLinesByFam(st, s, firstSeen), 1) : null;\n}"]], (m) => fuzzDiffs(m, 1, 80) + fuzzDiffs(m, 7, 80) === 0));
+  // O942 (second opinion 2026-11-21 night): the pass walks every player's runs in ONE order by first seen (a version 7 team run needs
+  //   its members' earlier runs settled before its line freezes). Version 6 reads the pass context only, so the walk must not move it:
+  //   the T7 worlds settled by the one walk and by the walk player by player (the code before O942) end byte for byte the same. (T7
+  //   above cannot show it any more: the key order now only breaks first-seen ties.)
+  const WALK_OLD = [['const t = leftAt(x); if (!q || t < qt) { q = x; qt = t; }', 'const t = 0; if (!q) { q = x; qt = t; }']];
+  const PLACED_NOW = [["  return b.runs.length ? pointsPlan.elpHiddenFor(fam, b.runs, elpLinesByFam(st, s, firstSeen), 1) : null;\n}", "  const cNow = elpAllOf(st, p, s);\n  if (cNow && cNow.placed) return pointsPlan.elpHiddenFor(fam, b.runs, elpLinesByFam(st, s, firstSeen));\n  return b.runs.length ? pointsPlan.elpHiddenFor(fam, b.runs, elpLinesByFam(st, s, firstSeen), 1) : null;\n}"]];
+  function walkDiffs(mA, mB, seed0, iters) {
+    let seed = seed0;
+    const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+    const ri = (n) => Math.floor(rnd() * n);
+    const FM = ['solo', 'duo', 'trio', 'quad'], SIZE = { solo: 1, duo: 2, trio: 3, quad: 4 }, PL = ['p0', 'p1', 'p2', 'p3'], HR = 3600000, t0 = Date.UTC(2026, 10, 20);
+    const canonSt = (st) => { const o = {}; for (const k of Object.keys(st.hist).sort()) { const h = st.hist[k]; if (h.runs && !h.runs.length && !(h.gone || []).length && k.indexOf('|all|') < 0) continue; o[k] = h; } return canon([o, st.elpTeam || {}]); };
+    let diff = 0;
+    for (let it = 0; it < iters; it++) {
+      const ev = []; let id = 1000, at = t0;
+      for (let i = 0, N = 6 + ri(20); i < N; i++) { if (rnd() < 0.4) at += ri(3) * HR; const fam = FM[ri(4)]; ev.push({ at, pl: PL.slice().sort(() => rnd() - 0.5).slice(0, SIZE[fam]), fam, id: id++, depth: 3 + ri(40), fl: rnd() < 0.15 ? SUS : F }); }
+      const order = PL.slice().sort(() => rnd() - 0.5);   // the players in a random order: the old walk takes them one by one
+      const settleBy = (m) => {
+        const st = { hist: {} };
+        for (const p of order) for (const f of FM) st.hist[m.ratingHistKey(p, f, 0)] = { best: [0, 0], runs: [], old: [], t: 0 };
+        for (const e of ev) { for (const p of e.pl) m.ratingHistUpsert(st, p, e.fam, 0, e.id, e.depth, e.at, e.fl, e.id); if (e.pl.length > 1) m.elpTeamNote(st, e.id, e.pl, e.fam, 0, e.at); }
+        m.elpSettleAll(st, 0, ev[Math.floor(ev.length / 2)].at + 1); m.elpSettleAll(st, 0, ev[ev.length - 1].at + 30 * HR);
+        return canonSt(st);
+      };
+      if (settleBy(mA) !== settleBy(mB)) diff++;
+    }
+    return diff;
+  }
+  { let mOld = null, mNowA = null, mNowB = null;
+    try { mOld = mutantOf(WALK_OLD); mNowA = mutantOf(PLACED_NOW); mNowB = mutantOf(PLACED_NOW.concat(WALK_OLD)); } catch (e) { bad('[16] O942 walk: ' + e.message); }
+    if (mOld) T('[16] O942: the one walk by first seen moves no version 6 result -- 240 random worlds settled by it and by the walk player by player (the code before) end byte for byte the same', walkDiffs(v, mOld, 3, 80) + walkDiffs(v, mOld, 11, 80) + walkDiffs(v, mOld, 23, 80) === 0);
+    if (mNowA && mNowB) T('[16] O942: ... and the comparison sees a walk-dependent reading (the member reading switches on his points entry as it is NOW): it turns red', walkDiffs(mNowA, mNowB, 3, 80) + walkDiffs(mNowA, mNowB, 11, 80) > 0);
+  }
   // (b) the members' copies of a team run first seen at different ticks: the level is read at the run's own first tick, whoever settles first
   function lateCopy(m, aFirst) {
     const st = { hist: {} }, HR = 3600000, t0 = now - 20 * HR, ps = aFirst ? ['A', 'B'] : ['B', 'A'];

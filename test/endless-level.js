@@ -365,6 +365,40 @@ function sTeamOver(m) {
   return e;
 }
 
+// [12b] the team version of [11]: Q's first version 7 duo run read two ways (his client: the row's lower skill); every outcome of
+//   that run, then the next run back to back (no row read back): each member's client goes on from its own state with the host's
+//   verdict, the host takes the highest of those for the next line and the run passes there -- no seat judged a miss on either run
+function sTeamBack(m) {
+  const e = [], t0 = T0 + 6000 * MIN, seeds = [7701, 7702], R1 = 970, R2 = 971;
+  const lv = (ds) => PP.elpLevelInit(PP.elpHiddenFor('duo', ds.slice().reverse().map((dd) => ['solo', dd]), LINES, 1), LINES.duo);
+  for (const rowH of [700, 800, 900]) {
+    const xP = lv([9, 10, 11]), xQr = PP.elpLevelInit(rowH, LINES.duo), Th1 = PP.elpTargetOfL(Math.max(xP.L, xQr.L), seeds[0]);
+    for (const o of outcomesOf(Th1).filter((x) => !x.quit)) {
+      const st = { hist: {} };
+      const Pp = placedInto(m, st, 46, [9, 10, 11], null, 'duo', t0), Qp = placedInto(m, st, 47, [13, 14, 15], rowH, 'duo', t0);
+      m.elpSettleAll(st, 0, t0 + 10 * MIN);
+      C(st, Qp.p).h[FAMI('duo')] = rowH;   // his row carries a lower duo skill (his client reads it)
+      const at1 = t0 + 20 * MIN, at2 = t0 + 50 * MIN, pass1 = o.d >= Th1;
+      m.elpTeamNote(st, R1, [Pp.p, Qp.p], 'duo', 0, at1);
+      for (const q of [Pp.p, Qp.p]) m.ratingHistUpsert(st, q, 'duo', 0, R1, o.d, at1, F, seeds[0], { v7: true, quit: false });
+      m.elpSettleAll(st, 0, at1 + MIN);
+      const cP = PP.elpLevelStep(xP, { pass: pass1, depth: o.d, T: Th1, placing: -1 }), cQ = PP.elpLevelStep(xQr, { pass: pass1, depth: o.d, T: Th1, placing: -1 });
+      const Th2 = PP.elpTargetOfL(Math.max(cP.L, cQ.L), seeds[1]);
+      m.elpTeamNote(st, R2, [Pp.p, Qp.p], 'duo', 0, at2);
+      for (const q of [Pp.p, Qp.p]) m.ratingHistUpsert(st, q, 'duo', 0, R2, Th2, at2, F, seeds[1], { v7: true, quit: false });
+      m.elpSettleAll(st, 0, at2 + MIN);
+      const tag = 'row ' + rowH + ', run 1 ' + (pass1 ? 'pass' : 'death') + '@' + o.d;
+      for (const q of [Pp.p, Qp.p]) {
+        const r1 = runOf(st, q, 'duo', R1), r2 = runOf(st, q, 'duo', R2);
+        if (!r1 || r1[3] !== 2 || !r2 || r2[3] !== 2) { e.push(tag + ': seat ' + q.slice(-4) + ' did not settle'); continue; }
+        if (pass1 && (r1[5] | 0) > o.d) e.push(tag + ': seat ' + q.slice(-4) + ' run 1, the team\'s pass judged against ' + r1[5]);
+        if ((r2[5] | 0) > Th2) e.push(tag + ': seat ' + q.slice(-4) + ' run 2, the team\'s pass at ' + Th2 + ' judged against ' + r2[5]);
+      }
+    }
+  }
+  return e;
+}
+
 // [13] one pass or two: P and Q play two duo runs back to back; the first a miss that lowers Q (the higher of the two). Settled in
 //   one pass or in two, the second run reads the same lines and every seat ends the same
 function sTwoPasses(m) {
@@ -430,6 +464,7 @@ const SCEN = [['[1] intake: the version bit stays, the quit bit only with the fi
   ['[10] real intake: a signed solo record carries its key\'s rules version into the version bit (elp 7 / old key 6 / dev key ELP_DEV_VER); team LINE segments (a final one ending at a checkpoint depth, a save one) pass sanity at 2..4 seats, LINE + classic / unknown bits do not', sIntakeReal],
   ['[11] solo, two readings of his first version 7 level: no outcome of that run and no pass his client shows on the run after it is judged a miss; the depth rules out a reading below it', sCarry],
   ['[12] team: one member read above what his client sent does not lift the team\'s target (a pass for every seat)', sTeamOver],
+  ['[12b] team: the over-read member\'s first run, every outcome, then the next run back to back passing at the host\'s next line: no seat judged a miss', sTeamBack],
   ['[13] two team runs back to back: one pass or two, the second reads the same lines and every seat ends the same', sTwoPasses],
   ['[14] a run that stood parked is judged with every reading (its client may have read its target again on resume)', sResumed],
   ['[15] a conviction\'s replay steps a later run with the target its carried step read (r[10][6])', sReplayCarry]];
@@ -467,6 +502,8 @@ const MUTS = [
   ['the depth rules out nothing', [['  let keep = resumed ? all : all.filter((a) => a.t >= depth);', '  let keep = all;']], sCarry],
   ['a first version 7 run reads the job\'s own start only', [['  if (rs != null) xs.push(pointsPlan.elpLevelInit(rs, lines[fam]));\n  return elpLvUniq(xs);', '  return elpLvUniq(xs.slice(0, 1));']], sCarry],
   ['the team reads one state per member (its own line only)', [['    for (const xs of sets) for (const L of xs) if (L >= floor) lns.add(pointsPlan.elpLineOfL(L));', '']], sTeamOver],
+  ['a team run carries the reading its points came from (rule (a)), back to back', [['  return { pick, carry, outs };\n}', '  return { pick, carry: { rd: pick.rd, t: pick.t, after: pointsPlan.elpLevelStep(pick.rd.x, { pass: depth >= pick.t, depth, T: pick.t, quit, placing }) }, outs };\n}']], sTeamBack],
+  ['a team run reads one state per member, back to back', [['    for (const xs of sets) for (const L of xs) if (L >= floor) lns.add(pointsPlan.elpLineOfL(L));', '']], sTeamBack],
   ['the pass walks player by player', [['const t = leftAt(x); if (!q || t < qt) { q = x; qt = t; }', 'const t = 0; if (!q) { q = x; qt = t; }']], sTwoPasses],
   ['a resumed run is filtered by its depth too', [['  const resumed = Array.isArray(r[9]) && r[9].length > 0;', '  const resumed = false;']], sResumed],
   ['the replay steps with the points target (r[5])', [['t = r[10].length > 6 ? (r[10][6] | 0) : (r[5] | 0);', 't = (r[5] | 0);']], sReplayCarry],
