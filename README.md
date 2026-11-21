@@ -261,6 +261,20 @@ absent, so a run is unaffected before it is provisioned.
   season, the rules constants, N + seven lines per family; v1 rows read as no table). The carrier account is
   `TIERCUT_CARRIER_SID` or, unset, the account already carrying the app's `version_gate` row. Board names:
   `ENDLESS_RATING_LB_*`, `ENDLESS_TIERCUT_LB`.
+  ELP version 7 (O942, 2026-11-21; `points-plan.js` ELP7, `test/endless-level.js`): a competitive run ENDS at
+  its target, so a passed run's depth is its target and the depth mean only drifts down -- a version 7 run's
+  target follows a per-player, per-family level (a staircase: a pass multiplies it, a miss divides it, the
+  step shrinking on a reversal; the tiers read its smoothed value; a three-step placement with a missed run
+  floored at its depth; a quit or a run that passed no level leaves the level; points x the run's line / 10
+  levels; a team run's line = the roster's highest level, each seat stepping his own). A run's version is
+  fixed by its first segment: solo / couch by the signing key (`attest-keys.json` pubInfo `elp`, stamped by
+  the client's build tool; the dev key reads `ELP_DEV_VER`, default 6), team by the segment flag `SEG_LINE`
+  (128); version 6 runs settle exactly as before. The level states ride the points entry (`lv`) and the row
+  (v3, after the four hidden skills). Two levers, both off by default and set by the upload runbook the
+  moment the version 7 package's gate goes up: `ELP_PUB_VER=7` (the published table carries 7, the version 7
+  priors, the live lines from the smoothed levels; a version 6 client reads that table as "being rated", so
+  never before the gate) and `ELP_CUTOVER_MS=<that instant>` (every version 6 run still open or parked then
+  settles at the depth it reached).
 - Gold Rush Cup (client knife 5.1c-1, 2026-10-18; `test/endless-cup.js`): every competitive endless settle
   on the EA app id also keeps the player's best of the week on `<competitive ladder>_w<YYYYWW>` (ISO week,
   Monday 00:00 UTC; the week the settle runs in; team rows carry the team block; created at the week's
