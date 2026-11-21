@@ -7417,16 +7417,125 @@ function elpListOf(items, saved) {
 //       such run at the depth it stood at when this run was first seen (elpOpenAt), beside the job's.
 //   Runs of the family itself never move (a family's own runs settle in the order they were played, and a parked one is given up
 //   by the next), so a family with MIN_RUNS own runs reads the same skill from every list.
-function elpBeforeLists(st, p, s, fam, runId, at, order) {
-  const items = elpBeforeItems(st, p, s, fam, runId, at, order), out = [], seen = new Set();
-  const add = (list) => { const k = JSON.stringify(list); if (!seen.has(k)) { seen.add(k); out.push(list); } };
+// Q426 (cloud audit 2026-11-20, review M867): beside each of those readings, the other orders of the other families' runs his
+//   client may have held (elpBorrowOrders) -- a family short of MIN_RUNS own runs borrows the NEWEST of them, and which runs are
+//   the newest is just what the job cannot always tell. Such a list is added only when it borrows what no list before it does
+//   for one of the counts (sigOf: per count, the runs of the other families that count reads, as a set), so a family that
+//   borrows nothing, and a pass with nothing to choose, gets the very lists it got before; at most ELP_BORROW_CAP of them. mins
+//   (optional) = the counts the readings are taken with (elpMins of the settle; left out = MIN_RUNS).
+function elpBeforeLists(st, p, s, fam, runId, at, order, mins) {
+  const items = elpBeforeItems(st, p, s, fam, runId, at, order), out = [], seen = new Set(), ks = elpBorrowCounts(items, fam, mins), sigs = ks.map(() => new Set());
+  const sigOf = (list) => { const o = list.filter((x) => x[0] !== fam); return ks.map((k) => o.slice(0, k).map((x) => x[0] + ':' + (x[1] | 0)).sort().join(',')); };
+  const add = (list) => { const k = JSON.stringify(list); if (!seen.has(k)) { seen.add(k); sigOf(list).forEach((g, i) => sigs[i].add(g)); out.push(list); } };
+  let more = 0;
+  const addMore = (list) => { const g = sigOf(list); if (more < ELP_BORROW_CAP && g.some((x, i) => !sigs[i].has(x))) { more++; g.forEach((x, i) => sigs[i].add(x)); seen.add(JSON.stringify(list)); out.push(list); } };
   add(elpListOf(items.filter((it) => it.base), false));
   for (const tieAll of [false, true]) for (const saved of [false, true]) {
-    add(elpListOf(items.filter((it) => {
+    const use = items.filter((it) => {
       const kept = saved && it.save != null;
       if (it.tie) return tieAll && (it.live || kept);
       return it.base || kept;
-    }), saved));
+    });
+    add(elpListOf(use, saved));
+    if (tieAll && (!saved || use.some((it) => it.save != null))) for (const list of elpBorrowOrders(use, fam, at, saved, ks)) addMore(list);   // Q426 (the tie cut whole = the reading without it; no save depth = the reading without them)
+  }
+  return out;
+}
+// Q426: how many runs of the other families a reading of family fam borrows, one count per count the readings are taken with
+//   (points-plan.js elpHiddenFor: the family's own runs first, then the newest runs of the other families up to the count; a
+//   family with that many own runs borrows none): the distinct counts of 1 or more, ascending. items: elpBeforeItems (his own runs
+//   of the family are the same in every reading: base).
+function elpBorrowCounts(items, fam, mins) {
+  const own = Math.min(ELP.WINDOW, items.filter((it) => it.fam === fam && it.base).length), out = [];
+  for (const mn of ((Array.isArray(mins) && mins.length) ? mins : [undefined])) {
+    const k = (mn == null ? ELP.MIN_RUNS : Math.max(1, mn | 0)) - own;
+    if (k >= 1 && out.indexOf(k) < 0) out.push(k);
+  }
+  return out.sort((a, b) => a - b);
+}
+// items -> the same items in the start order of elpMergeByStart (elpListOf without the mapping)
+function elpItemsByStart(items) {
+  const by = new Map(), of = new Map();
+  for (const it of items) { if (!by.has(it.fam)) by.set(it.fam, { fam: it.fam, h: it.h, runs: [] }); by.get(it.fam).runs.push(it.r); of.set(it.r, it); }
+  return elpMergeByStart(pointsPlan.ELP_FAMS.filter((f) => by.has(f)).map((f) => by.get(f))).map((x) => of.get(x.r));
+}
+const ELP_BORROW_CAP = 256;    // the extra lists of one elpBeforeLists (Q426); past it the first ones walked
+const ELP_BORROW_LEAVES = 1024; // the lists one elpBorrowOrders makes at most (Q426)
+// Q426 (cloud audit 2026-11-20, review M867): the orders his client may have held the runs of the OTHER families in, as far as a
+//   family short of its own runs borrows them. His client orders its history by the instant each run ended (newest first) and
+//   borrows the newest; the job orders the runs by the tick it first saw them at, then by run id (elpMergeByStart). Between two
+//   ticks the order is his; within one tick the job knows each family's own order and nothing across families:
+//     - the runs of other families first seen at the very tick of this run (the tie, when the reading holds it): of each family
+//       his client held the ones played before this run -- the first of them in the family's own order, any number (0 .. all),
+//       not only none / every one;
+//     - runs of several other families first seen at one tick (a late job sees an hour of play at once): any merge of them that
+//       keeps each family's own order is the order he played them in, and which of them are the newest decides what is borrowed.
+//   use = the runs of one reading (elpBeforeLists); ks = elpBorrowCounts. A reading borrows the first k runs as a set, so for each
+//   count k every set his play may have borrowed is made once: the ticks taken whole, newest first, then in the tick the count
+//   ends in the newest runs of each of its families, every split of what is left of k over them -- and in the tie, of each
+//   family the runs after the ones played later than this run (cut: left out of the list). Returns lists [[fam, depth], ..]:
+//   that set first, then the rest in the job's order (a family's own runs are read wherever they stand); [] when there is
+//   nothing to choose (no tie, and every tick the borrowing reaches holds one family). At most ELP_BORROW_LEAVES lists. A
+//   reading his play may not have had is never among them: every list is an order his play may have had (a family's runs keep
+//   their order, no run moves across a tick, a cut run goes with every run its family played after it).
+function elpBorrowOrders(use, fam, at, saved, ks) {
+  const need = ks.length ? ks[ks.length - 1] : 0;
+  if (need < 1) return [];
+  const all = elpItemsByStart(use).reverse(), groups = [];   // newest first, the job's order (elpListOf)
+  for (const it of all) {
+    if (it.fam === fam) continue;
+    const t = it.r[2] || 0;
+    let g = groups[groups.length - 1];
+    if (!g || g.t !== t) groups.push(g = { t, by: new Map() });
+    if (!g.by.has(it.fam)) g.by.set(it.fam, []);
+    g.by.get(it.fam).push(it);   // a family's runs within a tick: newest first
+  }
+  const tie = (groups.length && groups[0].t === at) ? groups[0] : null;
+  let reach = 0, open = !!tie, upto = 0;   // upto: the ticks the borrowing may reach (the tie cut whole: the ticks after it)
+  for (const g of groups) { if (reach >= need) break; if (g.by.size > 1) open = true; if (g !== tie) for (const xs of g.by.values()) reach += xs.length; upto++; }
+  if (!open) return [];
+  const famsOf = (by) => pointsPlan.ELP_FAMS.filter((f) => by.has(f));
+  const rest = groups.slice(tie ? 1 : 0, upto).map((g) => { const fams = famsOf(g.by); return { fams, by: g.by, n: fams.reduce((a, f) => a + g.by.get(f).length, 0) }; });
+  const dep = (it) => (saved && it.save != null) ? it.save : (it.r[1] | 0), out = [], NO_CUT = new Set();
+  const emit = (taken, cut) => { if (out.length >= ELP_BORROW_LEAVES) return; const used = new Set(taken); out.push(taken.map((it) => [it.fam, dep(it)]).concat(all.filter((it) => !used.has(it) && !cut.has(it)).map((it) => [it.fam, dep(it)]))); };
+  // counts c[f] over the families fams of a tick summing to m, c[f] <= len(f) (each family's newest c[f] are borrowed)
+  const splits = (fams, len, m, cb) => {
+    const c = new Map();
+    const go = (j, m2) => { if (out.length >= ELP_BORROW_LEAVES) return; if (j === fams.length) { if (!m2) cb(c); return; } for (let x = 0; x <= Math.min(len(fams[j]), m2); x++) { c.set(fams[j], x); go(j + 1, m2 - x); } c.delete(fams[j]); };
+    go(0, m);
+  };
+  // the ticks after the tie: whole ones while the count lasts, then every split in the tick it ends in
+  const later = (k, taken, cut) => {
+    let m = k - taken.length, g = 0;
+    const tk = taken.slice();
+    while (m > 0 && g < rest.length && rest[g].n <= m) { for (const f of rest[g].fams) tk.push(...rest[g].by.get(f)); m -= rest[g].n; g++; }
+    if (m <= 0 || g >= rest.length) { emit(tk, cut); return; }
+    const G = rest[g];
+    splits(G.fams, (f) => G.by.get(f).length, m, (c) => { const x = tk.slice(); for (const f of G.fams) x.push(...G.by.get(f).slice(0, c.get(f) | 0)); emit(x, cut); });
+  };
+  for (const k of ks) {
+    if (!tie) { later(k, [], NO_CUT); continue; }
+    const tf = famsOf(tie.by), len = (f) => tie.by.get(f).length;
+    // the count ends in the tie: c[f] runs of family f borrowed, after its newest d[f] (played after this run): every d[f] for a
+    //   family that lends (a family that lends nothing: its runs stand where the job has them)
+    splits(tf, len, k, (c) => {
+      const lend = tf.filter((f) => c.get(f) > 0), d = new Map();
+      const go = (j) => {
+        if (out.length >= ELP_BORROW_LEAVES) return;   // full: nothing more is walked
+        if (j === lend.length) { const taken = [], cut = new Set(); for (const f of lend) { const xs = tie.by.get(f), a = d.get(f); xs.slice(0, a).forEach((x) => cut.add(x)); taken.push(...xs.slice(a, a + c.get(f))); } emit(taken, cut); return; }
+        const f = lend[j];
+        for (let a = 0; a + c.get(f) <= len(f); a++) { d.set(f, a); go(j + 1); }
+      };
+      go(0);
+    });
+    // the tie whole after the cut (fewer than k runs left in it), then the ticks after it
+    const d = new Map();
+    const go = (j, left) => {
+      if (left >= k || out.length >= ELP_BORROW_LEAVES) return;   // k runs or more left in the tie already: the count ends in it (above)
+      if (j === tf.length) { const taken = [], cut = new Set(); for (const f of tf) { const xs = tie.by.get(f); xs.slice(0, d.get(f)).forEach((x) => cut.add(x)); taken.push(...xs.slice(d.get(f))); } later(k, taken, cut); return; }
+      for (let a = 0; a <= len(tf[j]); a++) { d.set(tf[j], a); go(j + 1, left + len(tf[j]) - a); }
+    };
+    go(0, 0);
   }
   return out;
 }
@@ -7494,7 +7603,7 @@ function elpMemberReadings(st, p, fam, s, runId, at, nowMs, ctx) {
   add(elpMemberHiddenBefore(st, p, fam, s, runId, at, nowMs, ctx));
   if (elpFamEntries(st, p, s).length) {
     const tabs = elpCandidateTabs(st, s, at, nowMs);
-    for (const list of elpBeforeLists(st, p, s, fam, runId, at, elpOrderOf(ctx, st, p, s, nowMs))) for (const tb of tabs) for (const mn of elpMins(ctx, at)) {
+    for (const list of elpBeforeLists(st, p, s, fam, runId, at, elpOrderOf(ctx, st, p, s, nowMs), elpMins(ctx, at))) for (const tb of tabs) for (const mn of elpMins(ctx, at)) {
       add(list.length ? pointsPlan.elpHiddenFor(fam, list, tb, 1, mn) : null);   // version 6: inside the old-client window also what a five-run client sent
     }
   }
@@ -7579,7 +7688,7 @@ function elpSettleRun(st, p, c, h, r, fam, s, nowMs, ctx) {
   const at = r[2] ? r[2] : nowMs, tabs = elpCandidateTabs(st, s, at, nowMs);
   const depth = r[1] | 0, seed = r[8] | 0;
   // RC2-02: the readings of the runs before it his client may have fixed the target from; befores[0] = the job's own (it wins a tie)
-  const befores = elpBeforeLists(st, p, s, fam, r[0] >>> 0, at, (ctx && ctx.order && ctx.order.has(p)) ? ctx.order.get(p) : null);
+  const befores = elpBeforeLists(st, p, s, fam, r[0] >>> 0, at, (ctx && ctx.order && ctx.order.has(p)) ? ctx.order.get(p) : null, elpMins(ctx, at));
   const teamH = elpTeamHidden(st, r, fam, s, nowMs, ctx);   // O803: the team's usual level (a team run with a roster), else undefined = own
   const mins = elpMins(ctx, at);   // version 6: inside the old-client window every reading also with the count a five-run client used
   let d = 0, T = 0, pass = false, flags = 0, seeded = false, alts = 1, held = false;
@@ -16181,7 +16290,7 @@ Object.assign(module.exports, { pruneFlagged, flagBaseKey, FLAG_PRUNE_WAIT_MS, b
 Object.assign(module.exports, { lateWriterRoster });   // cloud audit Q261 a 1V1 whose result writer's own start was first read with his result
 Object.assign(module.exports, { lone1v1Spoiled, lone1v1VoidClaims });   // cloud audit Q216 a ranked 1V1 whose loser wrote only records the job cannot use
 Object.assign(module.exports, { teamXpFloor, teamXpStarts, teamXpMark, teamRollbackPlan });   // cloud audit Q237 team competitive XP floors (test/team-comp-ghost-xp.js)
-Object.assign(module.exports, { RATING, RATING_FAMS, ENDLESS_RATING_LB, ELP_ALL, elpAllKey, elpAllOf, elpEntryOk, elpFamEntries, elpMergeByStart, elpPassOrder, elpPlaceAt, elpLeftOf, elpOldUntil, elpMins, elpSeedNow, ratingOwed, elpPassOrders, elpTryOrder, elpPickOrders, ELP_ORDER_CAP, SEASON_UNSCHEDULED, elpSettledRuns, elpRunsBefore, elpSaveAt, elpOpenAt, elpBeforeItems, elpBeforeLists, elpRowSkill, elpMemberReadings, elpTeamPick, elpLinesByFam, elpSkillsOf, elpCandidateTabs, ENDLESS_RATING_LB_SOLO, ENDLESS_RATING_LB_DUO, ENDLESS_RATING_LB_TRIO, ENDLESS_RATING_LB_QUAD, ENDLESS_TIERCUT_LB, ratingFamOf, fnv32, ratingRunId, ratingHistKey,
+Object.assign(module.exports, { RATING, RATING_FAMS, ENDLESS_RATING_LB, ELP_ALL, elpAllKey, elpAllOf, elpEntryOk, elpFamEntries, elpMergeByStart, elpPassOrder, elpPlaceAt, elpLeftOf, elpOldUntil, elpMins, elpSeedNow, ratingOwed, elpPassOrders, elpTryOrder, elpPickOrders, ELP_ORDER_CAP, SEASON_UNSCHEDULED, elpSettledRuns, elpRunsBefore, elpSaveAt, elpOpenAt, elpBeforeItems, elpBeforeLists, elpBorrowCounts, elpBorrowOrders, ELP_BORROW_CAP, elpRowSkill, elpMemberReadings, elpTeamPick, elpLinesByFam, elpSkillsOf, elpCandidateTabs, ENDLESS_RATING_LB_SOLO, ENDLESS_RATING_LB_DUO, ENDLESS_RATING_LB_TRIO, ENDLESS_RATING_LB_QUAD, ENDLESS_TIERCUT_LB, ratingFamOf, fnv32, ratingRunId, ratingHistKey,
   ratingHistUpsert, ratingHistRemove, ratingHistFinal, elpRunRk, ratingScoreOf, ratingPlan, ratingTierOf, tiercutDay, tiercutEncode, tiercutDecode, tiercutDue, pruneRatingHist,
   elpSettledDepths, elpLinesAt, elpCandidates, elpSettleRun, elpTrim, elpSettleAll, elpRunReady, elpPendingSettles, elpTeamNote, elpMemberHiddenBefore, elpTeamHidden, elpTeamTrim, elpLinesOf, elpHiddensOf, elpLinesSkipBanned, elpTableKey, elpTabNewest, elpTabRecord });
 Object.assign(module.exports, { CUP, CUP_FAMS, ENDLESS_CUP_LB, ENDLESS_CUP_HONOR_LB, cupWeekId, cupWeekStart, cupWeekBack, cupNextWeek, cupEdition, cupWeekBoardName, teamBlockSids,

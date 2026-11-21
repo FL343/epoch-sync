@@ -67,6 +67,13 @@
 //       client showed beside this version's (alone and in the level a team freezes), outside the window and without the stamp the
 //       pure rule; the rows owed (ratingOwed; REAL main(): written through the ids of the xp board, a fully banned account left
 //       alone, nothing remembered); the upkeep guard restores the stamp too. Mutations for each.
+//  [20] Q426 (cloud audit 2026-11-20, review M867): a family short of its own runs borrows the newest runs of the other families,
+//       newest as his client played them -- the job adds a reading for every set of them his play may have borrowed (elpBorrowOrders:
+//       of the runs first seen at the run's own tick, each family's played-before ones, any number; of runs of several families first
+//       seen together earlier, any merge that keeps each family's order). The audit's two worlds (repro-q426.js: a pass on his dial was a
+//       miss) and the review's third (a run of another family parked in the tie, read at its save depth); random one-player worlds: every
+//       skill his client read from its own history is a reading of the job (also inside the old-client window), the readings are only
+//       added, the points never below the reading he took. Mutations for each part.
 // Usage: node test/endless-rating.js
 // ============================================================
 const { spawnSync } = require('child_process');
@@ -1748,9 +1755,20 @@ console.log('-- [18] Q402 / Q403: around the placement line, the order his play 
     return got;
   };
   const lateHolds = (m) => { const a = latePlay(m, undefined), b = latePlay(m, NONE); return !!a.p2 && !!b.p2 && a.p2.T <= b.p2.T && a.lp >= b.lp; };
-  { const a = latePlay(v, undefined), b = latePlay(v, NONE);
+  // Q426 (cloud audit 2026-11-20): a family short of its own runs now reads every order of the other families' runs his client may
+  //   have held (elpBorrowOrders) -- the same readings whichever order the pass settles in. In both stored worlds here the picks no
+  //   longer move the level a team run freezes, and across the random worlds the guard has nothing left to give up. The guard stays
+  //   (a pick still moves a parked run, and the job's own reading a tie keeps); its checks run on a copy WITHOUT the Q426 lists (vg:
+  //   the readings it was written against), where the stored worlds still need it; the code itself (v) is checked beside them.
+  const NO_Q426 = ['    if (tieAll && (!saved || use.some((it) => it.save != null))) for (const list of elpBorrowOrders(use, fam, at, saved, ks)) addMore(list);   // Q426 (the tie cut whole = the reading without it; no save depth = the reading without them)\n', ''];
+  let vg = null;
+  try { vg = mutantOf([NO_Q426]); } catch (e) { bad('[18] the copy without the Q426 lists: ' + e.message); }
+  vg = vg || v;
+  { const a = latePlay(vg, undefined), b = latePlay(vg, NONE);
     eq('[18] review round 1 -- a teammate whose copy of a team run settles in a later pass: the level the run froze under the job\'s own orders (1100: target 12, a pass, +53, 1742 in the end)', [b.p2, b.lp], [{ T: 12, pass: true, d: 53, teamH: 1100 }, 1742]);
-    T('[18] ... the picks that would freeze that run higher (1550: target 16, a miss) are given up: the late teammate settles exactly as under the job\'s own orders (the guard gave ' + a.dropped + ' pick(s) up over the world\'s ' + LATE.passes.length + ' passes)', lateHolds(v) && canon([a.p2, a.lp]) === canon([b.p2, b.lp]) && a.dropped >= 1);
+    T('[18] ... the picks that would freeze that run higher (1550: target 16, a miss) are given up: the late teammate settles exactly as under the job\'s own orders (the guard gave ' + a.dropped + ' pick(s) up over the world\'s ' + LATE.passes.length + ' passes; the readings before Q426)', lateHolds(vg) && canon([a.p2, a.lp]) === canon([b.p2, b.lp]) && a.dropped >= 1);
+    const a2 = latePlay(v, undefined), b2 = latePlay(v, NONE);
+    T('[18] ... with the Q426 readings the same world: the picks freeze no higher level, the late teammate settles exactly as under the job\'s own orders (' + JSON.stringify(a2.p2) + ', the guard gave ' + a2.dropped + ' up)', lateHolds(v) && canon([a2.p2, a2.lp]) === canon([b2.p2, b2.lp]), JSON.stringify([a2, b2]));
   }
   // the local review (2026-11-19): the branch "one side froze a team level, the other froze none" was pinned by nothing -- with it
   //   turned off every check here stayed green. A level that turns into NO level cannot be compared by its line (there is none): the
@@ -1775,9 +1793,11 @@ console.log('-- [18] Q402 / Q403: around the placement line, the order his play 
     return got;
   };
   const oneHolds = (m) => { const a = onePlay(m, undefined), b = onePlay(m, NONE); return !!a.p1 && !!b.p1 && a.p1.T <= b.p1.T && canon(a.p1) === canon(b.p1); };
-  { const a = onePlay(v, undefined), b = onePlay(v, NONE);
+  { const a = onePlay(vg, undefined), b = onePlay(vg, NONE);
     eq('[18] the local review -- a team run that freezes a LOW level under the job\'s own orders (200: the late teammate reads target 4, a pass, +119)', b.p1, { T: 4, pass: true, d: 119, teamH: 200 });
-    T('[18] ... and NO level under the picks (the silver line: target 12): the picks are given up (' + a.dropped + '), the late teammate settles exactly as under the job\'s own orders', oneHolds(v) && a.dropped >= 1 && a.picks === 0);
+    T('[18] ... and NO level under the picks (the silver line: target 12): the picks are given up (' + a.dropped + '), the late teammate settles exactly as under the job\'s own orders (the readings before Q426)', oneHolds(vg) && a.dropped >= 1 && a.picks === 0);
+    const a2 = onePlay(v, undefined), b2 = onePlay(v, NONE);
+    T('[18] ... with the Q426 readings the same world: the late teammate settles exactly as under the job\'s own orders (' + JSON.stringify(a2.p1) + ', the guard gave ' + a2.dropped + ' up)', oneHolds(v) && canon(a2.p1) === canon(b2.p1), JSON.stringify([a2, b2]));
   }
   // random worlds ACROSS passes (the local review's oracle): two to five players, team runs whose members' copies arrive in the same
   //   pass, one or several passes later, a day or two later, or never; parked runs; passes half an hour to eight hours apart. At every
@@ -1859,9 +1879,9 @@ console.log('-- [18] Q402 / Q403: around the placement line, the order his play 
     return res;
   }
   const LATE_WORLDS = 150, lateWorldsHold = (m) => lateWorlds(m, 1, LATE_WORLDS, 0.3, true).H1 === 0;
-  { const r = lateWorlds(v, 1, LATE_WORLDS, 0.3);
-    T('[18] ' + LATE_WORLDS + ' random worlds across passes (members\' copies of a team run arriving passes or days apart, or never): no team run settled in a later pass reads a higher target because of an earlier pass\'s picks (' + r.H1 + '), no picked player ends his pass lower (' + r.H4 + '), a pass whose picks were given up is the job\'s own settle byte for byte (' + r.H3 + ' differ)', r.H1 === 0 && r.H4 === 0 && r.H3 === 0, JSON.stringify(r.first));
-    T('[18] ... and the worlds are not trivial: picks applied in ' + r.forks + ' passes, given up ' + r.dropped + ' times; ' + r.lower + ' later team-run settles read a LOWER target after a pick', r.forks >= 10 && r.dropped >= 3);
+  { const r = lateWorlds(v, 1, LATE_WORLDS, 0.3), rg = lateWorlds(vg, 1, LATE_WORLDS, 0.3);
+    T('[18] ' + LATE_WORLDS + ' random worlds across passes (members\' copies of a team run arriving passes or days apart, or never): no team run settled in a later pass reads a higher target because of an earlier pass\'s picks (' + r.H1 + '; ' + rg.H1 + ' with the readings before Q426), no picked player ends his pass lower (' + r.H4 + ' / ' + rg.H4 + '), a pass whose picks were given up is the job\'s own settle byte for byte (' + r.H3 + ' / ' + rg.H3 + ' differ)', r.H1 === 0 && r.H4 === 0 && r.H3 === 0 && rg.H1 === 0 && rg.H4 === 0 && rg.H3 === 0, JSON.stringify([r.first, rg.first]));
+    T('[18] ... and the worlds are not trivial: picks applied in ' + r.forks + ' passes (' + rg.forks + ' before Q426), the guard gave picks up ' + rg.dropped + ' times with the readings before Q426 (' + r.dropped + ' with them); ' + rg.lower + ' later team-run settles read a LOWER target after a pick', r.forks >= 10 && rg.forks >= 10 && rg.dropped >= 3);
   }
   // random worlds: four players, four families, team runs, parked runs, ties -- nobody ever ends a pass below what the job's own orders leave him; the result does not depend on the key order of the file
   function worlds(m, seed0, iters) {
@@ -1913,17 +1933,17 @@ console.log('-- [18] Q402 / Q403: around the placement line, the order his play 
     && /const own = elpPassOrder\(st, p, s, nowMs\)/.test(v.elpPassOrders.toString()) && /const out = \[own\]/.test(v.elpPassOrders.toString())
     && /the order of this pass taken among/.test(SRC) && /picked order\(s\) given up/.test(SRC));
   // mutations
-  T('[18] baseline holds for the mutations below', q402Holds(v) && q403Holds(v) && ownBestHolds(v) && sameAsOwn(v, placedWorld) && untouched(v, q402World) && rowLaterHolds(v) && guardHolds(v) && lateHolds(v) && oneHolds(v));
+  T('[18] baseline holds for the mutations below', q402Holds(v) && q403Holds(v) && ownBestHolds(v) && sameAsOwn(v, placedWorld) && untouched(v, q402World) && rowLaterHolds(v) && guardHolds(v) && lateHolds(v) && oneHolds(v) && lateHolds(vg) && oneHolds(vg));
   T('[18] mutation "a level on one side, none on the other, is not a difference" turns the one-sided check red: the late teammate reads the silver line (target 12) where the job\'s own orders gave him target 4',
-    redBy('[18] one-sided', [['return (la === null || lb === null) ? a.h !== b.h : la > lb;', 'return (la === null || lb === null) ? false : la > lb;']], oneHolds));
+    redBy('[18] one-sided', [NO_Q426, ['return (la === null || lb === null) ? a.h !== b.h : la > lb;', 'return (la === null || lb === null) ? false : la > lb;']], oneHolds));
   T('[18] mutation "the guard compares the points of the pass only" turns the random worlds across passes red too (a class check, not only the two stored worlds)',
-    redBy('[18] points only (worlds across passes)', [['    if (raised || pids.some((p) => got(p) < own(p))) {', '    if (pids.some((p) => got(p) < own(p))) {']], lateWorldsHold));
+    redBy('[18] points only (worlds across passes)', [NO_Q426, ['    if (raised || pids.some((p) => got(p) < own(p))) {', '    if (pids.some((p) => got(p) < own(p))) {']], lateWorldsHold));
   T('[18] mutation "the guard compares the points of the pass only" (the guard before the review) turns the late-teammate check red: his target goes up a level, a pass becomes a miss',
-    redBy('[18] points only', [['    if (raised || pids.some((p) => got(p) < own(p))) {', '    if (pids.some((p) => got(p) < own(p))) {']], lateHolds));
+    redBy('[18] points only', [NO_Q426, ['    if (raised || pids.some((p) => got(p) < own(p))) {', '    if (pids.some((p) => got(p) < own(p))) {']], lateHolds));
   T('[18] mutation "a level frozen LOWER gives the picks up, a higher one passes" turns the late-teammate check red (the direction: a higher level is the one that hurts)',
-    redBy('[18] direction', [['a.h !== b.h : la > lb;', 'a.h !== b.h : la < lb;']], lateHolds));
+    redBy('[18] direction', [NO_Q426, ['a.h !== b.h : la > lb;', 'a.h !== b.h : la < lb;']], lateHolds));
   T('[18] mutation "a team run counts as covered once ANY copy of it settled" turns the late-teammate check red (the exemption is for a run whose every member settled in this pass)',
-    redBy('[18] any copy', [['return e.r.every((q) => { const h = cp.hist[ratingHistKey(q, e.fam, e.s)];', 'return e.r.some((q) => { const h = cp.hist[ratingHistKey(q, e.fam, e.s)];']], lateHolds));
+    redBy('[18] any copy', [NO_Q426, ['return e.r.every((q) => { const h = cp.hist[ratingHistKey(q, e.fam, e.s)];', 'return e.r.some((q) => { const h = cp.hist[ratingHistKey(q, e.fam, e.s)];']], lateHolds));
   const PICK = ['elpPickOrders(st, pids, seasonNow | 0, nowMs, ctx);', 'new Map();'];
   T('[18] mutation "the job\'s own order always" (the settle before this rule) turns the Q402 and the Q403 checks red', redBy('[18] no pick', [PICK], q402Holds) && redBy('[18] no pick (Q403)', [PICK], q403Holds));
   const PLACE = '  return (elpRunParked(r) && !elpRunEnded(r) && i < h.runs.length - 1) ? (h.runs[i + 1][2] || 0) : (r[2] || 0);';
@@ -2119,6 +2139,225 @@ console.log('-- [19] ELP version 6: the players the three-run rule finds unplace
     /if \(!st\.elp3\) \{ st\.elp3 = \{ at: nowMs \}; stamped = true;/.test(SRC) && !/elp3 = /.test(v.elpSettleAll.toString()) && /oldUntil: elpOldUntil\(st\)/.test(v.elpSettleAll.toString())
     && v.elpSettleAll.toString().indexOf('const x = elpSeedNow(st, p, c, seasonNow | 0, nowMs);') > v.elpSettleAll.toString().indexOf('const x = elpSettleRun(st, p, c, o.h, o.r, o.fam, seasonNow | 0, nowMs, ctx);')
     && v.elpSettleAll.toString().indexOf('const x = elpSeedNow(st, p, c, seasonNow | 0, nowMs);') < v.elpSettleAll.toString().indexOf('elpTrim(e.h);') && /let ch = done\.length > 0 \|\| stamped;/.test(SRC));
+}
+
+// ---- [20] Q426 (cloud audit 2026-11-20, review M867): the runs of the other families a family short of its own runs borrows ----
+console.log('-- [20] Q426: a family short of its own runs borrows the newest runs of the others -- in the order he played them --');
+{
+  const HR = 3600000, MIN = 60000, T0 = Date.UTC(2026, 10, 25), LN = ELP.PRIOR;
+  let SEED0 = 9700; while (PP.targetOffset(SEED0) !== 0) SEED0++;   // a run seed without an offset: the target is the line itself
+  const quiet = (fn) => { const w = console.warn, l = console.log; console.warn = () => {}; console.log = () => {}; try { return fn(); } finally { console.warn = w; console.log = l; } };
+  // a world: ONE player's runs played one after another ({ fam, id, depth, start, end, seed }), the job's passes at the instants given; a run
+  //   is first seen (its one final segment) at the first pass at or after its end, the runs of one pass entering in the order played.
+  //   Returns per run id { x (its settle), placed (before it, in the job), cur (his points before it) }. opt: elpSettleAll's; st0: a state to start from
+  const seenOf = (r, passes) => passes.find((at) => at >= r.end);
+  function play(m, runs, passes, opt, st0) {
+    const st = st0 || { hist: {}, elpTab: [] }, got = new Map();
+    let lp = null;
+    for (const at of passes) {
+      for (const r of runs.filter((y) => seenOf(y, passes) === at).sort((a, b) => a.end - b.end)) m.ratingHistUpsert(st, 'P', r.fam, 0, r.id, r.depth, at, F, r.seed);
+      for (const x of quiet(() => m.elpSettleAll(st, 0, at, opt))) {
+        got.set(x.runId + '|' + x.k.split('|')[1], { x, placed: lp != null, cur: lp });
+        lp = lp == null ? (x.seeded ? x.d : null) : lp + x.d;
+      }
+    }
+    return got;
+  }
+  // what his client read for run X: every run that ended before X started, the newest first (endless-tier.js _runs) -- while a run of his
+  //   still waits for its receipt (pending: the job saw it after X started), else the row
+  const before = (runs, X) => runs.filter((y) => y !== X && y.end <= X.start).sort((a, b) => b.end - a.end).map((y) => [y.fam, y.depth]);
+  const pending = (runs, passes, X) => runs.some((y) => y !== X && y.end <= X.start && seenOf(y, passes) > X.start);
+  // the target his dial showed for X and how the job settled it (repro-q426.js, the audit's two worlds)
+  function dialAndJob(m, runs, passes, X) {
+    const b = before(runs, X), placed = b.length >= ELP.MIN_RUNS, h = PP.elpHiddenFor(X.fam, b, LN, placed ? undefined : 1);
+    const dialT = PP.targetOf(0, LN[X.fam], X.seed, h, !placed), g = play(m, runs, passes).get(X.id + '|' + X.fam), x = g && g.x;
+    return { dialT, h, T: x ? x.T : null, pass: x ? x.pass : null, d: x ? x.d : null, hurt: !!x && X.depth >= dialT && (!x.pass || x.d < 0) };
+  }
+  const solo = (id, depth, end) => ({ fam: 'solo', id, depth, start: end - 30 * MIN, end, seed: id });
+  // world 1, a tie: the job first sees solo #4 (ended before trio X started), X and solo #5 (played after X) in one pass, an hour after X.
+  //   Trio holds two runs of its own and borrows one: his client borrowed #4 (depth 6); the job tried "both solo runs" (it reads #5,
+  //   depth 10) and "neither" (the solo run before them, depth 10) -- the line went up, a pass on his dial became a miss
+  const W1 = (() => {
+    const P1 = T0 + 30 * MIN, P2 = T0 + 4 * HR, P3 = T0 + 10 * HR;
+    const X = { fam: 'trio', id: 203, depth: 12, start: T0 + 8 * HR + 5 * MIN, end: T0 + 8 * HR + 40 * MIN, seed: SEED0 };
+    return { passes: [P1, P2, P3], X, runs: [solo(101, 10, T0), solo(102, 10, T0 + 5 * MIN), solo(103, 10, T0 + 10 * MIN),
+      { fam: 'trio', id: 201, depth: 24, start: T0 + 2 * HR, end: T0 + 2.5 * HR, seed: 201 }, { fam: 'trio', id: 202, depth: 8, start: T0 + 3 * HR, end: T0 + 3.5 * HR, seed: 202 },
+      solo(104, 6, T0 + 8 * HR), X, solo(105, 10, T0 + 9 * HR)] };
+  })();
+  // world 2, an earlier tick: duo D (played first, run id 302) and trio R (played second, run id 301) first seen in one pass; quad X started
+  //   after both, before that pass, and borrows one run: his client borrowed R (depth 3), the job took the higher run id, D (depth 30)
+  const W2 = (() => {
+    const P1 = T0 + 30 * MIN, P2 = T0 + 4 * HR, P3 = T0 + 8 * HR, P4 = T0 + 9 * HR;
+    const X = { fam: 'quad', id: 403, depth: 15, start: T0 + 7.5 * HR + 5 * MIN, end: T0 + 8.5 * HR, seed: SEED0 };
+    return { passes: [P1, P2, P3, P4], X, runs: [solo(101, 10, T0), solo(102, 10, T0 + 5 * MIN), solo(103, 10, T0 + 10 * MIN),
+      { fam: 'quad', id: 401, depth: 10, start: T0 + 2 * HR, end: T0 + 2.5 * HR, seed: 401 }, { fam: 'quad', id: 402, depth: 40, start: T0 + 3 * HR, end: T0 + 3.5 * HR, seed: 402 },
+      { fam: 'duo', id: 302, depth: 30, start: T0 + 6 * HR, end: T0 + 6.5 * HR, seed: 302 }, { fam: 'trio', id: 301, depth: 3, start: T0 + 7 * HR, end: T0 + 7.5 * HR, seed: 301 }, X] };
+  })();
+  const w1 = (m) => dialAndJob(m, W1.runs, W1.passes, W1.X), w2 = (m) => dialAndJob(m, W2.runs, W2.passes, W2.X);
+  const w1Holds = (m) => { const r = w1(m); return !r.hurt && r.T <= r.dialT; }, w2Holds = (m) => { const r = w2(m); return !r.hurt && r.T <= r.dialT; };
+  // world 3, a run parked in the tie (review round 1, M867 Q426 review world 3: its repro-q426-saved.js): world 1 with solo #4 saved at depth 6 at
+  //   8:00 (before trio X started at 8:05; his client holds a parked run at its save depth and borrows it), resumed after X ended (8:40) and
+  //   finished at depth 20 (9:00), then solo #5 (depth 10). The job first sees #4 (the save segment and the final one), X and #5 in one pass.
+  //   Only the reading "the tie without #5, #4 at its save depth" is his: the job's own and "the tie whole / none" borrow #5 or the solo run
+  //   before them (target 16), the new lists without the save depth borrow #4 at 20 (target 24) -- the reading sits in the saved branch alone
+  const W3 = (() => {
+    const P1 = T0 + 30 * MIN, P2 = T0 + 4 * HR, P3 = T0 + 10 * HR;
+    // segments in the order they reach the lane: [pass, fam, id, depth, flags, seed]
+    const segs = [[P1, 'solo', 101, 10, F, 101], [P1, 'solo', 102, 10, F, 102], [P1, 'solo', 103, 10, F, 103], [P2, 'trio', 201, 24, F, 201], [P2, 'trio', 202, 8, F, 202],
+      [P3, 'solo', 104, 6, SUS, 104], [P3, 'trio', 203, 12, F, SEED0], [P3, 'solo', 104, 20, F, 104], [P3, 'solo', 105, 10, F, 105]];
+    // his client when X started, newest first: #4 at its save depth, trio 202, 201, solo 103..101 (placed: six runs before)
+    const b = [['solo', 6], ['trio', 8], ['trio', 24], ['solo', 10], ['solo', 10], ['solo', 10]];
+    return { passes: [P1, P2, P3], segs, dialT: PP.targetOf(0, LN.trio, SEED0, PP.elpHiddenFor('trio', b, LN), false) };
+  })();
+  const w3 = (m) => {
+    const st = { hist: {}, elpTab: [] }; let x = null;
+    for (const at of W3.passes) {
+      for (const g of W3.segs.filter((y) => y[0] === at)) m.ratingHistUpsert(st, 'P', g[1], 0, g[2], g[3], at, g[4], g[5]);
+      for (const o of quiet(() => m.elpSettleAll(st, 0, at))) if (o.runId === 203 && o.k.split('|')[1] === 'trio') x = o;
+    }
+    return { dialT: W3.dialT, T: x ? x.T : null, pass: x ? x.pass : null, d: x ? x.d : null, hurt: !!x && 12 >= W3.dialT && (!x.pass || x.d < 0) };
+  };
+  const w3Holds = (m) => { const r = w3(m); return !r.hurt && r.T != null && r.T <= r.dialT; };
+  // random worlds: one player, five to thirteen runs of the four families one after another (run ids in no order), passes 25 min to 6 h apart
+  function gen(seed) {
+    let s = seed >>> 0;
+    const rnd = () => { s = (Math.imul(s, 1103515245) + 12345) >>> 0; return s / 4294967296; }, ri = (a, b) => a + Math.floor(rnd() * (b - a + 1));
+    const FAMS = ['solo', 'solo', 'duo', 'trio', 'quad'], runs = [], ids = new Set();
+    let t = T0;
+    for (let i = ri(5, 13); i > 0; i--) {
+      const start = t + ri(1, 50) * MIN, end = start + ri(8, 45) * MIN;
+      let id; do id = ri(1, 99999); while (ids.has(id)); ids.add(id);
+      runs.push({ fam: FAMS[ri(0, 4)], id, depth: ri(0, 36), start, end, seed: 7000 + ri(0, 9999) }); t = end;
+    }
+    const passes = []; let p = T0 + ri(10, 90) * MIN;
+    for (;;) { passes.push(p); if (p >= t) break; p += ri(25, 360) * MIN; }
+    return { runs, passes };
+  }
+  // (a) the readings: a copy that hands out the lists a settle read (befores) and the counts (mins). For every run his client read from its
+  //   own history (a run still pending), the skill it read -- for each count the job takes, as a placement run (min 1) and as a points
+  //   run -- is the skill of one of the job's lists. old: inside the old-client window (st.elp3: the counts 3 and 5)
+  const EXPOSE = ['  return { d, T, pass, seeded, teamH, alts, held };', '  return { d, T, pass, seeded, teamH, alts, held, befores, mins };'];
+  function readingsOracle(m, n, old) {
+    const o = { checked: 0, miss: 0, borrowed: 0, first: null };
+    for (let w = 0; w < n; w++) {
+      const { runs, passes } = gen(4260 + w), got = play(m, runs, passes, undefined, { hist: {}, elpTab: [], elp3: old ? { at: T0 } : undefined });
+      for (const X of runs) {
+        const g = got.get(X.id + '|' + X.fam);
+        if (!g || !pending(runs, passes, X)) continue;
+        const b = before(runs, X);
+        for (const mn of g.x.mins) for (const min of [undefined, 1]) {
+          const h = PP.elpHiddenFor(X.fam, b, LN, min, mn), hs = g.x.befores.map((L) => PP.elpHiddenFor(X.fam, L, LN, min, mn));
+          o.checked++;
+          if (hs.indexOf(h) < 0) { o.miss++; if (!o.first) o.first = { w, run: X.id, fam: X.fam, mn, min, h, hs }; }
+          else if (hs[0] !== h) o.borrowed++;
+        }
+      }
+    }
+    return o;
+  }
+  // (b) only added: the same worlds settled in the job's own orders (picks off: both copies settle the same runs in the same order) by the
+  //   code and by a copy without the Q426 lists -- every list of the copy is among the code's, the job's own first; no list twice; past them
+  //   at most ELP_BORROW_CAP lists, each borrowing for some count (elpBorrowCounts) a set of runs no list before it borrows
+  function onlyAdded(m, m0, n) {
+    const o = { settles: 0, extra: 0, bad: 0, first: null };
+    const sig = (L, fam, k) => L.filter((x) => x[0] !== fam).slice(0, k).map((x) => x[0] + ':' + (x[1] | 0)).sort().join(',');
+    for (let w = 0; w < n; w++) {
+      const { runs, passes } = gen(4260 + w), st0 = () => ({ hist: {}, elpTab: [], elp3: { at: T0 } });
+      const a = play(m, runs, passes, { picks: null }, st0()), b = play(m0, runs, passes, { picks: null }, st0());
+      for (const [key, g] of a) {
+        const B = g.x.befores.map((L) => JSON.stringify(L)), B0 = b.get(key).x.befores.map((L) => JSON.stringify(L)), fam = key.split('|')[1], set0 = new Set(B0);
+        const own = Math.min(ELP.WINDOW, g.x.befores[0].filter((x) => x[0] === fam).length);
+        const ks = [...new Set(g.x.mins.map((mn) => (mn == null ? ELP.MIN_RUNS : mn) - own).filter((k) => k >= 1))];
+        const sigs = ks.map(() => new Set());
+        let fine = B[0] === B0[0] && B0.every((x) => B.indexOf(x) >= 0) && new Set(B).size === B.length, extra = 0;
+        g.x.befores.forEach((L, i) => {
+          const gs = ks.map((k) => sig(L, fam, k));
+          if (!set0.has(B[i])) { extra++; if (!gs.some((x, j) => !sigs[j].has(x))) fine = false; }
+          gs.forEach((x, j) => sigs[j].add(x));
+        });
+        if (extra > v.ELP_BORROW_CAP) fine = false;
+        o.settles++; o.extra += extra;
+        if (!fine) { o.bad++; if (!o.first) o.first = { w, key, B, B0 }; }
+      }
+    }
+    return o;
+  }
+  // (c) the points: the code itself (no copy), the job's picks on, outside the window -- every run his client read from its own history and
+  //   the job settled with the placement as his client had it: a placement run's target no higher than his dial; a points run leaves
+  //   him no less than the settle at the reading his client took
+  function pointsOracle(m, n) {
+    const o = { checked: 0, worse: 0, other: 0, first: null };
+    for (let w = 0; w < n; w++) {
+      const { runs, passes } = gen(4260 + w), got = play(m, runs, passes);
+      for (const X of runs) {
+        const g = got.get(X.id + '|' + X.fam);
+        if (!g || !pending(runs, passes, X)) continue;
+        const b = before(runs, X), placed = b.length >= ELP.MIN_RUNS;
+        if (placed !== g.placed) { o.other++; continue; }
+        o.checked++;
+        let fine;
+        if (!placed) fine = g.x.T <= PP.targetOf(0, LN[X.fam], X.seed, PP.elpHiddenFor(X.fam, b, LN, 1), true);
+        else {
+          const H = PP.elpHiddenFor(X.fam, b, LN), t = PP.targetOf(g.cur, LN[X.fam], X.seed, H, false);
+          fine = g.cur + g.x.d >= PP.endlessSettle(g.cur, X.depth >= t, H, LN[X.fam], PP.targetOffset(X.seed), X.fam).nv;
+        }
+        if (!fine) { o.worse++; if (!o.first) o.first = { w, run: X.id, fam: X.fam, placed, x: g.x }; }
+      }
+    }
+    return o;
+  }
+  const NO_Q426 = ['    if (tieAll && (!saved || use.some((it) => it.save != null))) for (const list of elpBorrowOrders(use, fam, at, saved, ks)) addMore(list);   // Q426 (the tie cut whole = the reading without it; no save depth = the reading without them)\n', ''];
+  const N = 300;
+  let VX = null, VX0 = null;
+  try { VX = mutantOf([EXPOSE]); VX0 = mutantOf([EXPOSE, NO_Q426]); } catch (e) { bad('[20] the copies that hand out the readings: ' + e.message); }
+  { const r1 = w1(v), r2 = w2(v);
+    T('[20] world 1, a tie (solo #4 played before trio X, solo #5 after it, all three first seen in one pass): the job reads what his client borrowed (solo #4, depth 6) -- target ' + r1.T + ' = his dial ' + r1.dialT + ', depth 12 a pass, ' + (r1.d > 0 ? '+' : '') + r1.d, r1.T === r1.dialT && r1.pass === true && r1.d > 0 && !r1.hurt, JSON.stringify(r1));
+    T('[20] world 2, an earlier tick (duo D played first with the higher run id, trio R second, first seen together): quad X reads R as his client did -- target ' + r2.T + ' = his dial ' + r2.dialT + ', depth 15 a pass, ' + (r2.d > 0 ? '+' : '') + r2.d, r2.T === r2.dialT && r2.pass === true && r2.d > 0 && !r2.hurt, JSON.stringify(r2));
+    const r3 = w3(v);
+    T('[20] world 3, a run of another family parked in the tie (solo #4 saved at depth 6 before trio X started, resumed and finished at 20 after it, solo #5 after that, all first seen in one pass): the job reads #4 at its save depth as his client did -- target ' + r3.T + ' = his dial ' + r3.dialT + ', depth 12 a pass, ' + (r3.d > 0 ? '+' : '') + r3.d, r3.T === r3.dialT && r3.pass === true && r3.d > 0 && !r3.hurt, JSON.stringify(r3));
+  }
+  if (VX && VX0) {
+    const a = readingsOracle(VX, N, false), b = readingsOracle(VX, N, true);
+    T('[20] ' + N + ' random worlds (one player, the four families played one after another, run ids in no order, passes 25 min to 6 h apart): every skill his client read from its own history is among the job\'s readings -- ' + a.checked + ' readings, ' + a.miss + ' missing; inside the old-client window (the counts 3 and 5) ' + b.checked + ', ' + b.miss + ' missing',
+      a.miss === 0 && b.miss === 0, JSON.stringify(a.first || b.first));
+    const a0 = readingsOracle(VX0, N, false), b0 = readingsOracle(VX0, N, true);
+    T('[20] ... and the worlds are not trivial: ' + (a.borrowed + b.borrowed) + ' of those readings are not the job\'s own (another order of the borrowed runs); without the Q426 lists ' + (a0.miss + b0.miss) + ' of them are missing',
+      a.borrowed + b.borrowed > 0 && a0.miss > 0 && b0.miss > 0);
+    const c = onlyAdded(VX, VX0, N);
+    T('[20] the readings are only added (' + c.settles + ' settles, the job\'s own orders): every list the job read before is still read, its own first; no list twice; ' + c.extra + ' new lists, at most ' + v.ELP_BORROW_CAP + ' a run, each borrowing a set of runs no list before it borrows', c.bad === 0 && c.extra > 0, JSON.stringify(c.first));
+  }
+  { const p = pointsOracle(v, N);
+    T('[20] the points (the code itself, the picks on): ' + p.checked + ' runs his client read from its own history -- no placement run reads a target above his dial, no points run leaves him less than the reading his client took (' + p.worse + '; ' + p.other + ' runs the job placed otherwise than his client, left to [18])', p.worse === 0 && p.checked > 0, JSON.stringify(p.first));
+  }
+  // wiring: both readers pass the counts of the settle
+  T('[20] wiring: the settle and the member reading pass elpMins(ctx, at) to elpBeforeLists (the counts the borrowing is made for), the only two callers; every walk of elpBorrowOrders stops once it holds ELP_BORROW_LEAVES lists (a pass that sees dozens of runs at once stays seconds, not minutes)',
+    SRC.indexOf('elpBeforeLists(st, p, s, fam, r[0] >>> 0, at, (ctx && ctx.order && ctx.order.has(p)) ? ctx.order.get(p) : null, elpMins(ctx, at))') > 0
+    && SRC.indexOf('elpBeforeLists(st, p, s, fam, runId, at, elpOrderOf(ctx, st, p, s, nowMs), elpMins(ctx, at))') > 0 && (SRC.match(/elpBeforeLists\(/g) || []).length === 3
+    && (v.elpBorrowOrders.toString().match(/out\.length >= ELP_BORROW_LEAVES/g) || []).length === 4);
+  // mutations
+  if (VX) {
+    const NONE_ALL = [['        for (let a = 0; a + c.get(f) <= len(f); a++) { d.set(f, a); go(j + 1); }', '        for (let a = 0; a + c.get(f) <= len(f) && a < 1; a++) { d.set(f, a); go(j + 1); }'],
+      ['      for (let a = 0; a <= len(tf[j]); a++) { d.set(tf[j], a); go(j + 1, left + len(tf[j]) - a); }', '      for (const a of [0, len(tf[j])]) { d.set(tf[j], a); go(j + 1, left + len(tf[j]) - a); }']];
+    const TIE_ONLY = [['  if (!open) return [];', '  if (!tie) return [];']];
+    const COUNTS = [['  for (const mn of ((Array.isArray(mins) && mins.length) ? mins : [undefined])) {', '  for (const mn of [undefined]) {']];
+    const ALWAYS = [['if (more < ELP_BORROW_CAP && g.some((x, i) => !sigs[i].has(x))) {', 'if (more < ELP_BORROW_CAP) {']];
+    const NO_SAVED = [['  if (need < 1) return [];', '  if (need < 1 || saved) return [];']];
+    const NO_SAVE_DEPTH = [['  const dep = (it) => (saved && it.save != null) ? it.save : (it.r[1] | 0), out = [], NO_CUT = new Set();', '  const dep = (it) => (it.r[1] | 0), out = [], NO_CUT = new Set();']];
+    const missOf = (pairs, old) => { let mm = null; try { mm = mutantOf([EXPOSE].concat(pairs)); } catch (e) { bad('[20] ' + e.message); return 0; } return readingsOracle(mm, N, old).miss; };
+    T('[20] mutation "no Q426 lists" (the call taken out) turns both worlds red (the line his dial did not show: a miss and points taken)', redBy('[20] no Q426', [NO_Q426], w1Holds) && redBy('[20] no Q426', [NO_Q426], w2Holds));
+    T('[20] mutation "the runs of a tie count none or all of them" (before Q426) turns world 1 and the random worlds red; world 2 (no tie) holds',
+      redBy('[20] none / all', NONE_ALL, w1Holds) && !redBy('[20] none / all (control)', NONE_ALL, w2Holds) && missOf(NONE_ALL, false) > 0);
+    T('[20] mutation "only a tie is a choice" (the runs of several families first seen together at an earlier tick in the job\'s order) turns world 2 and the random worlds red; world 1 holds',
+      redBy('[20] tie only', TIE_ONLY, w2Holds) && !redBy('[20] tie only (control)', TIE_ONLY, w1Holds) && missOf(TIE_ONLY, false) > 0);
+    T('[20] mutation "no new lists for the reading with the save depths" (the saved branch) turns world 3 red (a miss, points taken); worlds 1 and 2 hold',
+      redBy('[20] no saved lists', NO_SAVED, w3Holds) && !redBy('[20] no saved lists (control 1)', NO_SAVED, w1Holds) && !redBy('[20] no saved lists (control 2)', NO_SAVED, w2Holds));
+    T('[20] mutation "the new lists read a parked run at its final depth" (no save depth) turns world 3 red; worlds 1 and 2 hold',
+      redBy('[20] no save depth', NO_SAVE_DEPTH, w3Holds) && !redBy('[20] no save depth (control 1)', NO_SAVE_DEPTH, w1Holds) && !redBy('[20] no save depth (control 2)', NO_SAVE_DEPTH, w2Holds));
+    T('[20] mutation "no Q426 lists" turns world 3 red too', redBy('[20] no Q426 (world 3)', [NO_Q426], w3Holds));
+    T('[20] mutation "the borrowing made for the count 3 only" turns the random worlds inside the old-client window red (a five-run client borrows more); outside it they hold',
+      missOf(COUNTS, true) > 0 && missOf(COUNTS, false) === 0);
+    T('[20] mutation "every list added" (no check that it borrows something new) turns the only-added check red', (() => { let mm = null; try { mm = mutantOf([EXPOSE].concat(ALWAYS)); } catch (e) { bad('[20] ' + e.message); return false; } return onlyAdded(mm, VX0, N).bad > 0; })());
+  }
 }
 
 if (failN) { console.log('FAIL (endless-rating) ' + failN); process.exit(1); } else console.log('ALL PASS (endless-rating)');
