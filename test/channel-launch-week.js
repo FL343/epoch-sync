@@ -1,6 +1,6 @@
 'use strict';
 // O777 (2026-11-09, user ruling under architecture decision 10): the full game's launch week (EA 2026-11-17, the window to
-// 2026-12-01T12:26:00Z in validate.yml since 2026-11-18, was 2026-11-24T12:26:00Z) is lenient with leaves on the MAIN channel -- a brand-new anti-cheat chain and the
+// 2026-12-15T12:26:00Z in validate.yml since 2026-11-22, before that 2026-12-01T12:26:00Z from 2026-11-18, first 2026-11-24T12:26:00Z) is lenient with leaves on the MAIN channel -- a brand-new anti-cheat chain and the
 // first-boot crash of dual-GPU laptops had not met real players, and a hard crash the player cannot come back from within
 // the hour is convicted as a leave. test/channel-leaver-record-only.js pins the XP switch per channel; this file pins the rest:
 //   [1] the ranked leave fine of the window (leaverLpFineOf): LEAVER_LP_EASY (a whole number 0..LEAVER_LP_PENALTY) until
