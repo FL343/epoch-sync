@@ -502,7 +502,8 @@
       "pubInfo": {
         "2a75a1927ce0a21bdb5f9bfd9dfd85eb9775f2d7c5ed134728670548d34d5508": {
           "ch": "ea",
-          "elp": 7
+          "elp": 7,
+          "retiredAt": "2026-11-22T17:47:36.098Z"
         }
       }
     },
