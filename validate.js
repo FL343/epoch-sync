@@ -8112,6 +8112,17 @@ function ratingOwed(st, seasonId, have) {
   }
   return out;
 }
+// O976: the rows owed less the keys Steam answered 27 (no longer owns the app) less than OV_GONE_MS ago (gone = soloState.ovGone)
+function ratingOwedLive(owed, gone, nowMs) {
+  const out = new Set();
+  for (const p of owed || []) if (!appGone(gone, p, nowMs)) out.add(p);
+  return out;
+}
+// O976: Steam's result code in the answer to a board write (null = the answer carries none)
+function ratingWriteCode(r) {
+  const x = r && r.json && r.json.result ? r.json.result.result : null;
+  return x == null || !Number.isFinite(Number(x)) ? null : Number(x);
+}
 // writes / deletes for the points board: existing = { sid: { s, det } } rows on the board, touched = sids settled this run. A couch
 //   run sits on 'duo' while merged (couchRatingFam) and settles onto the account's points; a split leaves it on 'duoc' (no points).
 function ratingPlan(st, seasonId, existing, touched, nowMs) {
@@ -12302,8 +12313,22 @@ async function main() {
           //   account that ever finished a game: its ids resolve the salted keys. Tried in a run that settled something and once
           //   an hour (a failed write); a fully banned account is left alone (the sanctions tool moves its rows), and so is
           //   everybody while the ban board cannot be read.
+          // O976 (live 2026-11-22): the rows of the same placed players came back HTTP 200 with a result other than 1 on every run since
+          //   the rows owed went live (2026-11-21 15:41Z: 7 accounts; 12 once the ELP version 7 cutover settled five more placements) --
+          //   each played 3-5 runs inside an hour and was never seen again, one had already been answered 27 on his xp row: accounts
+          //   that no longer own the app (a refund). The writer took no notice of the code: a warning a write, every run. Now the
+          //   per-account memory of the composite rows and the classic repack (soloState.ovGone, see appGone) covers these rows too:
+          //   a 27 marks him (a log line, no warning); while the mark is fresh his key is left out of the rows owed (no xp board
+          //   lookup for him) and a row of his is not sent unless he has a record this run (a player who bought the app back gets
+          //   his row at once); a row that lands clears his mark; any other failure warns with Steam's code and the start of its
+          //   answer. The marks are saved right here: a quiet run saves the chain memory only on its own changes, and the settle
+          //   saved it before the projection.
+          const fresh = new Set(touched || []), gone = st.ovGone || (st.ovGone = {});
+          let goneCh = false;
           try {
-            const owed = ratingOwed(st, seasonId, new Set([...Object.keys(existing), ...(touched || [])].map((x) => pid(String(x)))));
+            const owedAll = ratingOwed(st, seasonId, new Set([...Object.keys(existing), ...(touched || [])].map((x) => pid(String(x)))));
+            const owed = ratingOwedLive(owedAll, gone, nowMs), away = owedAll.size - owed.size;
+            if (away && owedAll.size && ((RUN.elpSettled | 0) > 0 || new Date(nowMs).getUTCMinutes() < 5)) console.log('rating: ' + away + ' placed player(s) without a row left out of the lookup -- Steam answered 27 (no longer owns the app) for a row of theirs less than 7 days ago (O976)');
             if (owed.size && touched && typeof touched.add === 'function' && ((RUN.elpSettled | 0) > 0 || new Date(nowMs).getUTCMinutes() < 5)) {
               const xpId0 = XP_LB ? byName0(XP_LB) : null, bans = await banSetOnce();
               let found = 0, banned = 0;
@@ -12315,14 +12340,21 @@ async function main() {
             }
           } catch (e) { ghWarn('rating: the rows owed could not be resolved (' + String((e && e.message) || e).slice(0, 100) + ') -- tried again later'); }
           const plan = ratingPlan(st, seasonId, existing, touched, nowMs);
-          wN += plan.writes.length; dN += plan.deletes.length;
-          if (plan.writes.length || plan.deletes.length) console.log('rating: ' + plan.writes.length + ' writes [' + plan.writes.map((w) => plog(w.sid) + '=' + w.score).join(' ') + '], ' + plan.deletes.length + ' deletes [' + plan.deletes.map(plog).join(' ') + ']');
+          const held = plan.writes.filter((w) => appGone(gone, pid(w.sid), nowMs) && !fresh.has(w.sid));   // O976
+          const writes = held.length ? plan.writes.filter((w) => held.indexOf(w) < 0) : plan.writes;
+          wN += writes.length; dN += plan.deletes.length;
+          if (writes.length || plan.deletes.length) console.log('rating: ' + writes.length + ' writes [' + writes.map((w) => plog(w.sid) + '=' + w.score).join(' ') + '], ' + plan.deletes.length + ' deletes [' + plan.deletes.map(plog).join(' ') + ']');
+          if (held.length) console.log('rating: ' + held.length + ' row(s) of accounts that no longer own the app not sent -- Steam answered 27 for a row of theirs less than 7 days ago, no record of theirs this run (O976)');
           if (APPLY_MMR) {
-            for (const w of plan.writes) {
+            for (const w of writes) {
               const r = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: bid, steamid: w.sid, score: w.score, scoremethod: 'ForceUpdate', format: 'json' }, w.details);
               const okW = r.ok && !(r.json && r.json.result && r.json.result.result && r.json.result.result !== 1);
-              if (okW) existing[w.sid] = { s: w.score, det: w.details }; else ghWarn('rating write failed ' + plog(w.sid) + ': HTTP ' + r.status);
+              const code = ratingWriteCode(r), p = pid(w.sid);
+              if (okW) { existing[w.sid] = { s: w.score, det: w.details }; if (Object.prototype.hasOwnProperty.call(gone, p)) { delete gone[p]; goneCh = true; } }
+              else if (code === 27) { gone[p] = nowMs; goneCh = true; console.log('  rating ' + plog(w.sid) + ': result 27 (no longer owns the app) -> his row not sent for 7 days unless he has a record (O976)'); }
+              else ghWarn('rating write failed ' + plog(w.sid) + ': HTTP ' + r.status + (code != null ? ' result ' + code : '') + ' ' + String(r.text || '').slice(0, 140));
             }
+            if (goneCh) saveSolo(st, nowMs);   // O976: the marks go with the chain memory whichever exit called (see above)
             for (const sid of plan.deletes) {
               const r = await postForm('/ISteamLeaderboards/DeleteLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: bid, steamid: sid, format: 'json' });
               if (r.ok) delete existing[sid]; else ghWarn('rating delete failed ' + plog(sid) + ': HTTP ' + r.status);
@@ -16512,7 +16544,7 @@ Object.assign(module.exports, { pruneFlagged, flagBaseKey, FLAG_PRUNE_WAIT_MS, b
 Object.assign(module.exports, { lateWriterRoster });   // cloud audit Q261 a 1V1 whose result writer's own start was first read with his result
 Object.assign(module.exports, { lone1v1Spoiled, lone1v1VoidClaims });   // cloud audit Q216 a ranked 1V1 whose loser wrote only records the job cannot use
 Object.assign(module.exports, { teamXpFloor, teamXpStarts, teamXpMark, teamRollbackPlan });   // cloud audit Q237 team competitive XP floors (test/team-comp-ghost-xp.js)
-Object.assign(module.exports, { RATING, RATING_FAMS, ENDLESS_RATING_LB, ELP_ALL, elpAllKey, elpAllOf, elpEntryOk, elpFamEntries, elpMergeByStart, elpPassOrder, elpPlaceAt, elpLeftOf, elpOldUntil, elpMins, elpSeedNow, ratingOwed, elpPassOrders, elpTryOrder, elpPickOrders, ELP_ORDER_CAP, SEASON_UNSCHEDULED, elpSettledRuns, elpRunsBefore, elpSaveAt, elpOpenAt, elpBeforeItems, elpBeforeLists, elpBorrowCounts, elpBorrowOrders, ELP_BORROW_CAP, elpRowSkill, elpMemberReadings, elpTeamPick, elpLinesByFam, elpSkillsOf, elpCandidateTabs, ENDLESS_RATING_LB_SOLO, ENDLESS_RATING_LB_DUO, ENDLESS_RATING_LB_TRIO, ENDLESS_RATING_LB_QUAD, ENDLESS_TIERCUT_LB, ratingFamOf, fnv32, ratingRunId, ratingHistKey,
+Object.assign(module.exports, { RATING, RATING_FAMS, ENDLESS_RATING_LB, ELP_ALL, elpAllKey, elpAllOf, elpEntryOk, elpFamEntries, elpMergeByStart, elpPassOrder, elpPlaceAt, elpLeftOf, elpOldUntil, elpMins, elpSeedNow, ratingOwed, ratingOwedLive, ratingWriteCode, elpPassOrders, elpTryOrder, elpPickOrders, ELP_ORDER_CAP, SEASON_UNSCHEDULED, elpSettledRuns, elpRunsBefore, elpSaveAt, elpOpenAt, elpBeforeItems, elpBeforeLists, elpBorrowCounts, elpBorrowOrders, ELP_BORROW_CAP, elpRowSkill, elpMemberReadings, elpTeamPick, elpLinesByFam, elpSkillsOf, elpCandidateTabs, ENDLESS_RATING_LB_SOLO, ENDLESS_RATING_LB_DUO, ENDLESS_RATING_LB_TRIO, ENDLESS_RATING_LB_QUAD, ENDLESS_TIERCUT_LB, ratingFamOf, fnv32, ratingRunId, ratingHistKey,
   ratingHistUpsert, ratingHistRemove, ratingHistFinal, elpRunRk, ratingScoreOf, ratingPlan, ratingTierOf, tiercutDay, tiercutEncode, tiercutDecode, tiercutDue, pruneRatingHist,
   elpSettledDepths, elpLinesAt, elpCandidates, elpSettleRun, elpTrim, elpSettleAll, elpRunReady, elpPendingSettles, elpTeamNote, elpMemberHiddenBefore, elpTeamHidden, elpTeamTrim, elpLinesOf, elpHiddensOf, elpLinesSkipBanned, elpTableKey, elpTabNewest, elpTabRecord });
 Object.assign(module.exports, { ELP_R_V7, ELP_R_QUIT, elpSegLv, elpTabVer, elpPriorPub, elpLevelBefore, elpMemberLevelBefore, elpTeamLevel, elpRowFresh, elpRowLevel, elpSettleRunLv, elpLevelReplay });   // O942 version 7 (test/endless-level.js)
