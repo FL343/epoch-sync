@@ -7778,6 +7778,21 @@ const elpLvArr = (x, placing) => [x.L, x.Lm, x.s, x.last, x.run, placing == null
 const elpLvOfArr = (a) => (Array.isArray(a) && a.length >= 5) ? pointsPlan.elpLevelOf({ L: a[0], Lm: a[1], s: a[2], last: a[3], run: a[4] }) : null;
 // distinct level states (null left out), the first kept first
 function elpLvUniq(xs) { const out = [], seen = new Set(); for (const x of xs) { if (!x) continue; const k = JSON.stringify(x); if (!seen.has(k)) { seen.add(k); out.push(x); } } return out; }
+// Q432 (2026-11-22, P0): the 0.6.1 client never read its row back (its decodeRow dropped the row's levels), so its level walked its
+//   own chain from its own start. Carrying only the lowest reading (rule (c) of the plan's section 13) loses that chain as soon as
+//   the readings differ, and a run his client ended AT ITS LINE ("target reached" on his screen) is judged a miss. So every reading a
+//   run kept (elpLvChoose's outs: each stepped by its own result) is carried on as a set -- the points entry's c.lvs[fam] (the job's
+//   own lowest first, then the rest by level, at most ELP_LV_SET_MAX) and the run's r[12] (the set after it, as elpLvArr rows) for a
+//   later team reading -- and the next run reads the whole set (simulation, companion repo archive/O991_GROW_2026-11-23 / the job's
+//   own rules: line-ends judged misses 2-8 % -> 0, misses judged passes about 1 %, the player's favour, architecture decision 10).
+//   c.lv[fam] (the row's v3 level, what a fixed client reads) stays the lowest; a conviction's replay collapses the set to its chain.
+const ELP_LV_SET_MAX = 8;
+function elpLvSetOf(low, outs) {
+  const rest = elpLvUniq(outs || []).filter((x) => x !== low).sort((a, b) => (a.L - b.L) || (a.Lm - b.Lm));
+  return elpLvUniq([low].concat(rest)).slice(0, ELP_LV_SET_MAX);
+}
+function elpLvSet(c, fam) { const a = (c && c.lvs && Array.isArray(c.lvs[fam])) ? c.lvs[fam] : []; return a.map((x) => pointsPlan.elpLevelOf(x)).filter(Boolean); }
+function elpLvSetOfArrs(a) { return Array.isArray(a) ? a.map(elpLvOfArr).filter(Boolean) : []; }
 // the states player p's level of family fam may have started from for run runId (first seen at `at`; no version 7 run of the family
 //   settled before it), the job's own first (second opinion 2026-11-21 night: the job read one, a client holding another table or
 //   another list of runs started elsewhere): elpLevelInit of every reading of the version 6 skill his client may have held -- the runs
@@ -7802,7 +7817,7 @@ function elpLevelStarts(st, p, fam, s, runId, at, nowMs, ctx, own, minRuns) {
 //   mean of his runs so far, none the silver line)
 function elpLevelBefore(st, p, c, fam, s, r, at, nowMs, ctx) {
   const have = c && c.lv ? pointsPlan.elpLevelOf(c.lv[fam]) : null;
-  if (have) return [have];
+  if (have) return elpLvUniq([have].concat(elpLvSet(c, fam)));   // Q432: and every reading carried with it
   const lines = elpLinesByFam(st, s, at, Infinity), mr = (c && c.placed) ? undefined : 1;
   const b = elpRunsBefore(st, p, s, fam, r[0] >>> 0, at, elpOrderOf(ctx, st, p, s, nowMs));
   const H = b.runs.length ? pointsPlan.elpHiddenFor(fam, b.runs, lines, mr) : null;
@@ -7817,9 +7832,9 @@ function elpMemberLevelBefore(st, q, fam, s, runId, at, nowMs, ctx) {
   for (const x of ((h && Array.isArray(h.runs)) ? h.runs : [])) {
     if ((x[0] >>> 0) === (runId >>> 0) || !x[3] || !((x[7] | 0) & ELP_R_V7) || !((x[2] || 0) < at)) continue;
     const lv = elpLvOfArr(x[11]);
-    if (lv && (!last || (x[2] || 0) >= last.t)) last = { t: x[2] || 0, lv };
+    if (lv && (!last || (x[2] || 0) >= last.t)) last = { t: x[2] || 0, lv, set: x[12] };
   }
-  if (last) return elpLvUniq([last.lv, elpRowLevel(ctx, q, fam, runId, at)]);
+  if (last) return elpLvUniq([last.lv, elpRowLevel(ctx, q, fam, runId, at)].concat(elpLvSetOfArrs(last.set)));   // Q432: the set his run carried
   return elpLevelStarts(st, q, fam, s, runId, at, nowMs, ctx, elpMemberHiddenBefore(st, q, fam, s, runId, at, nowMs, ctx), 1);
 }
 // D5: the lines a version 7 team run's target may have read, frozen in the run's team entry at its first settle (hasLv), so every
@@ -7912,6 +7927,8 @@ function elpSettleRunLv(st, p, c, h, r, fam, s, nowMs, ctx) {
   }
   r[10] = elpLvArr(ch.carry.rd.x, placing).concat([ch.carry.t]); r[11] = elpLvArr(after, placing);
   (c.lv = c.lv || {})[fam] = after;
+  const set = elpLvSetOf(after, ch.outs);   // Q432: every reading this run kept goes on (his 0.6.1 client's own chain is one of them)
+  (c.lvs = c.lvs || {})[fam] = set; r[12] = set.map((x) => elpLvArr(x, placing));
   r[3] = 2; r[4] = d; r[5] = T;
   c.n = (c.n | 0) + 1; c.t = nowMs;
   c.ring = receiptPush(c.ring || [], elpRunRk(s, r[8]), d, flags, 0xff);
@@ -7931,8 +7948,76 @@ function elpLevelReplay(c, h, fam, gone) {
     r[10] = elpLvArr(x, placing).concat([t]);
     x = pointsPlan.elpLevelStep(x, { pass: (r[1] | 0) >= t, depth: r[1] | 0, T: t, quit: !!((r[7] | 0) & ELP_R_QUIT), placing }) || x;
     r[11] = elpLvArr(x, placing);
+    if (r.length > 12) r[12] = [r[11].slice()];   // Q432: the replayed chain alone
   }
   (c.lv = c.lv || {})[fam] = x;
+  (c.lvs = c.lvs || {})[fam] = [x];
+}
+// Q432 (2026-11-22, P0): the one-time lift. Before the set was carried (elpLvSetOf), a run whose 0.6.1 client ended at its own
+//   line was judged a miss whenever that client's chain had parted from the job's lowest reading. Once a season (st.elp3.q432 stamps
+//   it; st.elp3 is in the lane's snapshot), every settled version 7 points run of the season a player played on his own (solo, a
+//   couch pair: no roster) is read again with the whole set his readings would have carried since his first version 7 run of the
+//   family: a miss that a kept reading of the set passes (its target is the depth: his client may have ended there) becomes a pass
+//   -- its points the pass's at the points he had before it, the difference added now (only up: nothing is taken, architecture
+//   decision 10; a quit stays a miss; a placement run and an online team run, whose line was the host's, are not re-read). The run's
+//   delta and target follow, so does its receipt if the ring still holds it; the gate caps the total like a settle; the family's
+//   carried set becomes the replayed one (the row's level c.lv stays). Returns { players, runs, pts }.
+function elpQ432Lift(st, seasonId, nowMs) {
+  const s = seasonId | 0, out = { players: 0, runs: 0, pts: 0 }, pids = [], tail = '|' + ELP_ALL + '|' + s;
+  for (const k of Object.keys((st && st.hist) || {})) if (k.endsWith(tail)) pids.push(k.slice(0, -tail.length));
+  const ctx = { order: new Map(), h0: new Map(), oldUntil: elpOldUntil(st) };   // as elpSettleAll takes it
+  for (const p of pids) {
+    ctx.order.set(p, elpPassOrder(st, p, s, nowMs));
+    const c0 = elpAllOf(st, p, s);
+    if (c0 && c0.placed && Array.isArray(c0.h) && c0.h.length === pointsPlan.ELP_FAMS.length) ctx.h0.set(p, { h: c0.h.slice(), ht: Number(c0.ht), lv: c0.lv ? JSON.parse(JSON.stringify(c0.lv)) : null });
+  }
+  for (const p of pids) {
+    const c = elpAllOf(st, p, s);
+    if (!c || !c.placed) continue;
+    const all = [];
+    for (const { fam, h } of elpFamEntries(st, p, s)) for (const r of h.runs) if (r[3]) all.push({ fam, r });
+    all.sort((a, b) => ((a.r[2] || 0) - (b.r[2] || 0)) || ((a.r[0] >>> 0) - (b.r[0] >>> 0)));
+    const later = new Map(); { let acc = 0; for (let i = all.length - 1; i >= 0; i--) { later.set(all[i].r, acc); acc += (all[i].r[4] | 0); } }
+    let gain = 0, flips = 0;
+    for (const fam of pointsPlan.ELP_FAMS) {
+      const runs = all.filter((x) => x.fam === fam && ((x.r[7] | 0) & ELP_R_V7) && Array.isArray(x.r[10]) && Array.isArray(x.r[11]));
+      if (!runs.length) continue;
+      const r0 = runs[0].r, at0 = r0[2] ? r0[2] : nowMs;
+      let S = elpLvUniq(elpLevelBefore(st, p, Object.assign({}, c, { lv: undefined, lvs: undefined }), fam, s, r0, at0, nowMs, ctx).concat([elpLvOfArr(r0[10])]));
+      for (const { r } of runs) {
+        const depth = r[1] | 0, seed = r[8] | 0, placing = r[10][5] | 0, quit = !!((r[7] | 0) & ELP_R_QUIT), resumed = Array.isArray(r[9]) && r[9].length > 0;
+        const cand = elpLvUniq(S.concat([elpLvOfArr(r[10])])).map((x) => ({ x, t: pointsPlan.elpTargetOfL(x.L, seed) }));
+        let keep = resumed ? cand : cand.filter((a) => a.t >= depth);
+        if (!keep.length) keep = cand.slice().sort((a, b) => b.x.L - a.x.L).slice(0, 1);
+        const hit = keep.filter((a) => a.t === depth);   // a reading under which his client ended this run at its line
+        if (hit.length && depth < (r[5] | 0) && !quit && placing < 0 && !elpTeamLevel(st, r, fam, s, nowMs, ctx)) {
+          const at = r[2] ? r[2] : nowMs, lpB = Math.max(0, Math.min(LP_MAX, (c.lp | 0) - (later.get(r) | 0) - (r[4] | 0)));
+          const tabs = elpCandidateTabs(st, s, at, nowMs, Infinity), off = pointsPlan.targetOffset(seed);
+          let best = null;
+          for (const a of hit) for (const tb of tabs) { const sl = pointsPlan.endlessSettleLv(lpB, true, a.x.Lm, tb[fam], off, fam, pointsPlan.elpLineOfL(a.x.L)); if (!best || sl.nv > best.nv) best = { nv: sl.nv, t: a.t }; }
+          const up = (best.nv - lpB) - (r[4] | 0);
+          if (up > 0) {
+            const mh = elpRunRk(s, r[8]);
+            if ((c.ring || []).some((e) => (e.mh | 0) === (mh | 0))) c.ring = receiptPush(c.ring, mh, up, 0, 0);
+            r[4] = (r[4] | 0) + up; r[5] = best.t; gain += up; flips++;
+          }
+        }
+        S = elpLvSetOf(elpLvOfArr(r[11]), keep.map((a) => pointsPlan.elpLevelStep(a.x, { pass: depth >= a.t, depth, T: a.t, quit, placing }) || a.x));
+      }
+      const low = c.lv ? pointsPlan.elpLevelOf(c.lv[fam]) : null;
+      (c.lvs = c.lvs || {})[fam] = elpLvSetOf(low || S[0], S);
+    }
+    if (gain > 0) {
+      const cur = Math.max(0, Math.min(LP_MAX, c.lp | 0)), lines = elpLinesByFam(st, s, nowMs, Infinity);
+      let sk = null;
+      for (const f of pointsPlan.ELP_FAMS) { const x = c.lv ? pointsPlan.elpLevelOf(c.lv[f]) : null; if (x) { const t = pointsPlan.skillTierOf(x.Lm, lines[f], f); if (t != null && (sk == null || t > sk)) sk = t; } }
+      let nv = Math.min(LP_MAX, cur + gain);
+      const top = Math.max(ELP.GATE_TIER - 1, sk == null ? 0 : sk, pointsPlan.lpTierIdx(cur));
+      if (top < LP_SEG.length - 1) { const lineMin = LP_SEG[top + 1].min, cap = lineMin - BOUNDARY_MARGIN - 1; if (cur < lineMin && nv > Math.max(cur, cap)) nv = Math.max(cur, cap); }
+      c.lp = nv; out.players++; out.runs += flips; out.pts += nv - cur;
+    }
+  }
+  return out;
 }
 // Version 6: seed player p (points entry c: not placed, MIN_RUNS settled runs or more) without a new run -- the players the three-run
 //   rule finds with three or four settled runs. Every settled run stays a placement run (nothing is settled again); the seed
@@ -12273,6 +12358,12 @@ async function main() {
     // version 6: the first run under the three-run rule stamps when it came (the old-client window, elpOldUntil); never moved again
     let stamped = false;
     if (!st.elp3) { st.elp3 = { at: nowMs }; stamped = true; console.log('endless points: the three-run placement rule starts with this run (ELP version ' + ELP.VER + '); runs first seen in the next ' + Math.round(RATING.OLD_CLIENT_MS / 3600000) + ' h are also read as a five-run client showed them'); }
+    // Q432: the season's one-time lift, before this pass settles anything (st.elp3 is in the lane's snapshot: a throw restores it)
+    if (st.elp3 && !(st.elp3.q432 && (st.elp3.q432.season | 0) === (seasonId | 0))) {
+      const lf = elpQ432Lift(st, seasonId, nowMs);
+      st.elp3.q432 = { at: nowMs, season: seasonId | 0, players: lf.players, runs: lf.runs, pts: lf.pts };
+      console.log('endless points: Q432 lift (once a season) -- ' + lf.runs + ' version 7 run(s) of ' + lf.players + ' player(s) a 0.6.1 client may have ended at its line, judged a miss, now a pass (+' + lf.pts + ' points in all; nothing taken)');
+    }
     const done = elpSettleAll(st, seasonId, nowMs);
     if (done.bad && done.bad.length) ghWarn('endless points: ' + done.bad.length + ' damaged history entr' + (done.bad.length === 1 ? 'y' : 'ies') + ' left alone (first ' + String(done.bad[0]).slice(0, 8) + ') -- their runs settle nothing until the state is repaired');
     for (const x of done) console.log('  endless points ' + x.k.split('|')[1] + ' ' + x.k.slice(0, 8) + ': run ' + (x.runId >>> 0).toString(16) + (x.noRun ? ' seeded without a new run (three settled runs or more, no placement)' : ' target ' + x.T + (x.pass ? ' passed' : ' missed')) + ' -> ' + (x.d >= 0 ? '+' : '') + x.d + (x.seeded && !x.noRun ? ' (placement done: seeded)' : '') + (x.held ? ' (a miss inside the old-client window, fewer than ' + ELP.MIN_RUNS_OLD + ' settled runs: no points taken)' : '') + (x.teamH !== undefined ? ' (team level ' + (x.teamH == null ? 'none' : x.teamH) + ')' : '') + (x.alts > 1 ? ' (best of ' + x.alts + ' targets his client may have shown)' : ''));
@@ -16547,7 +16638,8 @@ Object.assign(module.exports, { teamXpFloor, teamXpStarts, teamXpMark, teamRollb
 Object.assign(module.exports, { RATING, RATING_FAMS, ENDLESS_RATING_LB, ELP_ALL, elpAllKey, elpAllOf, elpEntryOk, elpFamEntries, elpMergeByStart, elpPassOrder, elpPlaceAt, elpLeftOf, elpOldUntil, elpMins, elpSeedNow, ratingOwed, ratingOwedLive, ratingWriteCode, elpPassOrders, elpTryOrder, elpPickOrders, ELP_ORDER_CAP, SEASON_UNSCHEDULED, elpSettledRuns, elpRunsBefore, elpSaveAt, elpOpenAt, elpBeforeItems, elpBeforeLists, elpBorrowCounts, elpBorrowOrders, ELP_BORROW_CAP, elpRowSkill, elpMemberReadings, elpTeamPick, elpLinesByFam, elpSkillsOf, elpCandidateTabs, ENDLESS_RATING_LB_SOLO, ENDLESS_RATING_LB_DUO, ENDLESS_RATING_LB_TRIO, ENDLESS_RATING_LB_QUAD, ENDLESS_TIERCUT_LB, ratingFamOf, fnv32, ratingRunId, ratingHistKey,
   ratingHistUpsert, ratingHistRemove, ratingHistFinal, elpRunRk, ratingScoreOf, ratingPlan, ratingTierOf, tiercutDay, tiercutEncode, tiercutDecode, tiercutDue, pruneRatingHist,
   elpSettledDepths, elpLinesAt, elpCandidates, elpSettleRun, elpTrim, elpSettleAll, elpRunReady, elpPendingSettles, elpTeamNote, elpMemberHiddenBefore, elpTeamHidden, elpTeamTrim, elpLinesOf, elpHiddensOf, elpLinesSkipBanned, elpTableKey, elpTabNewest, elpTabRecord });
-Object.assign(module.exports, { ELP_R_V7, ELP_R_QUIT, elpSegLv, elpTabVer, elpPriorPub, elpLevelBefore, elpMemberLevelBefore, elpTeamLevel, elpRowFresh, elpRowLevel, elpSettleRunLv, elpLevelReplay });   // O942 version 7 (test/endless-level.js)
+Object.assign(module.exports, { ELP_R_V7, ELP_R_QUIT, elpSegLv, elpTabVer, elpPriorPub, elpLevelBefore, elpMemberLevelBefore, elpTeamLevel, elpRowFresh, elpRowLevel, elpSettleRunLv, elpLevelReplay });
+Object.assign(module.exports, { ELP_LV_SET_MAX, elpLvSetOf, elpLvSet, elpQ432Lift });   // Q432   // O942 version 7 (test/endless-level.js)
 Object.assign(module.exports, { CUP, CUP_FAMS, ENDLESS_CUP_LB, ENDLESS_CUP_HONOR_LB, cupWeekId, cupWeekStart, cupWeekBack, cupNextWeek, cupEdition, cupWeekBoardName, teamBlockSids,
   cupStandings, cupPodium, cupPodiumFor, cupVerdict, cupMarksOf, cupHonorEncode, cupHonorDecode, cupHonorPlan, cupHeldMasks, cupCarrierEncode, cupCarrierDecode, cupRevoke, pruneCup, cupId, cupScrub, cupPidVerdict });   // O180 Gold Rush Cup (client knife 5.1c-1; test/endless-cup.js)   // O103 endless competitive rating (client knife 5.1a; test/endless-rating.js)
 Object.assign(module.exports, { BAN_LB, BAN_ACT_MM, banRowFull, fullBanSet, cupSkipBanned, elpLinesSkipBanned, CUP_BAN_WAIT_MS });   // cloud audit Q338 full bans kept off the cup podium / tier cuts / composite ladders (test/ban-skip.js; sanctions.js reads BAN_LB from here)

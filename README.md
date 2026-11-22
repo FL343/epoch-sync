@@ -276,7 +276,14 @@ absent, so a run is unaffected before it is provisioned.
   client's (the line would have ended the run there) and is left out (a run that stood parked keeps them
   all: its target may have been read again on resume), the verdict and points take the best of the rest,
   and the level CARRIED to the next run is the lowest of their steps (`elpLvChoose`; `r[10]` keeps the
-  target that step read, `r[11]` the state). A team run freezes every line the host may have read
+  target that step read, `r[11]` the state). Since Q432 (2026-11-22; the 0.6.1 client never read the row's
+  levels back, so it walked its own chain) every kept reading's step is carried on as well (`c.lvs[fam]`,
+  `r[12]`, at most `ELP_LV_SET_MAX`) and the next run reads the whole set: no run the client ended at its own
+  line is judged a miss (simulation: 2-8 % of line-ends before, 0 after; about 1 % of deaths judged passes,
+  in the player's favour). The row's level stays the lowest. Once a season (`elp3.q432`), `elpQ432Lift`
+  re-reads the season's settled solo / couch points runs with that set from the family's first version 7
+  run: a miss a kept reading passes at its depth becomes a pass, the difference added (only up; a quit, a
+  placement run, an online team run are not re-read). A team run freezes every line the host may have read
   (`elpTeam[run].lvLns`: any member's reading that is at least every member's lowest). One pass walks every
   player's runs in one order by first seen, so a team run's line freezes the same in one pass and in two.
   Two levers, both off by default and set by the upload runbook the moment the version 7 package's gate
