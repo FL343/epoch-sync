@@ -173,6 +173,11 @@ jobs:
           #   competitive family -- merge = the duo ladder + composite + duo rating (default); split = later couch runs go to the
           #   couch ladder only (forward-only: couch rows already on the duo ladder stay). One line to flip, no client build.
           COUCH_DUO: merge
+          # O942 levers, set the moment the version 7 package's gate went up (0.6.1, buildNum 2026112202, gate
+          #   2026-11-22T07:33:07.920Z): the table publishes version 7, and every version 6 run parked at a save point
+          #   settles at its save depth from that instant (a run still being played waits for its own end)
+          ELP_PUB_VER: '7'
+          ELP_CUTOVER_MS: '1795332787920'
           # O198 v1 trust ledger (knife 5.5b-1): this job writes trust.json; the sanctions twin's file is a read-only
           # consult (its event queue), like seedcap.json above
           TRUST_FILE: trust.json
