@@ -488,20 +488,8 @@
       "at": "2026-11-21T10:02:38.908Z",
       "pubInfo": {
         "8149877d474c591f75f4b77617718926b0366ce3e06fba6083075d78b1a37554": {
-          "ch": "ea"
-        }
-      }
-    },
-    "2026112201": {
-      "pubs": [
-        "b34cbacd6f72f25adcba3d441c4a8a9fbba41a84b314c06e15bdc47ce974b883"
-      ],
-      "sealed": true,
-      "at": "2026-11-22T03:37:38.109Z",
-      "pubInfo": {
-        "b34cbacd6f72f25adcba3d441c4a8a9fbba41a84b314c06e15bdc47ce974b883": {
           "ch": "ea",
-          "elp": 7
+          "retiredAt": "2026-11-22T07:33:07.920Z"
         }
       }
     },
