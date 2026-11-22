@@ -18,6 +18,8 @@
 //        so no run that client ended at its own line is judged a miss over four runs back to back
 //   [17] Q432 lift: the one-time re-read of runs the old job (the lowest reading only) judged misses at a line-end: passed, the
 //        difference added, nothing taken, a death / quit / a death the depth rules a reading out for stays, once only
+//   [18] O992 (2026-11-23): the host may start before a member's hello reached him; a team line without the member who sets the
+//        floor is a line too (a pass there passes every seat, a death under it stays a miss)
 // ============================================================
 const path = require('path'), fs = require('fs'), os = require('os');
 for (const k of ['ELP_PUB_VER', 'ELP_CUTOVER_MS', 'ELP_DEV_VER', 'ELP_IDLE_MS', 'PT_MODE', 'SEASON_NOW', 'COUCH_DUO']) delete process.env[k];
@@ -137,7 +139,10 @@ function sTeam(m, out) {
   for (const q of [A, B]) m.ratingHistUpsert(st, q, 'duo', 0, RID, Tt, at, F, seed, { v7: true, quit: false });
   m.elpSettleAll(st, 0, at + MIN);
   const rA = runOf(st, A, 'duo', RID), rB = runOf(st, B, 'duo', RID), tm = st.elpTeam && st.elpTeam[String(RID)];
-  if (!tm || J(tm.lvLns) !== J([PP.elpLineOfL(line)])) e.push('team lines ' + J(tm && tm.lvLns) + ' != [' + PP.elpLineOfL(line) + '] (nothing else is plausible: one state each)');
+  // one state each: the highest (every member counted) and, since O992, the other member's alone (the higher one's hello may not
+  //   have reached the host before he started)
+  const low = Math.min(xA.L, xB.L), wantLns = [PP.elpLineOfL(line)].concat(PP.elpLineOfL(low) !== PP.elpLineOfL(line) ? [PP.elpLineOfL(low)] : []);
+  if (!tm || J(tm.lvLns) !== J(wantLns)) e.push('team lines ' + J(tm && tm.lvLns) + ' != ' + J(wantLns) + ' (one state each: the highest, and the other member\'s alone)');
   if (!tm || tm.lvL !== line) e.push('team line ' + (tm && tm.lvL) + ' != the highest ' + line + ' (' + xA.L + ' / ' + xB.L + ')');
   if (!rA || !rB || (rA[5] | 0) !== Tt || (rB[5] | 0) !== Tt) e.push('targets ' + J([rA && rA[5], rB && rB[5]]) + ' != ' + Tt);
   const sA = PP.elpLevelStep(xA, { pass: true, depth: Tt, T: Tt, placing: -1 }), sB = PP.elpLevelStep(xB, { pass: true, depth: Tt, T: Tt, placing: -1 });
@@ -566,6 +571,31 @@ function sLift(m) {
   return e;
 }
 
+// [18] O992: the host started before the strong member's hello reached him, so his line was the weak member's alone (below the
+//   strong one's lowest reading). The run passes at that line: no seat is judged a miss; a death under it is still a miss
+function sTeamMissing(m) {
+  const e = [], t0 = T0 + 9000 * MIN, seed = 7451;
+  const lv = (ds) => PP.elpLevelInit(PP.elpHiddenFor('duo', ds.slice().reverse().map((dd) => ['solo', dd]), LINES, 1), LINES.duo);
+  const xS = lv([16, 17, 18]), xW = lv([7, 8, 9]), Tw = PP.elpTargetOfL(xW.L, seed), Ts = PP.elpTargetOfL(xS.L, seed);
+  if (!(Ts > Tw + 2)) return ['the world is not a real test: ' + J([xS.L, xW.L, Ts, Tw])];
+  for (const [label, depth, wantPass] of [['the team passes at the weak member\'s line', Tw, true], ['a death under it', Math.max(0, Tw - 2), false]]) {
+    const st = { hist: {} }, RID = 990 + (wantPass ? 0 : 1);
+    const S = placedInto(m, st, 48, [16, 17, 18], null, 'duo', t0), W = placedInto(m, st, 49, [7, 8, 9], null, 'duo', t0);
+    m.elpSettleAll(st, 0, t0 + 10 * MIN);
+    const at = t0 + 20 * MIN;
+    m.elpTeamNote(st, RID, [S.p, W.p], 'duo', 0, at);
+    for (const q of [S.p, W.p]) m.ratingHistUpsert(st, q, 'duo', 0, RID, depth, at, F, seed, { v7: true, quit: false });
+    m.elpSettleAll(st, 0, at + MIN);
+    for (const q of [S.p, W.p]) {
+      const r = runOf(st, q, 'duo', RID);
+      if (!r || r[3] !== 2) { e.push(label + ': seat ' + q.slice(-4) + ' did not settle'); continue; }
+      const passed = (r[5] | 0) <= depth;
+      if (passed !== wantPass) e.push(label + ' (depth ' + depth + '): seat ' + q.slice(-4) + ' judged against ' + r[5] + (wantPass ? ' (a miss)' : ' (a pass)'));
+    }
+  }
+  return e;
+}
+
 const SCEN = [['[1] intake: the version bit stays, the quit bit only with the final segment, elpSegLv', sIntake],
   ['[2] solo: placement walks the level and seeds from it, points runs by endlessSettleLv + lambda, R1 / R2 leave the level, states / receipts / row v3', sSolo],
   ['[2b] the tiers read the smoothed level (here the demotion protection), not the jumpy one', sTiers],
@@ -583,7 +613,8 @@ const SCEN = [['[1] intake: the version bit stays, the quit bit only with the fi
   ['[14] a run that stood parked is judged with every reading (its client may have read its target again on resume)', sResumed],
   ['[15] a conviction\'s replay steps a later run with the target its carried step read (r[10][6])', sReplayCarry],
   ['[16] Q432: a client that never reads its row back, four runs: no run it ended at its line judged a miss; deaths judged passes under 10 %', sCarryLong],
-  ['[17] Q432 lift: chains the old job hurt get their line-end runs passed and the difference added (only up), a death / quit stays, a second lift changes nothing', sLift]];
+  ['[17] Q432 lift: chains the old job hurt get their line-end runs passed and the difference added (only up), a death / quit stays, a second lift changes nothing', sLift],
+  ['[18] O992: the host started before the strong member\'s hello came (his line = the weak member\'s): a pass there is a pass for every seat, a death under it a miss', sTeamMissing]];
 console.log('-- O942 version 7: the job --');
 for (const [label, fn] of SCEN) { const e = fn(v); T(label, e.length === 0, e.slice(0, 3).join(' | ')); }
 {
@@ -618,6 +649,7 @@ const MUTS = [
   ['Q432: the job carries the lowest reading only (no set)', [['const set = elpLvSetOf(after, ch.outs);', 'const set = [after];']], sCarryLong],
   ['Q432: the next run does not read the carried set', [['if (have) return elpLvUniq([have].concat(elpLvSet(c, fam)));', 'if (have) return [have];']], sCarryLong],
   ['Q432 lift: a reading under the depth also passes (a death becomes a pass)', [['const hit = keep.filter((a) => a.t === depth);', 'const hit = cand.filter((a) => a.t <= Math.max(1, depth));']], sLift],
+  ['O992: the team lines keep the floor of the whole roster (nobody left out)', [['    if (sets.length > 1) {\n      const top = mins.indexOf(floor)', '    if (false) {\n      const top = mins.indexOf(floor)']], sTeamMissing],
   ['Q432 lift: the lift re-reads nothing (no replayed set: the lowest reading only)', [['S = elpLvSetOf(elpLvOfArr(r[11]), keep.map(', 'S = [elpLvOfArr(r[11])].filter(Boolean); void (keep.map(']], sLift],
   ['the depth rules out nothing', [['  let keep = resumed ? all : all.filter((a) => a.t >= depth);', '  let keep = all;']], sCarry],
   ['a first version 7 run reads the job\'s own start only', [['  if (rs != null) xs.push(pointsPlan.elpLevelInit(rs, lines[fam]));\n  return elpLvUniq(xs);', '  return elpLvUniq(xs.slice(0, 1));']], sCarry],

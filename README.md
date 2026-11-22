@@ -284,7 +284,9 @@ absent, so a run is unaffected before it is provisioned.
   re-reads the season's settled solo / couch points runs with that set from the family's first version 7
   run: a miss a kept reading passes at its depth becomes a pass, the difference added (only up; a quit, a
   placement run, an online team run are not re-read). A team run freezes every line the host may have read
-  (`elpTeam[run].lvLns`: any member's reading that is at least every member's lowest). One pass walks every
+  (`elpTeam[run].lvLns`: any member's reading that is at least every member's lowest; since O992, 2026-11-23, also the
+  other members' readings down to the highest of THEIR lowest -- the host may have started before the hello of the member who
+  sets that floor reached him). One pass walks every
   player's runs in one order by first seen, so a team run's line freezes the same in one pass and in two.
   Two levers, both off by default and set by the upload runbook the moment the version 7 package's gate
   goes up: `ELP_PUB_VER=7` (the published table carries 7, the version 7 priors, the live lines from the

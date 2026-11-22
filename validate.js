@@ -7851,8 +7851,17 @@ function elpTeamLevel(st, r, fam, s, nowMs, ctx) {
     const at = tm.t0 || (r[2] ? r[2] : nowMs);
     const sets = tm.r.map((q) => elpMemberLevelBefore(st, q, fam, s, r[0] >>> 0, at, nowMs, ctx).map((x) => x.L));
     tm.lvL = pointsPlan.elpTeamLine(sets.map((xs) => xs[0]));
-    const floor = Math.max.apply(null, sets.map((xs) => Math.min.apply(null, xs))), own = pointsPlan.elpLineOfL(tm.lvL), lns = new Set();
+    const mins = sets.map((xs) => Math.min.apply(null, xs)), floor = Math.max.apply(null, mins), own = pointsPlan.elpLineOfL(tm.lvL), lns = new Set();
     for (const xs of sets) for (const L of xs) if (L >= floor) lns.add(pointsPlan.elpLineOfL(L));
+    // O992 (2026-11-23): the host counts a member only once that member's hello reached him (his endless room page sends it about
+    //   half a second after the seat fills), and may start before it did -- then his line is the highest of the OTHERS, under the
+    //   floor above. So the member who sets the floor (the highest lowest reading) may be left out too: the others' readings down to
+    //   the highest of THEIR lowest readings are lines as well (architecture decision 10: a line-end judged a miss for the whole team
+    //   is the worse error; a tie at the top adds nothing).
+    if (sets.length > 1) {
+      const top = mins.indexOf(floor), rest = sets.filter((xs, i) => i !== top), floor2 = Math.max.apply(null, rest.map((xs) => Math.min.apply(null, xs)));
+      for (const xs of rest) for (const L of xs) if (L >= floor2) lns.add(pointsPlan.elpLineOfL(L));
+    }
     lns.delete(own);
     tm.lvLns = [own].concat([...lns].sort((a, b) => a - b));
     tm.hasLv = 1;
