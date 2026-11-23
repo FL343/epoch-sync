@@ -25,6 +25,9 @@
 //   [12] Q3 milestones: a version 8 run pays its family's version 8 steps (solo 26 / 29 / 33, duo 32 / 36 / 41, quad 35 / 40 / 44),
 //        a version 7 run the old ones; the call sites pass the list by the run's version
 //   [13] T14 the gate in the job: a placed diamond player's pass is held under master until his smoothed level reaches 104 %
+//   [14] a member who stopped writing (the team's final segment ends his copy: ratingHistFinal) keeps the version 8 bit and settles
+//        on the team line (a version 7 copy loses its bit there as it always did: [7]'s world pins that unchanged)
+//   [15] a client still on the version 8 prior after a version 8 table was recorded: his pass at the prior's target stays a pass
 //   [20] mutations: each check above turns red on the matching break
 // ============================================================
 const path = require('path'), fs = require('fs'), os = require('os');
@@ -258,6 +261,12 @@ function v7WorldRun(m) {
     m.elpSettleAll(st, 0, t0 + 210 * MIN);
     m.elpTeamNote(st, 9400, [c, d], 'duo', 0, t0 + 220 * MIN);
     for (const q of [c, d]) m.ratingHistUpsert(st, q, 'duo', 0, 9400, 11, t0 + 220 * MIN, F, 5400, { v7: true, quit: false });
+    // a member who stopped writing: d wrote one checkpoint, c went on to the end; the team's final segment ends d's copy
+    //   (ratingHistFinal: a version 7 copy loses its version bit there, as it always did -- pinned unchanged)
+    m.elpTeamNote(st, 9450, [c, d], 'duo', 0, t0 + 225 * MIN);
+    for (const q of [d, c]) m.ratingHistUpsert(st, q, 'duo', 0, 9450, 5, t0 + 225 * MIN, 0, 5450, { v7: true, quit: false });
+    m.ratingHistUpsert(st, c, 'duo', 0, 9450, 9, t0 + 228 * MIN, F, 5450, { v7: true, quit: false });
+    m.ratingHistFinal(st, d, 'duo', 0, 9450);
     m.ratingHistUpsert(st, c, 'solo', 0, 9500, 6, t0 + 230 * MIN, SUS, 5500, { v7: true, quit: false });   // parked: the version 7 levers never cut it
     m.ratingHistUpsert(st, a, 'solo', 0, 9600, 5, t0 + 240 * MIN, SUS, 5600);                           // a version 6 run parked: cut past the instant
     m.elpSettleAll(st, 0, t0 + 600 * MIN);
@@ -422,6 +431,45 @@ function sGate(m) {
   return e;
 }
 
+// ---- [14] a member who stopped writing (review 2026-11-23): the team's final segment ends his copy (ratingHistFinal); a version 8
+//   copy keeps its version and settles on the team's version 8 line like the seat that played on ----
+function sDropped(m) {
+  const e = [], st = world(), t0 = T0 + 1100 * MIN, RID = 7801, seed = 2;
+  const xA7 = S(1000, 980, 3, 1, 2), xB7 = S(700, 680, 3, 0, 2), dA = [11, 10, 12], dB = [7, 6, 8];
+  const A = v7Holder(m, st, 93, 'duo', xA7, dA, 3000, t0), B = v7Holder(m, st, 94, 'duo', xB7, dB, 1500, t0);
+  const xA = PP.elpLevelInit8(xA7, newestFirst(dA), L7.duo, L8.duo), xB = PP.elpLevelInit8(xB7, newestFirst(dB), L7.duo, L8.duo);
+  const Tt = PP.elpTargetOfL8(Math.max(xA.L, xB.L), seed), at = t0 + 30 * MIN;
+  m.elpTeamNote(st, RID, [A, B], 'duo', 0, at);
+  for (const q of [B, A]) m.ratingHistUpsert(st, q, 'duo', 0, RID, 20, at, 0, seed, V8);   // both wrote the first checkpoint; B stopped there
+  m.ratingHistUpsert(st, A, 'duo', 0, RID, Tt, at + 10 * MIN, F, seed, V8);
+  m.ratingHistFinal(st, B, 'duo', 0, RID);
+  m.elpSettleAll(st, 0, at + 11 * MIN);
+  const rA = runOf(st, A, 'duo', RID), rB = runOf(st, B, 'duo', RID), tm = st.elpTeam && st.elpTeam[String(RID)];
+  // his copy is a miss at 20 against one of the team's frozen lines (the one that costs him least: elpLvChoose8), read as version 8
+  const lineTs = ((tm && tm.lvLns8) || []).map((ln) => PP.elpTargetOfL8(ln * 100, seed));
+  if (!rB || m.elpRunVer(rB) !== 8) e.push('the copy of the member who stopped lost its version: fl ' + (rB && rB[7]));
+  else if (rB[3] !== 2 || !rA || (rA[5] | 0) !== Tt || lineTs.indexOf(rB[5] | 0) < 0 || !Array.isArray(rB[10]) || !PP.elpLevelOf8({ L: rB[10][0], Lm: rB[10][1], s: rB[10][2], last: rB[10][3], run: rB[10][4] }) || !(C(st, B).lv8 && C(st, B).lv8.duo)) e.push('his copy did not settle on a team line under version 8: ' + J([rB[3], rB[5], lineTs, rA && rA[5], Tt, rB[10], C(st, B).lv8]));
+  return e;
+}
+
+// ---- [15] a client still on the version 8 prior a day after the job recorded a version 8 table (review 2026-11-23): his first
+//   version 8 run read his start through the prior (a lower target than the table gives); he passed at it -- not a miss ----
+function sPrior8(m) {
+  const e = [], st = world(), x7 = S(1200, 1150, 3, 1, 2), ds = [12, 11, 13], t0 = T0 + 1200 * MIN, HI8 = [24, 26, 28, 30, 33, 36, 42];
+  st.elpTab.push({ day: 20251122, season: 0, ms: T0 - 2 * DAY, key: J([8, 1500]), byFam: { solo: { N: 30, pass: HI8 } } });
+  const p = v7Holder(m, st, 95, 'solo', x7, ds, 2500, t0);
+  const xc = PP.elpLevelInit8(x7, newestFirst(ds), L7.solo, L8.solo), xt = PP.elpLevelInit8(x7, newestFirst(ds), L7.solo, HI8);
+  let seed = 0, Tc = 0, Tt = 0;
+  for (const s2 of [2, 4, 19, 6, 1]) { const a = PP.elpTargetOfL8(xc.L, s2), b = PP.elpTargetOfL8(xt.L, s2); if (a < b) { seed = s2; Tc = a; Tt = b; break; } }
+  if (!seed) return ['the world is not a real test: ' + J([xc, xt])];
+  const at = t0 + 30 * MIN;
+  m.ratingHistUpsert(st, p, 'solo', 0, 7901, Tc, at, F, seed, V8);   // his client's line ended the run at Tc
+  m.elpSettleAll(st, 0, at + 1000);
+  const r = runOf(st, p, 'solo', 7901);
+  if (!r || r[3] !== 2 || (r[5] | 0) > Tc) e.push('his pass at ' + Tc + ' (the prior) was judged against ' + (r && r[5]) + ' (the table gives ' + Tt + ')');
+  return e;
+}
+
 // ---- the fixtures (made once, with the job before O991; see the header) ----
 if (fxArg) {
   const old = require(path.resolve(fxArg));
@@ -460,7 +508,9 @@ const SCEN = [['[1] intake: ELP_R_V8 alone, kept; elpSegLv / elpRunVer; an elp-8
   ['[10] tables: version 8 readings take version 8 tables only, version 7 readings never; PUB_VER 8 publishes 8 with the version 8 priors, elpCutVer; the live lines read lv8.Lm (no lv8 = left out) under 8, lv.Lm under 7', sTables],
   ['[11] T12 rows: the job writes v2 / v3 / v4 by what the player holds, v4 reads back, the rows of the job before O991 read the same (lv8 none), ROW_VERS lists 4', sRows],
   ['[12] Q3 milestones: the version 8 steps by family, the version 7 ones without a list, one step once a season either way, both call sites pass the list by the run\'s version', sMilestones],
-  ['[13] T14 the gate in the job: a diamond pass is held under master at Lm 35.35 and goes through at 35.36 (104 % of 34)', sGate]];
+  ['[13] T14 the gate in the job: a diamond pass is held under master at Lm 35.35 and goes through at 35.36 (104 % of 34)', sGate],
+  ['[14] a member who stopped writing: his version 8 copy keeps its version when the team\'s final segment ends it and settles on the team line', sDropped],
+  ['[15] a client still on the version 8 prior a day after a version 8 table was recorded: his pass at the prior\'s lower target is a pass', sPrior8]];
 console.log('-- O991 version 8: the job --');
 for (const [label, fn] of SCEN) { let e; try { e = fn(v); } catch (err) { e = ['threw: ' + (err && err.stack || err).toString().slice(0, 300)]; } T(label, e.length === 0, e.slice(0, 3).join(' | ')); }
 
@@ -515,6 +565,8 @@ const MUTS = [
   ['Q3: the team call site pays the version 7 steps for a version 8 run', [['f.endDepth, ((f.flags | 0) & attest.SEG_V8) ? pointsPlan.elpMilestones8(fam.low) : null)) {', 'f.endDepth, null)) {']], [], sMilestones],
   ['Q3: soloMilestones ignores the list', [['const out = [], L = (Array.isArray(list) && list.length) ? list : COMP.MILESTONES;', 'const out = [], L = COMP.MILESTONES;']], [], sMilestones],
   ['T14: the gate back to 100 % (the version 7 rule)', [], [['GATE: 104, TEAM_GATE: 104,', 'GATE: 100, TEAM_GATE: 104,']], sGate],
+  ['a member who stopped writing loses the version 8 bit (ratingHistFinal as before O991)', [['  r[7] = 1 | ((r[7] | 0) & ELP_R_V8);', '  r[7] = 1;']], [], sDropped],
+  ['the version 8 prior is not among the first-run lines', [['.map((tb) => tb[fam]), [pointsPlan.ELP8.PRIOR[fam]]));', '.map((tb) => tb[fam])));']], [], sPrior8],
 ];
 console.log('-- [20] mutations --');
 for (const [label, pairs, ppPairs, fn] of MUTS) {

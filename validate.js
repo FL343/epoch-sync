@@ -7183,7 +7183,10 @@ function ratingHistFinal(st, p, fam, seasonId, runId) {
   const h = st && st.hist && st.hist[ratingHistKey(p, fam, seasonId)];
   const r = h && Array.isArray(h.runs) ? h.runs.find((x) => (x[0] >>> 0) === (runId >>> 0)) : null;
   if (!r || ((r[7] | 0) & 1)) return false;
-  r[7] = 1;
+  // O991: a version 8 run keeps its version bit (the member's copy settles on the team's version 8 line like the other seats). A
+  //   version 7 copy still loses ELP_R_V7 here as it always did (it then settles under version 6): left exactly as it was so that
+  //   version 7 settles as before -- whether to keep that bit too is a separate decision (it would move settled numbers)
+  r[7] = 1 | ((r[7] | 0) & ELP_R_V8);
   return true;
 }
 // the receipt key of a run on its family row: the run seed | 0 (the record's d[4]; the client knows it, the chain key holds the
@@ -8096,14 +8099,19 @@ function elpRowLevel8(ctx, p, fam, runId, at) {
 // the states player p's FIRST version 8 run of family fam (run runId, first seen at `at`; h = his family entry) may start from, the
 //   job's own first: points-plan.js elpLevelInit8 of each version 7 state (elpV7StatesOf; none = the silver line) under the version 7
 //   lines (the job's own at `at`, the other candidate tables of version 7 or older, the version 7 prior -- what a version 8 client
-//   holds once the job publishes version 8) and the version 8 lines (the job's own at `at`, the other version 8 candidates), capped
-//   at the depths of his settled runs of the family first seen no later than it (newest first). The client fixes the target when
-//   the run starts, from what it holds; the choice of elpLvChoose8 keeps what the depth allows (architecture decision 10)
+//   holds once the job publishes version 8) and the version 8 lines (the job's own at `at`, the other version 8 candidates, the
+//   version 8 prior), capped at the depths of his settled runs of the family first seen no later than it
+//   (newest first). The client fixes the target when the run starts, from what it holds; the choice of elpLvChoose8 keeps what the
+//   depth allows (architecture decision 10)
 function elpLevelStarts8(st, p, c, fam, s, h, runId, at, nowMs, ctx) {
   const rid = runId >>> 0, v7s = elpV7StatesOf(ctx, c, p, fam, rid, at);
   const depths = ((h && Array.isArray(h.runs)) ? h.runs : []).filter((x) => x[3] && (x[0] >>> 0) !== rid && (x[2] || 0) <= at).map((x) => x[1] | 0).reverse();
+  // the two priors are always among the lines (a client that holds no table of that version reads its copy's prior: the contract
+  //   with the client is "the table of that version it holds, else ELP7.PRIOR / ELP8.PRIOR") -- review 2026-11-23: without the
+  //   version 8 prior, a client still on it a day after the job recorded a version 8 table read a lower target than every reading
+  //   here, and its pass at that target was judged a miss
   const l7s = elpLinesUniq([elpLinesAt(st, fam, s, at, ELP_V7_TABS)].concat(elpCandidateTabs(st, s, at, nowMs, ELP_V7_TABS).map((tb) => tb[fam]), [pointsPlan.ELP7.PRIOR[fam]]));
-  const l8s = elpLinesUniq([elpLinesAt8(st, fam, s, at)].concat(elpCandidateTabs8(st, s, at, nowMs).map((tb) => tb[fam])));
+  const l8s = elpLinesUniq([elpLinesAt8(st, fam, s, at)].concat(elpCandidateTabs8(st, s, at, nowMs).map((tb) => tb[fam]), [pointsPlan.ELP8.PRIOR[fam]]));
   const xs = [];
   if (!v7s.length) for (const l8 of l8s) xs.push(pointsPlan.elpLevelInit8(null, depths, null, l8));
   for (const x7 of v7s) for (const l7 of l7s) for (const l8 of l8s) xs.push(pointsPlan.elpLevelInit8(x7, depths, l7, l8));

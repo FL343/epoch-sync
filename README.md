@@ -304,7 +304,9 @@ absent, so a run is unaffected before it is provisioned.
   signing key (`elp: 8`; the dev key reads `ELP_DEV_VER`: a job replaying a version 8 dev build sets 8), team by
   the segment flag `SEG_V8` (256, always with `SEG_LINE`; a job without it rejects the segment, so this half goes
   live before the package); the run row carries `ELP_R_V8` (16) ALONE, so the version 7 readings never see a
-  version 8 run. Version 7 and older runs settle exactly as before (`fixtures/elp8/v7-world.json` pins a world of
+  version 8 run, and keeps it when the team's final segment ends the copy of a member who stopped writing
+  (`ratingHistFinal`; a version 7 copy still loses `ELP_R_V7` there, as before -- it then settles under version 6).
+  Version 7 and older runs settle exactly as before (`fixtures/elp8/v7-world.json` pins a world of
   them to the values of the job before this change); a version 7 reading never takes a version 8 table, a version
   8 reading takes version 8 tables only (else the version 8 prior). The version 8 level rides the points entry
   (`lv8`, the set its readings carried `lvs8`) and the row: v4 = v3 + the four families' version 8 states (58 ints
@@ -312,8 +314,9 @@ absent, so a run is unaffected before it is provisioned.
   version 7 level of the family read through the two line tables (`elpConvert`: the same tier position on both
   curves), capped at the deepest of his newest three runs of the family x 1.15 read the same way (a level his
   recent play does not back -- the 0.6.1 duo tail -- is not carried on); no version 7 level = the silver line.
-  Where the client may have read other lines (the version 7 lines of the day or the version 7 prior; the version 8
-  ones), every such start is a reading and `elpLvChoose8` takes the version 7 rule (and the Q432 set) over them.
+  Where the client may have read other lines (the version 7 tables of the three instants or the version 7 prior; the
+  version 8 tables of the three instants or the version 8 prior), every such start is a reading and `elpLvChoose8`
+  takes the version 7 rule (and the Q432 set) over them.
   The two levers move again at the version 8 package's gate, together: `ELP_PUB_VER=8` (the table carries 8 and the
   version 8 priors; the live lines read the version 8 smoothed levels, players without one left out -- a version 7
   client reads that table as "being rated", so never before the gate) and `ELP_CUTOVER_MS=<that instant>` (every
