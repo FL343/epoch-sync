@@ -138,8 +138,12 @@ function applyKeyPolicy(keys, policy) {
 // O942 (endless points version 7, 2026-11-21): the endless rules version of the package a key signs for. The client repo's build /
 //   set-live tools write keys[id].pubInfo[pub].elp = the package's points-plan.js ELP.VER (mvp/scripts/release/attest-key.js); a
 //   sealed key without it is an older package's (version 6: the rules before O942). The dev key (unsealed, tests and the _test
-//   boards) has no pubInfo: process.env.ELP_DEV_VER (default 6) -- a local job that replays a version 7 dev build sets it.
-//   A run's rules version is fixed by the key of its records (validate.js: a version 7 run settles under the level rules).
+//   boards) has no pubInfo: process.env.ELP_DEV_VER (default 6) -- a local job that replays a version 7 dev build sets it (7).
+//   O991 (version 8, 2026-11-23): the same for a version 8 package (elp: 8, the grow phase); a job that replays a version 8 dev
+//   build -- the cloud test presets once the client master plays version 8 -- sets ELP_DEV_VER=8 (the live workflow's 7 moves
+//   with it: a dev build of version 8 whose runs the job read as 7 would settle under the other curve's rules).
+//   A run's rules version is fixed by the key of its records (validate.js: a version 7 run settles under the level rules, a
+//   version 8 one under the grow-phase rules).
 function keyElpVer(ent, pub) {
   if (!ent) return 6;
   if (!ent.sealed) { const v = Number(process.env.ELP_DEV_VER || 6); return Number.isInteger(v) && v > 0 ? v : 6; }
@@ -276,6 +280,7 @@ function soloSettleGate(verdict, opts) {
 //   a new COUCH_ATT_VER with both versions accepted for >= 7 days (architecture decision 9); an unknown one = pending (O199).
 const SEG_COUCH = 64;      // couch segment: guard-written, one account on every seat (client knife 5c O606: with SEG_COMP; knife C3a O278: casual = with SEG_CASUAL, tail continues = the seat-0 nibble)
 const SEG_LINE = 128;      // O942 (endless points version 7): a team competitive segment of a client whose run ends at its target -- every segment of such a run carries it (the consensus vector agrees); a run with it settles under the level rules. Team records only (the solo / couch rules version rides the signing key: keyElpVer)
+const SEG_V8 = 256;        // O991 (endless points version 8, the grow phase): a team competitive segment of a version 8 client -- always WITH SEG_LINE (SEG_LINE alone says "version 7 or later"); every segment of such a run carries both. A job that does not know the bit rejects the segment ('flags'): the job half goes live before the package. Team records only, like SEG_LINE
 const COUCH_MAGIC = 0xE8, COUCH_BLK_VER = 1, COUCH_BLK_LEN = 21, COUCH_ATT_VER = 1;
 const COUCH_LAYOUTS = { 1: {} };   // attVer -> layout (v1: the block above); a new attVer joins here when the reader learns it
 const COUCH_PC_MIN = 2, COUCH_PC_MAX = 4;   // the layout holds up to the registry's ENDLESS_MAX_PC; the settle lane takes competitive N = 2 (O606) and casual N = 2..4 (knife C3a)
@@ -576,7 +581,7 @@ module.exports = {
   SEG_SUSPENDED, SEG_FINAL, SEG_RESUMED, SEG_COMP, SEG_CASUAL, SEG_CLASSIC, DISP_FINISHED, DISP_USER_QUIT,
   verifySoloRecord, soloSettleGate, soloTail, toBytes, loadPubTable,
   // A3
-  SEG_COUCH, SEG_LINE, COUCH_MAGIC, COUCH_BLK_VER, COUCH_BLK_LEN, COUCH_ATT_VER, COUCH_LAYOUTS, COUCH_PC_MIN, COUCH_PC_MAX, COUCH_TAIL_INTS,
+  SEG_COUCH, SEG_LINE, SEG_V8, COUCH_MAGIC, COUCH_BLK_VER, COUCH_BLK_LEN, COUCH_ATT_VER, COUCH_LAYOUTS, COUCH_PC_MIN, COUCH_PC_MAX, COUCH_TAIL_INTS,
   verifyCouchRecord, couchSettleGate, couchTail, couchFieldsOf,
   // A2
   verifyMatchSig, matchSigGate,

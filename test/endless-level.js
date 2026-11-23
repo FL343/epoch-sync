@@ -57,7 +57,7 @@ function sIntake(m) {
   m.ratingHistUpsert(st, p, 'solo', 0, 42, 4, T0 + 4 * MIN, F, 901);   // a version 6 run
   if ((runOf(st, p, 'solo', 42)[7] | 0) & (m.ELP_R_V7 | m.ELP_R_QUIT)) e.push('a version 6 run carries a version 7 / quit bit');
   const a = m.elpSegLv({ ok: true, elp: 7 }, { flags: F, dispCode: 5 }), b = m.elpSegLv({ ok: true, elp: 7 }, { flags: 0, dispCode: 5 }), c = m.elpSegLv({ ok: true, elp: 6 }, { flags: F, dispCode: 0 });
-  if (J(a) !== J({ v7: true, quit: true }) || J(b) !== J({ v7: true, quit: false }) || J(c) !== J({ v7: false, quit: false })) e.push('elpSegLv ' + J([a, b, c]));
+  if (J(a) !== J({ v7: true, quit: true, v8: false }) || J(b) !== J({ v7: true, quit: false, v8: false }) || J(c) !== J({ v7: false, quit: false, v8: false })) e.push('elpSegLv ' + J([a, b, c]));   // O991: + v8 (test/endless-level8.js)
   return e;
 }
 
@@ -637,14 +637,14 @@ const MUTS = [
   ['the team line is the LOWEST level', [['tm.lvL = pointsPlan.elpTeamLine(sets.map((xs) => xs[0]));', 'tm.lvL = Math.min.apply(null, sets.map((xs) => xs[0]));']], sTeam],
   ['every member takes the team line (the ratchet)', [['const after = pointsPlan.elpLevelStep(a.rd.x, { pass: depth >= a.t, depth, T: a.t, quit, placing });', 'const after = pointsPlan.elpLevelStep(Object.assign({}, a.rd.x, { L: a.rd.L }), { pass: depth >= a.t, depth, T: a.t, quit, placing });']], sTeam],
   ['the cutover never comes', [['const cut = RATING.CUTOVER_MS > 0 && nowMs != null', 'const cut = false && nowMs != null']], sCut],
-  ['the cutover also cuts runs still being played (no parked check)', [[' && !((r[7] | 0) & ELP_R_V7) && !!((r[7] | 0) & 2);', ' && !((r[7] | 0) & ELP_R_V7);']], sCut],
+  ['the cutover also cuts runs still being played (no parked check)', [[' && elpRunVer(r) < elpCutVer() && !!((r[7] | 0) & 2);', ' && elpRunVer(r) < elpCutVer();']], sCut],   // O991: the version test reads elpRunVer / elpCutVer
   ['a conviction does not replay the level', [['  if (lvGone && c) elpLevelReplay(c, h, fam, lvGone);', '  if (false) elpLevelReplay(c, h, fam, lvGone);']], sReplay],
-  ['a later segment drops the version bit', [['| ((r[7] | 0) & (ELP_R_V7 | ELP_R_QUIT)) |', '| ((r[7] | 0) & ELP_R_QUIT) |']], sIntake],
+  ['a later segment drops the version bit', [['| ((r[7] | 0) & (ELP_R_V7 | ELP_R_V8 | ELP_R_QUIT)) |', '| ((r[7] | 0) & ELP_R_QUIT) |']], sIntake],   // O991: the kept bits carry ELP_R_V8 too
   ['a version 6 reading takes version 7 tables', [['const mv = maxVer == null ? 6 : maxVer;', 'const mv = maxVer == null ? Infinity : maxVer;']], sTables],
   ['the placement seeds from the level BEFORE the last placement run', [['lp = Math.max(lp, pointsPlan.elpLevelSeed(x.L, tb[fam], tb.solo));', 'lp = Math.max(lp, pointsPlan.elpLevelSeed(ch.carry.rd.x.L, tb[fam], tb.solo));']], sSolo],
   ['a points run reads the jumpy level for its tiers (not Lm)', [['pointsPlan.endlessSettleLv(cur, depth >= a.t, a.rd.x.Lm, tb[fam], off, fam, pointsPlan.elpLineOfL(a.rd.L));', 'pointsPlan.endlessSettleLv(cur, depth >= a.t, a.rd.x.L, tb[fam], off, fam, pointsPlan.elpLineOfL(a.rd.L));']], sTiers],
-  ['the row stays v2 (no level states)', [['placed: 1, h, lv: c.lv || null }, c.ring || []);', 'placed: 1, h }, c.ring || []);']], sSolo],
-  ['the team sanity drops SEG_LINE from the accepted bits', [['| attest.SEG_CLASSIC | attest.SEG_LINE)) !== 0 || ((fl & attest.SEG_LINE) && (fl & attest.SEG_CLASSIC))) out.push(\'flags\');', '| attest.SEG_CLASSIC)) !== 0 || ((fl & attest.SEG_LINE) && (fl & attest.SEG_CLASSIC))) out.push(\'flags\');']], sIntakeReal],
+  ['the row stays v2 (no level states)', [['placed: 1, h, lv: c.lv || null, lv8: c.lv8 || null }, c.ring || []);', 'placed: 1, h }, c.ring || []);']], sSolo],   // O991: the row also carries lv8
+  ['the team sanity drops SEG_LINE from the accepted bits', [['| attest.SEG_CLASSIC | attest.SEG_LINE | attest.SEG_V8)) !== 0 || ((fl & attest.SEG_LINE) && (fl & attest.SEG_CLASSIC))', '| attest.SEG_CLASSIC | attest.SEG_V8)) !== 0 || ((fl & attest.SEG_LINE) && (fl & attest.SEG_CLASSIC))']], sIntakeReal],   // O991: + SEG_V8
   ['the job carries the reading its points came from (rule (a)), without the set', [['  return { pick, carry, outs };\n}', '  return { pick, carry: { rd: pick.rd, t: pick.t, after: pointsPlan.elpLevelStep(pick.rd.x, { pass: depth >= pick.t, depth, T: pick.t, quit, placing }) }, outs };\n}'], ['const set = elpLvSetOf(after, ch.outs);', 'const set = [after];']], sCarry],
   ['Q432: the job carries the lowest reading only (no set)', [['const set = elpLvSetOf(after, ch.outs);', 'const set = [after];']], sCarryLong],
   ['Q432: the next run does not read the carried set', [['if (have) return elpLvUniq([have].concat(elpLvSet(c, fam)));', 'if (have) return [have];']], sCarryLong],
