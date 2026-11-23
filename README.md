@@ -293,6 +293,33 @@ absent, so a run is unaffected before it is provisioned.
   smoothed levels; a version 6 client reads that table as "being rated", so never before the gate) and
   `ELP_CUTOVER_MS=<that instant>` (every version 6 run parked at a save point then settles at its save
   depth; a run still being played waits for its own end).
+  ELP version 8 (O991, 2026-11-23; `points-plan.js` ELP8, `test/endless-level8.js`, `test/endless-level8-main.js`,
+  `test/endless-lp8-sim.js`): the competitive money curve gets a grow phase (levels 1-15 ask for little money, the
+  levels after it are steep), so every level rule reads the depth past `GROW_END` (15): the target is at least
+  `T_MIN` (20), a step / a placement step / the missed-placement floor scale the part of the level past level 15,
+  a death in the grow phase (15 levels passed or fewer) takes points but leaves the level (R2), lambda = the line
+  / 20 levels (`PROP.REF` 2000), the master / grandmaster gate asks 104 % of the line (solo and team), the priors
+  and the CP milestones are per family (solo 22..40 and 26 / 29 / 33; duo / trio 25..48 and 32 / 36 / 41; quad
+  27..51 and 35 / 40 / 44). A run's version comes from its first segment as in version 7: solo / couch by the
+  signing key (`elp: 8`; the dev key reads `ELP_DEV_VER`: a job replaying a version 8 dev build sets 8), team by
+  the segment flag `SEG_V8` (256, always with `SEG_LINE`; a job without it rejects the segment, so this half goes
+  live before the package); the run row carries `ELP_R_V8` (16) ALONE, so the version 7 readings never see a
+  version 8 run. Version 7 and older runs settle exactly as before (`fixtures/elp8/v7-world.json` pins a world of
+  them to the values of the job before this change); a version 7 reading never takes a version 8 table, a version
+  8 reading takes version 8 tables only (else the version 8 prior). The version 8 level rides the points entry
+  (`lv8`, the set its readings carried `lvs8`) and the row: v4 = v3 + the four families' version 8 states (58 ints
+  at most; v2 / v3 / v4 are read, `RATING.ROW_VERS`). A family's first version 8 run starts from the player's
+  version 7 level of the family read through the two line tables (`elpConvert`: the same tier position on both
+  curves), capped at the deepest of his newest three runs of the family x 1.15 read the same way (a level his
+  recent play does not back -- the 0.6.1 duo tail -- is not carried on); no version 7 level = the silver line.
+  Where the client may have read other lines (the version 7 lines of the day or the version 7 prior; the version 8
+  ones), every such start is a reading and `elpLvChoose8` takes the version 7 rule (and the Q432 set) over them.
+  The two levers move again at the version 8 package's gate, together: `ELP_PUB_VER=8` (the table carries 8 and the
+  version 8 priors; the live lines read the version 8 smoothed levels, players without one left out -- a version 7
+  client reads that table as "being rated", so never before the gate) and `ELP_CUTOVER_MS=<that instant>` (every
+  run parked at a save point whose version is below the published one -- version 6 and 7 then: `elpCutVer` =
+  max(7, the published version) -- settles at its save depth under its own rules; a version 8 run, or a run still
+  being played, is never cut). Until then the live workflow keeps `ELP_PUB_VER=7` and the version 7 instant.
 - Gold Rush Cup (client knife 5.1c-1, 2026-10-18; `test/endless-cup.js`): every competitive endless settle
   on the EA app id also keeps the player's best of the week on `<competitive ladder>_w<YYYYWW>` (ISO week,
   Monday 00:00 UTC; the week the settle runs in; team rows carry the team block; created at the week's
