@@ -8,13 +8,18 @@
 //   [T5] the floor does not trap the weakest: the weakest 5 % pass level T_MIN in >= 40 % of their runs, and all 40 of them reach
 //        diamond within 3000 runs
 //   [T6] grinding: hours to diamond version 8 / version 7 <= 1.4 for silver / gold / platinum, <= 2.0 for the weakest tenth; hours to
-//        master within +-25 % for the master / grandmaster players; every tier under diamond gains on average a run
+//        master within +-25 % for the master / grandmaster players; every tier under diamond gains on average a run. The hours ratios
+//        pool three seed groups (120 players a tier): one group of 40 scatters the master players' ratio over 1.10-1.27 at the 104 %
+//        gate (six groups tried, 2026-11-23), so one lucky draw (1.11) sat far under the bound while the expectation (about 1.18) sits
+//        close to it; pooled, the check reads the expectation
 //   [T7] sandbagging: dying on purpose at the cheapest death that lowers the level (the depth past the grow phase: the rules decide
 //        it), then farming the low target, reaches diamond in >= 0.85 x the honest hours, every tier from bronze up
 //   [T14] the master gate (D3): within 300 runs, platinum players never reach master, diamond players at most 20 % (8 / 40), master
 //        and grandmaster players >= 90 %
-//   [M] mutations on a copy of points-plan.js: T_MIN 25 -> T5 red; lambda back to the version 7 base / lambda gone -> T6 red; R2 back
-//       to "no level passed" (a death at level 2 drops the level) -> T7 red; the gate back to 100 % -> T14 red
+//   [M] mutations on a copy of points-plan.js: T_MIN 25 -> T5 red; lambda back to the version 7 base / the version 8 compensation
+//       gone (lambda x1 and MUL8 back to the version 7 multipliers) -> T6 red; R2 back to "no level passed" (a death at level 2 drops
+//       the level) -> T7 red; the gate back to 100 % -> T14 red. (T6 bounds the outcome, not each constant: lambda gone alone moves
+//       platinum only 1.31 -> 1.40 and MUL8 alone 1.31 -> 1.34 on the pooled players, so neither alone is a mutation of it.)
 //   Each player: three placement runs from the silver line, then up to 3000 points runs; a run costs its levels x 82 s + 120 s
 //   (the live median of 0.6.1). Seeds as the companion simulation's.
 // ============================================================
@@ -67,13 +72,14 @@ function play(M, ver, ti, seed, runs, policy, stats) {
   return { hD, hM, pass: passN / Math.max(1, n) };
 }
 // 40 players of tier ti: mean hours to diamond (when 20 or more got there) / to master (36 or more), how many got there, pass rate
-function cell(M, ver, ti, policy) {
-  const hD = [], hM = [], ps = [];
-  for (let j = 0; j < PLAYERS; j++) { const o = play(M, ver, ti, 60000 + ti * 977 + j * 13, RUNS, policy); if (o.hD != null) hD.push(o.hD); if (o.hM != null) hM.push(o.hM); ps.push(o.pass); }
-  return { hD: hD.length >= 20 ? mean(hD) : null, nD: hD.length, hM: hM.length >= 36 ? mean(hM) : null, nM: hM.length, pass: mean(ps) };
+function cell(M, ver, ti, policy, groups) {
+  const hD = [], hM = [], ps = [], G = groups || [0], n = PLAYERS * G.length;
+  for (const g of G) for (let j = 0; j < PLAYERS; j++) { const o = play(M, ver, ti, 60000 + g + ti * 977 + j * 13, RUNS, policy); if (o.hD != null) hD.push(o.hD); if (o.hM != null) hM.push(o.hM); ps.push(o.pass); }
+  return { hD: hD.length >= n / 2 ? mean(hD) : null, nD: hD.length, hM: hM.length >= n * 0.9 ? mean(hM) : null, nM: hM.length, pass: mean(ps) };
 }
 const memo = new Map();
-const cellOf = (M, ver, ti, policy) => { const k = (M === PP0 ? 'base' : 'mut') + ver + ':' + ti + ':' + (policy || ''); if (M !== PP0 || !memo.has(k)) { const c = cell(M, ver, ti, policy); if (M !== PP0) return c; memo.set(k, c); } return memo.get(k); };
+const cellOf = (M, ver, ti, policy, groups) => { const k = (M === PP0 ? 'base' : 'mut') + ver + ':' + ti + ':' + (policy || '') + ':' + (groups || [0]).join(','); if (M !== PP0 || !memo.has(k)) { const c = cell(M, ver, ti, policy, groups); if (M !== PP0) return c; memo.set(k, c); } return memo.get(k); };
+const POOL = [0, 100003, 200003];   // [T6]: three seed groups (group 0 = the seeds every other check uses)
 const f1 = (x) => (x == null ? '-' : x.toFixed(2));
 
 // [T5]
@@ -86,7 +92,7 @@ function t5(M) {
 // [T6]
 function t6(M) {
   const e = [], parts = [];
-  const ratio = (ti, k) => { const a = cellOf(PP0, 7, ti), b = cellOf(M, 8, ti); return (a[k] && b[k]) ? b[k] / a[k] : null; };
+  const ratio = (ti, k) => { const a = cellOf(PP0, 7, ti, null, POOL), b = cellOf(M, 8, ti, null, POOL); return (a[k] && b[k]) ? b[k] / a[k] : null; };
   for (const [n, cap] of [['silver', 1.4], ['gold', 1.4], ['plat', 1.4], ['bot10%', 2.0]]) {
     const q = ratio(TI(n), 'hD');
     parts.push(n + ' ' + f1(q));
@@ -146,7 +152,8 @@ function mutPP(pairs) {
 const MUTS = [
   ['T5: the floor 25 (variant B of the plan)', [['GROW_END: 15, T_MIN: 20,', 'GROW_END: 15, T_MIN: 25,']], t5],
   ['T6: lambda on the version 7 base (REF 1000: every version 8 line at the cap)', [['PROP: Object.freeze({ REF: 2000, LO: 500, HI: 2000 }),', 'PROP: Object.freeze({ REF: 1000, LO: 500, HI: 2000 }),']], t6],
-  ['T6: lambda gone (x1 for every line)', [['function elpPropK8(line) { return Math.max(ELP8.PROP.LO, Math.min(ELP8.PROP.HI, Math.round(Math.max(0, line | 0) * 100 * 1000 / ELP8.PROP.REF))); }', 'function elpPropK8(line) { void line; return 1000; }']], t6],
+  ['T6: the version 8 compensation gone (lambda x1 and MUL8 back to the version 7 multipliers)', [['function elpPropK8(line) { return Math.max(ELP8.PROP.LO, Math.min(ELP8.PROP.HI, Math.round(Math.max(0, line | 0) * 100 * 1000 / ELP8.PROP.REF))); }', 'function elpPropK8(line) { void line; return 1000; }'],
+    ['MUL: Object.freeze([2800, 2500, 2400, 2500, 2900, 2800, 2800]),', 'MUL: Object.freeze([1800, 1800, 2100, 2200, 2800, 2800, 2800]),']], t6],
   ['T7: R2 back to "no level passed" (a death at level 2 lowers the level)', [['if (!pass && depth <= ELP8.GROW_END) return x;', 'if (!pass && depth === 0) return x;']], t7],
   ['T14: the solo gate back to 100 %', [['GATE: 104, TEAM_GATE: 104,', 'GATE: 100, TEAM_GATE: 104,']], t14],
 ];
