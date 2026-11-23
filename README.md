@@ -298,7 +298,7 @@ absent, so a run is unaffected before it is provisioned.
   levels after it are steep), so every level rule reads the depth past `GROW_END` (15): the target is at least
   `T_MIN` (20), a step / a placement step / the missed-placement floor scale the part of the level past level 15,
   a death in the grow phase (15 levels passed or fewer) takes points but leaves the level (R2), lambda = the line
-  / 20 levels (`PROP.REF` 2000), the master / grandmaster gate asks 104 % of the line (solo and team), the priors
+  / 20 levels (`PROP.REF` 2000), the master / grandmaster gate asks 103 % of the line solo and 104 % in a team, the priors
   and the CP milestones are per family (solo 22..40 and 26 / 29 / 33; duo / trio 25..48 and 32 / 36 / 41; quad
   27..51 and 35 / 40 / 44). A run's version comes from its first segment as in version 7: solo / couch by the
   signing key (`elp: 8`; the dev key reads `ELP_DEV_VER`: a job replaying a version 8 dev build sets 8), team by

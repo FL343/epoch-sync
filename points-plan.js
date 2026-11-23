@@ -23,7 +23,7 @@
   else if (root) root.POINTS_PLAN = api;
 })(typeof module === 'object' && !!module && typeof exports === 'object' && this === exports, typeof window !== 'undefined' ? window : null, function () {
   const RULES_VER = 2;
-  const FIXTURES_HASH = '20eae2639b45e172';
+  const FIXTURES_HASH = 'e482ca6f7351bb55';
   // the knobs configure() can move (production runs these defaults)
   const DEFAULTS = Object.freeze({ RS_THRESHOLD: 400, RS_UPSET_BONUS: 1.0, RS_STRONG_UPSET_LOSS: 0.5, RS_SOLO_VS_TRIO: 0.6, RS_TRIO_WIN: 0.7, LEAVER_LP_PENALTY: 100 });
   const LP_MAX = 9999;
@@ -691,7 +691,10 @@
     CONV_CAP: 1150, CONV_RUNS: 3,   // the first version 8 level: at most the deepest of the newest CONV_RUNS runs x CONV_CAP / 1000, converted
     MUL: Object.freeze([2800, 2500, 2400, 2500, 2900, 2800, 2800]),
     PROP: Object.freeze({ REF: 2000, LO: 500, HI: 2000 }),
-    GATE: 104, TEAM_GATE: 104,   // per cent of the master / grandmaster line the smoothed level must reach (version 7: 100 solo / ELP.TEAM_GATE 110 team)
+    GATE: 103, TEAM_GATE: 104,   // per cent of the master / grandmaster line the smoothed level must reach (version 7: 100 solo / ELP.TEAM_GATE 110 team).
+                                 //   O991 2026-11-23, the user: solo 103 = the least that holds D3 on these rules (a diamond player 1-6 / 40 into master
+                                 //   within 300 runs over six seed groups; 104 held 0-3 / 40 but slowed the master players to master about 1.18x, 103 about
+                                 //   1.11x); the team gate stays 104 (a team gate above solo is the carry guard of O825; carried runs are not simulated)
     PRIOR: Object.freeze({
       solo: Object.freeze([22, 24, 26, 28, 31, 34, 40]),
       duo: Object.freeze([25, 29, 32, 35, 38, 43, 48]),

@@ -10,7 +10,7 @@
 //   [T6] grinding: hours to diamond version 8 / version 7 <= 1.4 for silver / gold / platinum, <= 2.0 for the weakest tenth; hours to
 //        master within +-25 % for the master / grandmaster players; every tier under diamond gains on average a run. The hours ratios
 //        pool three seed groups (120 players a tier): one group of 40 scatters the master players' ratio over 1.10-1.27 at the 104 %
-//        gate (six groups tried, 2026-11-23), so one lucky draw (1.11) sat far under the bound while the expectation (about 1.18) sits
+//        gate of the first draft (six groups tried, 2026-11-23; the gate is 103 % since), so one lucky draw (1.11) sat far under the bound while the expectation (about 1.18) sits
 //        close to it; pooled, the check reads the expectation
 //   [T7] sandbagging: dying on purpose at the cheapest death that lowers the level (the depth past the grow phase: the rules decide
 //        it), then farming the low target, reaches diamond in >= 0.85 x the honest hours, every tier from bronze up
@@ -155,7 +155,7 @@ const MUTS = [
   ['T6: the version 8 compensation gone (lambda x1 and MUL8 back to the version 7 multipliers)', [['function elpPropK8(line) { return Math.max(ELP8.PROP.LO, Math.min(ELP8.PROP.HI, Math.round(Math.max(0, line | 0) * 100 * 1000 / ELP8.PROP.REF))); }', 'function elpPropK8(line) { void line; return 1000; }'],
     ['MUL: Object.freeze([2800, 2500, 2400, 2500, 2900, 2800, 2800]),', 'MUL: Object.freeze([1800, 1800, 2100, 2200, 2800, 2800, 2800]),']], t6],
   ['T7: R2 back to "no level passed" (a death at level 2 lowers the level)', [['if (!pass && depth <= ELP8.GROW_END) return x;', 'if (!pass && depth === 0) return x;']], t7],
-  ['T14: the solo gate back to 100 %', [['GATE: 104, TEAM_GATE: 104,', 'GATE: 100, TEAM_GATE: 104,']], t14],
+  ['T14: the solo gate back to 100 %', [['GATE: 103, TEAM_GATE: 104,', 'GATE: 100, TEAM_GATE: 104,']], t14],
 ];
 for (const [label, pairs, fn] of MUTS) {
   let red = false, why = '';

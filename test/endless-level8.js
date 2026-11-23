@@ -24,7 +24,7 @@
 //        O991 wrote (fixtures/elp8/rows-old.json) read the same; RATING.ROW_VERS lists 4
 //   [12] Q3 milestones: a version 8 run pays its family's version 8 steps (solo 26 / 29 / 33, duo 32 / 36 / 41, quad 35 / 40 / 44),
 //        a version 7 run the old ones; the call sites pass the list by the run's version
-//   [13] T14 the gate in the job: a placed diamond player's pass is held under master until his smoothed level reaches 104 %
+//   [13] T14 the gate in the job: a placed diamond player's pass is held under master until his smoothed level reaches 103 %
 //   [14] a member who stopped writing (the team's final segment ends his copy: ratingHistFinal) keeps the version 8 bit and settles
 //        on the team line (a version 7 copy loses its bit there as it always did: [7]'s world pins that unchanged)
 //   [15] a client still on the version 8 prior after a version 8 table was recorded: his pass at the prior's target stays a pass
@@ -417,7 +417,7 @@ function sMilestones(m) {
 // ---- [13] T14 the gate in the job ----
 function sGate(m) {
   const e = [], t0 = T0 + 900 * MIN;
-  for (const [Lm, held] of [[3535, true], [3536, false]]) {
+  for (const [Lm, held] of [[3501, true], [3502, false]]) {
     const st = world(), p = P(m, 90);
     st.hist[m.ratingHistKey(p, 'solo', 0)] = { best: [0, 0], runs: [], old: [], t: t0 };
     st.hist[m.elpAllKey(p, 0)] = { lp: 5850, placed: 1, n: 9, ring: [], t: t0, lv8: { solo: S(3600, Lm, 3, 1, 1) } };
@@ -425,8 +425,8 @@ function sGate(m) {
     m.ratingHistUpsert(st, p, 'solo', 0, 7600, Tt, t0 + MIN, F, seed, V8);
     m.elpSettleAll(st, 0, t0 + 2 * MIN);
     const lp = C(st, p).lp | 0;
-    if (held && lp > 5879) e.push('Lm ' + Lm + ' (under 104 % of the master line): the pass went to ' + lp);
-    if (!held && lp <= 5879) e.push('Lm ' + Lm + ' (104 % reached): the pass was held at ' + lp);
+    if (held && lp > 5879) e.push('Lm ' + Lm + ' (under 103 % of the master line): the pass went to ' + lp);
+    if (!held && lp <= 5879) e.push('Lm ' + Lm + ' (103 % reached): the pass was held at ' + lp);
   }
   return e;
 }
@@ -508,7 +508,7 @@ const SCEN = [['[1] intake: ELP_R_V8 alone, kept; elpSegLv / elpRunVer; an elp-8
   ['[10] tables: version 8 readings take version 8 tables only, version 7 readings never; PUB_VER 8 publishes 8 with the version 8 priors, elpCutVer; the live lines read lv8.Lm (no lv8 = left out) under 8, lv.Lm under 7', sTables],
   ['[11] T12 rows: the job writes v2 / v3 / v4 by what the player holds, v4 reads back, the rows of the job before O991 read the same (lv8 none), ROW_VERS lists 4', sRows],
   ['[12] Q3 milestones: the version 8 steps by family, the version 7 ones without a list, one step once a season either way, both call sites pass the list by the run\'s version', sMilestones],
-  ['[13] T14 the gate in the job: a diamond pass is held under master at Lm 35.35 and goes through at 35.36 (104 % of 34)', sGate],
+  ['[13] T14 the gate in the job: a diamond pass is held under master at Lm 35.01 and goes through at 35.02 (103 % of 34)', sGate],
   ['[14] a member who stopped writing: his version 8 copy keeps its version when the team\'s final segment ends it and settles on the team line', sDropped],
   ['[15] a client still on the version 8 prior a day after a version 8 table was recorded: his pass at the prior\'s lower target is a pass', sPrior8]];
 console.log('-- O991 version 8: the job --');
@@ -564,7 +564,7 @@ const MUTS = [
   ['T12: the reader drops v3 rows', [], [['if (ver !== ELP.ROW_VER && ver !== ELP.ROW_VER_LV && ver !== ELP.ROW_VER_LV8) return null;', 'if (ver !== ELP.ROW_VER && ver !== ELP.ROW_VER_LV8) return null;']], sRows],
   ['Q3: the team call site pays the version 7 steps for a version 8 run', [['f.endDepth, ((f.flags | 0) & attest.SEG_V8) ? pointsPlan.elpMilestones8(fam.low) : null)) {', 'f.endDepth, null)) {']], [], sMilestones],
   ['Q3: soloMilestones ignores the list', [['const out = [], L = (Array.isArray(list) && list.length) ? list : COMP.MILESTONES;', 'const out = [], L = COMP.MILESTONES;']], [], sMilestones],
-  ['T14: the gate back to 100 % (the version 7 rule)', [], [['GATE: 104, TEAM_GATE: 104,', 'GATE: 100, TEAM_GATE: 104,']], sGate],
+  ['T14: the gate back to 100 % (the version 7 rule)', [], [['GATE: 103, TEAM_GATE: 104,', 'GATE: 100, TEAM_GATE: 104,']], sGate],
   ['a member who stopped writing loses the version 8 bit (ratingHistFinal as before O991)', [['  r[7] = 1 | ((r[7] | 0) & ELP_R_V8);', '  r[7] = 1;']], [], sDropped],
   ['the version 8 prior is not among the first-run lines', [['.map((tb) => tb[fam]), [pointsPlan.ELP8.PRIOR[fam]]));', '.map((tb) => tb[fam])));']], [], sPrior8],
 ];

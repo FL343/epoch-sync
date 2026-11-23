@@ -64,8 +64,8 @@ T('[3] the settle composes its plan and its points line through the module (matc
     'endlessDeltaLv8', 'endlessSettleLv8', 'elpRowDetails', 'elpRowOf', 'elpTableDetails', 'elpTableOf', 'elpMilestones8'];
   T('[4] O991: the elpLevel8 cases call every version 8 rule (' + need8.length + ' functions)', need8.every((k) => fns8.has(k)), need8.filter((k) => !fns8.has(k)).join(','));
   const c8 = doc.cases.filter((c) => c.kind === 'elpLevel8'), has8 = (re) => c8.some((c) => re.test(c.name));
-  T('[4] O991: the version 8 cases cover the floor, R1 / R2, the three placement steps + the miss floor, the conversion cap, lambda, the 104 % gate (solo / team), the v4 row and v3 / v2 rows read beside it',
-    [/stays at T_MIN/, /R1: a quit/, /R2: a death in the grow phase/, /R2 not once level 16/, /placement 0 pass/, /placement 1 miss near the target/, /placement 2 \(the last\)/, /the cap:/, /lambda, line 20/, /gate, solo Lm 35\.36 = master/, /gate, duo Lm 44\.72 = master/, /row read v4$/, /row read v3/, /row read v2/].every(has8));
+  T('[4] O991: the version 8 cases cover the floor, R1 / R2, the three placement steps + the miss floor, the conversion cap, lambda, the gates (103 % solo / 104 % team), the v4 row and v3 / v2 rows read beside it',
+    [/stays at T_MIN/, /R1: a quit/, /R2: a death in the grow phase/, /R2 not once level 16/, /placement 0 pass/, /placement 1 miss near the target/, /placement 2 \(the last\)/, /the cap:/, /lambda, line 20/, /gate, solo Lm 35\.02 = master/, /gate, duo Lm 44\.72 = master/, /row read v4$/, /row read v3/, /row read v2/].every(has8));
   // O717: the placement matches -- the relegation band without its series, the promotion band with it, the cap under master
   //   (from a clamp and from a natural win), the same match as a sixth (placed), seeded and placing on one part, a PROTECTED loss,
   //   a team code, a part over the cap; the ring readings of placementOf (the counted flags, a full ring, no ring, the target)
@@ -177,8 +177,8 @@ const code = strip(SRC);
     ['T_MIN 20 -> 21', 'GROW_END: 15, T_MIN: 20,', 'GROW_END: 15, T_MIN: 21,'],
     ['MUL gold 2400 -> 2500', 'MUL: Object.freeze([2800, 2500, 2400, 2500, 2900, 2800, 2800]),', 'MUL: Object.freeze([2800, 2500, 2500, 2500, 2900, 2800, 2800]),'],
     ['PROP.REF 2000 -> 1000 (lambda back to the version 7 base)', 'PROP: Object.freeze({ REF: 2000, LO: 500, HI: 2000 }),', 'PROP: Object.freeze({ REF: 1000, LO: 500, HI: 2000 }),'],
-    ['GATE 104 -> 100', 'GATE: 104, TEAM_GATE: 104,', 'GATE: 100, TEAM_GATE: 104,'],
-    ['TEAM_GATE 104 -> 110', 'GATE: 104, TEAM_GATE: 104,', 'GATE: 104, TEAM_GATE: 110,'],
+    ['GATE 103 -> 100', 'GATE: 103, TEAM_GATE: 104,', 'GATE: 100, TEAM_GATE: 104,'],
+    ['TEAM_GATE 104 -> 110', 'GATE: 103, TEAM_GATE: 104,', 'GATE: 103, TEAM_GATE: 110,'],
     ['CONV_CAP 1150 -> 1300', 'CONV_CAP: 1150, CONV_RUNS: 3,', 'CONV_CAP: 1300, CONV_RUNS: 3,'],
     ['MISS_FLOOR 1150 -> 1000', 'PLACE: Object.freeze([1800, 1500, 1300]), MISS_FLOOR: 1150,   // both', 'PLACE: Object.freeze([1800, 1500, 1300]), MISS_FLOOR: 1000,   // both'],
     ['R2 back to "no level passed" only', 'if (!pass && depth <= ELP8.GROW_END) return x;', 'if (!pass && depth === 0) return x;'],

@@ -391,8 +391,8 @@ function levelCases(E, SOLO, DUO) {
 
 // O991 (ELP v8, kind elpLevel8): the grow phase -- the version 8 level state, the target floor T_MIN, the steps on the part past
 //   GROW_END (Lm, reversals, the floor), R1 / R2 (a death in the grow phase leaves the level), the placement steps + the miss floor,
-//   the first level from a version 7 one (the conversion + the cap of the newest runs), the team line, lambda on REF 2000, the gate
-//   of 104 %, the delta / the points line, the v4 row with the version 8 states, the version 8 table, the milestones. Fixed lines
+//   the first level from a version 7 one (the conversion + the cap of the newest runs), the team line, lambda on REF 2000, the gates
+//   (103 % solo, 104 % team), the delta / the points line, the v4 row with the version 8 states, the version 8 table, the milestones. Fixed lines
 //   (written out, not ELP8.PRIOR: retuning the prior moves no case). The run seeds: 2 -> offset 0, 4 -> +1, 19 -> +2, 6 -> -1, 1 -> -2.
 //   in = { fn, args } -> PP[fn](...args), exactly as the endless kind.
 function level8Cases() {
@@ -460,11 +460,11 @@ function level8Cases() {
     E('lambda, line 26 = 1300', 'elpPropK8', [26]),
     E('lambda, line 40 = HI 2000', 'elpPropK8', [40]),
     E('lambda, line 55 = HI 2000', 'elpPropK8', [55]),
-    // the gate (104 %)
-    E('gate, solo Lm 35.35 = diamond (the master line 34 x1.04 = 35.36)', 'skillTierOf8', [3535, SOLO8, 'solo']),
-    E('gate, solo Lm 35.36 = master', 'skillTierOf8', [3536, SOLO8, 'solo']),
-    E('gate, solo Lm 41.60 = grandmaster (40 x1.04)', 'skillTierOf8', [4160, SOLO8, 'solo']),
-    E('gate, solo Lm 41.59 = master', 'skillTierOf8', [4159, SOLO8, 'solo']),
+    // the gates (103 % solo, 104 % team)
+    E('gate, solo Lm 35.01 = diamond (the master line 34 x1.03 = 35.02)', 'skillTierOf8', [3501, SOLO8, 'solo']),
+    E('gate, solo Lm 35.02 = master', 'skillTierOf8', [3502, SOLO8, 'solo']),
+    E('gate, solo Lm 41.20 = grandmaster (40 x1.03)', 'skillTierOf8', [4120, SOLO8, 'solo']),
+    E('gate, solo Lm 41.19 = master', 'skillTierOf8', [4119, SOLO8, 'solo']),
     E('gate, duo Lm 44.71 = diamond (43 x1.04 = 44.72)', 'skillTierOf8', [4471, DUO8, 'duo']),
     E('gate, duo Lm 44.72 = master', 'skillTierOf8', [4472, DUO8, 'duo']),
     E('gate, quad Lm 53.04 = grandmaster (51 x1.04)', 'skillTierOf8', [5304, QUAD8, 'quad']),
@@ -480,8 +480,8 @@ function level8Cases() {
     E('delta, duo gold 2500 miss, Lm 32, line 32 (team length factor)', 'endlessDeltaLv8', [2500, false, 3200, DUO8, 0, 'duo', 32]),
     E('settle, gold 2500 pass, Lm 26, line 26', 'endlessSettleLv8', [2500, true, 2600, SOLO8, 0, 'solo', 26]),
     E('settle, relegation band gold 2050 miss, Lm silver (forced down)', 'endlessSettleLv8', [2050, false, 2400, SOLO8, 0, 'solo', 24]),
-    E('settle, diamond 5850 pass, Lm 35.35 (the master gate held)', 'endlessSettleLv8', [5850, true, 3535, SOLO8, 2, 'solo', 35]),
-    E('settle, diamond 5850 pass, Lm 35.36 (the master gate open)', 'endlessSettleLv8', [5850, true, 3536, SOLO8, 2, 'solo', 35]),
+    E('settle, diamond 5850 pass, Lm 35.01 (the master gate held)', 'endlessSettleLv8', [5850, true, 3501, SOLO8, 2, 'solo', 35]),
+    E('settle, diamond 5850 pass, Lm 35.02 (the master gate open)', 'endlessSettleLv8', [5850, true, 3502, SOLO8, 2, 'solo', 35]),
     E('settle, duo diamond 5850 pass, Lm 44.71 (the team gate held)', 'endlessSettleLv8', [5850, true, 4471, DUO8, 2, 'duo', 45]),
     E('settle, duo diamond 5850 pass, Lm 44.72 (the team gate open)', 'endlessSettleLv8', [5850, true, 4472, DUO8, 2, 'duo', 45]),
     E('settle, master 6050 miss, Lm diamond (forced down)', 'endlessSettleLv8', [6050, false, 3100, SOLO8, 0, 'solo', 31]),
