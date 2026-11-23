@@ -178,6 +178,8 @@ const CASES = [
     team: { scores: [500, 400, 300, 200, 250, 0], leaverSeats: [5], winTeam: 0 } },
   // ---- O728 endless competitive points: the per-run target, the pass / miss points, the placement seed, the row and the table ----
   ...endlessCases(),
+  // ---- O991 version 8 (the grow phase): kind elpLevel8 ----
+  ...level8Cases(),
 ];
 // the endless cases (O728): fixed pass lines (not ELP.PRIOR, so retuning the prior moves no case)
 function endlessCases() {
@@ -382,8 +384,127 @@ function levelCases(E, SOLO, DUO) {
     E('row read v3, a level that is not a state reads as none', 'elpRowOf', [[0xEE | 768, 7, 2, 1, 950, -1, -1, -1, 50, 905, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, 198, 0]]),
     E('table details, version 6 passed (version 6 priors for the missing families)', 'elpTableDetails', [1, { solo: { N: 30, pass: SOLO } }, 6]),
     E('table details, version 7 (version 7 priors for the missing families)', 'elpTableDetails', [1, { solo: { N: 30, pass: SOLO } }, 7]),
-    E('table read, version 6 (rulesSame: a version 7 copy reads it)', 'elpTableOf', [20261201, [0xEC | 512, 1, 6, 1500, 500, 100, 2].concat([30], SOLO, [4], DUO, [0], DUO, [0], DUO)]),
+    E('table read, version 6 (rulesSame for a version 7 copy; a version 8 copy reads version 8 tables only)', 'elpTableOf', [20261201, [0xEC | 512, 1, 6, 1500, 500, 100, 2].concat([30], SOLO, [4], DUO, [0], DUO, [0], DUO)]),
     E('table read, version 5 (rulesSame false)', 'elpTableOf', [20261201, [0xEC | 512, 1, 5, 1500, 500, 100, 2].concat([30], SOLO, [4], DUO, [0], DUO, [0], DUO)]),
+  ];
+}
+
+// O991 (ELP v8, kind elpLevel8): the grow phase -- the version 8 level state, the target floor T_MIN, the steps on the part past
+//   GROW_END (Lm, reversals, the floor), R1 / R2 (a death in the grow phase leaves the level), the placement steps + the miss floor,
+//   the first level from a version 7 one (the conversion + the cap of the newest runs), the team line, lambda on REF 2000, the gate
+//   of 104 %, the delta / the points line, the v4 row with the version 8 states, the version 8 table, the milestones. Fixed lines
+//   (written out, not ELP8.PRIOR: retuning the prior moves no case). The run seeds: 2 -> offset 0, 4 -> +1, 19 -> +2, 6 -> -1, 1 -> -2.
+//   in = { fn, args } -> PP[fn](...args), exactly as the endless kind.
+function level8Cases() {
+  const E = (name, fn, args) => ({ name: 'elp8: ' + name, kind: 'elpLevel8', fn, args });
+  const S = (L, Lm, s, last, run) => ({ L, Lm, s, last, run });
+  const SOLO8 = [22, 24, 26, 28, 31, 34, 40], DUO8 = [25, 29, 32, 35, 38, 43, 48], QUAD8 = [27, 31, 35, 38, 42, 47, 51];
+  const SOLO7 = [2, 6, 10, 16, 25, 35, 45];
+  const st = (L, Lm, s, last, run) => (s | ((last + 1) << 4) | (run << 6));
+  return [
+    // the state
+    E('state, a valid one', 'elpLevelOf8', [S(2400, 2350, 3, 1, 2)]),
+    E('state, L under T_MIN x 100 = null', 'elpLevelOf8', [S(1999, 2350, 3, 1, 2)]),
+    E('state, Lm under T_MIN x 100 = null', 'elpLevelOf8', [S(2400, 1999, 3, 1, 2)]),
+    E('state, s past S_MAX = null', 'elpLevelOf8', [S(2400, 2350, 7, 1, 2)]),
+    E('state, run past RUN_CAP = null', 'elpLevelOf8', [S(2400, 2350, 3, 1, 16)]),
+    E('state, a version 7 level (1000) is not a version 8 one', 'elpLevelOf8', [S(1000, 950, 3, 1, 2)]),
+    // the line and the target
+    E('line, 24.50 rounds to 25', 'elpLineOfL8', [2450]),
+    E('line, never under T_MIN (1500 -> 20)', 'elpLineOfL8', [1500]),
+    E('target, level 24, offset 0', 'elpTargetOfL8', [2400, 2]),
+    E('target, level 31, offset +2', 'elpTargetOfL8', [3100, 19]),
+    E('target, level 20, offset -2 stays at T_MIN', 'elpTargetOfL8', [2000, 1]),
+    E('target, level 21, offset -1 = T_MIN', 'elpTargetOfL8', [2100, 6]),
+    E('target of a state, level 26, offset +1', 'elpLevelTarget8', [S(2600, 2500, 2, -1, 0), 4]),
+    E('target of a state that is not one = null', 'elpLevelTarget8', [S(900, 900, 2, -1, 0), 4]),
+    E('team line, the highest of the roster (version 8 levels)', 'elpTeamLine', [[2400, null, 3100, 2650]]),
+    // the steps (on the part past GROW_END)
+    E('step, the first pass (s 2: the part past 15 x1.25)', 'elpLevelStep8', [S(2400, 2400, 2, -1, 0), { pass: true, depth: 24, T: 24 }]),
+    E('step, the second pass in a row (bigger steps: s 2 -> 1)', 'elpLevelStep8', [S(2625, 2468, 2, 1, 1), { pass: true, depth: 26, T: 26 }]),
+    E('step, a reversal (a miss after a pass: smaller steps, s + 1)', 'elpLevelStep8', [S(2900, 2600, 1, 1, 2), { pass: false, depth: 22, T: 29 }]),
+    E('step, a long streak keeps s at S_MIN and run at RUN_CAP', 'elpLevelStep8', [S(5000, 4500, 1, 1, 15), { pass: true, depth: 50, T: 50 }]),
+    E('step, a miss at the floor stays at T_MIN x 100 (Lm follows the floored level)', 'elpLevelStep8', [S(2000, 2600, 1, 0, 3), { pass: false, depth: 17, T: 20 }]),
+    E('step, R1: a quit miss leaves the level', 'elpLevelStep8', [S(2800, 2700, 3, 1, 1), { pass: false, depth: 18, T: 28, quit: true }]),
+    E('step, R1 does not hold for a pass', 'elpLevelStep8', [S(2800, 2700, 3, 1, 1), { pass: true, depth: 28, T: 28, quit: true }]),
+    E('step, R2: a death in the grow phase (15 levels passed) leaves the level', 'elpLevelStep8', [S(2800, 2700, 3, 1, 1), { pass: false, depth: 15, T: 28 }]),
+    E('step, R2: no level passed leaves the level', 'elpLevelStep8', [S(2800, 2700, 3, 1, 1), { pass: false, depth: 0, T: 28 }]),
+    E('step, R2 not once level 16 was passed (moves)', 'elpLevelStep8', [S(2800, 2700, 3, 1, 1), { pass: false, depth: 16, T: 28 }]),
+    E('step, R2 for a deep target too (T 40, 15 passed)', 'elpLevelStep8', [S(4000, 3900, 4, 1, 1), { pass: false, depth: 15, T: 40 }]),
+    E('step, placement 0 pass (the part past 15 x1.8)', 'elpLevelStep8', [S(2400, 2400, 2, -1, 0), { pass: true, depth: 24, T: 24, placing: 0 }]),
+    E('step, placement 0 miss far under (/1.8, floored at T_MIN)', 'elpLevelStep8', [S(2400, 2400, 2, -1, 0), { pass: false, depth: 10, T: 24, placing: 0 }]),
+    E('step, placement 1 miss near the target (floored at 15 + its depth past 15 x1.15)', 'elpLevelStep8', [S(3120, 3120, 2, -1, 0), { pass: false, depth: 28, T: 31, placing: 1 }]),
+    E('step, placement 2 (the last) pass starts the staircase', 'elpLevelStep8', [S(2580, 2580, 4, 0, 1), { pass: true, depth: 26, T: 26, placing: 2 }]),
+    E('step, a placement quit in the grow phase still moves (R1 / R2 are for points runs)', 'elpLevelStep8', [S(2400, 2400, 2, -1, 0), { pass: false, depth: 3, T: 24, quit: true, placing: 0 }]),
+    E('step, an invalid state = null', 'elpLevelStep8', [S(1000, 1000, 2, -1, 0), { pass: true, depth: 24, T: 24 }]),
+    // the first version 8 level (plan section 3.2)
+    E('init, no version 7 level = the silver line (solo 24)', 'elpLevelInit8', [null, [], SOLO7, SOLO8]),
+    E('init, no version 7 level = the silver line (duo 29)', 'elpLevelInit8', [null, [9, 12], SOLO7, DUO8]),
+    E('init, no lines = T_MIN', 'elpLevelInit8', [null, [], null, null]),
+    E('init, a version 7 level on the gold line reads the version 8 gold line (L), Lm between silver and gold', 'elpLevelInit8', [S(1000, 950, 3, 1, 2), [10, 9, 12], SOLO7, SOLO8]),
+    E('init, the cap: the deepest of the newest runs x1.15 read on the version 8 scale', 'elpLevelInit8', [S(2500, 2400, 3, 1, 2), [10, 9, 12], SOLO7, DUO8]),
+    E('init, only the newest CONV_RUNS runs count for the cap', 'elpLevelInit8', [S(2500, 2400, 3, 1, 2), [5, 6, 4, 40], SOLO7, SOLO8]),
+    E('init, no run for the cap: the converted level', 'elpLevelInit8', [S(2500, 2400, 3, 1, 2), [], SOLO7, SOLO8]),
+    E('init, a version 7 level under the bronze line keeps its ratio, floored at T_MIN', 'elpLevelInit8', [S(100, 100, 1, 0, 2), [1], SOLO7, SOLO8]),
+    E('init, a level past the grandmaster line keeps its ratio', 'elpLevelInit8', [S(5000, 4800, 1, 1, 5), [52, 50, 55], SOLO7, SOLO8]),
+    E('init, no lines: the version 7 values as they are, floored', 'elpLevelInit8', [S(2500, 2400, 3, 1, 2), [30], null, null]),
+    E('init, a version 7 state that is not one = the silver line', 'elpLevelInit8', [S(99, 900, 3, 1, 2), [10], SOLO7, SOLO8]),
+    // the placement seed
+    E('seed, solo 26.00 (the gold line)', 'elpLevelSeed8', [2600, SOLO8, SOLO8]),
+    E('seed, duo 29.00 read on the solo scale (silver)', 'elpLevelSeed8', [2900, DUO8, SOLO8]),
+    E('seed, past the cap', 'elpLevelSeed8', [4500, SOLO8, SOLO8]),
+    // lambda
+    E('lambda, line 0 = LO 500', 'elpPropK8', [0]),
+    E('lambda, line 10 = LO 500', 'elpPropK8', [10]),
+    E('lambda, line 20 = 1000', 'elpPropK8', [20]),
+    E('lambda, line 26 = 1300', 'elpPropK8', [26]),
+    E('lambda, line 40 = HI 2000', 'elpPropK8', [40]),
+    E('lambda, line 55 = HI 2000', 'elpPropK8', [55]),
+    // the gate (104 %)
+    E('gate, solo Lm 35.35 = diamond (the master line 34 x1.04 = 35.36)', 'skillTierOf8', [3535, SOLO8, 'solo']),
+    E('gate, solo Lm 35.36 = master', 'skillTierOf8', [3536, SOLO8, 'solo']),
+    E('gate, solo Lm 41.60 = grandmaster (40 x1.04)', 'skillTierOf8', [4160, SOLO8, 'solo']),
+    E('gate, solo Lm 41.59 = master', 'skillTierOf8', [4159, SOLO8, 'solo']),
+    E('gate, duo Lm 44.71 = diamond (43 x1.04 = 44.72)', 'skillTierOf8', [4471, DUO8, 'duo']),
+    E('gate, duo Lm 44.72 = master', 'skillTierOf8', [4472, DUO8, 'duo']),
+    E('gate, quad Lm 53.04 = grandmaster (51 x1.04)', 'skillTierOf8', [5304, QUAD8, 'quad']),
+    E('gate, below master the nearest line (no gate)', 'skillTierOf8', [2900, SOLO8, 'solo']),
+    E('gate, no level = null', 'skillTierOf8', [null, SOLO8, 'solo']),
+    // the points of one run
+    E('delta, gold 2500 pass, Lm 26, line 26 (lambda 1.3)', 'endlessDeltaLv8', [2500, true, 2600, SOLO8, 0, 'solo', 26]),
+    E('delta, gold 2500 miss, Lm 26, line 26', 'endlessDeltaLv8', [2500, false, 2600, SOLO8, 0, 'solo', 26]),
+    E('delta, gold 2500 pass, Lm 26, line 20 (lambda 1)', 'endlessDeltaLv8', [2500, true, 2600, SOLO8, 0, 'solo', 20]),
+    E('delta, silver 1000 pass, Lm 31 (rated too low), offset +2', 'endlessDeltaLv8', [1000, true, 3100, SOLO8, 2, 'solo', 31]),
+    E('delta, platinum 3500 pass at line 40 (lambda 2: the swing cap)', 'endlessDeltaLv8', [3500, true, 3400, SOLO8, 2, 'solo', 40]),
+    E('delta, duo gold 2500 pass, Lm 32, line 32 (team length factor)', 'endlessDeltaLv8', [2500, true, 3200, DUO8, 0, 'duo', 32]),
+    E('delta, duo gold 2500 miss, Lm 32, line 32 (team length factor)', 'endlessDeltaLv8', [2500, false, 3200, DUO8, 0, 'duo', 32]),
+    E('settle, gold 2500 pass, Lm 26, line 26', 'endlessSettleLv8', [2500, true, 2600, SOLO8, 0, 'solo', 26]),
+    E('settle, relegation band gold 2050 miss, Lm silver (forced down)', 'endlessSettleLv8', [2050, false, 2400, SOLO8, 0, 'solo', 24]),
+    E('settle, diamond 5850 pass, Lm 35.35 (the master gate held)', 'endlessSettleLv8', [5850, true, 3535, SOLO8, 2, 'solo', 35]),
+    E('settle, diamond 5850 pass, Lm 35.36 (the master gate open)', 'endlessSettleLv8', [5850, true, 3536, SOLO8, 2, 'solo', 35]),
+    E('settle, duo diamond 5850 pass, Lm 44.71 (the team gate held)', 'endlessSettleLv8', [5850, true, 4471, DUO8, 2, 'duo', 45]),
+    E('settle, duo diamond 5850 pass, Lm 44.72 (the team gate open)', 'endlessSettleLv8', [5850, true, 4472, DUO8, 2, 'duo', 45]),
+    E('settle, master 6050 miss, Lm diamond (forced down)', 'endlessSettleLv8', [6050, false, 3100, SOLO8, 0, 'solo', 31]),
+    // the v4 row
+    E('row details v4, a solo version 7 level and a duo version 8 level', 'elpRowDetails', [{ n: 7, tier: 2, placed: 1, h: { solo: 950, duo: 1480, trio: null, quad: null }, lv: { solo: S(940, 905, 3, 1, 2) }, lv8: { duo: S(2600, 2550, 3, 0, 1) } }, [{ mh: -5, delta: 40, flags: 264 }]]),
+    E('row details v4, version 8 levels only (the version 7 part -1)', 'elpRowDetails', [{ n: 4, tier: 1, placed: 1, h: { solo: 2100 }, lv8: { solo: S(2400, 2400, 2, -1, 0), quad: S(3000, 2950, 4, 1, 3) } }, []]),
+    E('row details, version 8 levels all invalid and a version 7 one = v3', 'elpRowDetails', [{ n: 7, tier: 2, placed: 1, h: { solo: 950 }, lv: { solo: S(940, 905, 3, 1, 2) }, lv8: { solo: S(1000, 905, 3, 1, 2) } }, []]),
+    E('row details, nothing valid = v2', 'elpRowDetails', [{ n: 7, tier: 2, placed: 1, h: { solo: 950 }, lv8: { solo: S(1999, 2000, 3, 1, 2) } }, []]),
+    E('row read v4', 'elpRowOf', [[0xEE | 1024, 7, 2, 1, 950, 1480, -1, -1, 940, 905, st(940, 905, 3, 1, 2), -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 2600, 2550, st(2600, 2550, 3, 0, 1), -1, -1, -1, -1, -1, -1, 198, 1, -5, 40, 264]]),
+    E('row read v4, a version 8 state under the floor reads as none', 'elpRowOf', [[0xEE | 1024, 4, 1, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 1500, 1500, st(1500, 1500, 2, -1, 0), -1, -1, -1, -1, -1, -1, -1, -1, -1, 198, 0]]),
+    E('row read v4 cut short before its version 8 levels = null', 'elpRowOf', [[0xEE | 1024, 7, 2, 1, 950, -1, -1, -1, 940, 905, st(940, 905, 3, 1, 2), -1, -1, -1, -1, -1, -1, -1, -1, -1, 198, 0]]),
+    E('row read v3 (a version 7 row: lv8 every family null)', 'elpRowOf', [[0xEE | 768, 7, 2, 1, 950, 1480, -1, -1, 940, 905, st(940, 905, 3, 1, 2), -1, -1, -1, -1, -1, -1, -1, -1, -1, 198, 0]]),
+    E('row read v2 (lv and lv8 every family null)', 'elpRowOf', [[0xEE | 512, 7, 1, 1, 950, 1480, -1, -1, 198, 0]]),
+    E('row read v5 = null (a layout this copy does not know)', 'elpRowOf', [[0xEE | 1280, 7, 2, 1, 950, 1480, -1, -1].concat(new Array(24).fill(-1), [198, 0])]),
+    // the table and the milestones
+    E('table details, version 8 (version 8 priors for the missing families)', 'elpTableDetails', [1, { solo: { N: 30, pass: SOLO8 } }, 8]),
+    E('table read, version 8 (rulesSame)', 'elpTableOf', [20261201, [0xEC | 512, 1, 8, 1500, 500, 100, 2].concat([30], SOLO8, [4], DUO8, [0], DUO8, [0], QUAD8)]),
+    E('table read, version 7 (rulesSame false: the version 7 scale)', 'elpTableOf', [20261201, [0xEC | 512, 1, 7, 1500, 500, 100, 2].concat([30], SOLO7, [4], SOLO7, [0], SOLO7, [0], SOLO7)]),
+    E('milestones, solo', 'elpMilestones8', ['solo']),
+    E('milestones, duo', 'elpMilestones8', ['duo']),
+    E('milestones, trio', 'elpMilestones8', ['trio']),
+    E('milestones, quad', 'elpMilestones8', ['quad']),
+    E('milestones, a family without its own list (duoc) = solo', 'elpMilestones8', ['duoc']),
   ];
 }
 
@@ -493,6 +614,7 @@ function replay(PP, c) {
   if (c.kind === 'boundary') return PP.boundaryOf(c.lp);
   if (c.kind === 'seat') return { mask: PP.rankedSeatMaskOf(c.mt), sans: PP.mtSansSeats(c.mt), base: PP.baseMt(c.mt), any: PP.anyAppliesLp(c.mt), seats: [0, 1, 2, 3, 4, 5].map((s) => PP.seatAppliesLp(c.mt, s)) };
   if (c.kind === 'endless') return PP[c.fn].apply(null, c.args);   // O728: one endless points function at fixed inputs
+  if (c.kind === 'elpLevel8') return PP[c.fn].apply(null, c.args);   // O991: one version 8 level function at fixed inputs (in = { fn, args }, as endless)
   if (c.kind === 'placement') return PP.placementOf(c.det, c.target);   // O717: the settled matches of a season on a row's ring
   if (c.kind !== 'match') throw new Error('unknown case kind ' + c.kind);
   const parts = c.parts.map((p) => ({ steamID: p.id, seat: p.seat, mmr: p.mmr, rank: p.rank, lp: p.lp }));

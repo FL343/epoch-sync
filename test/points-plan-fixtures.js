@@ -10,6 +10,7 @@
 //   [6] the module loads the way the client loads it: comments stripped, new Function('window', src) -> window.POINTS_PLAN,
 //       same outputs for every case
 //   [7] the module stays self-contained: no require, no process.env, no clock, no block comment, ASCII-only code
+//   [8] O991 (T1): a version 8 constant (or rule) moved on one side only turns a version 8 case (kind elpLevel8) red
 const fs = require('fs');
 const path = require('path');
 for (const k of ['RS_THRESHOLD', 'RS_UPSET_BONUS', 'RS_STRONG_UPSET_LOSS', 'RS_SOLO_VS_TRIO', 'RS_TRIO_WIN', 'LEAVER_LP_PENALTY']) delete process.env[k];
@@ -54,7 +55,17 @@ T('[3] the settle composes its plan and its points line through the module (matc
 // [4]
 {
   const kinds = new Set(doc.cases.map((c) => c.kind));
-  T('[4] all seven kinds present', ['match', 'seed', 'leave', 'boundary', 'seat', 'endless', 'placement'].every((k) => kinds.has(k)), [...kinds].join(','));
+  T('[4] all eight kinds present (O991: elpLevel8)', ['match', 'seed', 'leave', 'boundary', 'seat', 'endless', 'placement', 'elpLevel8'].every((k) => kinds.has(k)), [...kinds].join(','));
+  // O991 (ELP v8, plan section 4.1 / T1): the version 8 cases name every version 8 rule the two repos share -- the state, the line /
+  //   target (floor), the step (part past the grow phase, R1 / R2, placement + floor), the first level (conversion + cap), the seed,
+  //   lambda, the gate, the delta / points line, the v4 row (both ways), the version 8 table, the milestones, the team line
+  const fns8 = new Set(doc.cases.filter((c) => c.kind === 'elpLevel8').map((c) => c.in.fn));
+  const need8 = ['elpLevelOf8', 'elpLineOfL8', 'elpTargetOfL8', 'elpLevelTarget8', 'elpTeamLine', 'elpLevelStep8', 'elpLevelInit8', 'elpLevelSeed8', 'elpPropK8', 'skillTierOf8',
+    'endlessDeltaLv8', 'endlessSettleLv8', 'elpRowDetails', 'elpRowOf', 'elpTableDetails', 'elpTableOf', 'elpMilestones8'];
+  T('[4] O991: the elpLevel8 cases call every version 8 rule (' + need8.length + ' functions)', need8.every((k) => fns8.has(k)), need8.filter((k) => !fns8.has(k)).join(','));
+  const c8 = doc.cases.filter((c) => c.kind === 'elpLevel8'), has8 = (re) => c8.some((c) => re.test(c.name));
+  T('[4] O991: the version 8 cases cover the floor, R1 / R2, the three placement steps + the miss floor, the conversion cap, lambda, the 104 % gate (solo / team), the v4 row and v3 / v2 rows read beside it',
+    [/stays at T_MIN/, /R1: a quit/, /R2: a death in the grow phase/, /R2 not once level 16/, /placement 0 pass/, /placement 1 miss near the target/, /placement 2 \(the last\)/, /the cap:/, /lambda, line 20/, /gate, solo Lm 35\.36 = master/, /gate, duo Lm 44\.72 = master/, /row read v4$/, /row read v3/, /row read v2/].every(has8));
   // O717: the placement matches -- the relegation band without its series, the promotion band with it, the cap under master
   //   (from a clamp and from a natural win), the same match as a sixth (placed), seeded and placing on one part, a PROTECTED loss,
   //   a team code, a part over the cap; the ring readings of placementOf (the counted flags, a full ring, no ring, the target)
@@ -156,6 +167,32 @@ const code = strip(SRC);
   T('[6] the stripped copy loads with new Function(\'window\', src) onto window.POINTS_PLAN', !err && win.POINTS_PLAN && typeof win.POINTS_PLAN.matchPlan === 'function', err && err.message);
   if (win.POINTS_PLAN) T('[6] the stripped copy replays every case to its out', J(replayAll(win.POINTS_PLAN)) === J(want));
   if (win.POINTS_PLAN) T('[6] the stripped copy carries the same RULES_VER and FIXTURES_HASH', win.POINTS_PLAN.RULES_VER === PP.RULES_VER && win.POINTS_PLAN.FIXTURES_HASH === PP.FIXTURES_HASH);
+}
+// [8] O991 T1 mutations: a version 8 constant moved on ONE side (a copy of the module, as a client copy built from another
+//   points-plan.js would be) turns the version 8 cases red -- the two repos cannot drift on a number the cases name
+{
+  const idx8 = doc.cases.map((c, i) => (c.kind === 'elpLevel8' ? i : -1)).filter((i) => i >= 0);
+  const MUT8 = [
+    ['GROW_END 15 -> 14', 'GROW_END: 15, T_MIN: 20,', 'GROW_END: 14, T_MIN: 20,'],
+    ['T_MIN 20 -> 21', 'GROW_END: 15, T_MIN: 20,', 'GROW_END: 15, T_MIN: 21,'],
+    ['MUL gold 2400 -> 2500', 'MUL: Object.freeze([2800, 2500, 2400, 2500, 2900, 2800, 2800]),', 'MUL: Object.freeze([2800, 2500, 2500, 2500, 2900, 2800, 2800]),'],
+    ['PROP.REF 2000 -> 1000 (lambda back to the version 7 base)', 'PROP: Object.freeze({ REF: 2000, LO: 500, HI: 2000 }),', 'PROP: Object.freeze({ REF: 1000, LO: 500, HI: 2000 }),'],
+    ['GATE 104 -> 100', 'GATE: 104, TEAM_GATE: 104,', 'GATE: 100, TEAM_GATE: 104,'],
+    ['TEAM_GATE 104 -> 110', 'GATE: 104, TEAM_GATE: 104,', 'GATE: 104, TEAM_GATE: 110,'],
+    ['CONV_CAP 1150 -> 1300', 'CONV_CAP: 1150, CONV_RUNS: 3,', 'CONV_CAP: 1300, CONV_RUNS: 3,'],
+    ['MISS_FLOOR 1150 -> 1000', 'PLACE: Object.freeze([1800, 1500, 1300]), MISS_FLOOR: 1150,   // both', 'PLACE: Object.freeze([1800, 1500, 1300]), MISS_FLOOR: 1000,   // both'],
+    ['R2 back to "no level passed" only', 'if (!pass && depth <= ELP8.GROW_END) return x;', 'if (!pass && depth === 0) return x;'],
+    ['the step on the whole level (not the part past the grow phase)', 'const up = (L, f) => G + Math.round((L - G) * f / 1000), down = (L, f) => G + Math.round((L - G) * 1000 / f);', 'const up = (L, f) => Math.round(L * f / 1000), down = (L, f) => Math.round(L * 1000 / f);'],
+    ['the quad milestones = the duo ones', 'quad: Object.freeze([Object.freeze([35, 40]), Object.freeze([40, 80]), Object.freeze([44, 150])]),', 'quad: Object.freeze([Object.freeze([32, 40]), Object.freeze([36, 80]), Object.freeze([41, 150])]),'],
+    ['the v4 row reader drops the version 8 states', 'if (ver === ELP.ROW_VER_LV8) ELP_FAMS.forEach((fam, i) => { lv8[fam] = stateAt(lv8At + 3 * i, elpLevelOf8); });', 'void 0;'],
+  ];
+  for (const [label, good, badS] of MUT8) {
+    if (SRC.indexOf(good) < 0) { bad('[8] T1 mutation anchor missing: ' + label); continue; }
+    const w = {};
+    let red = false;
+    try { new Function('window', strip(SRC.split(good).join(badS)))(w); const got = replayAll(w.POINTS_PLAN); red = idx8.some((i) => got[i] !== want[i]); } catch (e) { red = true; }
+    T('[8] T1 mutation "' + label + '" turns a version 8 case red', red);
+  }
 }
 // [7]
 T('[7] no require, no process, no clock in the module code', !/\brequire\s*\(|\bprocess\b|\bDate\b|\bperformance\b/.test(code));
