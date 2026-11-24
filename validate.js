@@ -19,12 +19,29 @@ const errRefund = require('./err-refund.js');   // O618: game-error reports (err
 //   go in through configure(); the live workflows set none of them (main() warns when one is set: the client's copy then
 //   reads other numbers than the points this job settles).
 const pointsPlan = require('./points-plan.js');
-const PP_OVERRIDES = pointsPlan.configure({ RS_THRESHOLD: process.env.RS_THRESHOLD, RS_UPSET_BONUS: process.env.RS_UPSET_BONUS,
+// O989 rules-cfg (points-plan.js CFG_KEYS: the couch-pair numbers that move without a build). One small JSON file beside the
+//   code ({ rev, vals }; config, not state -- like RECOVER_FILE): read once here, handed to configure() with the environment
+//   knobs, published on the pulse row for the client and stamped (rev) on the receipts of the couch matches this run settles.
+//   No file (or an empty object) = rev 0 = the defaults. A file this job cannot use (not JSON, a value off its range) is not
+//   guessed around -- a multiplier set to 0 must not read as 1 for a run: the defaults stay configured, main() warns every
+//   run and every couch match WAITS (couch-cfg-hold) until the file is fixed; every other match settles as ever.
+const RULES_CFG_FILE = process.env.RULES_CFG_FILE || require('path').join(__dirname, 'rules-cfg.json');
+function loadRulesCfg(file) {
+  const dflt = () => { const vals = {}; for (const k of pointsPlan.CFG_KEYS) vals[k] = pointsPlan.DEFAULTS[k]; return { rev: 0, vals }; };
+  let text;
+  try { text = fs.readFileSync(file, 'utf8'); } catch (e) { return (e && e.code === 'ENOENT') ? dflt() : Object.assign(dflt(), { bad: 'unreadable (' + (e && e.code) + ')' }); }
+  let o;
+  try { o = JSON.parse(text); } catch (e) { return Object.assign(dflt(), { bad: 'not JSON' }); }
+  if (o && typeof o === 'object' && !Array.isArray(o) && !Object.keys(o).length) return dflt();
+  return pointsPlan.rulesCfgOf(o) || Object.assign(dflt(), { bad: 'rev or a value out of range' });
+}
+const RULES_CFG = loadRulesCfg(RULES_CFG_FILE);
+const PP_OVERRIDES = pointsPlan.configure(Object.assign({ RS_THRESHOLD: process.env.RS_THRESHOLD, RS_UPSET_BONUS: process.env.RS_UPSET_BONUS,
   RS_STRONG_UPSET_LOSS: process.env.RS_STRONG_UPSET_LOSS, RS_SOLO_VS_TRIO: process.env.RS_SOLO_VS_TRIO, RS_TRIO_WIN: process.env.RS_TRIO_WIN,
-  LEAVER_LP_PENALTY: process.env.LEAVER_LP_PENALTY });
+  LEAVER_LP_PENALTY: process.env.LEAVER_LP_PENALTY }, RULES_CFG.vals)).filter((k) => pointsPlan.CFG_KEYS.indexOf(k) < 0);   // (the cfg's own numbers are no environment override)
 const { RULES_VER, LP_MAX, LP_SEG, lpSeg, LP_SEED, seedLp, SOFT_RESET, softResetLp, seasonSeedLp, lpDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND,
   boundaryOf, crosslineDelta, matchPlan, settleLine, baseMt, premadeMaskOf, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, appliesLp, isTeamMt, leaverLpPenalty,
-  rankedSeatMaskOf, mtSansSeats, seatAppliesLp, anyAppliesLp,
+  rankedSeatMaskOf, mtSansSeats, seatAppliesLp, anyAppliesLp, guestSeatMaskOf, isGuestSeat, guestSeatOfMain, accountSeatsOf,
   RS_MAGIC, reducedStakesPlan, teamLpPlan, RS_THRESHOLD, RS_UPSET_BONUS, RS_STRONG_UPSET_LOSS, RS_SOLO_VS_TRIO, RS_TRIO_WIN, LEAVER_LP_PENALTY,
   ratingDetails, RECEIPT_F, lpDetailsOf, lpDetails, receiptPush, pulseDetails, PLACEMENT_TARGET, placementOf } = pointsPlan;
 // O480 points receipts: the details of every points-board write = the RS reveal slot (rv = this run's flagged outcome { matchHash,
@@ -34,7 +51,7 @@ const { RULES_VER, LP_MAX, LP_SEG, lpSeg, LP_SEED, seedLp, SOFT_RESET, softReset
 function lpWriteDetails(prevDet, rv, events) {
   const cur = lpDetailsOf(prevDet);
   let ring = cur.ring;
-  for (const ev of (events || [])) ring = receiptPush(ring, ev.mh, ev.change, ev.set, ev.clear);
+  for (const ev of (events || [])) ring = receiptPush(ring, ev.mh, ev.change, ev.set, ev.clear, ev.rev);   // O989: ev.rev = a couch settle's rules-cfg revision (else the entry keeps its own)
   return lpDetails(rv ? [RS_MAGIC, rv.matchHash, rv.seed, rv.flag, rv.adjDelta, rv.normalDelta] : cur.rs, ring);
 }
 const mhOfKey = (m) => parseInt(String(m), 10) | 0;   // a match key starts with its records' matchHash (d[3]_d[4]_d[2])
@@ -1335,8 +1352,47 @@ function blankSeatStart(r) {
   if (r.d.length < 9) return false;   // no seat count (the job reads a start only with d.length >= 10; old unit fixtures)
   const pc = r.d[8] | 0, ro = r.roster || {};
   if (pc < 1) return true;
-  for (let s = 0; s < pc; s++) if (!ro[s]) return true;
+  // O989: a guest seat the match type declares (a couch pair's second seat) is empty on every honest start of the key: not blank
+  for (let s = 0; s < pc; s++) if (!ro[s] && !isGuestSeat(r.d[2], s)) return true;
   return false;
+}
+// ---- a couch pair's guest seat is nobody's to claim (O989; the companion plan's K2) ----
+// A matchmade table may seat a couch pair: one account (the main) and, at the next seat, a guest with no account. The match
+// type names the guest seats (bits 17-22, part of the match key) and every honest record leaves them empty on its roster.
+// Left as an ordinary empty seat, each honest start of such a key was a blank start (Q130: it does not vote), so ONE outside
+// start naming the players' table with its writer on the guest seat was the only voter: it registered itself there, the
+// seat gate then let its result in, and it took the guest's place, XP and rating (test/guest-seat-settle.js [1] seats it
+// with the two lines below taken out). So, ahead of everything that reads starts: a matchmade start written FROM a declared
+// guest seat, or naming an account ON one, counts nowhere -- no vote, no split, no contest, nobody's own start -- and nobody
+// is flagged (the seat index and the table are the host's, Q292: an honest joiner a modded host hands a guest seat is left
+// without a start, which convicts nobody, Q69). The honest starts are no longer blank (blankSeatStart) and register the
+// table with the guest seat empty; a result from that seat then meets the seat gate, or without a registered roster the
+// per-record sanity reasons 'guest-seat' / 'guest-roster' (dropped alone, nobody flagged, its writer no leaver: Q109).
+// the id a guest seat goes by inside one settle (never a Steam id: no state file and no board write carries it)
+const guestIdOf = (seat) => '~guest' + (seat | 0);
+function guestSeatClaim(r) {
+  const mt = r.d[2] | 0;
+  if (!guestSeatMaskOf(mt) || !isMatchmadeMt(mt)) return false;
+  if (isGuestSeat(mt, r.d[5] | 0)) return true;
+  for (const k of Object.keys(r.roster || {})) if (isGuestSeat(mt, k | 0)) return true;
+  return false;
+}
+// Drops, in place, every such start (a processed key's are left alone, as the seat gate leaves them). Returns { out: Map(key
+// -> dropped starts), n }.
+function dropGuestSeatStarts(starts, processed) {
+  const out = new Map();
+  let n = 0, w = 0;
+  if (!starts) return { out, n };
+  for (let i = 0; i < starts.length; i++) {
+    const r = starts[i], m = r.d[3] + '_' + r.d[4] + '_' + r.d[2];
+    if (processed.has(m) || !guestSeatClaim(r)) { starts[w++] = r; continue; }
+    if (!out.has(m)) out.set(m, []);
+    out.get(m).push(r); n++;
+  }
+  starts.length = w;
+  for (const [m, rs] of out) ghWarn('match=' + m + ': ' + rs.length + ' start record(s) written from a guest seat of a couch pair, or naming an account on one -- not counted, nobody flagged (O989): '
+    + rs.map((r) => plog(r.steamID) + '@' + r.shard + '=' + (r.d[5] | 0)).join(' '));
+  return { out, n };
 }
 const BLANK_STARTS = [];   // [key, record] -- flagged in main once signals are loaded
 function noteBlankStarts(m, recs) {
@@ -2730,24 +2786,34 @@ function endlessLoneVerdicts(pending, groups, processed, consistentKeys, now, co
 // Still not covered: a seat that wrote no confession (crash, pulled cable) leaves the key as today (the start-orphan
 // verdict), and so does a second player who stayed (two writers: the normal settle).
 const QUIT_LONE = { MT: 1, PC: 2, PC_MAX: 6, LEVEL_SECONDS: 60 };
+// O989: a couch table is in the lane too -- its guest seat follows its main (no account, no start, no confession of its own),
+//   and its brawl code may carry the party bit of the couch pair itself: the lane reads the code without that bit. Any other
+//   party bit keeps the key out as before ("a party queue").
+function quitLoneMt(mt) {
+  let m = mtSansSeats(mt);
+  const gm = guestSeatMaskOf(mt);
+  if (gm) for (let k = 0; k < 4; k++) if (((m >> (4 + k)) & 1) && ((gm >> (2 * k + 1)) & 1) && !((gm >> (2 * k)) & 1)) m &= ~(1 << (4 + k));
+  return m;
+}
 // p: the key's starts entry; g: groups[key]; quitSeen: "pid|key" of the abandon confessions read this run (not synthetic).
 //   Returns { m, w, o, seat, prog, os } or null -- o the quitter of a 1V1 (the first other seat's), os every other seat's
 //   [{ o, seat }] (Q427: one per quitter, in seat order).
 function quitLoneClaim(p, key, g, pending, processed, confState, confSeen, quitSeen, vecOf) {
   if (!p || !g || !g.length || processed.has(key) || processed.has(splitMark(key))) return null;
   const pc = g[0].d[8] | 0;
-  if (mtSansSeats(g[0].d[2]) !== QUIT_LONE.MT || mtSansSeats(p.mt) !== QUIT_LONE.MT || pc < QUIT_LONE.PC || pc > QUIT_LONE.PC_MAX) return null;
+  if (quitLoneMt(g[0].d[2]) !== QUIT_LONE.MT || quitLoneMt(p.mt) !== QUIT_LONE.MT || pc < QUIT_LONE.PC || pc > QUIT_LONE.PC_MAX) return null;
   const ro = seatGateRoster(p);
   if (!ro || p.prov || p.lent) return null;
   const cn = pending['~' + key];
   if (cn && (cn.c || cn.lent)) return null;
-  const seats = Object.keys(ro);   // Q427: every seat 0 .. pc - 1 registered, nothing else (a bot seat has no roster entry)
-  if (seats.length !== pc || seats.some((s) => String(s | 0) !== s || (s | 0) < 0 || (s | 0) >= pc)) return null;
+  const mtQ = g[0].d[2] | 0, acc = accountSeatsOf(mtQ, pc);   // O989: the seats that carry an account (pc without a guest mask)
+  const seats = Object.keys(ro);   // Q427: every seat 0 .. pc - 1 registered, nothing else (a bot seat has no roster entry; O989: nor a declared guest seat)
+  if (seats.length !== acc || seats.some((s) => String(s | 0) !== s || (s | 0) < 0 || (s | 0) >= pc || isGuestSeat(mtQ, s | 0))) return null;
   const w = String(g[0].steamID), wp = pid(w), seat = g[0].d[5] | 0, v0 = vecOf(g[0]);
   if (seat < 0 || seat >= pc || ro[seat] !== wp || String(v0).indexOf('BAD') === 0) return null;
   const others = [];
-  for (let s = 0; s < pc; s++) if (s !== seat) others.push(s);
-  if (seats.some((s) => !ro[s]) || new Set(seats.map((s) => ro[s])).size !== pc) return null;   // one account at two seats (him or a quitter)
+  for (let s = 0; s < pc; s++) if (s !== seat && !isGuestSeat(mtQ, s)) others.push(s);
+  if (seats.some((s) => !ro[s]) || new Set(seats.map((s) => ro[s])).size !== acc) return null;   // one account at two seats (him or a quitter)
   for (const r of g) {
     const dc = r.dispCode | 0;
     if (String(r.steamID) !== w || (r.d[5] | 0) !== seat || (r.d[8] | 0) !== pc) return null;
@@ -2777,7 +2843,7 @@ function quitLoneVerdicts(pending, groups, processed, consistentKeys, now, matur
   const res = { due: [], waiting: 0, held: 0 };
   for (const m of Object.keys(pending)) {
     const p = pending[m];
-    if (m.charAt(0) === '~' || !p || typeof p !== 'object' || mtSansSeats(p.mt) !== QUIT_LONE.MT || consistentKeys.has(m) || !groups[m]) continue;
+    if (m.charAt(0) === '~' || !p || typeof p !== 'object' || quitLoneMt(p.mt) !== QUIT_LONE.MT || consistentKeys.has(m) || !groups[m]) continue;
     if (now - (p.t0 || 0) >= maturityMs) continue;   // the start-orphan verdict's (it ran first this run)
     const c = quitLoneClaim(p, m, groups[m], pending, processed, confState, confSeen, quitSeen, vecOf);
     if (!c) continue;
@@ -2846,7 +2912,7 @@ function quitLoneLateDue(confState, consistentMatches, processed) {
     let o = null, w = null, why = '';
     for (const r of c.g) {
       const h = pid(String(r.steamID)), seat = r.d[5] | 0;
-      if (mtSansSeats(r.d[2]) !== QUIT_LONE.MT || (r.d[8] | 0) !== pc0 || pc0 < QUIT_LONE.PC || pc0 > QUIT_LONE.PC_MAX || ws < 0) { why = 'not a quick match of the lane'; break; }
+      if (quitLoneMt(r.d[2]) !== QUIT_LONE.MT || (r.d[8] | 0) !== pc0 || pc0 < QUIT_LONE.PC || pc0 > QUIT_LONE.PC_MAX || ws < 0) { why = 'not a quick match of the lane'; break; }
       if (h === op && seat === qs) {
         if (dispClassOf(r.dispCode) === 'abandoner') { why = 'a quit end of his'; break; }
         if (!o) o = String(r.steamID);
@@ -3311,6 +3377,28 @@ function sanityFlags(g) {
     if (SEAT_MASK_BASES.indexOf(base) < 0) out.push('seat-mask');
     if ((seatMask >> Math.max(0, Math.min(pc, 6))) !== 0) out.push('seat-mask-range');
   }
+  // O989 a couch pair's guest seats: bits 17-22, on a matchmade table of the quick family like the ranked-seat mask, and the
+  //   host's header like it (each reason below is a header reason, SANITY_HEADER_SLUGS: held, no joiner flagged). 'guest-mask':
+  //   the playtest / demo job (no build of theirs writes one: 'mt'), a code that never carries one, or a guest seat marked
+  //   ranked (a guest has no points). 'guest-range': a bit past the seats, seat 0 (no seat before it for its main), or fewer
+  //   than two accounts at the table (a couch pair never plays alone). 'guest-pair': the seat before a guest is not his
+  //   main's -- another guest, the other team of a team code, or a brawl's premade trio / another party pair over the two.
+  const guestMask = guestSeatMaskOf(mt);
+  if (guestMask) {
+    if (PT_MODE && out.indexOf('mt') < 0) out.push('mt');
+    if (SEAT_MASK_BASES.indexOf(base) < 0 || (guestMask & seatMask) !== 0) out.push('guest-mask');
+    if ((guestMask >> Math.max(0, Math.min(pc, 6))) !== 0 || (guestMask & 1) || accountSeatsOf(mt, pc) < 2) out.push('guest-range');
+    else for (let s = 1; s < pc; s++) {
+      if (!((guestMask >> s) & 1)) continue;
+      let off = ((guestMask >> (s - 1)) & 1) === 1;
+      if (isTeamMt(base)) { const tsz = teamSizeOfMt(base); if (teamOfSeat(s, tsz) !== teamOfSeat(s - 1, tsz)) off = true; }
+      else {
+        if (trioAt > 0 && s >= trioAt - 1 && s - 1 <= trioAt + 1) off = true;
+        for (let k = 0; k < 4; k++) if (((mask >> k) & 1) && (2 * k === s || 2 * k + 1 === s - 1)) off = true;   // a party pair over one of the two seats only
+      }
+      if (off) { out.push('guest-pair'); break; }
+    }
+  }
   let scoreCap = SANITY.SCORE_CAP, scoreFloor = SANITY.SCORE_FLOOR;
   if (isTeamMt(base)) {
     if (mask !== 0 || trioAt !== 0) out.push('team-mask');   // team codes never carry premade fields (pair mask OR trio)
@@ -3416,6 +3504,7 @@ function sanityFlags(g) {
     // there; real elapsed time is enforced by the pacing gate against this job's own clock.
     if (dur < 0 || (base !== ENDLESS.MT && dur > durCapOf(base, r.d))) { out.push('duration'); break; }   // O792: a friends' room scales with its levels
     if (seat < 0 || seat >= pc) { out.push('seat'); break; }
+    if (guestMask && isGuestSeat(mt, seat)) { out.push('guest-seat'); break; }   // O989: nobody writes from a couch pair's guest seat
     const roster = r.roster || {};
     // the writing account is unforgeable (leaderboard entry owner) -- a roster that puts
     // somebody else at the writer's own seat is a forged record, not a disagreement.
@@ -3428,6 +3517,7 @@ function sanityFlags(g) {
       seen.add(sid);
     }
     if (bad) break;
+    if (guestMask && Object.keys(roster).some((k) => isGuestSeat(mt, k | 0))) { out.push('guest-roster'); break; }   // O989: nor names an account on one
   }
   return out;
 }
@@ -3439,7 +3529,7 @@ function sanityFlags(g) {
 // fields: type, seat count, scores, rank claims, premade fields) keeps the whole-group rule, and so does endless (its
 // writers-only outputs and its chain read every writer's tail -- resume tags -- so dropping one could change a chain verdict).
 // Returns { flags, drop: [{ sid, why, recs }], keep }: drop empty = the whole-group rule applies to `flags`.
-const SANITY_RECORD_SLUGS = ['duration', 'seat', 'self-seat', 'sid-range', 'dup-sid', 'dup-writer'];
+const SANITY_RECORD_SLUGS = ['duration', 'seat', 'self-seat', 'sid-range', 'dup-sid', 'dup-writer', 'guest-seat', 'guest-roster'];
 // Q109 rework 2 (+ cloud audit Q211): a roster reason drops the record and flags nobody. A settle record's roster is the host's
 //   seat map as the writer received it: a friends' room has no seal, so a modded host's table naming an account twice or a number
 //   outside the Steam id range lands in every honest joiner's record, and a cold rejoin adopts the receipt's table whole. The
@@ -3452,8 +3542,11 @@ const SANITY_RECORD_SLUGS = ['duration', 'seat', 'self-seat', 'sid-range', 'dup-
 //   outside the table had the joiner's record dropped AND the joiner flagged alone, once per match (three matches: trust
 //   tier 1); the host was not flagged. The drop already takes what the record could earn and keeps him ranked at his
 //   consensus seat, so a flag on it deterred nothing.
-const SANITY_ROSTER_SLUGS = ['self-seat', 'sid-range', 'dup-sid'];
-const SANITY_HOST_SLUGS = SANITY_ROSTER_SLUGS.concat(['seat']);   // Q292: the reasons a host's broadcast can put on a joiner's record
+// O989: a record written from a couch pair's guest seat ('guest-seat': the seat index is the host's, as 'seat') or naming an
+//   account on one ('guest-roster': the table is the host's) joins them -- dropped alone, nobody flagged, its writer ranked at
+//   the seat the kept records (or the start roster) give him and no leaver; an outside account they name nowhere is ranked nowhere.
+const SANITY_ROSTER_SLUGS = ['self-seat', 'sid-range', 'dup-sid', 'guest-roster'];
+const SANITY_HOST_SLUGS = SANITY_ROSTER_SLUGS.concat(['seat', 'guest-seat']);   // Q292: the reasons a host's broadcast can put on a joiner's record
 const sanityDropFlags = (x) => x.why.some((f) => SANITY_HOST_SLUGS.indexOf(f) < 0);
 // cloud audit Q294: the match header is the host's too. An honest joiner's client takes the entry and mode, the party / trio
 //   bits and the seat table from START_GAME unchecked (mvp/src/net/mp.js onStartGame) and result-reporter mtCodeOf builds the
@@ -3469,7 +3562,8 @@ const sanityDropFlags = (x) => x.why.some((f) => SANITY_HOST_SLUGS.indexOf(f) < 
 //   decision 10: let a cheat through rather than wrong an honest player).
 // O716: a ranked-seat mask is the host's header too (it rides START_GAME with the party bits) -- 'seat-mask' (a code that never
 //   carries one) / 'seat-mask-range' (a bit past the seats) join, so a modded host's mask holds the match and flags no joiner.
-const SANITY_HEADER_SLUGS = ['mt', 'pc', 'mask-range', 'trio-range', 'unit-overlap', 'nobot', 'seat-mask', 'seat-mask-range'];
+// O989: so is the guest-seat mask of a couch pair ('guest-mask' / 'guest-range' / 'guest-pair', sanityFlags).
+const SANITY_HEADER_SLUGS = ['mt', 'pc', 'mask-range', 'trio-range', 'unit-overlap', 'nobot', 'seat-mask', 'seat-mask-range', 'guest-mask', 'guest-range', 'guest-pair'];
 // the per-writer half of sanitySplit: every writer whose own records break a bound of their own ({ sid, why, recs }; why =
 //   recordSanityFlags of each of his records, 'dup-writer' first when he wrote the key twice)
 function sanityWriterFaults(g) {
@@ -3479,7 +3573,7 @@ function sanityWriterFaults(g) {
   const out = [];
   for (const [sid, recs] of bySid) {
     const why = recs.length > 1 ? ['dup-writer'] : [];
-    for (const r of recs) for (const f of recordSanityFlags(r, base, pc)) if (why.indexOf(f) < 0) why.push(f);
+    for (const r of recs) for (const f of recordSanityFlags(r, base, pc, g[0].d[2] | 0)) if (why.indexOf(f) < 0) why.push(f);
     if (why.length) out.push({ sid, why, recs });
   }
   return out;
@@ -3500,11 +3594,14 @@ function sanityHeaderHeld(g, sane, sp) {
   return { flags, own: sanityWriterFaults(g).filter(sanityDropFlags) };
 }
 // the per-record half of sanityFlags (same bounds, every reason of the record rather than the first)
-function recordSanityFlags(r, base, pc) {
+//   mt (O989, optional): the group's match type, for the guest-seat reasons of a couch table (left out: not judged)
+function recordSanityFlags(r, base, pc, mt) {
   const out = [];
   const dur = r.d[9] | 0, seat = r.d[5] | 0, roster = r.roster || {};
   if (dur < 0 || (base !== ENDLESS.MT && dur > durCapOf(base, r.d))) out.push('duration');   // O792
   if (seat < 0 || seat >= pc) out.push('seat');
+  else if (mt != null && isGuestSeat(mt, seat)) out.push('guest-seat');
+  if (mt != null && guestSeatMaskOf(mt) && Object.keys(roster).some((k) => isGuestSeat(mt, k | 0))) out.push('guest-roster');
   if (roster[seat] != null && String(roster[seat]) !== String(r.steamID)) out.push('self-seat');
   else if (base === BOT_XP.MT && pc >= 2 && pc <= 6 && roster[seat] == null) out.push('self-seat');   // bot lane: the writer must name himself
   const seen = new Set();
@@ -4856,6 +4953,7 @@ function writeRunSummary() {
       '| settled keys with records that disagree, nobody flagged (Q114) | ' + s('lateMismatch', 0) + ' |',
       "| friends' room records whose writer is not on his own roster seat, not counted (Q123) | " + s('seatless', 0) + ' |',
       '| bot match records whose writer is not on his own roster seat, not counted (Q148) | ' + s('seatlessBot', 0) + ' |',
+      '| couch pairs (O989): starts from or naming an account on a guest seat, not counted / couch matches settled / of those with a ranked seat / held: the rules-cfg file is not usable | ' + s('guestStarts', 0) + ' / ' + s('couchSettled', 0) + ' / ' + s('couchRanked', 0) + ' / ' + s('cfgHeld', 0) + ' |',
       "| friends' room / bot match keys held past maturity by results on two tables: two tables or more, each on a key of its own / one table, on a key of its own, the others' results left out / no writer on one table, still held (Q214, Q220) | " + s('tableSplit', 0) + ' / ' + s('tableOne', 0) + ' / ' + s('tableHeld', 0) + ' |',
       '| campaign grants / campaign endless / campaign story / couch classic duo (rfduo) | ' + s('campaign', '-') + ' / ' + s('campaignEndless', '-') + ' / ' + s('campaignStory', '-') + ' / ' + s('rfduo', '-') + ' |',
       '| page-cap hits | ' + RUN.cap + ' |',
@@ -11854,6 +11952,8 @@ async function main() {
   if (missing.length) { ghErr('missing env: ' + missing.join(', ')); process.exit(1); }
   RUN.t0 = Date.now();
   console.log('reconcile: start (concurrency ' + CONCURRENCY + ')');
+  if (RULES_CFG.bad) ghWarn('rules-cfg ' + require('path').basename(RULES_CFG_FILE) + ' is not usable (' + RULES_CFG.bad + '): the defaults are configured and every couch match waits until it is fixed (O989)');
+  else if (RULES_CFG.rev) console.log('rules-cfg: rev ' + RULES_CFG.rev + ' ' + pointsPlan.CFG_KEYS.map((k) => k + '=' + RULES_CFG.vals[k]).join(' '));
   if (PP_OVERRIDES.length) ghWarn('points rules overridden by the environment (' + PP_OVERRIDES.map((k) => k + '=' + pointsPlan[k]).join(', ')
     + '): settled points no longer follow points-plan.js RULES_VER ' + RULES_VER + ' (the client copy reads the defaults)');
   if (sandboxOn()) console.log('sandbox: test shard prefix -> leaderboard writes limited to boards named *test*');
@@ -12078,9 +12178,11 @@ async function main() {
       if (v !== (was.v | 0)) { console.log('  endless best write of ' + k.slice(0, 8) + ' on ' + name + ': ' + (was.v | 0) + ' repacked ' + v + ' (O569)'); was.v = v; backlogDirty = true; }
     }
   }
-  const noteReceipt = (sid, mh, change, set, clear) => {
+  const noteReceipt = (sid, mh, change, set, clear, rev) => {   // rev (O989): a couch settle's rules-cfg revision, else left out
     if (!lpBoardId) return;
-    (receipts[String(sid)] = receipts[String(sid)] || []).push({ mh: mh | 0, change: change | 0, set: set | 0, clear: clear | 0 });
+    const ev = { mh: mh | 0, change: change | 0, set: set | 0, clear: clear | 0 };
+    if (rev != null) ev.rev = rev | 0;
+    (receipts[String(sid)] = receipts[String(sid)] || []).push(ev);
   };
   // a failed points write of an earlier run waiting for its retry (backlog w), on this season's board; or null
   const lpWaiting = (sid) => { const e = lpBacklog[pid(String(sid))], w = e && e.w; return (w && lpBoardId && w.b === lpCur.name) ? w : null; };
@@ -12187,7 +12289,7 @@ async function main() {
   // the details a points write of his carries (his queued receipts, this run's, then the caller's own) and how many receipts
   const lpPlan = (sid, prevDet, rv, events) => {
     const b = lpBacklog[pid(String(sid))];
-    const queued = (b && Array.isArray(b.rc)) ? b.rc.map((x) => ({ mh: x[0] | 0, change: x[1] | 0, set: x[2] | 0, clear: x[3] | 0 })) : [];
+    const queued = (b && Array.isArray(b.rc)) ? b.rc.map((x) => (x.length > 5 && x[5] != null ? { mh: x[0] | 0, change: x[1] | 0, set: x[2] | 0, clear: x[3] | 0, rev: x[5] | 0 } : { mh: x[0] | 0, change: x[1] | 0, set: x[2] | 0, clear: x[3] | 0 })) : [];   // O989: a 6th number = the rules-cfg revision
     const all = queued.concat(receipts[String(sid)] || [], events || []);
     return { det: lpWriteDetails(prevDet, rv, all), n: all.length, queued: queued.length };
   };
@@ -12303,7 +12405,7 @@ async function main() {
       delete receipts[sid];
       if (!ev.length) continue;
       const k = pid(sid), b = lpBacklog[k] = lpBacklog[k] || {};
-      b.rc = (Array.isArray(b.rc) ? b.rc : []).concat(ev.map((x) => [x.mh, x.change, x.set, x.clear, t]));
+      b.rc = (Array.isArray(b.rc) ? b.rc : []).concat(ev.map((x) => (x.rev != null ? [x.mh, x.change, x.set, x.clear, t, x.rev] : [x.mh, x.change, x.set, x.clear, t])));
       n += ev.length; backlogDirty = true;
     }
     if (n) { console.log('receipts: ' + n + ' queued for their player\'s next points write (no points write of his this run)'); RUN.receiptsQueued = (RUN.receiptsQueued | 0) + n; }
@@ -12666,9 +12768,9 @@ async function main() {
     if (!id) { try { id = await findOrCreateBoard(name, true); } catch (e) { id = null; } }
     if (!id) { ghWarn('cron pulse: board ' + name + ' unresolved -- not written'); RUN.pulse = 'no board'; return; }
     const minute = Math.floor(Date.now() / 60000);
-    const r = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: id, steamid: carrier, score: minute, scoremethod: 'ForceUpdate', format: 'json' }, pulseDetails());
+    const r = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: id, steamid: carrier, score: minute, scoremethod: 'ForceUpdate', format: 'json' }, pulseDetails(RULES_CFG.bad ? null : RULES_CFG));   // O989: + the rules-cfg in force (rev >= 1 only)
     const ok = r.ok && !(r.json && r.json.result && r.json.result.result && r.json.result.result !== 1);
-    if (ok) { RUN.pulse = String(minute); console.log('cron pulse: ' + name + ' = minute ' + minute + ', rules ' + RULES_VER); }
+    if (ok) { RUN.pulse = String(minute); console.log('cron pulse: ' + name + ' = minute ' + minute + ', rules ' + RULES_VER + ((!RULES_CFG.bad && RULES_CFG.rev) ? ', rules-cfg rev ' + RULES_CFG.rev : '')); }
     else { RUN.pulse = 'write failed'; ghWarn('cron pulse: write failed HTTP ' + r.status + ' ' + String(r.text).slice(0, 140)); }
   };
   const ALLOW_TEST = process.env.ALLOW_TEST === '1';
@@ -12808,6 +12910,7 @@ async function main() {
   //   (its start votes on no roster, splits nothing) and of grouping; nobody flagged (Q148: a bot-match record too, counted
   //   in RUN.seatlessBot)
   RUN.seatless = dropSeatlessPrivate(recs, starts, processed).n;
+  RUN.guestStarts = dropGuestSeatStarts(starts, processed).n;   // O989: a start from (or naming an account on) a couch pair's guest seat counts nowhere
   // O462: a proven matchmade key's records from accounts its committed table does not seat count nowhere -- ahead of every step that
   //   reads starts or the note (the late screen, Q254's lo, Q261, the Q208 cap, registration, the seat gate). Observe-only until START_PROOF_GATE=1.
   applyStartProof(starts, recs, startsPending, processed, Date.now());
@@ -16320,6 +16423,13 @@ async function main() {
       for (const sid of writerSids) sigPlayer(signals, pid(sid), nowMs).ns += 1;
       sigDirty = true;
     }
+    // O989: a couch match waits while the rules-cfg file is not usable (RULES_CFG): its multipliers are not guessed
+    if (RULES_CFG.bad && guestSeatMaskOf(matchType)) {
+      RUN.cfgHeld = (RUN.cfgHeld | 0) + 1;
+      RUN.keptKeep = (RUN.keptKeep | 0) + keptKeep(pend, g.concat(dropRecs), nowMs, keptKeys(SALT));   // Q373: what it read, should the shards lose it
+      console.log('  couch-cfg-hold ' + c.m + ': the rules-cfg file is not usable (' + RULES_CFG.bad + ') -- deferred until it is fixed (O989)');
+      continue;
+    }
     // writers already seen agreeing on this match (pids): a finisher whose record later rotates off its shard while
     //   the group waits (e.g. the one-match-at-a-time drain after an outage) is not convicted as absent when the
     //   rest of the group settles -- see the leaver filter below
@@ -16559,7 +16669,28 @@ async function main() {
       }
       if (back) parts.sort((a, b) => a.seat - b.seat);
     }
-    const sorted = [...parts].sort((a, b) => b.score - a.score);
+    // O989 a couch pair's guest (the match type's guest-seat mask; his main at seat g - 1): while the main is at this settle (a
+    //   record of his, or a seat put back above) the guest takes the place the agreed scores give him and counts as a player
+    //   -- in everybody's ranking and player count (XP, career, points), in the rating update (at his main's rating with a
+    //   newcomer's uncertainty: the others move less against a seat nobody knows) and in the points plan (his main's rating
+    //   and points: the pair is one unit of a brawl, a full member of its team). He has no account: `parts` stays the accounts
+    //   (signals, seeds, group decay, every write read it), the guests ride beside it (partsG) and nothing of theirs is written.
+    //   A main who is not here takes his guest with him (the seat is nobody's, as an empty seat ever was); a quit-lone settle
+    //   ranks its one writer alone. The companion plan's balance (section 9.2) is points-plan.js's (the couch-pair note there).
+    const guests = [];
+    if (guestSeatMaskOf(matchType) && !c.quitLone) {
+      const at = new Map(parts.map((p) => [p.seat | 0, p]));
+      for (let s = 1; s < pc; s++) {
+        const main = (isGuestSeat(matchType, s) && !isGuestSeat(matchType, s - 1) && !at.has(s)) ? at.get(s - 1) : null;
+        if (main) guests.push({ steamID: guestIdOf(s), seat: s, score: scores[s] | 0, guest: true, main: main.steamID });
+      }
+      if (guests.length) console.log('  couch ' + c.m + ': guest seat' + (guests.length > 1 ? 's ' : ' ') + guests.map((x) => x.seat + ' (of ' + plog(x.main) + ')').join(', ')
+        + ' counted as ' + (guests.length > 1 ? 'players' : 'a player') + ' at the agreed place, no account of ' + (guests.length > 1 ? 'their' : 'his') + ' own (O989)');
+    }
+    const partsG = guests.length ? parts.concat(guests).sort((a, b) => a.seat - b.seat) : parts;
+    const isGuestId = (id) => guests.some((x) => x.steamID === id);
+    const couchRev = guestSeatMaskOf(matchType) ? RULES_CFG.rev : null;   // the rules-cfg revision a couch match's receipts carry
+    const sorted = [...partsG].sort((a, b) => b.score - a.score);
     let rank = 1; const rankOf = {};
     for (let i = 0; i < sorted.length; i++) { if (i > 0 && sorted[i].score < sorted[i - 1].score) rank = i + 1; sorted[i].rank = rank; rankOf[sorted[i].steamID] = rank; }
     // team modes: overwrite with the team-convention ranks BEFORE XP/TrueSkill so both consume the
@@ -16569,8 +16700,8 @@ async function main() {
     // t2Win is non-null on every group that reaches here).
     const t2Win = isSubScoreMt(matchType) ? team2WinTeamOf(g) : null;
     if (isTeamMt(matchType)) {
-      const tr = isSubScoreMt(matchType) ? team2RankOf(parts, t2Win, teamSizeOfMt(matchType)) : teamRankOf(parts);
-      if (tr) { for (const p of parts) rankOf[p.steamID] = tr[p.steamID]; for (const s of sorted) s.rank = tr[s.steamID]; }
+      const tr = isSubScoreMt(matchType) ? team2RankOf(partsG, t2Win, teamSizeOfMt(matchType)) : teamRankOf(partsG);   // O989: partsG = parts unless a guest plays
+      if (tr) { for (const p of partsG) rankOf[p.steamID] = tr[p.steamID]; for (const s of sorted) s.rank = tr[s.steamID]; }
     }
     // ===== O140 private friend rooms (type 10): XP-only settle, then done. =====
     // Placed AFTER the rank derivation (the XP-lite formula consumes rankOf) and BEFORE every
@@ -16663,7 +16794,7 @@ async function main() {
     //   here (rankNo: the settle's ranking of live) and their count; rankX = the place each one's XP, CP and career read
     const rankNo = {}, rankX = stoodOwn.size ? Object.assign({}, rankOf) : rankOf;
     if (stoodOwn.size) {
-      const so = [...live].sort((a, b) => b.score - a.score); let rr = 1;
+      const so = [...live.concat(guests)].sort((a, b) => b.score - a.score); let rr = 1;   // O989: the guests stay players for him too
       for (let i = 0; i < so.length; i++) { if (i > 0 && so[i].score < so[i - 1].score) rr = i + 1; rankNo[so[i].steamID] = rr; }
       for (const p of live) if (stoodOwn.has(String(p.steamID))) rankX[p.steamID] = rankNo[p.steamID];
     }
@@ -16704,6 +16835,17 @@ async function main() {
     if (parts.length < 2) { processed.add(c.m); continue; }
     // B6 collection for a real settle: per-player counters + pairwise co-occurrence.
     recordMatchSignals(signals, g, live, rankOf, matchType, false, nowMs);
+    // O989: a main's couch matches, counted on his account (cm; cmr = of those from a ranked seat) -- data for the balance
+    //   numbers of the companion plan, nobody flagged. A main standing in himself (Q227) wrote nothing here: not counted.
+    if (guests.length) {
+      for (const x of guests) {
+        const mp = live.find((q) => q.steamID === x.main);
+        if (!mp) continue;
+        const h = sigPlayer(signals, pid(String(x.main)), nowMs);
+        h.cm = (h.cm | 0) + 1; if (seatAppliesLp(matchType, mp.seat)) h.cmr = (h.cmr | 0) + 1;
+      }
+      sigDirty = true; RUN.couchSettled = (RUN.couchSettled | 0) + 1; if (anyAppliesLp(matchType)) RUN.couchRanked = (RUN.couchRanked | 0) + 1;
+    }
     for (const p of live) if (stoodOwn.has(String(p.steamID)) && rankNo[p.steamID] === 1 && rankOf[p.steamID] !== 1) signals.players[pid(String(p.steamID))].w += 1;   // Q264: his win as before Q227
     const ratedIds = parts.filter((p) => p.rated).map((p) => String(p.steamID));   // Q265: the seats rated where they would have stood in
     if (stoodIds.size || ratedIds.length) {   // Q263 / Q264 / Q265 (see STAND_IN_WINDOW_MS): a stand-in (or a seat rated instead) marked, a player rated with them paired with each of them
@@ -16804,6 +16946,9 @@ async function main() {
     if (lossSide && lossSide.counted) {
       const tsz = teamSizeOfMt(matchType);
       const accSeats = new Set(parts.map((p) => p.seat).concat(leavers0.map((x) => x.seat), agreedSeats));
+      // O989: a couch pair's guest seat is accounted for with its main (his record, his leave or his agreement: the guest has
+      //   none of his own and goes where the main goes). A main named by the others only leaves both seats unaccounted.
+      if (guestSeatMaskOf(matchType)) for (let s = 1; s < 2 * tsz; s++) if (isGuestSeat(matchType, s) && accSeats.has(s - 1)) accSeats.add(s);
       const nmd = new Set(namedOnly.map((x) => x.seat));
       for (let s = 0; s < 2 * tsz; s++) if (teamOfSeat(s, tsz) === lossSide.lose && !accSeats.has(s)) namedLose.push({ seat: s, blank: !nmd.has(s) });
     }
@@ -16923,6 +17068,10 @@ async function main() {
     const lateSh = {}, lpMoved = {};   // Q228: per leaver convicted below, lateShadow; per rated player, his points delta
     if (!PT_MODE) {
       const tsIn = parts.map(p => { const sk = skill[pid(p.steamID)] || ts.DEFAULTS; return { id: p.steamID, rank: rankOf[p.steamID], mu: sk.mu, sigma: sk.sigma }; });
+      // O989: the guests beside them, each at his main's rating with a newcomer's uncertainty; rated against, never rated (noGuest)
+      const guestTs = guests.map((x) => ({ id: x.steamID, rank: rankOf[x.steamID], mu: (skill[pid(x.main)] || ts.DEFAULTS).mu, sigma: ts.DEFAULTS.sigma }));
+      const tsInG = guestTs.length ? tsIn.concat(guestTs) : tsIn;
+      const noGuest = (rows) => (guests.length ? rows.filter((r) => !isGuestId(r.id)) : rows);
       // placement seeding: first ranked settle -> seed the lp map itself (recorded in changedLp so a
       //   bare seed persists), so the plan below, the settle write and the leaver penalty all read one
       //   consistent base. Leavers seed too (their first ranked appearance may be the leave itself --
@@ -17012,6 +17161,7 @@ async function main() {
         const sides = [[], []];
         const _mts = teamSizeOfMt(matchType);
         for (let i = 0; i < parts.length; i++) sides[teamOfSeat(parts[i].seat, _mts)].push(tsIn[i]);
+        for (let i = 0; i < guests.length; i++) sides[teamOfSeat(guests[i].seat, _mts)].push(guestTs[i]);   // O989: the team at its full strength
         // Q56 / Q62: a whole team can be absent -- both 2v2 dissenters of a team-gamble dissent settle (Q56), or every
         //   member of a team who left mid-match without a record in ANY team match (Q62). Rate the present team against
         //   the absent team's PRE-match ratings (outputs kept for the present only; absent ratings never move), instead
@@ -17073,10 +17223,11 @@ async function main() {
             + ' leaver(s) at their pre-match rating (' + ghostLoss.map(x => 'seat ' + x.seat).join(', ') + '), its ' + sides[1 - winTeam].length + ' present player(s) against team ' + winTeam + ' only (Q167)');
         }
       } else {
-        tsOut = ts.updateMatch(tsIn);
+        tsOut = ts.updateMatch(tsInG);
         if (stoodIds.size) tsOut = tsOut.filter((r) => !stoodIds.has(String(r.id)));   // Q227: rated against, never rated
-        if (stoodOwn.size) tsOut = ownUpdate(tsOut, tsIn);   // Q264: as before Q227 for those
+        if (stoodOwn.size) tsOut = ownUpdate(tsOut, tsInG);   // Q264: as before Q227 for those
       }
+      tsOut = noGuest(tsOut);   // O989
       // visible-LP plan uses PRE-match ratings (tsIn) + current LP -> per-player adjusted delta + reveal flag.
       //   team matches: halved team-LP path (teamLpPlan); FFA: per-unit plan (premade pairs from the
       //   matchType mask settle at their average rank -- design line 66; solos = original formula).
@@ -17086,6 +17237,9 @@ async function main() {
       const rIn = (sid, base) => { const rr = rankedNow ? rankedRatingOf(skill[pid(sid)]) : null; return rr ? Object.assign({}, base, { mu: rr.mu, sigma: rr.sigma }) : base; };
       const asPlayed = tsIn.map((t) => rIn(t.id, t));
       const planIn = tsIn.map((t, i) => ({ steamID: t.id, seat: parts[i].seat | 0, mmr: ts.displayRating(asPlayed[i].mu, asPlayed[i].sigma), rank: t.rank, lp: (lp[t.id] == null ? 0 : lp[t.id]) }));
+      // O989: a guest's row of the ranked update = his main's ranked rating (the stored one until he has one), a newcomer's uncertainty
+      const guestPlayed = guests.map((x, i) => Object.assign({}, guestTs[i], { mu: asPlayed[parts.findIndex((q) => q.steamID === x.main)].mu }));
+      const asPlayedG = guestPlayed.length ? asPlayed.concat(guestPlayed) : asPlayed;
       // ... and at a ranked settle that rating moves on by the same update from the ranked inputs, never held back by the decay:
       //   a whole team absent (Q56) is rated against that team's pre-match ranked ratings as the stored update does, a side
       //   simply empty (the degenerate fallback) leaves it as it was
@@ -17096,6 +17250,7 @@ async function main() {
           const winT = (t2Win != null) ? t2Win : (((scores[2] | 0) + (scores[3] | 0)) > ((scores[0] | 0) + (scores[1] | 0)) ? 1 : 0);
           const sd = [[], []], _ts = teamSizeOfMt(matchType);
           for (let i = 0; i < parts.length; i++) sd[teamOfSeat(parts[i].seat, _ts)].push(asPlayed[i]);
+          for (let i = 0; i < guests.length; i++) sd[teamOfSeat(guests[i].seat, _ts)].push(guestPlayed[i]);   // O989
           const emptyT = !sd[0].length ? 0 : (!sd[1].length ? 1 : -1);
           const ghostR = (emptyT >= 0 && Array.isArray(c.t2ex))
             ? leavers0.filter((x) => teamOfSeat(x.seat, _ts) === emptyT).map((x) => { const sk = skill[pid(x.steamID)] || ts.DEFAULTS; return rIn(x.steamID, { id: x.steamID, mu: sk.mu, sigma: sk.sigma }); })
@@ -17123,7 +17278,7 @@ async function main() {
             for (const o of full) if (gIds.has(o.id)) ghostRanked.push(o);   // Q167 rework: the absent losers' side of the same update
           }
         } else {
-          playedOut = ts.updateMatch(asPlayed);
+          playedOut = ts.updateMatch(asPlayedG);   // O989: asPlayedG = asPlayed unless a guest plays (rows of a guest are never read back)
           if (stoodOwn.size) playedOut = ownUpdate(playedOut, asPlayed);   // Q264: his ranked rating as before Q227 too
         }
       }
@@ -17173,6 +17328,9 @@ async function main() {
         if (finishedIn.length && lpId && anyLp) console.log('  agreed-gone ' + c.m + ': ' + agreedAbs.map((x) => 'seat ' + x.seat).join(', ')
           + ' read as finished member(s) of their team in the points plan (Q183)');
       }
+      // O989: the guests' rows of the plan -- each his main's rating and points as the plan reads them now (after the plan-only
+      //   seeds above), his own place: a brawl's couch pair is one unit at the average place, a team reads him as a member
+      for (const x of guests) { const mrow = planIn.find((q) => q.steamID === x.main); planIn.push({ steamID: x.steamID, seat: x.seat | 0, mmr: mrow.mmr, rank: rankOf[x.steamID], lp: mrow.lp }); }
       // the match's points plan (points-plan.js matchPlan: the team planner for a team code, else the FFA planner on the code's party bits)
       const rsPlan = matchPlan(planIn, matchType, { scores, leaverSeats: leavers0.concat(namedOnly).map(x => x.seat), winTeam: t2Win, absent: absentIn, finished: finishedIn });   // Q69: named-only seats still shield their teammates
       // Q264: the points plan of a player who settles as before Q227: the players rated here at their places there
@@ -17212,7 +17370,7 @@ async function main() {
         let lpLine = '';
         if (lpId && seatLp(r.id)) {   // quick = MMR only; visible LP ladder is ranked-only (O716: by the seat's own entry, D3)
           const cur = lp[r.id] == null ? 0 : lp[r.id];
-          const own = stoodOwn.has(String(r.id)), nP = own ? live.length : parts.length;   // Q264: as before Q227 for him
+          const own = stoodOwn.has(String(r.id)), nP = (own ? live.length : parts.length) + guests.length;   // Q264: as before Q227 for him (O989: a guest counts)
           const rs = own ? (rsPlanOwn && rsPlanOwn[r.id]) : (rsPlan && rsPlan[r.id]);
           // the plan's delta (or the plain lpDelta at his own place), then the promotion/relegation series clamp: decisive line
           //   crossing for the boundary-zone match (won: plan-supplied -- unit average rank / team outcome -- else top-half at his
@@ -17227,7 +17385,7 @@ async function main() {
           //   nowhere -- the promotion was taken back by the cap -- so it carries no SERIES: his client reads the same
           //   (clamped && !capped), and a correction notice then never names "a series landing" for it.
           const series = !!sl.clamped && !sl.capped;
-          noteReceipt(r.id, g[0].d[3] | 0, nv - cur, ((rs && rs.flag) & RECEIPT_F.RS) | (series ? RECEIPT_F.SERIES : 0) | (seededNow.has(r.id) ? RECEIPT_F.SEEDED : 0), 0xff);
+          noteReceipt(r.id, g[0].d[3] | 0, nv - cur, ((rs && rs.flag) & RECEIPT_F.RS) | (series ? RECEIPT_F.SERIES : 0) | (seededNow.has(r.id) ? RECEIPT_F.SEEDED : 0), 0xff, couchRev);
           if (rs && rs.flag) reveal[r.id] = { matchHash: g[0].d[3] | 0, seed: g[0].d[4] | 0, flag: rs.flag, adjDelta: d, normalDelta: rs.normalDelta };
           lpLine = ' | pts ' + cur + (d >= 0 ? '+' : '') + d + '->' + nv + (rs && rs.flag ? (' [' + (rs.flag === 1 ? 'UPSET' : 'PROTECTED') + ' normal ' + rs.normalDelta + ']') : '')
             + (series ? (' [SERIES ' + (wonLike ? 'PROMOTED' : 'RELEGATED') + ' from ' + d0 + ']') : '')
@@ -17262,12 +17420,14 @@ async function main() {
           if (confState[hx + '|' + c.m] || t2ex.has(hx)) continue;   // not convicted below
           if (!seatAppliesLp(matchType, x.seat)) continue;   // O716: a quick leaver of a mixed table takes no fine and no points (D9)
           const xr = Object.assign({ steamID: x.steamID }, await planRow(x));
-          const rk = rankWith(planIn.concat([xr]).map((q) => ({ steamID: q.steamID, seat: q.seat | 0, score: scores[q.seat | 0] | 0 })));
+          // O989: a couch main who left took his guest with him -- with his record there the guest would have played too (his main's rows)
+          const gx = guestSeatOfMain(matchType, x.seat) >= 0 ? [{ steamID: guestIdOf((x.seat | 0) + 1), seat: (x.seat | 0) + 1, mmr: xr.mmr, lp: xr.lp }] : [];
+          const rk = rankWith(planIn.concat([xr], gx).map((q) => ({ steamID: q.steamID, seat: q.seat | 0, score: scores[q.seat | 0] | 0 })));
           const withRank = (q) => Object.assign({}, q, { rank: rk[q.steamID] });
           const xs = x.seat | 0;
           const planX = (all) => matchPlan(all, matchType,
             { scores, leaverSeats: lSeats.filter((s) => (s | 0) !== xs), winTeam: t2Win, absent: absentIn.filter((a) => (a.seat | 0) !== xs), finished: finishedIn });
-          lateSh[x.steamID] = lateShadow(planIn.map(withRank), withRank(xr), lpMoved, seededNow, planX, unitMates(xs), placingNow);
+          lateSh[x.steamID] = lateShadow(planIn.concat(gx).map(withRank), withRank(xr), lpMoved, seededNow, planX, unitMates(xs), placingNow);
           if (ownRows) {   // Q264: the gain of a mate who settled as before Q227, read the same way without the stand-ins
             const rk2 = rankWith(ownRows.concat([xr]).map((q) => ({ steamID: q.steamID, seat: q.seat | 0, score: scores[q.seat | 0] | 0 })));
             const with2 = (q) => Object.assign({}, q, { rank: rk2[q.steamID] });
@@ -18013,6 +18173,7 @@ Object.assign(module.exports, { placementMode, PLACEMENT_TARGET, placementOf });
 Object.assign(module.exports, { rosterContestSeats, applyRosterContest, seatLayout, seatLayoutsDisagree });   // cloud audit Q75 one account per seat per match key (+ Q80 third review seat layout)
 Object.assign(module.exports, { registerStartRosters, startRosterSplit, rosterCanon, startRosterDisagrees, seatGateRoster, seatedOnRoster, applySeatGate });   // cloud audit Q80 seat gate
 Object.assign(module.exports, { seatlessPrivate, dropSeatlessPrivate });   // cloud audit Q123
+Object.assign(module.exports, { guestSeatClaim, dropGuestSeatStarts, quitLoneMt, loadRulesCfg, RULES_CFG, RULES_CFG_FILE, guestIdOf });   // O989
 Object.assign(module.exports, { recTable, splitKey, splitMark, applyTableSplit });   // cloud audit Q214 / Q220 a held friends' room / bot match: each table on a key of its own
 Object.assign(module.exports, { LONE1V1, lone1v1Claim, lone1v1Verdicts, lone1v1Count });   // cloud audit Q184 a ranked 1V1 only its winner wrote
 Object.assign(module.exports, { repUpgrade, sortKeys });   // cloud audit Q209 report state with no key that stays with one reporter
