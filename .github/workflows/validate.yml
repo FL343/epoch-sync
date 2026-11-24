@@ -191,8 +191,8 @@ jobs:
           # O942 levers, set the moment the version 7 package's gate went up (0.6.1, buildNum 2026112202, gate
           #   2026-11-22T07:33:07.920Z): the table publishes version 7, and every version 6 run parked at a save point
           #   settles at its save depth from that instant (a run still being played waits for its own end)
-          ELP_PUB_VER: '7'
-          ELP_CUTOVER_MS: '1795332787920'
+          ELP_PUB_VER: '8'
+          ELP_CUTOVER_MS: '1795527551733'
           # the dev key (unsealed test packages, the _test boards) carries no pubInfo: since the 0.6.4 integration branch
           #   (competitive endless growth phase) merged into the client master (2026-11-24) every dev build plays the
           #   version 8 rules, so its runs settle under version 8 too (attest.js keyElpVer; user ruling 2026-11-24; before
