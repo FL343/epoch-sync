@@ -25,7 +25,8 @@
   const RULES_VER = 2;
   const FIXTURES_HASH = 'e482ca6f7351bb55';
   // the knobs configure() can move (production runs these defaults)
-  const DEFAULTS = Object.freeze({ RS_THRESHOLD: 400, RS_UPSET_BONUS: 1.0, RS_STRONG_UPSET_LOSS: 0.5, RS_SOLO_VS_TRIO: 0.6, RS_TRIO_WIN: 0.7, LEAVER_LP_PENALTY: 100 });
+  const DEFAULTS = Object.freeze({ RS_THRESHOLD: 400, RS_UPSET_BONUS: 1.0, RS_STRONG_UPSET_LOSS: 0.5, RS_SOLO_VS_TRIO: 0.6, RS_TRIO_WIN: 0.7, LEAVER_LP_PENALTY: 100,
+    COUCH_SOLO_LOSS: 0.8, COUCH_PAIR_WIN: 0.85, COUCH_DUO_MULT: 1, COUCH_LP_MULT: 1 });   // the COUCH_* four: O989, see the couch-pair note below
   const LP_MAX = 9999;
   let LEAVER_LP_PENALTY = DEFAULTS.LEAVER_LP_PENALTY;   // ranked leaver authoritative LP deduction (pairs the client optimistic -100)
   // `rs` = mismatch retention coefficient (fraction of the win/loss component applied to EXPECTED outcomes in a
@@ -170,6 +171,18 @@
   function mtSansSeats(mt) { return (mt | 0) & ((1 << RANKED_SEAT_SHIFT) - 1); }
   function seatAppliesLp(mt, seat) { const m = rankedSeatMaskOf(mt); return m ? !!((m >> (seat | 0)) & 1) : appliesLp(mt); }
   function anyAppliesLp(mt) { return appliesLp(mt) || rankedSeatMaskOf(mt) !== 0; }
+  // O989 a couch pair in the online queue (companion plan KNIFE_O989; the user's calls of 2026-11-23): one machine = one account
+  //   (the main) plus a guest seat with no account. Bits 17-22 of the match type = the guest seats of the table; the roster
+  //   leaves a guest seat empty (the bot-seat form), and the guest of seat g belongs to the account at seat g - 1 (the main
+  //   first, his guest right after him; a team code seats both on one team). Host-derived, broadcast and keyed into the match
+  //   group like the party bits. No mask (every record written before O989) = no guest: every reading below is then the old one.
+  const GUEST_SEAT_SHIFT = 17;
+  function guestSeatMaskOf(mt) { return ((mt | 0) >> GUEST_SEAT_SHIFT) & 0x3F; }
+  function isGuestSeat(mt, seat) { const s = seat | 0; return s >= 0 && s < 6 && !!((guestSeatMaskOf(mt) >> s) & 1); }
+  // the guest seat of the main at `seat` (seat + 1 when the mask names it), or -1
+  function guestSeatOfMain(mt, seat) { const s = seat | 0; return (s >= 0 && !isGuestSeat(mt, s) && isGuestSeat(mt, s + 1)) ? s + 1 : -1; }
+  // the seats of a table that carry an account: pc minus its guest seats
+  function accountSeatsOf(mt, pc) { let n = 0; for (let s = 0; s < (pc | 0); s++) if (!isGuestSeat(mt, s)) n++; return n; }
   // team match types: 3/4 = quick/ranked team-brawl (mode 1); 5/6 = quick/ranked mode 2 (true 2v2);
   // 8/9 = quick/ranked mode 2 at teamSize 3 (O82 6P matchmaking).
   function isTeamMt(mt) { const b = baseMt(mt); return b === 3 || b === 4 || b === 5 || b === 6 || b === 8 || b === 9; }
@@ -194,6 +207,21 @@
   // (strongest protection wins, factors never stack multiplicatively).
   let RS_SOLO_VS_TRIO = DEFAULTS.RS_SOLO_VS_TRIO;
   let RS_TRIO_WIN = DEFAULTS.RS_TRIO_WIN;
+  // O989 couch pair (the user, 2026-11-23: "count the two as one, and keep it fair to the others"; starting values, half
+  //   the trio numbers, every one of them movable without a build -- rules-cfg below):
+  //   - the pair is ONE unit of the brawl: the main's points move by the average place of his two seats (the premade-pair
+  //     rule above; the guest's row is read, never written), a team code by the team's outcome as ever;
+  //   - a solo's LOSS in a brawl with a live couch pair is compressed x COUCH_SOLO_LOSS (PROTECTED reveal on a real net loss)
+  //     and the pair's WIN x COUCH_PAIR_WIN (no reveal); min-composed with the mismatch factor like the trio tilt;
+  //   - a ranked table of exactly two accounts, each with a guest (the couch 2V2), multiplies the mains' whole delta by
+  //     COUCH_DUO_MULT; every couch main's whole delta is multiplied by COUCH_LP_MULT (0 = a couch match moves no points:
+  //     the row is marked `still` and settleLine applies no series clamp to it). Both 0..1, default 1.
+  let COUCH_SOLO_LOSS = DEFAULTS.COUCH_SOLO_LOSS;
+  let COUCH_PAIR_WIN = DEFAULTS.COUCH_PAIR_WIN;
+  let COUCH_DUO_MULT = DEFAULTS.COUCH_DUO_MULT;
+  let COUCH_LP_MULT = DEFAULTS.COUCH_LP_MULT;
+  // the multiplier of a couch main's whole delta at a table of `accounts` account seats
+  function couchMult(accounts) { return COUCH_LP_MULT * ((accounts | 0) === 2 ? COUCH_DUO_MULT : 1); }
   const RS_MAGIC = 0xC5;                                                   // reveal-details marker; flags: 0 none / 1 upset / 2 protected
   // pure: parts = [{ steamID, seat, mmr (pre-match display rating), rank (1-based), lp (current) }]. returns null if
   //   not applicable, else { [steamID]: { adjDelta, flag, normalDelta } }. Drip is never discounted (only the
@@ -211,6 +239,15 @@
     const units = [], used = new Set();
     const bySeat = {};
     for (const p of parts) bySeat[p.seat | 0] = p;
+    // O989: a couch pair first (the guest-seat mask of the match type: the main at g - 1, his guest at g; both rows present,
+    //   else the main settles as a solo -- the absent-partner rule of every unit). The party bits may name the same pair.
+    const guestMask = guestSeatMaskOf(matchType);
+    const couch = new Set();
+    if (guestMask) for (let s = 1; s < 6; s++) {
+      if (!((guestMask >> s) & 1) || ((guestMask >> (s - 1)) & 1)) continue;
+      const m0 = bySeat[s - 1], m1 = bySeat[s];
+      if (m0 && m1 && !used.has(m0.steamID) && !used.has(m1.steamID)) { const u = [m0, m1]; couch.add(u); units.push(u); used.add(m0.steamID); used.add(m1.steamID); }
+    }
     // O82: trio unit first (all three members present, else each falls back to solo -- the same
     // conservative absent-partner rule as pairs). trioAt = start seat + 1 (contiguous seats).
     if (premadeTrioAt | 0) {
@@ -232,6 +269,8 @@
     const mean = mmrs.reduce((a, b) => a + b, 0) / mmrs.length;
     const trioLive = units.some(u => u.length === 3);   // O82 solo-tilt applies only against a LIVE trio
     const pc = parts.length, out = {};
+    // O989: the couch multiplier reads the accounts rated here (the rows that are not a guest's)
+    const cMult = couch.size ? couchMult(parts.filter(p => !isGuestSeat(matchType, p.seat)).length) : 1;
     for (const u of units) {
       const uRank = u.reduce((s, p) => s + (p.rank | 0), 0) / u.length;
       const uLp = u.reduce((s, p) => s + (p.lp | 0), 0) / u.length;
@@ -260,12 +299,28 @@
         if (RS_TRIO_WIN < factor) why.push('trio_tax');
         factor = Math.min(factor, RS_TRIO_WIN);
       }
-      const adjDelta = Math.round(base * factor + seg.drip);
+      // O989 couch tilt (min-composed like the trio tilt): a solo losing in a brawl with a live couch pair is shielded, the
+      //   pair's win is taxed; then the pair's whole delta takes the couch multiplier (a 0 marks the row `still`)
+      const isCouch = couch.has(u);
+      if (couch.size && !isCouch && u.length === 1 && base < 0) {
+        if (COUCH_SOLO_LOSS < factor) why.push('couch_shield');
+        factor = Math.min(factor, COUCH_SOLO_LOSS);
+        if (flag === 0 && normalDelta < 0) flag = 2;
+      } else if (isCouch && base > 0) {
+        if (COUCH_PAIR_WIN < factor) why.push('couch_tax');
+        factor = Math.min(factor, COUCH_PAIR_WIN);
+      }
+      let adjDelta = Math.round(base * factor + seg.drip);
+      let still = false;
+      if (isCouch && cMult !== 1) { adjDelta = Math.round(adjDelta * cMult); still = cMult === 0; why.push('couch_mult'); }
       // won = top-half finish at the unit's (average) rank -- the same sign line the base uses;
       // consumed by the series clamp (crosslineDelta) at settle time. Q160 layer 5 (cloud audit): one delta for the whole
       // unit, its strong member's expected win included (see teamLpPlan: held at his own tier, the honest grandmaster in a
       // pair with a gold friend gained nothing; a premade carry of zero-points accounts stays a known residual).
-      for (const p of u) out[p.steamID] = { adjDelta, flag, normalDelta, won: prog >= 0.5, why: why.slice() };
+      for (const p of u) {
+        out[p.steamID] = { adjDelta, flag, normalDelta, won: prog >= 0.5, why: why.slice() };
+        if (still) out[p.steamID].still = true;
+      }
     }
     return out;
   }
@@ -318,6 +373,8 @@
     const mmrsA = mmrs.concat((absent || []).map(a => a.mmr | 0));
     const mismatchA = mmrsA.length >= 2 && (Math.max.apply(null, mmrsA) - Math.min.apply(null, mmrsA) > RS_THRESHOLD);
     const meanA = mmrsA.reduce((a, b) => a + b, 0) / (mmrsA.length || 1);
+    // O989: the couch multiplier reads the accounts that played the match out (the rows that are not a guest's), as the brawl's
+    const cMult = guestSeatMaskOf(matchType) ? couchMult(roster.filter(p => !isGuestSeat(matchType, p.seat)).length) : 1;
     const shielded = new Set();
     for (const s of (leaverSeats || [])) for (const p of parts) {
       if (teamOf(p.seat) === teamOf(s) && (p.seat | 0) !== (s | 0)) shielded.add(p.steamID);
@@ -377,6 +434,13 @@
       }
       if (protectedLoss && normalDelta < 0 && flag === 0) flag = 2;
       out[p.steamID] = { adjDelta, flag, normalDelta, won, why };   // won feeds the series clamp at settle; why = O774 labels
+      // O989: a couch main's whole delta takes the couch multiplier (his guest's row counts in the team readings above like
+      //   any member's and has no output the settle reads); a 0 marks the row `still`
+      if (cMult !== 1 && guestSeatOfMain(matchType, p.seat) >= 0) {
+        out[p.steamID].adjDelta = Math.round(adjDelta * cMult);
+        if (cMult === 0) out[p.steamID].still = true;
+        why.push('couch_mult');
+      }
     }
     return out;
   }
@@ -412,7 +476,8 @@
     const seeded = !!m.seeded, placing = !seeded && !!m.placing;
     const d0 = plan ? plan.adjDelta : lpDelta(cur, rank, pc);
     const won = plan ? !!plan.won : ((rank | 0) <= (pc + 1) / 2);
-    let d = ((plan && plan.flag === 2) || seeded || (placing && !won)) ? d0 : crosslineDelta(cur, d0, won);
+    // O989: a `still` row (a couch main under a couch multiplier of 0) moves nothing, a series match included
+    let d = ((plan && (plan.flag === 2 || plan.still)) || seeded || (placing && !won)) ? d0 : crosslineDelta(cur, d0, won);
     const clamped = d !== d0;
     let capped = false;
     if (placing) {
@@ -445,6 +510,9 @@
   const RECEIPT_MAGIC = 0xC6, RECEIPT_CAP = 8, RS_SLOT = 6;
   const RECEIPT_F = Object.freeze({ RS: 3, LEAVE: 4, SERIES: 8, SEEDED: 16, VOID: 32, RULES: 64, COMP: 128 });
   function receiptVer(flags) { return ((flags | 0) >>> 8) & 0xffff; }
+  // O989: bits 24..30 of a receipt's flags = the rules-cfg revision the settle of a couch match ran with (0 = the defaults,
+  //   and every receipt of a match without a guest seat). A later event on the entry (a fine, a refund) keeps it.
+  function receiptCfgRev(flags) { return ((flags | 0) >>> 24) & 0x7f; }
   // { rs: the 6-int reveal or null, ring: [{ mh, delta, flags }] newest first } of a row's details
   function lpDetailsOf(det) {
     const d = Array.isArray(det) ? det : [];
@@ -470,14 +538,17 @@
   // one event of match mh on the ring: change = the points it moved (0 for a void); set / clear = the RECEIPT_F bits it sets /
   //   clears (a settle passes clear 0xff: its flags replace the entry's; a refund clears LEAVE). The entry moves to the front
   //   carrying the net delta; past RECEIPT_CAP the oldest drops. Returns a new ring.
-  function receiptPush(ring, mh, change, set, clear) {
+  //   cfgRev (O989, optional): the rules-cfg revision of a couch match's settle (see receiptCfgRev); left out, the entry keeps
+  //   the one it has.
+  function receiptPush(ring, mh, change, set, clear, cfgRev) {
     const r = Array.isArray(ring) ? ring : [];
     const key = mh | 0;
     const old = r.find((e) => (e.mh | 0) === key) || null;
     const rest = r.filter((e) => (e.mh | 0) !== key);
     let low = (((old ? (old.flags & 0xff) & ~(clear | 0) : 0) | (set | 0)) & 0xff) & ~RECEIPT_F.RULES;
     if (rest.length && receiptVer(rest[0].flags) !== (RULES_VER & 0xffff)) low |= RECEIPT_F.RULES;
-    const e = { mh: key, delta: ((old ? old.delta | 0 : 0) + (change | 0)) | 0, flags: low | ((RULES_VER & 0xffff) << 8) };
+    const rev = cfgRev == null ? (old ? receiptCfgRev(old.flags) : 0) : ((cfgRev | 0) & 0x7f);
+    const e = { mh: key, delta: ((old ? old.delta | 0 : 0) + (change | 0)) | 0, flags: low | ((RULES_VER & 0xffff) << 8) | (rev << 24) };
     return [e].concat(rest).slice(0, RECEIPT_CAP);
   }
   // the receipt of match mh on a row's details, or null
@@ -1172,10 +1243,45 @@
   //   score = the unix minute a run of the job reached its end; details = [PULSE_MAGIC, RULES_VER]. A client reads it on idle
   //   screens: a pulse a few ticks old = the job is behind, a RULES_VER other than its own = the rules moved since its build.
   const PULSE_MAGIC = 0xCC;
-  function pulseDetails() { return [PULSE_MAGIC, RULES_VER]; }
+  //   O989: a job running a rules-cfg (rev >= 1) appends [PULSE_CFG, rev, the CFG_KEYS values in permille]; a build before
+  //   O989 reads the first two numbers only.
+  function pulseDetails(cfg) {
+    const c = rulesCfgOf(cfg);
+    return (c && c.rev >= 1) ? [PULSE_MAGIC, RULES_VER, PULSE_CFG, c.rev].concat(CFG_KEYS.map((k) => Math.round(c.vals[k] * 1000))) : [PULSE_MAGIC, RULES_VER];
+  }
   function pulseOf(score, det) {
     if (!Array.isArray(det) || det.length < 2 || (det[0] & 0xff) !== PULSE_MAGIC) return null;
-    return { minute: score | 0, rulesVer: det[1] | 0 };
+    const out = { minute: score | 0, rulesVer: det[1] | 0 };
+    if (det.length >= 4 + CFG_KEYS.length && (det[2] | 0) === PULSE_CFG) {
+      const vals = {};
+      CFG_KEYS.forEach((k, i) => { vals[k] = (det[4 + i] | 0) / 1000; });
+      const cfg = rulesCfgOf({ rev: det[3] | 0, vals });
+      if (cfg && cfg.rev >= 1) out.cfg = cfg;
+    }
+    return out;
+  }
+  // ---- O989 rules-cfg: the numbers of this file that move without a build ----
+  //   The job reads { rev, vals } from its rules-cfg file at the start of a run (no file = rev 0 = the defaults), hands vals to
+  //   configure(), publishes them on its pulse row and stamps rev on the receipts of the couch matches it settles (a match
+  //   is settled once, with the values of that run; a later revision never re-reads it). The client reads the pulse row and
+  //   hands pulseOf().cfg.vals to its own configure(): the same numbers on both sides, or the defaults when it read none.
+  //   rev 1..127, +1 with every change; each value 0..1 in steps of 0.001.
+  const PULSE_CFG = 0xC9;
+  const CFG_KEYS = Object.freeze(['COUCH_SOLO_LOSS', 'COUCH_PAIR_WIN', 'COUCH_DUO_MULT', 'COUCH_LP_MULT']);
+  // { rev, vals } as this file reads it, or null when it is not a usable cfg (a missing key, a value outside 0..1 or off the
+  //   0.001 grid, a rev outside 0..127; rev 0 must carry the defaults)
+  function rulesCfgOf(o) {
+    if (!o || typeof o !== 'object' || !o.vals || typeof o.vals !== 'object') return null;
+    const rev = o.rev;
+    if (!Number.isInteger(rev) || rev < 0 || rev > 127) return null;
+    const vals = {};
+    for (const k of CFG_KEYS) {
+      const x = o.vals[k];
+      if (typeof x !== 'number' || !(x >= 0 && x <= 1) || Math.abs(x * 1000 - Math.round(x * 1000)) > 1e-9) return null;
+      vals[k] = Math.round(x * 1000) / 1000;
+      if (rev === 0 && vals[k] !== DEFAULTS[k]) return null;
+    }
+    return { rev, vals };
   }
   // configure({ NAME: value }): the job hands its environment overrides in here (validate.js passes process.env.<NAME>). A missing,
   //   null or empty value keeps the default, anything else reads as Number(value) -- the reading of the job's old
@@ -1184,16 +1290,19 @@
     const v = (k) => ((o && o[k] != null && o[k] !== '') ? Number(o[k]) : DEFAULTS[k]);
     RS_THRESHOLD = v('RS_THRESHOLD'); RS_UPSET_BONUS = v('RS_UPSET_BONUS'); RS_STRONG_UPSET_LOSS = v('RS_STRONG_UPSET_LOSS');
     RS_SOLO_VS_TRIO = v('RS_SOLO_VS_TRIO'); RS_TRIO_WIN = v('RS_TRIO_WIN'); LEAVER_LP_PENALTY = v('LEAVER_LP_PENALTY');
+    COUCH_SOLO_LOSS = v('COUCH_SOLO_LOSS'); COUCH_PAIR_WIN = v('COUCH_PAIR_WIN'); COUCH_DUO_MULT = v('COUCH_DUO_MULT'); COUCH_LP_MULT = v('COUCH_LP_MULT');   // O989
     Object.assign(api, knobs());
     return Object.keys(DEFAULTS).filter((k) => !Object.is(api[k], DEFAULTS[k]));
   }
-  function knobs() { return { RS_THRESHOLD, RS_UPSET_BONUS, RS_STRONG_UPSET_LOSS, RS_SOLO_VS_TRIO, RS_TRIO_WIN, LEAVER_LP_PENALTY }; }
+  function knobs() { return { RS_THRESHOLD, RS_UPSET_BONUS, RS_STRONG_UPSET_LOSS, RS_SOLO_VS_TRIO, RS_TRIO_WIN, LEAVER_LP_PENALTY, COUCH_SOLO_LOSS, COUCH_PAIR_WIN, COUCH_DUO_MULT, COUCH_LP_MULT }; }
   const api = Object.assign({
     RULES_VER, FIXTURES_HASH, DEFAULTS, configure,
     LP_MAX, LP_SEG, lpSeg, LP_SEED, seedLp, SOFT_RESET, softResetLp, seasonSeedLp, lpDelta,
     BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, boundaryOf, crosslineDelta, matchPlan, settleLine,
     baseMt, premadeMaskOf, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, appliesLp, isTeamMt,
     RANKED_SEAT_SHIFT, rankedSeatMaskOf, mtSansSeats, seatAppliesLp, anyAppliesLp,
+    GUEST_SEAT_SHIFT, guestSeatMaskOf, isGuestSeat, guestSeatOfMain, accountSeatsOf, couchMult,   // O989
+    PULSE_CFG, CFG_KEYS, rulesCfgOf, receiptCfgRev,   // O989 rules-cfg
     leaverLpPenalty, RS_MAGIC, reducedStakesPlan, teamLpPlan,
     RATING_MAGIC, ratingDetails, ratingDetailsOf,
     RECEIPT_MAGIC, RECEIPT_CAP, RS_SLOT, RECEIPT_F, receiptVer, lpDetailsOf, lpDetails, receiptPush, receiptOf,
