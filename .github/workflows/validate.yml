@@ -193,10 +193,11 @@ jobs:
           #   settles at its save depth from that instant (a run still being played waits for its own end)
           ELP_PUB_VER: '7'
           ELP_CUTOVER_MS: '1795332787920'
-          # the dev key (unsealed test packages, the _test boards) carries no pubInfo: since 0.6.1 merged back into the
-          #   client master (2026-11-22) every dev build plays the version 7 rules, so its runs settle under version 7 too
-          #   (attest.js keyElpVer; user ruling 2026-11-22, FU2)
-          ELP_DEV_VER: '7'
+          # the dev key (unsealed test packages, the _test boards) carries no pubInfo: since the 0.6.4 integration branch
+          #   (competitive endless growth phase) merged into the client master (2026-11-24) every dev build plays the
+          #   version 8 rules, so its runs settle under version 8 too (attest.js keyElpVer; user ruling 2026-11-24; before
+          #   that, 0.6.1's merge-back on 2026-11-22 had set version 7)
+          ELP_DEV_VER: '8'
           # O198 v1 trust ledger (knife 5.5b-1): this job writes trust.json; the sanctions twin's file is a read-only
           # consult (its event queue), like seedcap.json above
           TRUST_FILE: trust.json
