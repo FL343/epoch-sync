@@ -26,6 +26,8 @@
 //   [9] a duel table whose writers refuse the team gamble and name the main's seat (Q43; the rule, its wiring and its mutant
 //       are test/team2-accuse.js [25]): not counted on him, no made-up confession. The cost is the writers' (the table
 //       voids, one flag each) -- so the clients still at a duel table must not answer a seat that never loaded with a refusal
+//   [10] the main at seat 0 (the seat the job reads as the host's: a table the original host starts after a refused
+//       handover may put him there): brawl, the three team codes, the refused duel -- each as at the other seats
 //   node test/guest-short-requeue.js [sections, e.g. 1,3]
 const fs = require('fs'), path = require('path');
 const H = require('./lib/settle-stub.js');
@@ -310,6 +312,61 @@ if (on(8)) {
     const mm = match(mt, 0x97802, [A2, B2, C2, M2], [0, 1, 2], [], { sc: [0, 0, 0, 0] });
     const mx = run([[0, mm.S], [5 * MIN, mm.S], [MATURE, mm.S], [6 * MIN, mm.S]], ptsOf(A2, B2, C2, M2), null, f2);
     T('[8] mutant (the start-orphan verdict convicts a seat with no start of its own): the main takes an exit -- caught', mx.okAll && leavesOf(mx, M2) === 1, why(mx, M2));
+  }
+}
+
+// ---- [10] the main sits at seat 0, the seat the job reads as the host's ----
+if (on(10)) {
+  // (a) brawl of four
+  {
+    const [M, A, B, C] = SIDS(98010);
+    const mm = match(1 | S(0b1111), 0x98001, [M, A, B, C], [1, 2, 3], [1, 2, 3], { sc: [0, 900, 700, 500] });
+    const m = run(SETTLE(mm), ptsOf(M, A, B, C));
+    T('[10] brawl of four, the main at seat 0: the three others settle among themselves in the run after the absence grace; the main named-only, untouched; nobody flagged',
+      m.okAll && settledAt(m, mm.key) === 2 && NOT_A_LEAVER(mm.key, 0).test(m.out) && untouched(m, M) && m.pts[M].score === 1000
+      && [A, B, C].every((s) => skillOf(m, s) && xpOf(m, s) > 0 && posts(m, POINTS, s).length > 0 && leavesOf(m, s) === 0) && flaggedN(m) === 0,
+      'settled at run ' + settledAt(m, mm.key) + ' ' + why(m, M) + J([A, B, C].map((s) => [!!skillOf(m, s), xpOf(m, s), posts(m, POINTS, s).length, leavesOf(m, s)])) + ' flagged ' + flaggedN(m) + m.out.slice(-1500));
+  }
+  // (b) team codes: the main is seat 0 of team 0
+  const cases = [
+    ['team brawl (base 3)', 3 | S(0b1111), 98020, 4, { lose: { sc: [0, 500, 900, 700] }, win: { sc: [0, 2500, 900, 700] } }],
+    ['2V2 duel (base 5)', 5 | S(0b1111), 98040, 4, { lose: { sc: [0, 500, 900, 700], ranks: [3, 4, 1, 2] }, win: { sc: [0, 2500, 900, 700], ranks: [1, 2, 3, 4] } }],
+    ['3V3 duel (base 8)', 8 | S(0b111111), 98060, 6, { lose: { sc: [0, 500, 400, 900, 800, 700], ranks: [4, 5, 6, 1, 2, 3] }, win: { sc: [0, 2500, 2400, 900, 800, 700], ranks: [1, 2, 3, 4, 5, 6] } }],
+  ];
+  for (const [label, mt, base, pc, o] of cases) {
+    const tsz = pc / 2, acc = SIDS(base).slice(0, pc), accW = SIDS(base + 10).slice(0, pc);
+    const others = acc.map((_, i) => i).filter((i) => i !== 0);
+    const lose = match(mt, 0x98000 + (base % 100), acc, others, others, o.lose);
+    const win = match(mt, 0x98000 + (base % 100) + 1, accW, others, others, o.win);
+    const m = run(SETTLE([lose, win]), ptsOf(...acc, ...accW));
+    const M = acc[0], MW = accW[0], mates = others.filter((i) => i < tsz), opp = others.filter((i) => i >= tsz);
+    T('[10] ' + label + ', the main at seat 0 on the losing team: settled after the grace with no rating move for anybody (Q149 named-loser), XP as ever; nobody flagged, nobody a leaver; the main untouched',
+      m.okAll && settledAt(m, lose.key) === 2 && new RegExp('named-loser ' + lose.key + ': seat 0 \\(named by the others only\\)').test(m.out)
+      && others.every((i) => !skillOf(m, acc[i]) && posts(m, POINTS, acc[i]).length === 0 && m.pts[acc[i]].score === 1000 && xpOf(m, acc[i]) > 0 && leavesOf(m, acc[i]) === 0)
+      && flaggedN(m) === 0 && untouched(m, M) && m.pts[M].score === 1000,
+      'settled at run ' + settledAt(m, lose.key) + ' flagged ' + flaggedN(m) + ' ' + why(m, M) + J(others.map((i) => [!!skillOf(m, acc[i]), m.pts[acc[i]].score, xpOf(m, acc[i]), leavesOf(m, acc[i])])) + m.out.slice(-1500));
+    T('[10] ' + label + ', the main at seat 0 on the winning team: rated as ever, the main untouched',
+      settledAt(m, win.key) === 2 && !new RegExp('named-loser ' + win.key).test(m.out) && mates.every((i) => skillOf(m, accW[i]) && skillOf(m, accW[i]).mu > ts.DEFAULTS.mu)
+      && opp.every((i) => skillOf(m, accW[i]) && skillOf(m, accW[i]).mu < ts.DEFAULTS.mu) && untouched(m, MW) && m.pts[MW].score === 1000,
+      'settled at run ' + settledAt(m, win.key) + ' ' + J(others.map((i) => skillOf(m, accW[i]) && skillOf(m, accW[i]).mu)) + why(m, MW));
+  }
+  // (c) a duel table whose three writers refuse the team gamble and name seat 0
+  {
+    const [M, A, C, D] = SIDS(98090);
+    const mt = 5 | S(0b1111), hash = 0x98091, ros = [M, A, C, D], sc = [0, 500, 900, 700];
+    const TAG = (0x74320000 | (1 << 0)) | 0;
+    const st = [1, 2, 3].map((seat) => ({ sid: ros[seat], seat, d: rec(0xB2, mt, hash, seat, 0, false, ros, sc) }));
+    const rf = [1, 2, 3].map((seat) => ({ sid: ros[seat], seat, d: rec(0xB1, mt, hash, seat, 0, false, ros, sc, 0).concat([TAG]) }));
+    const all = st.concat(rf), key = hash + '_1234_' + mt;
+    const MATURE = (v.STARTS_MATURITY_MS || 2 * HOUR) + 10 * MIN;
+    const m = run([[0, st], [5 * MIN, all], [GRACE, all], [6 * MIN, all], [MATURE, all], [6 * MIN, all]], ptsOf(M, A, C, D));
+    const av = ((m.last.state.SIGNALS_FILE || {}).t2av || {})[key + '|' + v.pid(M)] || null;
+    T('[10] three refusals name seat 0, the main\'s: not counted on him (he never wrote his own record) -- no strike, no made-up confession, no exit, no board write, his points 1000',
+      m.okAll && /team2 accusation [^\n]*3 writers name [^\n]*not counted \(he never wrote his own record for this match, Q69; record only\)/.test(m.out) && (!av || av.v === 'nostart')
+      && leavesOf(m, M) === 0 && anyWrite(m, M) === 0 && m.pts[M].score === 1000 && !skillOf(m, M), J(av) + why(m, M) + m.out.slice(-1500));
+    T('[10] ... the three who refused: as at [9] -- the table voids at maturity (nobody rated, no points, no exit), one flag each',
+      settled(m, key) && flaggedN(m) === 1 && [A, C, D].every((s) => leavesOf(m, s) === 0 && m.pts[s].score === 1000 && !skillOf(m, s) && ((sigOf(m, s) || {}).f | 0) === 1),
+      J([flaggedN(m), [A, C, D].map((s) => [leavesOf(m, s), m.pts[s].score, !!skillOf(m, s), (sigOf(m, s) || {}).f])]));
   }
 }
 
