@@ -6903,8 +6903,9 @@ const COMP = {
   CKPT_EVERY: 5,                                                              // lockstep: ENDLESS.CHECKPOINT_EVERY (guard segment cadence = max span)
   CHAIN_WAIT_MS: Number(process.env.COMP_CHAIN_WAIT_MS || 7 * 86400000),      // unchained segment waits this long for its predecessor, then rejects
   // cloud audit Q428: a guard-signed segment (solo / couch lane) still waiting for its predecessor this long settles on its own
-  //   instead (soloChainPlan opts.gapSettle); never longer than CHAIN_WAIT_MS (the wait clock is pruned a day after it). Default = it
-  GAP_SETTLE_MS: Number(process.env.COMP_GAP_SETTLE_MS || process.env.COMP_CHAIN_WAIT_MS || 7 * 86400000),
+  //   instead (soloChainPlan opts.gapSettle); never longer than CHAIN_WAIT_MS (the wait clock is pruned a day after it). Default 1 day
+  //   (Q428 user pick: every late predecessor seen since launch came within 6 hours -- the guard's retry outbox lives in memory)
+  GAP_SETTLE_MS: Number(process.env.COMP_GAP_SETTLE_MS || 86400000),
   MS_TTL_MS: Number(process.env.COMP_MS_TTL_MS || 120 * 86400000),           // milestone bitmaps (player x season x ladder family) outlive a season
   RUN_TTL_MS: Number(process.env.COMP_RUN_TTL_MS || 45 * 86400000),           // run chain memory (saves included) pruned after -- unless a save can still bring the run back (soloRunKept, Q327)
   RUN_CAP: Number(process.env.COMP_RUN_CAP || 100000),                       // fuse: chain memory entries past it forget the oldest idle past RUN_TTL_MS, never a run inside it (about 15 MB at ~150 bytes each; Q327)

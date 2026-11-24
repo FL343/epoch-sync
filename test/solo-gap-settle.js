@@ -48,7 +48,7 @@ console.log('=== Q428: a signed endless segment whose predecessor never came set
 // ---- [0] wiring pins + tripwires ----
 {
   const pin = (label, s) => T('[0] ' + label, SRC.split(s).length === 2, 'not found exactly once: ' + s.slice(0, 140));
-  T('[0] CHAIN_WAIT_MS 7 days, GAP_SETTLE_MS defaults to it', W === 7 * DAY && v.COMP.GAP_SETTLE_MS === W, W + ' / ' + v.COMP.GAP_SETTLE_MS);
+  T('[0] CHAIN_WAIT_MS 7 days, GAP_SETTLE_MS defaults to 1 day', W === 7 * DAY && v.COMP.GAP_SETTLE_MS === DAY, W + ' / ' + v.COMP.GAP_SETTLE_MS);
   pin('the solo lane (solo + couch: signature + owner binding checked above) passes gapSettle',
     'const plan = soloChainPlan(soloState, key, f, m, nowMs, { recovered: !!r.recovered, gapSettle: soloGapTick });');
   // tripwire: a consensus lane (team competitive / team classic / seat-only pass) must not gap-settle without its own decision --
