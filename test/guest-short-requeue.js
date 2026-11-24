@@ -14,13 +14,18 @@
 //   [3] team brawl (base 3), 2V2 duel (base 5), 3V3 duel (base 8): the main on the LOSING team -> the match settles with no
 //       rating move for anybody (Q149 named-loser: his teammate loses nothing, the winners gain nothing), XP as ever; the
 //       main untouched. The main on the WINNING team -> rated as ever, the main untouched
-//   [4] a table of two (the main + one stranger): the stranger's lone records never settle and convict nobody
+//   [4] a table of two (the main + one stranger): the stranger's lone records never settle and convict nobody -- his start
+//       alone, his start and a result, his start and an exit note. His own abandon confession does charge HIM (one exit and
+//       the ranked fine, as for any quit): the client must end an empty table itself, not leave the player to quit it
 //   [5] the table never settles (start-orphan verdict at maturity): the main is not convicted
 //   [6] the boundary -- what DOES make it a leave: the main's own start record (level 1 began on his machine), or his own
 //       abandon confession. The client's requeue path must write neither
 //   [7] the seat table DID seat the guest (guest bit set) and the main still wrote nothing: the same -- pair out, the
 //       others settle, nobody convicted or flagged (only on a job that reads guest seats)
 //   [8] mutants: the named-only filter of the settle path / of the start-orphan verdict taken out -> the main is convicted
+//   [9] a duel table whose writers refuse the team gamble and name the main's seat (Q43; the rule, its wiring and its mutant
+//       are test/team2-accuse.js [25]): not counted on him, no made-up confession. The cost is the writers' (the table
+//       voids, one flag each) -- so the clients still at a duel table must not answer a seat that never loaded with a refusal
 //   node test/guest-short-requeue.js [sections, e.g. 1,3]
 const fs = require('fs'), path = require('path');
 const H = require('./lib/settle-stub.js');
@@ -187,6 +192,7 @@ if (on(3)) {
 if (on(4)) {
   const MATURE = (v.STARTS_MATURITY_MS || 2 * HOUR) + 10 * MIN;
   for (const [label, mt, base] of [['both seats ranked', 1 | S(0b11), 97410], ['both seats quick', 1, 97420]]) {
+    // eslint-disable-next-line no-shadow
     const [A, M] = SIDS(base);
     // the stranger alone at the table: his start, and a result of his own if his client wrote one
     const mm = match(mt, 0x97400 + (base % 100), [A, M], [0], [0], { sc: [900, 0] });
@@ -195,6 +201,47 @@ if (on(4)) {
       m.okAll && !settled(m, mm.key) && !skillOf(m, A) && leavesOf(m, A) === 0 && flaggedN(m) === 0 && m.pts[A].score === 1000, why(m, A) + m.out.slice(-900));
     T('[4] ' + label + ': the main is untouched', untouched(m, M) && m.pts[M].score === 1000, why(m, M));
   }
+  // what else the stranger's client may have written from the empty table (the main untouched in each)
+  const mt = 1 | S(0b11);
+  const tbl = (base, extra) => {
+    const [A, M] = SIDS(base), hash = 0x97400 + (base % 100);
+    const mm = match(mt, hash, [A, M], [0], [], { sc: [0, 0] });
+    const x = extra ? [{ sid: A, seat: 0, d: rec(extra[0], mt, hash, 0, 0, false, [A, M], null, extra[1]) }] : [];
+    const all = mm.S.concat(x);
+    return { A, M, mm, m: run([[0, mm.S], [5 * MIN, all], [GRACE, all], [MATURE, all], [6 * MIN, all]], ptsOf(A, M)) };
+  };
+  const so = tbl(97430, null), sc = tbl(97440, [0xB5, 5]), sn = tbl(97450, [0xBD, 2]);
+  T('[4] the stranger wrote his start and nothing else (the table ended before any result): nothing is charged to him -- no exit, points as before', so.m.okAll && leavesOf(so.m, so.A) === 0 && so.m.pts[so.A].score === 1000 && flaggedN(so.m) === 0 && untouched(so.m, so.M), why(so.m, so.A));
+  T('[4] the stranger wrote his start and an exit note (the table died on him): nothing is charged to him', sn.m.okAll && leavesOf(sn.m, sn.A) === 0 && sn.m.pts[sn.A].score === 1000 && flaggedN(sn.m) === 0 && untouched(sn.m, sn.M), why(sn.m, sn.A));
+  // ... but his own abandon confession is his own word, as for any quit: the client must end an empty table itself (the
+  //   "peers gone" way, which writes no confession) and not leave it to the player to quit it from the menu
+  T('[4] the stranger quit the empty table himself and confessed: one exit and the ranked fine for HIM (the confession path, as for any quit); the main untouched',
+    sc.m.okAll && leavesOf(sc.m, sc.A) === 1 && sc.m.pts[sc.A].score === 1000 - PP.DEFAULTS.LEAVER_LP_PENALTY && untouched(sc.m, sc.M), why(sc.m, sc.A) + ' pts ' + sc.m.pts[sc.A].score);
+}
+
+// ---- [9] a duel table whose writers refuse the team gamble and name the main's seat (Q43) ----
+if (on(9)) {
+  // the rule itself, its wiring in main() and its mutant: test/team2-accuse.js [25]; here the live code form (the quick
+  //   family code with a ranked-seat mask) and the guest-short shape: three writers, each a refusal (rank claim 0) with
+  //   the accusation int after the roster naming seat 1, the main's
+  const [A, M, C, D] = SIDS(97910);
+  const mt = 5 | S(0b1111), hash = 0x97901, ros = [A, M, C, D], sc = [500, 0, 900, 700];
+  const TAG = (0x74320000 | (1 << 1)) | 0;
+  const st = [0, 2, 3].map((seat) => ({ sid: ros[seat], seat, d: rec(0xB2, mt, hash, seat, 0, false, ros, sc) }));
+  const rf = [0, 2, 3].map((seat) => ({ sid: ros[seat], seat, d: rec(0xB1, mt, hash, seat, 0, false, ros, sc, 0).concat([TAG]) }));
+  const all = st.concat(rf), key = hash + '_1234_' + mt;
+  const MATURE = (v.STARTS_MATURITY_MS || 2 * HOUR) + 10 * MIN;
+  const m = run([[0, st], [5 * MIN, all], [GRACE, all], [6 * MIN, all], [MATURE, all], [6 * MIN, all]], ptsOf(A, M, C, D));
+  const av = ((m.last.state.SIGNALS_FILE || {}).t2av || {})[key + '|' + v.pid(M)] || null;
+  T('[9] three refusals name the main\'s seat: not counted on him (he never wrote his own record) -- no strike, no made-up confession',
+    m.okAll && /team2 accusation [^\n]*3 writers name [^\n]*not counted \(he never wrote his own record for this match, Q69; record only\)/.test(m.out) && (!av || av.v === 'nostart'), J(av) + m.out.slice(-1500));
+  T('[9] ... through maturity: the main has no exit, no points write, no board write; his points 1000', leavesOf(m, M) === 0 && anyWrite(m, M) === 0 && m.pts[M].score === 1000 && !skillOf(m, M), why(m, M));
+  // the cost falls on the WRITERS, as at any refused table whose named seat wrote no start (the trade-off noted at Q285):
+  //   the key voids at maturity and each refuser carries one flag. So the clients of the players still at a duel table must
+  //   not answer a seat that never loaded with a refusal -- a client matter, pinned here so that it is known
+  T('[9] the three who refused: the table voids at maturity (nobody rated, no points, no exit) and each carries one flag -- the rule for any refused table whose named seat wrote no start',
+    settled(m, key) && flaggedN(m) === 1 && [A, C, D].every((s) => leavesOf(m, s) === 0 && m.pts[s].score === 1000 && !skillOf(m, s) && ((sigOf(m, s) || {}).f | 0) === 1),
+    J([flaggedN(m), [A, C, D].map((s) => [leavesOf(m, s), m.pts[s].score, !!skillOf(m, s), (sigOf(m, s) || {}).f])]));
 }
 
 // ---- [5] the table never settles ----
