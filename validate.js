@@ -7214,8 +7214,22 @@ function elpTeamNote(st, runId, pids, fam, s, nowMs) {
 // run i of entry h may settle now (its own condition; elpSettleAll also needs every run before it settled first): its final segment
 //   came, a newer run of the player in the family started (starting another run gives a save up), or no segment came for IDLE_MS
 //   while no save point is open. The one predicate of elpSettleAll's loop and of elpPendingSettles (RC2-01: they must not drift).
+//   "A newer run" (elpNewerRun) is a run after it in the list of the same rules version or a later one -- not merely any run after
+//   it. 2026-11-24, the night the version 8 package went up: a player's first version 8 run and his old version 7 run (parked at a
+//   save point before the update) were first seen in the same pass; the old run sat after the new one in the list, so the new run
+//   counted as given up and settled at the depth it had then (10, later 24 = its line: a miss of -60; another at 5, later 24: -11)
+//   while it was still being played (architecture decision 10). An old-version run never supersedes a newer-version one (the updated
+//   client cannot continue it). Such a run settles on its final segment, on a newer run of its version or a later one, or after
+//   IDLE_MS. The list position still decides between runs of one version, those first seen in the same pass included (every run a
+//   pass first sees carries that pass's instant): a parked run followed by a finished run of its version in one pass is given up
+//   there, as before -- a rule asking for a later first-seen instant would hold both back until the player plays again.
+function elpNewerRun(h, i) {
+  const v = elpRunVer(h.runs[i]);
+  for (let k = i + 1; k < h.runs.length; k++) if (elpRunVer(h.runs[k]) >= v) return true;
+  return false;
+}
 function elpRunReady(h, i, nowMs) {
-  const r = h.runs[i], newer = i < h.runs.length - 1, idle = nowMs != null && nowMs - (r[6] || r[2] || 0) >= RATING.IDLE_MS;
+  const r = h.runs[i], newer = elpNewerRun(h, i), idle = nowMs != null && nowMs - (r[6] || r[2] || 0) >= RATING.IDLE_MS;
   // O942 D6: once the version 7 package's gate is up (RATING.CUTOVER_MS, the upload runbook sets it), a version 6 run PARKED at a save
   //   point is never continued (the new client offers no resume of an old key's save) -- it settles at its save depth. A version 6 run
   //   still being PLAYED then (an old client mid-run: its checkpoint segments are on the board) is NOT cut: settling it now would read
@@ -17095,7 +17109,7 @@ Object.assign(module.exports, { lone1v1Spoiled, lone1v1VoidClaims });   // cloud
 Object.assign(module.exports, { teamXpFloor, teamXpStarts, teamXpMark, teamRollbackPlan });   // cloud audit Q237 team competitive XP floors (test/team-comp-ghost-xp.js)
 Object.assign(module.exports, { RATING, RATING_FAMS, ENDLESS_RATING_LB, ELP_ALL, elpAllKey, elpAllOf, elpEntryOk, elpFamEntries, elpMergeByStart, elpPassOrder, elpPlaceAt, elpLeftOf, elpOldUntil, elpMins, elpSeedNow, ratingOwed, ratingOwedLive, ratingWriteCode, elpPassOrders, elpTryOrder, elpPickOrders, ELP_ORDER_CAP, SEASON_UNSCHEDULED, elpSettledRuns, elpRunsBefore, elpSaveAt, elpOpenAt, elpBeforeItems, elpBeforeLists, elpBorrowCounts, elpBorrowOrders, ELP_BORROW_CAP, elpRowSkill, elpMemberReadings, elpTeamPick, elpLinesByFam, elpSkillsOf, elpCandidateTabs, ENDLESS_RATING_LB_SOLO, ENDLESS_RATING_LB_DUO, ENDLESS_RATING_LB_TRIO, ENDLESS_RATING_LB_QUAD, ENDLESS_TIERCUT_LB, ratingFamOf, fnv32, ratingRunId, ratingHistKey,
   ratingHistUpsert, ratingHistRemove, ratingHistFinal, elpRunRk, ratingScoreOf, ratingPlan, ratingTierOf, tiercutDay, tiercutEncode, tiercutDecode, tiercutDue, pruneRatingHist,
-  elpSettledDepths, elpLinesAt, elpCandidates, elpSettleRun, elpTrim, elpSettleAll, elpRunReady, elpPendingSettles, elpTeamNote, elpMemberHiddenBefore, elpTeamHidden, elpTeamTrim, elpLinesOf, elpHiddensOf, elpLinesSkipBanned, elpTableKey, elpTabNewest, elpTabRecord });
+  elpSettledDepths, elpLinesAt, elpCandidates, elpSettleRun, elpTrim, elpSettleAll, elpRunReady, elpNewerRun, elpPendingSettles, elpTeamNote, elpMemberHiddenBefore, elpTeamHidden, elpTeamTrim, elpLinesOf, elpHiddensOf, elpLinesSkipBanned, elpTableKey, elpTabNewest, elpTabRecord });
 Object.assign(module.exports, { ELP_R_V7, ELP_R_QUIT, elpSegLv, elpTabVer, elpPriorPub, elpLevelBefore, elpMemberLevelBefore, elpTeamLevel, elpRowFresh, elpRowLevel, elpSettleRunLv, elpLevelReplay });
 Object.assign(module.exports, { ELP_LV_SET_MAX, elpLvSetOf, elpLvSet, elpQ432Lift });   // Q432   // O942 version 7 (test/endless-level.js)
 Object.assign(module.exports, { ELP_RESTART_BACK, elpRestartOn, elpRestartStart, elpRestartOwn, elpRestartChainAt, elpRestartReads, elpO1015Lift, elpLvChoose });   // O1015 (test/elp-restart-start.js)
