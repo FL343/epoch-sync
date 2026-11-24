@@ -8105,17 +8105,53 @@ function elpRowLevel8(ctx, p, fam, runId, at) {
 //   depth allows (architecture decision 10)
 function elpLevelStarts8(st, p, c, fam, s, h, runId, at, nowMs, ctx) {
   const rid = runId >>> 0, v7s = elpV7StatesOf(ctx, c, p, fam, rid, at);
-  const depths = ((h && Array.isArray(h.runs)) ? h.runs : []).filter((x) => x[3] && (x[0] >>> 0) !== rid && (x[2] || 0) <= at).map((x) => x[1] | 0).reverse();
-  // the two priors are always among the lines (a client that holds no table of that version reads its copy's prior: the contract
-  //   with the client is "the table of that version it holds, else ELP7.PRIOR / ELP8.PRIOR") -- review 2026-11-23: without the
-  //   version 8 prior, a client still on it a day after the job recorded a version 8 table read a lower target than every reading
-  //   here, and its pass at that target was judged a miss
+  if (!v7s.length) return elpSilverStarts8(st, fam, s, h, rid, at, nowMs);
+  const { depths, l8s } = elpStartInputs8(st, fam, s, h, rid, at, nowMs);
   const l7s = elpLinesUniq([elpLinesAt(st, fam, s, at, ELP_V7_TABS)].concat(elpCandidateTabs(st, s, at, nowMs, ELP_V7_TABS).map((tb) => tb[fam]), [pointsPlan.ELP7.PRIOR[fam]]));
-  const l8s = elpLinesUniq([elpLinesAt8(st, fam, s, at)].concat(elpCandidateTabs8(st, s, at, nowMs).map((tb) => tb[fam]), [pointsPlan.ELP8.PRIOR[fam]]));
   const xs = [];
-  if (!v7s.length) for (const l8 of l8s) xs.push(pointsPlan.elpLevelInit8(null, depths, null, l8));
   for (const x7 of v7s) for (const l7 of l7s) for (const l8 of l8s) xs.push(pointsPlan.elpLevelInit8(x7, depths, l7, l8));
   return elpLvUniq(xs);
+}
+// the inputs of a FIRST version 8 run's starts (elpLevelStarts8 / elpSilverStarts8): the depths of his settled runs of the family
+//   first seen no later than it (newest first) and the version 8 lines it may read. The two priors are always among the lines (a
+//   client that holds no table of that version reads its copy's prior: the contract with the client is "the table of that version it
+//   holds, else ELP7.PRIOR / ELP8.PRIOR") -- review 2026-11-23: without the version 8 prior, a client still on it a day after the job
+//   recorded a version 8 table read a lower target than every reading here, and its pass at that target was judged a miss
+function elpStartInputs8(st, fam, s, h, runId, at, nowMs) {
+  const rid = runId >>> 0;
+  const depths = ((h && Array.isArray(h.runs)) ? h.runs : []).filter((x) => x[3] && (x[0] >>> 0) !== rid && (x[2] || 0) <= at).map((x) => x[1] | 0).reverse();
+  const l8s = elpLinesUniq([elpLinesAt8(st, fam, s, at)].concat(elpCandidateTabs8(st, s, at, nowMs).map((tb) => tb[fam]), [pointsPlan.ELP8.PRIOR[fam]]));
+  return { depths, l8s };
+}
+// the silver-line starts of a FIRST version 8 run (what a client holding no version 7 level of the family starts from: points-plan.js
+//   elpLevelInit8(null, ...), capped at his newest depths) under each version 8 line list: the starts of a player with no version 7
+//   level (elpLevelStarts8) and the verdict-only readings of elpSilverReads8
+function elpSilverStarts8(st, fam, s, h, runId, at, nowMs) {
+  const { depths, l8s } = elpStartInputs8(st, fam, s, h, runId, at, nowMs);
+  return elpLvUniq(l8s.map((l8) => pointsPlan.elpLevelInit8(null, depths, null, l8)));
+}
+// O1015 for version 8 (the user, 2026-11-24: do it, the narrow variant): a 0.6.4 client that holds no version 7 level of the family when its
+//   FIRST version 8 run of it starts -- its row not read that session, and the local ledger lost the level (0.6.1-0.6.3 dropped lv on
+//   load and re-saved the ledger at every launch; a 0.6.3 cached row has no level either) -- starts from the silver line, a start
+//   elpLevelStarts8 leaves out for a player the job holds a version 7 level of. When that run ends at its (shallower) target the game
+//   shows a pass and the job, reading only the converted version 7 level, a miss. Such a reading may decide THAT verdict: a family's
+//   first version 8 run (no lv8 of the family yet), his own level (solo / the couch pair: a team target reads the team line), not a
+//   quit, its depth == the silver start's target. It is verdictOnly (elpLvChoose8): it enters the pick only, never the carry, the outs
+//   (the set carried on, the placement seed) -- the level chain is exactly the one without it. The record cannot tell a run that ended
+//   at that target from one that died on the next level, so the leniency is the verdict of one run per family at one depth
+//   (architecture decision 10); the level never follows it.
+function elpSilverReads8(st, p, c, h, r, fam, s, at, nowMs, ctx, team, quit, depth, seed, reads) {
+  if (team || quit) return [];
+  if (c && c.lv8 && pointsPlan.elpLevelOf8(c.lv8[fam])) return [];   // not the family's first version 8 run
+  const rid = r[0] >>> 0;
+  if (!elpV7StatesOf(ctx, c, p, fam, rid, at).length) return [];      // no version 7 level: the silver line is already among the starts
+  const have = new Set(reads.map((rd) => rd.L | 0)), out = [];
+  for (const x of elpSilverStarts8(st, fam, s, h, rid, at, nowMs)) {
+    if (have.has(x.L | 0) || pointsPlan.elpTargetOfL8(x.L, seed) !== (depth | 0)) continue;
+    have.add(x.L | 0);
+    out.push({ x, L: x.L, verdictOnly: true });
+  }
+  return out;
 }
 // player p's version 8 states of family fam before run r, the job's own first: the state his points entry holds (c.lv8[fam]: every
 //   run of the family before this one settled first) with the set carried with it, else the starts (elpLevelStarts8)
@@ -8163,9 +8199,11 @@ function elpTeamLevel8(st, r, fam, s, nowMs, ctx) {
 }
 // elpLvChoose of version 8 (the same rule: a reading whose target is below the depth cannot have been his client's unless the run
 //   stood parked; the verdict and points the best for him; the carry the lowest of the kept readings' steps), with elpTargetOfL8 /
-//   elpLevelStep8
+//   elpLevelStep8. A verdictOnly reading (elpSilverReads8) is kept by the same rule and enters the pick only: the carry and the outs
+//   are those of the other readings, exactly as without it
 function elpLvChoose8(reads, depth, seed, quit, placing, resumed, val) {
-  const all = reads.map((rd) => ({ rd, t: pointsPlan.elpTargetOfL8(rd.L, seed) }));
+  const every = reads.map((rd) => ({ rd, t: pointsPlan.elpTargetOfL8(rd.L, seed) }));
+  const all = every.filter((a) => !a.rd.verdictOnly), only = every.filter((a) => a.rd.verdictOnly && (resumed || a.t >= depth));
   let keep8 = resumed ? all : all.filter((a) => a.t >= depth);
   if (!keep8.length) { let hi = null; for (const a of all) if (!hi || a.rd.L > hi.rd.L) hi = a; keep8 = [hi]; }
   let pick8 = null, carry8 = null;
@@ -8177,6 +8215,7 @@ function elpLvChoose8(reads, depth, seed, quit, placing, resumed, val) {
     outs.push(after8);
     if (!carry8 || after8.L < carry8.after.L) carry8 = { rd: a.rd, t: a.t, after: after8 };
   }
+  for (const a of only) { const v = val(a); if (!pick8 || v.score > pick8.v.score) pick8 = { rd: a.rd, t: a.t, v }; }
   return { pick: pick8, carry: carry8, outs };
 }
 // settle version 8 run r (r[7] & ELP_R_V8) of player p onto his points entry c (elpSettleRun's contract): elpSettleRunLv's shape --
@@ -8193,6 +8232,7 @@ function elpSettleRunLv8(st, p, c, h, r, fam, s, nowMs, ctx) {
   const team = elpTeamLevel8(st, r, fam, s, nowMs, ctx);   // D5: the lines the roster may have read (undefined = his own level)
   const reads = [];
   for (const x of xs) { if (team) for (const ln of team.lns) reads.push({ x, L: ln * 100 }); else reads.push({ x, L: x.L }); }
+  for (const rd of elpSilverReads8(st, p, c, h, r, fam, s, at, nowMs, ctx, team, quit, depth, seed, reads)) reads.push(rd);   // O1015 v8: verdict only
   const placing = c.placed ? -1 : Math.min(ELP.MIN_RUNS - 1, c.n | 0);
   const off = pointsPlan.targetOffset(seed), cur = Math.max(0, Math.min(LP_MAX, c.lp | 0));
   const val = c.placed
@@ -8217,8 +8257,8 @@ function elpSettleRunLv8(st, p, c, h, r, fam, s, nowMs, ctx) {
   r[3] = 2; r[4] = d; r[5] = T;
   c.n = (c.n | 0) + 1; c.t = nowMs;
   c.ring = receiptPush(c.ring || [], elpRunRk(s, r[8]), d, flags, 0xff);
-  const alts = new Set(reads.map((rd) => pointsPlan.elpTargetOfL8(rd.L, seed))).size;
-  return { d, T, pass, seeded, teamH: team ? team.L : undefined, alts, held: false, lv: [ch.carry.rd.x.L, after.L, after.s], v8: true };
+  const alts = new Set(reads.filter((rd) => !rd.verdictOnly).map((rd) => pointsPlan.elpTargetOfL8(rd.L, seed))).size;
+  return { d, T, pass, seeded, teamH: team ? team.L : undefined, alts, held: false, lv: [ch.carry.rd.x.L, after.L, after.s], v8: true, ...(ch.pick.rd.verdictOnly ? { silver: true } : {}) };
 }
 // a conviction took version 8 run `gone` out of entry h: the family's version 8 level is replayed from the state before it through
 //   every later settled version 8 run of the family on its own recorded result (r[10][6]; elpLevelReplay's rule) -- their points stay
@@ -16873,7 +16913,7 @@ Object.assign(module.exports, { RATING, RATING_FAMS, ENDLESS_RATING_LB, ELP_ALL,
 Object.assign(module.exports, { ELP_R_V7, ELP_R_QUIT, elpSegLv, elpTabVer, elpPriorPub, elpLevelBefore, elpMemberLevelBefore, elpTeamLevel, elpRowFresh, elpRowLevel, elpSettleRunLv, elpLevelReplay });
 Object.assign(module.exports, { ELP_LV_SET_MAX, elpLvSetOf, elpLvSet, elpQ432Lift });   // Q432   // O942 version 7 (test/endless-level.js)
 Object.assign(module.exports, { ELP_R_V8, ELP_V7_TABS, elpRunVer, elpCutVer, elpLinesAt8, elpLinesByFam8, elpCandidateTabs8, elpLvSet8, elpV7StatesOf, elpRowLevel8, elpLevelStarts8, elpLevelBefore8,
-  elpMemberLevelBefore8, elpTeamLevel8, elpLvChoose8, elpSettleRunLv8, elpLevelReplay8, soloMilestones });   // O991 version 8 (test/endless-level8.js)
+  elpMemberLevelBefore8, elpTeamLevel8, elpLvChoose8, elpSettleRunLv8, elpLevelReplay8, soloMilestones, elpStartInputs8, elpSilverStarts8, elpSilverReads8 });   // O991 version 8 (test/endless-level8.js)
 Object.assign(module.exports, { CUP, CUP_FAMS, ENDLESS_CUP_LB, ENDLESS_CUP_HONOR_LB, cupWeekId, cupWeekStart, cupWeekBack, cupNextWeek, cupEdition, cupWeekBoardName, teamBlockSids,
   cupStandings, cupPodium, cupPodiumFor, cupVerdict, cupMarksOf, cupHonorEncode, cupHonorDecode, cupHonorPlan, cupHeldMasks, cupCarrierEncode, cupCarrierDecode, cupRevoke, pruneCup, cupId, cupScrub, cupPidVerdict });   // O180 Gold Rush Cup (client knife 5.1c-1; test/endless-cup.js)   // O103 endless competitive rating (client knife 5.1a; test/endless-rating.js)
 Object.assign(module.exports, { BAN_LB, BAN_ACT_MM, banRowFull, fullBanSet, cupSkipBanned, elpLinesSkipBanned, CUP_BAN_WAIT_MS });   // cloud audit Q338 full bans kept off the cup podium / tier cuts / composite ladders (test/ban-skip.js; sanctions.js reads BAN_LB from here)

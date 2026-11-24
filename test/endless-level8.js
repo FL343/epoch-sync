@@ -470,6 +470,69 @@ function sPrior8(m) {
   return e;
 }
 
+// ---- [16] O1015 for version 8 (the user 2026-11-24, the narrow variant): the silver-line start decides the verdict only ----
+//   A placed player the job holds a version 7 level of; his 0.6.4 client starts his first version 8 solo run from the silver line (row
+//   not read, the local level lost) and the run ends at that shallower target. The job judges it a pass with the silver reading (the
+//   points the game showed) and carries the level chain it would carry without it (the converted start, stepped by the miss of its own
+//   target). Not on: a later run (lv8 held), a quit, any other depth, a team run.
+function silverWorld(m, n, lp0) {
+  const st = world(), x7 = S(2600, 2550, 3, 1, 2), ds = [30, 28, 31], t0 = T0 + (2000 + 100 * n) * MIN;
+  const p = v7Holder(m, st, n, 'solo', x7, ds, lp0, t0);
+  const x8 = PP.elpLevelInit8(x7, newestFirst(ds), L7.solo, L8.solo), xs = PP.elpLevelInit8(null, newestFirst(ds), null, L8.solo);
+  let seed = 0;
+  for (let s2 = 1; s2 < 64 && !seed; s2++) if (PP.elpTargetOfL8(xs.L, s2) < PP.elpTargetOfL8(x8.L, s2)) seed = s2;
+  return { st, p, x7, x8, xs, seed, Ts: PP.elpTargetOfL8(xs.L, seed), T8: PP.elpTargetOfL8(x8.L, seed), at: t0 + 30 * MIN, lp0 };
+}
+function sSilver8(m) {
+  const e = [];
+  const w = silverWorld(m, 16, 3200), { st, p, x7, x8, xs, seed, Ts, T8, at, lp0 } = w;
+  if (!seed || !(Ts < T8)) return ['the world is not a real test: the silver target is not below the converted one ' + J([Ts, T8])];
+  const h = st.hist[m.ratingHistKey(p, 'solo', 0)];
+  const starts = m.elpLevelStarts8(st, p, C(st, p), 'solo', 0, h, 7101, at, at + MIN, null);
+  if (starts.some((x) => x.L === xs.L)) e.push('the starts already hold the silver line: ' + J(starts));
+  // the run his client ended at its silver target
+  m.ratingHistUpsert(st, p, 'solo', 0, 7101, Ts, at, F, seed, V8);
+  m.elpSettleAll(st, 0, at + 1000);
+  const r = runOf(st, p, 'solo', 7101), c = C(st, p);
+  if (!r || r[3] !== 2) return ['the run did not settle'];
+  const shown = PP.endlessSettleLv8(lp0, true, xs.Lm, L8.solo, PP.targetOffset(seed), 'solo', PP.elpLineOfL8(xs.L));   // what the game showed
+  const miss = PP.endlessSettleLv8(lp0, false, x8.Lm, L8.solo, PP.targetOffset(seed), 'solo', PP.elpLineOfL8(x8.L));
+  if (!(shown.nv > miss.nv)) return ['the world is not a real test: the silver pass leaves him no more than the miss ' + J([shown.nv, miss.nv])];
+  if ((r[5] | 0) !== Ts || (r[4] | 0) !== shown.nv - lp0 || (c.lp | 0) !== shown.nv) e.push('the verdict ' + J([r[5], r[4], c.lp]) + ' != the silver pass the game showed ' + J([Ts, shown.nv - lp0, shown.nv]));
+  // the level chain is the one without the silver reading
+  const after = PP.elpLevelStep8(x8, { pass: Ts >= T8, depth: Ts, T: T8, placing: -1 });
+  if (J(r[10]) !== J(arr(x8, -1).concat([T8])) || J(r[11]) !== J(arr(after, -1))) e.push('the states ' + J([r[10], r[11]]) + ' != the converted start and its step ' + J([arr(x8, -1).concat([T8]), arr(after, -1)]));
+  if (J(c.lv8 && c.lv8.solo) !== J(after) || J(c.lvs8 && c.lvs8.solo) !== J([after]) || J(c.lv.solo) !== J(x7)) e.push('the levels ' + J([c.lv8, c.lvs8, c.lv]) + ' (the silver line must not be carried, the version 7 level stays)');
+  // a later run (lv8 of the family held) at its own silver target's depth: no silver reading
+  let seed2 = 0, T2 = 0, Ts2 = 0;
+  const xs2 = PP.elpLevelInit8(null, [Ts, 31, 28], null, L8.solo);
+  for (let s2 = 1; s2 < 64 && !seed2; s2++) { const a = PP.elpTargetOfL8(xs2.L, s2), b = PP.elpTargetOfL8(after.L, s2); if (a < b) { seed2 = s2; Ts2 = a; T2 = b; } }
+  if (!seed2) e.push('the world is not a real test: no later seed with a shallower silver target');
+  else {
+    m.ratingHistUpsert(st, p, 'solo', 0, 7102, Ts2, at + 40 * MIN, F, seed2, V8);
+    m.elpSettleAll(st, 0, at + 41 * MIN);
+    const r2 = runOf(st, p, 'solo', 7102);
+    if (!r2 || (r2[5] | 0) !== T2) e.push('a later run at the silver depth was judged at ' + (r2 && r2[5]) + ' (its own target ' + T2 + ')');
+  }
+  // a quit at the silver target's depth / a death one level short of it: their own target, as without the net
+  //   (+ a placement run one level short: a placement pick takes the LOWEST target, so a silver reading there would show)
+  for (const [n, depth, lv, what, placing] of [[17, Ts, { v7: true, quit: true, v8: true }, 'a quit'], [18, Ts - 1, V8, 'a run one level short'], [20, Ts - 1, V8, 'a placement run one level short', true]]) {
+    const q = silverWorld(m, n, 3200);
+    if (placing) { const qc = C(q.st, q.p); qc.placed = 0; qc.n = 1; delete qc.seedRun; }
+    m.ratingHistUpsert(q.st, q.p, 'solo', 0, 7201, depth, q.at, F, q.seed, lv);
+    m.elpSettleAll(q.st, 0, q.at + 1000);
+    const rq = runOf(q.st, q.p, 'solo', 7201);
+    if (!rq || (rq[5] | 0) !== q.T8) e.push(what + ' at depth ' + depth + ' was judged at ' + (rq && rq[5]) + ' (its own target ' + q.T8 + ')');
+  }
+  // the reader itself: a team run gets none; the same run without the team gets the silver reading (so the guard is what stops it)
+  const z = silverWorld(m, 19, 3200), zc = C(z.st, z.p), zh = z.st.hist[m.ratingHistKey(z.p, 'solo', 0)], zr = [7301, z.Ts, z.at, 0, 0, 0, z.at, m.ELP_R_V8 | 1, z.seed];
+  const solo = m.elpSilverReads8(z.st, z.p, zc, zh, zr, 'solo', 0, z.at, z.at + MIN, null, undefined, false, z.Ts, z.seed, []);
+  const team = m.elpSilverReads8(z.st, z.p, zc, zh, zr, 'solo', 0, z.at, z.at + MIN, null, { L: 2400, lns: [24] }, false, z.Ts, z.seed, []);
+  if (solo.length !== 1 || !solo[0].verdictOnly || solo[0].L !== z.xs.L) e.push('the silver reading of a solo run ' + J(solo));
+  if (team.length) e.push('a team run got a silver reading ' + J(team));
+  return e;
+}
+
 // ---- the fixtures (made once, with the job before O991; see the header) ----
 if (fxArg) {
   const old = require(path.resolve(fxArg));
@@ -510,7 +573,8 @@ const SCEN = [['[1] intake: ELP_R_V8 alone, kept; elpSegLv / elpRunVer; an elp-8
   ['[12] Q3 milestones: the version 8 steps by family, the version 7 ones without a list, one step once a season either way, both call sites pass the list by the run\'s version', sMilestones],
   ['[13] T14 the gate in the job: a diamond pass is held under master at Lm 35.01 and goes through at 35.02 (103 % of 34)', sGate],
   ['[14] a member who stopped writing: his version 8 copy keeps its version when the team\'s final segment ends it and settles on the team line', sDropped],
-  ['[15] a client still on the version 8 prior a day after a version 8 table was recorded: his pass at the prior\'s lower target is a pass', sPrior8]];
+  ['[15] a client still on the version 8 prior a day after a version 8 table was recorded: his pass at the prior\'s lower target is a pass', sPrior8],
+  ['[16] O1015 v8: a first version 8 solo run that ended at the silver line\'s target (his client held no version 7 level) is a pass with the points the game showed; the level chain is the one without it (converted start, its own target); not on a later run / a quit / another depth / a team run', sSilver8]];
 console.log('-- O991 version 8: the job --');
 for (const [label, fn] of SCEN) { let e; try { e = fn(v); } catch (err) { e = ['threw: ' + (err && err.stack || err).toString().slice(0, 300)]; } T(label, e.length === 0, e.slice(0, 3).join(' | ')); }
 
@@ -545,7 +609,7 @@ const MUTS = [
   ['T10: the team intake drops the version 8 bit (its runs would settle as version 7)', [['quit: false, v8: !!((f.flags | 0) & attest.SEG_V8) });', 'quit: false });']], [], sIntake],
   ['the first version 8 run starts from the version 7 level as it is (no conversion)', [], [['const L = Math.max(FL, Math.min(cap, elpConvert(x7.L, lines7, lines8))), Lm = Math.max(FL, Math.min(cap, elpConvert(x7.Lm, lines7, lines8)));', 'const L = Math.max(FL, Math.min(cap, x7.L)), Lm = Math.max(FL, Math.min(cap, x7.Lm));']], sFirst],
   ['the conversion without the cap', [], [['const cap = ds.length ? elpConvert(', 'const cap = false ? elpConvert(']], sCap],
-  ['the first version 8 run reads the silver line (the version 7 level ignored)', [['  if (!v7s.length) for (const l8 of l8s) xs.push(pointsPlan.elpLevelInit8(null, depths, null, l8));', '  for (const l8 of l8s) xs.push(pointsPlan.elpLevelInit8(null, depths, null, l8)); if (false)']], [], sFirst],
+  ['the first version 8 run reads the silver line (the version 7 level ignored)', [['  if (!v7s.length) return elpSilverStarts8(st, fam, s, h, rid, at, nowMs);', '  if (true) return elpSilverStarts8(st, fam, s, h, rid, at, nowMs);']], [], sFirst],
   ['a version 8 run reads the version 7 level again (not its version 8 one)', [['  if (have) return elpLvUniq([have].concat(elpLvSet8(c, fam)));', '  if (false) return [have];']], [], sFirst],
   ['a version 8 run steps the version 7 level (lv) instead of lv8', [['  (c.lv8 = c.lv8 || {})[fam] = after;', '  (c.lv = c.lv || {})[fam] = after;']], [], sFirst],
   ['R2 back to "no level passed" only', [], [['if (!pass && depth <= ELP8.GROW_END) return x;', 'if (!pass && depth === 0) return x;']], sR2],
@@ -567,6 +631,12 @@ const MUTS = [
   ['T14: the gate back to 100 % (the version 7 rule)', [], [['GATE: 103, TEAM_GATE: 104,', 'GATE: 100, TEAM_GATE: 104,']], sGate],
   ['a member who stopped writing loses the version 8 bit (ratingHistFinal as before O991)', [['  r[7] = 1 | ((r[7] | 0) & ELP_R_V8);', '  r[7] = 1;']], [], sDropped],
   ['the version 8 prior is not among the first-run lines', [['.map((tb) => tb[fam]), [pointsPlan.ELP8.PRIOR[fam]]));', '.map((tb) => tb[fam])));']], [], sPrior8],
+  ['O1015 v8: the silver reading never added (the narrow net gone)', [['  for (const rd of elpSilverReads8(st, p, c, h, r, fam, s, at, nowMs, ctx, team, quit, depth, seed, reads)) reads.push(rd);', '']], [], sSilver8],
+  ['O1015 v8: the silver reading enters the carry / the outs', [['const all = every.filter((a) => !a.rd.verdictOnly), only =', 'const all = every, only =']], [], sSilver8],
+  ['O1015 v8: also on a later run (lv8 of the family held)', [['  if (c && c.lv8 && pointsPlan.elpLevelOf8(c.lv8[fam])) return [];', '']], [], sSilver8],
+  ['O1015 v8: also on a quit', [['  if (team || quit) return [];', '  if (team) return [];']], [], sSilver8],
+  ['O1015 v8: also on a team run', [['  if (team || quit) return [];', '  if (quit) return [];']], [], sSilver8],
+  ['O1015 v8: at any depth (not only its target)', [['pointsPlan.elpTargetOfL8(x.L, seed) !== (depth | 0)) continue;', 'false) continue;']], [], sSilver8],
 ];
 console.log('-- [20] mutations --');
 for (const [label, pairs, ppPairs, fn] of MUTS) {
