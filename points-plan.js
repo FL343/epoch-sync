@@ -25,8 +25,9 @@
   const RULES_VER = 2;
   const FIXTURES_HASH = 'e482ca6f7351bb55';
   // the knobs configure() can move (production runs these defaults)
-  const DEFAULTS = Object.freeze({ RS_THRESHOLD: 400, RS_UPSET_BONUS: 1.0, RS_STRONG_UPSET_LOSS: 0.5, RS_SOLO_VS_TRIO: 0.6, RS_TRIO_WIN: 0.7, LEAVER_LP_PENALTY: 100,
-    COUCH_SOLO_LOSS: 0.8, COUCH_PAIR_WIN: 0.85, COUCH_DUO_MULT: 1, COUCH_LP_MULT: 1 });   // the COUCH_* four: O989, see the couch-pair note below
+  const DEFAULTS_0 = Object.freeze({ RS_THRESHOLD: 400, RS_UPSET_BONUS: 1.0, RS_STRONG_UPSET_LOSS: 0.5, RS_SOLO_VS_TRIO: 0.6, RS_TRIO_WIN: 0.7, LEAVER_LP_PENALTY: 100 });
+  // ... plus the couch-pair four (O989, see the couch-pair note below): the job moves these through its rules-cfg, not the environment
+  const DEFAULTS = Object.freeze(Object.assign({}, DEFAULTS_0, { COUCH_SOLO_LOSS: 0.8, COUCH_PAIR_WIN: 0.85, COUCH_DUO_MULT: 1, COUCH_LP_MULT: 1 }));
   const LP_MAX = 9999;
   let LEAVER_LP_PENALTY = DEFAULTS.LEAVER_LP_PENALTY;   // ranked leaver authoritative LP deduction (pairs the client optimistic -100)
   // `rs` = mismatch retention coefficient (fraction of the win/loss component applied to EXPECTED outcomes in a
@@ -1243,11 +1244,12 @@
   //   score = the unix minute a run of the job reached its end; details = [PULSE_MAGIC, RULES_VER]. A client reads it on idle
   //   screens: a pulse a few ticks old = the job is behind, a RULES_VER other than its own = the rules moved since its build.
   const PULSE_MAGIC = 0xCC;
-  //   O989: a job running a rules-cfg (rev >= 1) appends [PULSE_CFG, rev, the CFG_KEYS values in permille]; a build before
-  //   O989 reads the first two numbers only.
+  //   O989: a job that reads guest seats appends its rules-cfg, [PULSE_CFG, rev, the CFG_KEYS values in permille] (rev 0 = the
+  //   defaults; 8 numbers in all, a row holds 64). The tail is also the job's word that it reads guest seats: a client that
+  //   finds none shows a couch match's points as "to be confirmed". A build before O989 reads the first two numbers only.
   function pulseDetails(cfg) {
     const c = rulesCfgOf(cfg);
-    return (c && c.rev >= 1) ? [PULSE_MAGIC, RULES_VER, PULSE_CFG, c.rev].concat(CFG_KEYS.map((k) => Math.round(c.vals[k] * 1000))) : [PULSE_MAGIC, RULES_VER];
+    return c ? [PULSE_MAGIC, RULES_VER, PULSE_CFG, c.rev].concat(CFG_KEYS.map((k) => Math.round(c.vals[k] * 1000))) : [PULSE_MAGIC, RULES_VER];
   }
   function pulseOf(score, det) {
     if (!Array.isArray(det) || det.length < 2 || (det[0] & 0xff) !== PULSE_MAGIC) return null;
@@ -1256,7 +1258,7 @@
       const vals = {};
       CFG_KEYS.forEach((k, i) => { vals[k] = (det[4 + i] | 0) / 1000; });
       const cfg = rulesCfgOf({ rev: det[3] | 0, vals });
-      if (cfg && cfg.rev >= 1) out.cfg = cfg;
+      if (cfg) out.cfg = cfg;
     }
     return out;
   }
@@ -1264,8 +1266,8 @@
   //   The job reads { rev, vals } from its rules-cfg file at the start of a run (no file = rev 0 = the defaults), hands vals to
   //   configure(), publishes them on its pulse row and stamps rev on the receipts of the couch matches it settles (a match
   //   is settled once, with the values of that run; a later revision never re-reads it). The client reads the pulse row and
-  //   hands pulseOf().cfg.vals to its own configure(): the same numbers on both sides, or the defaults when it read none.
-  //   rev 1..127, +1 with every change; each value 0..1 in steps of 0.001.
+  //   hands pulseOf().cfg.vals to its own configure(): the same numbers on both sides (no cfg on the row: see pulseDetails).
+  //   rev 0 = the defaults, else 1..127, +1 with every change; each value 0..1 in steps of 0.001.
   const PULSE_CFG = 0xC9;
   const CFG_KEYS = Object.freeze(['COUCH_SOLO_LOSS', 'COUCH_PAIR_WIN', 'COUCH_DUO_MULT', 'COUCH_LP_MULT']);
   // { rev, vals } as this file reads it, or null when it is not a usable cfg (a missing key, a value outside 0..1 or off the

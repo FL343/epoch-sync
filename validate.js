@@ -12737,7 +12737,8 @@ async function main() {
   };
   // ---- O480 cron_pulse (test/cron-pulse.js) ----
   //   One row on its own board per channel app id (a sandbox run: cron_pulse_test): score = the unix minute this run reached its
-  //   end -- every successful exit writes it, a run that fails before writes nothing -- and details [0xCC, RULES_VER]
+  //   end -- every successful exit writes it, a run that fails before writes nothing -- and details [0xCC, RULES_VER] (O989: + the
+  //   rules-cfg tail on the main job, points-plan.js pulseDetails)
   //   (points-plan.js pulseDetails). The client reads it on idle screens: a pulse a few ticks old = the job is behind (points stay
   //   "to be confirmed"), a RULES_VER other than its own = the rules moved since its build (the same). Carrier account: the
   //   tier-cut rule -- TIERCUT_CARRIER_SID, else the account already on the row, else the one carrying this app's version_gate
@@ -12768,7 +12769,7 @@ async function main() {
     if (!id) { try { id = await findOrCreateBoard(name, true); } catch (e) { id = null; } }
     if (!id) { ghWarn('cron pulse: board ' + name + ' unresolved -- not written'); RUN.pulse = 'no board'; return; }
     const minute = Math.floor(Date.now() / 60000);
-    const r = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: id, steamid: carrier, score: minute, scoremethod: 'ForceUpdate', format: 'json' }, pulseDetails(RULES_CFG.bad ? null : RULES_CFG));   // O989: + the rules-cfg in force (rev >= 1 only)
+    const r = await postFormDetails('/ISteamLeaderboards/SetLeaderboardScore/v1/', { key: KEY, appid: APPID, leaderboardid: id, steamid: carrier, score: minute, scoremethod: 'ForceUpdate', format: 'json' }, pulseDetails((RULES_CFG.bad || PT_MODE) ? null : RULES_CFG));   // O989: + the rules-cfg in force (none while the file is unusable: couch matches wait; none on the playtest / demo job: no build of theirs seats a guest)
     const ok = r.ok && !(r.json && r.json.result && r.json.result.result && r.json.result.result !== 1);
     if (ok) { RUN.pulse = String(minute); console.log('cron pulse: ' + name + ' = minute ' + minute + ', rules ' + RULES_VER + ((!RULES_CFG.bad && RULES_CFG.rev) ? ', rules-cfg rev ' + RULES_CFG.rev : '')); }
     else { RUN.pulse = 'write failed'; ghWarn('cron pulse: write failed HTTP ' + r.status + ' ' + String(r.text).slice(0, 140)); }
@@ -18173,7 +18174,7 @@ Object.assign(module.exports, { placementMode, PLACEMENT_TARGET, placementOf });
 Object.assign(module.exports, { rosterContestSeats, applyRosterContest, seatLayout, seatLayoutsDisagree });   // cloud audit Q75 one account per seat per match key (+ Q80 third review seat layout)
 Object.assign(module.exports, { registerStartRosters, startRosterSplit, rosterCanon, startRosterDisagrees, seatGateRoster, seatedOnRoster, applySeatGate });   // cloud audit Q80 seat gate
 Object.assign(module.exports, { seatlessPrivate, dropSeatlessPrivate });   // cloud audit Q123
-Object.assign(module.exports, { guestSeatClaim, dropGuestSeatStarts, quitLoneMt, loadRulesCfg, RULES_CFG, RULES_CFG_FILE, guestIdOf });   // O989
+Object.assign(module.exports, { guestSeatClaim, dropGuestSeatStarts, quitLoneMt, loadRulesCfg, RULES_CFG, RULES_CFG_FILE, guestIdOf, blankSeatStart, sanityDropFlags });   // O989
 Object.assign(module.exports, { recTable, splitKey, splitMark, applyTableSplit });   // cloud audit Q214 / Q220 a held friends' room / bot match: each table on a key of its own
 Object.assign(module.exports, { LONE1V1, lone1v1Claim, lone1v1Verdicts, lone1v1Count });   // cloud audit Q184 a ranked 1V1 only its winner wrote
 Object.assign(module.exports, { repUpgrade, sortKeys });   // cloud audit Q209 report state with no key that stays with one reporter

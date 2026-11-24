@@ -1,0 +1,1208 @@
+'use strict';
+// ============================================================
+// points-plan.js - the visible points (LP) rules of a ranked settle: one copy for this job and for the client
+// ============================================================
+// O480 (2026-10-16): the client shows the points a ranked match gave the moment the match ends. To show the value this
+// job will settle (not an estimate), both sides run THIS file: validate.js requires it, and the companion repo vendors a
+// comment-stripped copy of it into the client (its scripts/gen-points-vendor.js; byte-locked by its schema lockstep test,
+// and both repos replay the golden cases fixtures/points-plan/cases.json). Hence the rules for this file:
+//   - self-contained: no require, no process.env, no clock, no I/O. The knobs the job used to read from the environment
+//     (RS_* / LEAVER_LP_PENALTY) come in through configure(); the live workflows set none of them;
+//   - `//` line comments only, never `//` inside a string, ASCII-only code (the vendor copy strips comments line by line);
+//   - it loads as a CommonJS module (module.exports: only when `this` is this file's own exports object, so a script or a
+//     new Function('window', src) run inside a host that happens to have a global `module` still lands on window.POINTS_PLAN).
+// RULES_VER: +1 in the same change as ANY number or rule here that moves a settled delta. The client copy carries the version
+//   it was built with; a job ahead of the client shows the player "to be confirmed" instead of a wrong value (the job
+//   publishes its version on the cron_pulse row and in every points receipt).
+// FIXTURES_HASH: canonical hash of fixtures/points-plan/cases.json (tools/gen-points-fixtures.js prints it); a change that moves
+//   a case regenerates the file and updates this constant in the same change (test/points-plan-fixtures.js holds both).
+// ============================================================
+(function (cjs, root, factory) {
+  const api = factory();
+  if (cjs) module.exports = api;
+  else if (root) root.POINTS_PLAN = api;
+})(typeof module === 'object' && !!module && typeof exports === 'object' && this === exports, typeof window !== 'undefined' ? window : null, function () {
+  const RULES_VER = 2;
+  const FIXTURES_HASH = 'e482ca6f7351bb55';
+  // the knobs configure() can move (production runs these defaults)
+  const DEFAULTS = Object.freeze({ RS_THRESHOLD: 400, RS_UPSET_BONUS: 1.0, RS_STRONG_UPSET_LOSS: 0.5, RS_SOLO_VS_TRIO: 0.6, RS_TRIO_WIN: 0.7, LEAVER_LP_PENALTY: 100 });
+  const LP_MAX = 9999;
+  let LEAVER_LP_PENALTY = DEFAULTS.LEAVER_LP_PENALTY;   // ranked leaver authoritative LP deduction (pairs the client optimistic -100)
+  // `rs` = mismatch retention coefficient (fraction of the win/loss component applied to EXPECTED outcomes in a
+  //   mismatched match) per tier: lower tiers move closer to normal, higher tiers compress hard (protect the top ladder).
+  // 7 tiers (2026-07-14): silver/platinum inserted as transition tiers -- narrow bottom (fast first
+  //   promotion), wide top. The four legacy tier lines (2000/4000/6000/8000) are unchanged, so every
+  //   promotion-series invariant below still holds: band width 2*120=240 < narrowest span 600, and
+  //   the largest natural swing (45+5=50) < BOUNDARY_MARGIN. Mirrored by the client ranked-config
+  //   LP_SEG + rating-store TIERS (lockstep-pinned by the client test suite; rs is cron-only, not mirrored).
+  // Grandmaster rs 0 (cloud audit Q160; was 0.05): the top is zero-sum, so an expected result in a mismatch moves nothing.
+  //   At 0.05 a grandmaster's expected win still made +1 (20 * 0.05) out of nobody: a loser at the points floor pays nothing,
+  //   so two accounts writing every seat of matches nobody played (one always winning, one kept at 0 points) climbed the top
+  //   one point a match without end, about 290 a day at the one-match-at-a-time pace. Below grandmaster rs is unchanged.
+  const LP_SEG = [
+    { min: 0, win: 45, loss: 15, drip: 5, rs: 0.70 },     // bronze (600 wide)
+    { min: 600, win: 40, loss: 17, drip: 4, rs: 0.60 },   // silver
+    { min: 2000, win: 35, loss: 20, drip: 3, rs: 0.50 },  // gold
+    { min: 3000, win: 31, loss: 22, drip: 2, rs: 0.40 },  // platinum
+    { min: 4000, win: 28, loss: 25, drip: 2, rs: 0.30 },  // diamond
+    { min: 6000, win: 22, loss: 22, drip: 1, rs: 0.15 },  // master
+    { min: 8000, win: 20, loss: 20, drip: 0, rs: 0 },     // grandmaster (zero-sum top; rs 0, Q160)
+  ];
+  function lpSeg(lp) { let s = LP_SEG[0]; for (const x of LP_SEG) if (lp >= x.min) s = x; return s; }
+  // placement seeding (2026-07-14): a player's FIRST ranked settle starts from a TrueSkill-derived
+  //   seed instead of 0. Ranked unlock requires ~15 quick matches, so the pre-match display rating is
+  //   already a real skill signal. seed = clamp((display - BASE) * SLOPE, 0, CAP); CAP lands mid-
+  //   platinum -- diamond+ must be climbed, and 3200 sits outside both boundary bands (3000+120 /
+  //   4000-120). New/weak players (display <= 1000) seed 0 = the old everyone-starts-bronze behavior.
+  //   The client mirrors this formula optimistically on its first ranked game (read-back corrects).
+  // O786 (companion KNIFE_O785 section 3.5, user call 2026-11-09 "one tier lower overall"): BASE 1000 -> 1250. By the unlock
+  //   (15 quick matches) sigma is already ~2.3, so with BASE 1000 an average player's display (~1650) seeded mid-gold and
+  //   only ~1 % started in bronze (the design: weak -> bronze, average -> silver, good -> gold). With 1250 the season
+  //   simulation (real trueskill.js) seeds weak / below average / average / above average / top players at a median of
+  //   700 / 1300 / 1620 / 1890 / 2300 (average 88 % silver, top 76 % gold); playing many quick matches before ranked still
+  //   seeds higher (sigma keeps shrinking), by at most about one tier.
+  // 2026-11-18 (user call; the quick matches that unlock ranked go from 15 to 5 -- a client-side gate): BASE 1250 -> 1050. After
+  //   only 5 quick matches sigma is still ~3.8 and the display about 300 lower, so 1250 would seed 34 % bronze / 56 % silver /
+  //   11 % gold with 15 % at 0 points. 1050 gives back the spread chosen on 2026-11-09 for a player who goes to ranked as soon
+  //   as it unlocks (10 % / 49 % / 35 % / 6 % platinum, 4 % at 0; medians by skill fifth 804 / 1396 / 1812 / 2116 / 2596). Known
+  //   and accepted: a player who plays 15 quick matches first seeds about a tier higher (30 % platinum), still under CAP.
+  const LP_SEED = { BASE: 1050, SLOPE: 4, CAP: 3200 };
+  function seedLp(display) { return Math.max(0, Math.min(LP_SEED.CAP, Math.round(((display | 0) - LP_SEED.BASE) * LP_SEED.SLOPE))); }
+  // Soft-reset landing per tier index: null = keep in place, else land at the target (min() guards against a mis-edited
+  // table ever RAISING points).
+  // O786 (companion KNIFE_O785 section 3.3; user calls 2026-11-09, A72 + "reveal at most diamond"): a new season drops every
+  //   player ONE tier and lands him RESET_UNDER (60) under the line of the tier he finished in -- the middle of the promotion
+  //   band of the tier below, so his first match of the season is a promotion match ("the system thinks he may well be back
+  //   up"). Bronze stays where it is, but never above silver's landing (540). Grandmaster lands with master, at the diamond
+  //   landing (the reveal is at most diamond; the placement cap itself is a placement-match rule). The old table
+  //   [keep, keep, 1200, 2000, 3000, 4000, 5000] was not monotone (a gold finish landed under a kept silver one) and landed
+  //   platinum / diamond / master right ON a line, inside the relegation band. Invariants (test/lp-landing.js): monotone
+  //   non-decreasing over 0..LP_MAX, never raises, every landing past bronze sits in a promotion band.
+  const SOFT_RESET = [540, 540, 1940, 2940, 3940, 5940, 5940];
+  function softResetLp(lp) {
+    let i = 0; for (let k = 0; k < LP_SEG.length; k++) if ((lp | 0) >= LP_SEG[k].min) i = k;
+    const t = SOFT_RESET[i];
+    return t == null ? (lp | 0) : Math.min(lp | 0, t | 0);
+  }
+  // Lazy season seeding priority: an entry on the IMMEDIATELY previous season's board wins
+  // (soft reset of last season's finish); absent there = sat the season out (or brand new) ->
+  // fall back to the display-derived placement seed. Applied at a player's first settle of the
+  // new season -- no boundary-time bulk migration ever runs.
+  // O786 (user call 2026-11-09 "new players drop a tier too"): hasPrevSeason = this season has a previous one (season 1 and
+  //   later; the job passes !!prevLpId, the client "season id >= 1"). Then a player with no entry on the previous board (brand
+  //   new to ranked, or back after sitting a season out) is measured with the same ruler as one who played: his display seed
+  //   counts as his finish and soft-resets like one. Before, he seeded straight from his display while a player of the same
+  //   level who had played last season soft-reset far under him (S1 start 700-1400 lower), so skipping a season paid.
+  //   Required argument (test/lp-landing.js scans every call site): a missing one reads as the preseason (no reset).
+  function seasonSeedLp(prevScore, display, hasPrevSeason) {
+    if (prevScore != null) return softResetLp(prevScore | 0);
+    return hasPrevSeason === true ? softResetLp(seedLp(display)) : seedLp(display);
+  }
+  function lpDelta(lp, rank, pc) {
+    const seg = lpSeg(lp);
+    const p = pc <= 1 ? 0.5 : (pc - 1 - (rank - 1)) / (pc - 1);
+    const base = p >= 0.5 ? seg.win * (2 * p - 1) : -seg.loss * (1 - 2 * p);
+    return Math.round(base + seg.drip);
+  }
+  // ===== hard promotion/relegation series (user design 2026-07-10). =====
+  // A player whose pre-match LP sits within BOUNDARY_MARGIN of a tier line is "in series" -- the
+  // client shows the promotion/relegation-match UI + intro music for exactly that state (lockstep
+  // mirror of RatingStore.boundaryState). The series rule makes the outcome decisive:
+  //   promotion match + top-half finish (teams: team won)  -> always crosses UP   (lands min+PROMO_LAND)
+  //   relegation match + bottom-half finish (teams: lost)  -> always crosses DOWN (lands min-RELEG_LAND)
+  // Implemented as a clamp on the final per-player delta so it composes with reduced-stakes factors,
+  // team halving and the premade average-rank rule; a natural delta already past the line is kept.
+  // The margin (120) exceeds the largest natural swing (~50), so line crossings can ONLY happen in a
+  // series match -- this clamp adds the reverse guarantee (series win/loss is always decisive).
+  // PROTECTED ends (flag 2: mismatch weak side / abandoned-teammate shield, design line 7) keep their
+  // compressed natural loss instead of the forced drop. The leaver -100 penalty path stays independent.
+  // O785 (companion KNIFE_O785 section 3.1, user call 2026-11-09 "land outside the bands, 150"): the landings sit OUTSIDE both
+  //   bands of the tier landed in (were +10 / -15: a promotion landed inside the new tier's relegation band, so the next
+  //   bottom-half finish sent the player straight back -- in a whole-season simulation 64 % of promotions were undone within
+  //   3 matches, 21-28 tier changes per 100 matches at an even level). At 150 / 150: 0-12 % undone, under 2 changes per 100.
+  //   A series match now moves up to 270 points (from the bottom of the promotion band to the line + 150). Invariant
+  //   (test/lp-landing.js): min + PROMO_LAND and min - RELEG_LAND of every tier past bronze are in no band.
+  const BOUNDARY_MARGIN = 120, PROMO_LAND = 150, RELEG_LAND = 150;
+  function boundaryOf(lp) {
+    let i = 0; for (let k = 0; k < LP_SEG.length; k++) if (lp >= LP_SEG[k].min) i = k;
+    if (i > 0 && lp - LP_SEG[i].min <= BOUNDARY_MARGIN) return 'relegation';
+    if (i < LP_SEG.length - 1 && LP_SEG[i + 1].min - lp <= BOUNDARY_MARGIN) return 'promotion';
+    return null;
+  }
+  function crosslineDelta(lp, delta, won) {
+    const b = boundaryOf(lp);
+    let i = 0; for (let k = 0; k < LP_SEG.length; k++) if (lp >= LP_SEG[k].min) i = k;
+    if (b === 'promotion' && won) return Math.max(delta, LP_SEG[i + 1].min + PROMO_LAND - lp);
+    if (b === 'relegation' && !won) return Math.min(delta, LP_SEG[i].min - RELEG_LAND - lp);
+    return delta;
+  }
+  // matchType layout: base mode code in the low nibble, FFA "premade seat-pair" bitmask in bits 4..7
+  // (bit k set = seats (2k, 2k+1) queued together as a party). The host derives the mask from the
+  // mutually-acknowledged party groups at seat time and broadcasts it with the match start payload,
+  // so every honest end composes the same code -- and since the match group key contains d[2], a
+  // lone end forging its mask just orphans its own record (and gets convicted absent by the rest).
+  // Team codes (3/4/5/6/8/9) never carry a mask: the fixed seat convention already encodes grouping.
+  // FFA codes carry it so the settle pass can apply the premade average-rank LP rule (design line 66)
+  // with no record-layout change.
+  // O82 (6P matchmaking): bits 8..10 = FFA premade-TRIO start seat + 1 (0 = none; v>0 = a mutually
+  // acknowledged 3-man party occupies contiguous seats v-1..v+1). Same trust model as the pair mask
+  // (host-derived, broadcast, keyed into the match group). Bases 8/9 = quick/ranked mode-2 with
+  // teamSize 3 (3V3, seats 0-2 vs 3-5) -- the same mirrored-rounds engine as 5/6, wider seating.
+  function baseMt(mt) { return (mt | 0) & 0xF; }
+  function premadeMaskOf(mt) { return ((mt | 0) >> 4) & 0xF; }
+  function premadeTrioAtOf(mt) { return ((mt | 0) >> 8) & 0x7; }
+  // team layout parameters: bases 8/9 seat two teams of 3 (0-2 vs 3-5); every other team base is 2v2.
+  function teamSizeOfMt(mt) { const b = baseMt(mt); return (b === 8 || b === 9) ? 3 : 2; }
+  function teamOfSeat(seat, ts) { return (((seat | 0) / (ts || 2)) | 0) & 1; }
+  // visible points move for ranked matches only; quick classes update the hidden rating.
+  // base 6 (ranked mode 2) flips on HERE, in the same change that routes mode-2 groups through the
+  // halved team-LP path with a sub-score-derived outcome (teamLpPlan winTeamOverride below) -- the
+  // same red line as base 4: a team code must never reach the individual full-stakes LP path.
+  // base 4 (ranked team-brawl) flipped HERE earlier, in the same change that shipped the halved team-LP path
+  // (teamLpPlan below) -- the plan's red line: a type-4 record must never reach the individual
+  // full-stakes LP path. Base 9 (ranked 3V3) joins in the same change that generalizes every
+  // team-code consumer to teamSizeOfMt -- same red line, wider seats.
+  function appliesLp(mt) { const b = baseMt(mt); return b === 2 || b === 4 || b === 6 || b === 9; }
+  // O716 one queue for quick + ranked: bits 11-16 of the match type = the seats that came in through ranked (a mixed table of
+  //   one quick family base). No mask (every record written before O716) = the old whole-table rule, so 2/4/6/9 stay all-ranked.
+  const RANKED_SEAT_SHIFT = 11;
+  function rankedSeatMaskOf(mt) { return ((mt | 0) >> RANKED_SEAT_SHIFT) & 0x3F; }
+  function mtSansSeats(mt) { return (mt | 0) & ((1 << RANKED_SEAT_SHIFT) - 1); }
+  function seatAppliesLp(mt, seat) { const m = rankedSeatMaskOf(mt); return m ? !!((m >> (seat | 0)) & 1) : appliesLp(mt); }
+  function anyAppliesLp(mt) { return appliesLp(mt) || rankedSeatMaskOf(mt) !== 0; }
+  // team match types: 3/4 = quick/ranked team-brawl (mode 1); 5/6 = quick/ranked mode 2 (true 2v2);
+  // 8/9 = quick/ranked mode 2 at teamSize 3 (O82 6P matchmaking).
+  function isTeamMt(mt) { const b = baseMt(mt); return b === 3 || b === 4 || b === 5 || b === 6 || b === 8 || b === 9; }
+  // clamp-aware authoritative leaver deduction (never below 0)
+  function leaverLpPenalty(cur, pen) { return Math.max(0, (cur | 0) - (pen | 0)); }
+  // O774 (2026-11-09, the user: "add the other modifiers so the client can make its best guess"): every plan row also
+  //   carries why: the rules that shaped its delta, in the order applied -- 'upset' (weak side placed up), 'mismatch' (weak
+  //   side's loss compressed), 'expected' (strong side's win compressed by the tier's rs), 'upset_loss' (strong side lost:
+  //   the loss is cut to RS_STRONG_UPSET_LOSS), 'solo_shield' (a solo's loss against a live trio), 'trio_tax' (a trio's win
+  //   in that match), 'teammate_left' (a shielded team loser). Labels only: the settle never reads them and no number moves,
+  //   so RULES_VER stays; the golden cases carry them (FIXTURES_HASH moves with the case file).
+  // ===== mismatch compensation (the matchmaking-fairness layer): compress the strong side's swing, protect/reward the
+  //   weak side. authoritative -- the client shows a flat optimistic delta (it can't see opponents' ratings); this is the
+  //   only place the real adjusted delta + UPSET/PROTECTED tag is computed, revealed back to the client via board details. =====
+  let RS_THRESHOLD = DEFAULTS.RS_THRESHOLD;            // pre-match rating spread (display points) that triggers
+  let RS_UPSET_BONUS = DEFAULTS.RS_UPSET_BONUS;        // weak side over-performs: 1.0 = full (>1 = super reward)
+  let RS_STRONG_UPSET_LOSS = DEFAULTS.RS_STRONG_UPSET_LOSS; // strong side upset: mild penalty (not the strict tier coeff)
+  // O82 solo-tilt (design 2026-08-12, conservative until B5/B6 calibration): in an FFA that
+  // contains a live 3-man premade, a solo's LOSS is compressed x0.6 (escort shield, PROTECTED
+  // reveal on a real net loss) and the trio's WIN is compressed x0.7 (convoy tax, no reveal --
+  // same precedent as the strong-side compression). Composed with the mismatch factor by min()
+  // (strongest protection wins, factors never stack multiplicatively).
+  let RS_SOLO_VS_TRIO = DEFAULTS.RS_SOLO_VS_TRIO;
+  let RS_TRIO_WIN = DEFAULTS.RS_TRIO_WIN;
+  const RS_MAGIC = 0xC5;                                                   // reveal-details marker; flags: 0 none / 1 upset / 2 protected
+  // pure: parts = [{ steamID, seat, mmr (pre-match display rating), rank (1-based), lp (current) }]. returns null if
+  //   not applicable, else { [steamID]: { adjDelta, flag, normalDelta } }. Drip is never discounted (only the
+  //   win/loss component is scaled).
+  // M3 (PARTY_MODES §5.3, design line 66): FFA settles in UNITS -- a premade seat-pair (both members present)
+  //   is one unit: average rank interpolates the win/loss component, average LP picks the tier, and BOTH members
+  //   get the same delta (the premade "debt": queuing together taxes the good rank into the pair average).
+  //   Mismatch compensation then applies per unit (pair average rating vs the match mean). Solo players are
+  //   1-man units == the original per-player formula, bit for bit. A pair whose partner is absent (leaver)
+  //   falls back to solo. With no live pair and no mismatch this returns null (caller's plain lpDelta path).
+  function reducedStakesPlan(parts, matchType, premadeMask, premadeTrioAt) {
+    // O716: a mixed table (a ranked-seat mask) plans too -- every seat, the mismatch read over the whole table (the user's
+    //   call 2026-11-07, D11); the settle takes the rows of its ranked seats only. A premade unit is one entry (D4).
+    if (!anyAppliesLp(matchType) || isTeamMt(matchType) || !parts || parts.length < 2) return null;
+    const units = [], used = new Set();
+    const bySeat = {};
+    for (const p of parts) bySeat[p.seat | 0] = p;
+    // O82: trio unit first (all three members present, else each falls back to solo -- the same
+    // conservative absent-partner rule as pairs). trioAt = start seat + 1 (contiguous seats).
+    if (premadeTrioAt | 0) {
+      const s0 = (premadeTrioAt | 0) - 1;
+      const m = [bySeat[s0], bySeat[s0 + 1], bySeat[s0 + 2]];
+      if (m[0] && m[1] && m[2]) { units.push(m); for (const p of m) used.add(p.steamID); }
+    }
+    if (premadeMask | 0) {
+      for (let pair = 0; pair < 4; pair++) {
+        if (!(((premadeMask | 0) >> pair) & 1)) continue;
+        const m0 = bySeat[pair * 2], m1 = bySeat[pair * 2 + 1];
+        if (m0 && m1 && !used.has(m0.steamID) && !used.has(m1.steamID)) { units.push([m0, m1]); used.add(m0.steamID); used.add(m1.steamID); }
+      }
+    }
+    for (const p of parts) if (!used.has(p.steamID)) units.push([p]);
+    const mmrs = parts.map(p => p.mmr | 0);
+    const mismatch = Math.max.apply(null, mmrs) - Math.min.apply(null, mmrs) > RS_THRESHOLD;
+    if (!mismatch && units.every(u => u.length === 1)) return null;   // fair all-solo match: plain lpDelta path
+    const mean = mmrs.reduce((a, b) => a + b, 0) / mmrs.length;
+    const trioLive = units.some(u => u.length === 3);   // O82 solo-tilt applies only against a LIVE trio
+    const pc = parts.length, out = {};
+    for (const u of units) {
+      const uRank = u.reduce((s, p) => s + (p.rank | 0), 0) / u.length;
+      const uLp = u.reduce((s, p) => s + (p.lp | 0), 0) / u.length;
+      const uMmr = u.reduce((s, p) => s + (p.mmr | 0), 0) / u.length;
+      const seg = lpSeg(uLp);
+      const prog = pc <= 1 ? 0.5 : (pc - 1 - (uRank - 1)) / (pc - 1);
+      const base = prog >= 0.5 ? seg.win * (2 * prog - 1) : -seg.loss * (1 - 2 * prog);
+      const normalDelta = Math.round(base + seg.drip);
+      let factor = 1, flag = 0;
+      const why = [];   // O774: which rule shaped this delta (labels only, never read by the settle; see whyOf below)
+      if (mismatch && uMmr < mean) {                             // weak side
+        if (base > 0) { factor = RS_UPSET_BONUS; flag = 1; why.push('upset'); }     //   placed up = upset (full/super, not compressed)
+        else { factor = seg.rs; if (normalDelta < 0) flag = 2; if (base < 0) why.push('mismatch'); } //   placed down = protected (loss compressed; reveal only on a real net loss)
+      } else if (mismatch && uMmr > mean) {                      // strong side (no client reveal)
+        if (base >= 0) { factor = seg.rs; if (base > 0) why.push('expected'); }   //   won as expected = gain compressed
+        else { factor = RS_STRONG_UPSET_LOSS; why.push('upset_loss'); }          //   lost an upset = mild penalty
+      }
+      // O82 solo-tilt (min-composed, see RS_SOLO_VS_TRIO note): solo losing vs a live trio gets the
+      // escort shield (PROTECTED reveal on a real net loss); the trio's winning delta takes the
+      // convoy tax silently (strong-side precedent).
+      if (trioLive && u.length === 1 && base < 0) {
+        if (RS_SOLO_VS_TRIO < factor) why.push('solo_shield');
+        factor = Math.min(factor, RS_SOLO_VS_TRIO);
+        if (flag === 0 && normalDelta < 0) flag = 2;
+      } else if (trioLive && u.length === 3 && base > 0) {
+        if (RS_TRIO_WIN < factor) why.push('trio_tax');
+        factor = Math.min(factor, RS_TRIO_WIN);
+      }
+      const adjDelta = Math.round(base * factor + seg.drip);
+      // won = top-half finish at the unit's (average) rank -- the same sign line the base uses;
+      // consumed by the series clamp (crosslineDelta) at settle time. Q160 layer 5 (cloud audit): one delta for the whole
+      // unit, its strong member's expected win included (see teamLpPlan: held at his own tier, the honest grandmaster in a
+      // pair with a gold friend gained nothing; a premade carry of zero-points accounts stays a known residual).
+      for (const p of u) out[p.steamID] = { adjDelta, flag, normalDelta, won: prog >= 0.5, why: why.slice() };
+    }
+    return out;
+  }
+
+  // ===== M3 (PARTY_MODES §5.2 + §6 line 118 + §7): team-brawl visible-LP planner (match types 3/4; only 4
+  //   actually applies LP). Binary team outcome from the frozen score vector -- a leaver's score still counts
+  //   for his team's total. The win/loss component uses the TEAM-average tier (design: "team LP first, then
+  //   halve"), is scaled by mismatch compensation at TEAM granularity (team-average rating vs the match mean,
+  //   coefficient = team-average tier's rs), then HALVED per member; drip is added per member at full value
+  //   from his OWN tier (design line 76: the halving only ever touches the win/loss component).
+  //   §7 abandoned-teammate shield: a present member whose teammate was convicted absent gets his loss
+  //   compressed by his own tier's rs (min with any mismatch factor) and a PROTECTED reveal on a real net loss.
+  //   parts: [{ steamID, seat, mmr, lp }] (present ends only); scores: full 4-seat frozen vector;
+  //   leaverSeats: consensus-absent seats. winTeamOverride (mode-2 only): the sub-score-derived
+  //   outcome from team2WinTeamOf -- money must never decide a base-5/6 match, so the caller passes
+  //   the claims-derived winner and the money comparison below stays a 3/4-only fallback.
+  //   absent (Q167, optional): [{ seat, mmr, lp }] -- the losing team's convicted leavers at their pre-match rating; they count
+  //   toward the mismatch of an expected win (see the strong-team branch below) and, with their points, toward the
+  //   full-team reading of a shielded loser (Q183, below).
+  //   finished (Q183, optional): [{ seat, mmr, lp }] -- seats seen agreeing whose record is gone at this settle (Q149: they
+  //   finished): members of their team for every reading, as if their record were still there; no output of their own.
+  //   Returns { [steamID]: { adjDelta, flag, normalDelta } } or null. =====
+  function teamLpPlan(parts, matchType, scores, leaverSeats, winTeamOverride, absent, finished) {
+    // O716: a mixed table plans too (team averages over every seat: a quick member reads his points row, or with none this
+    //   season the placement seed the settle would give him, not written -- the user's call 2026-11-07, D8); the settle takes
+    //   the rows of its ranked seats only
+    if (!anyAppliesLp(matchType) || !isTeamMt(matchType)) return null;
+    const ts = teamSizeOfMt(matchType);
+    if (!parts || !parts.length || !scores || scores.length < 2 * ts) return null;
+    const teamOf = s => teamOfSeat(s, ts);
+    let aTotal = 0, bTotal = 0;
+    for (let s = 0; s < 2 * ts; s++) { if (teamOfSeat(s, ts) === 0) aTotal += scores[s] | 0; else bTotal += scores[s] | 0; }
+    const winTeam = (winTeamOverride == null)
+      ? (bTotal > aTotal ? 1 : 0)              // tie -> team A (mirrors teamRankOf / the client rule)
+      : (winTeamOverride | 0);
+    // team aggregates over PRESENT members (an absent leaver has no record: not averaged in)
+    // Q183 (cloud audit): ... and over the seats seen agreeing whose record is gone (finished): those players played the match
+    //   out and agreed on its result, and only their record went missing before the settle (shard rotation while the group
+    //   waited, or a client that overwrote it). Read without them, the honest loser who stayed lost the mismatch protection of
+    //   the normal finish: a gold loser whose fresh-account teammate agreed and then lost his record took -7 where the normal
+    //   finish gave -2 (up to 11 points lower across tiers), and a withdrawal could just as well lighten a loss or move a win.
+    //   Counted here, every reading of every present player is the one of the normal finish.
+    const roster = parts.concat(finished || []);
+    const agg = [{ n: 0, lp: 0, mmr: 0 }, { n: 0, lp: 0, mmr: 0 }];
+    for (const p of roster) { const t = teamOf(p.seat); agg[t].n++; agg[t].lp += p.lp | 0; agg[t].mmr += p.mmr | 0; }
+    const mmrs = roster.map(p => p.mmr | 0);
+    const mismatch = mmrs.length >= 2 && (Math.max.apply(null, mmrs) - Math.min.apply(null, mmrs) > RS_THRESHOLD);
+    const mean = mmrs.reduce((a, b) => a + b, 0) / (mmrs.length || 1);
+    // Q167 (cloud audit): the same spread and mean with the losing team's leavers counted at their pre-match rating
+    const mmrsA = mmrs.concat((absent || []).map(a => a.mmr | 0));
+    const mismatchA = mmrsA.length >= 2 && (Math.max.apply(null, mmrsA) - Math.min.apply(null, mmrsA) > RS_THRESHOLD);
+    const meanA = mmrsA.reduce((a, b) => a + b, 0) / (mmrsA.length || 1);
+    const shielded = new Set();
+    for (const s of (leaverSeats || [])) for (const p of parts) {
+      if (teamOf(p.seat) === teamOf(s) && (p.seat | 0) !== (s | 0)) shielded.add(p.steamID);
+    }
+    const out = {};
+    for (const p of parts) {
+      const t = teamOf(p.seat), won = t === winTeam;
+      const tAvgLp = agg[t].n ? agg[t].lp / agg[t].n : (p.lp | 0);
+      const tAvgMmr = agg[t].n ? agg[t].mmr / agg[t].n : (p.mmr | 0);
+      const tSeg = lpSeg(tAvgLp), ownSeg = lpSeg(p.lp | 0);
+      const base = won ? tSeg.win : -tSeg.loss;
+      let factor = 1, flag = 0, protectedLoss = false;
+      const why = [];   // O774: which rule shaped this delta (labels only, never read by the settle)
+      if (mismatch && tAvgMmr < mean) {                          // weak team
+        if (won) { factor = RS_UPSET_BONUS; flag = 1; why.push('upset'); }
+        else { factor = tSeg.rs; protectedLoss = true; why.push('mismatch'); }
+      } else if ((mismatch && tAvgMmr > mean) || (won && mismatchA && tAvgMmr > meanA)) {   // strong team (Q167: or the weak team left)
+        why.push(won ? 'expected' : 'upset_loss');
+        // Q160 layer 5 (cloud audit): an expected win compresses at the TEAM-average tier for every member, the strong one
+        // included. Holding him at his own tier instead (the rework's fourth layer) cut a grandmaster carrying zero-points
+        // accounts, but cut the honest grandmaster queued with lower-tier friends as hard (a gold friend, 6 wins in 8: -12
+        // where this gives +12; a master with a diamond friend +20 for +30), and the carry came back once the zeros were
+        // walked to silver (14 matches). Architecture decision 10 keeps the honest side whole: the carry is a known residual
+        // (+4 a 2V2 win, +9 a 3V3), as the third farming form is, held by O226 and the manual top-100 check.
+        // Q167 (cloud audit): an expected win stays an expected win when the weak team leaves at the start (the second half
+        // of the condition). The spread and the mean see the present only, so two grandmasters whose two zero-points
+        // opponents wrote the level-1 start and left (convicted leavers, -100 points each at the floor) took the full team
+        // win every match (+10): no spread among the present. With the losing team's leavers counted at their pre-match
+        // rating (mismatchA, meanA) the win is the expected one and takes this same compression, written once here so the
+        // strong-team factor of whatever base this sits on serves both. Only this case reads them: the weak team, an upset
+        // and a loss keep the present-only reading (a leaver's rating says nothing about how the players who stayed did).
+        factor = won ? tSeg.rs : RS_STRONG_UPSET_LOSS;
+      }
+      if (!won && shielded.has(p.steamID)) { factor = Math.min(factor, ownSeg.rs); protectedLoss = true; why.push('teammate_left'); }
+      let normalDelta = Math.round(base / 2 + ownSeg.drip);
+      let adjDelta = Math.round(base * factor / 2 + ownSeg.drip);
+      // Q183 (cloud audit): the shielded loser also gets the full-team reading -- his team's convicted leavers counted at their
+      //   pre-match rating and points (absent), as if they had stayed and lost with him: the points of the normal finish --
+      //   and keeps whichever of the two costs him less. Read on the present only, a loser whose higher-tier teammate left
+      //   at the start lost up to 2 points more than if that teammate had stayed and lost (the team-average tier compresses
+      //   the loss, his own does not); so: never more than staying with the team, never more than before. (Capping the
+      //   full-team reading by his own tier as well would add at most a point in some cases: left out, the rule stays "the
+      //   better of before and the normal finish".) The leaver himself pays as before (the leave and its points).
+      const mine = (!won && shielded.has(p.steamID)) ? (absent || []).filter(a => teamOf(a.seat) === t) : [];
+      if (mine.length) {
+        let fn = agg[t].n, fl = agg[t].lp, fm = agg[t].mmr;
+        for (const a of mine) { fn++; fl += a.lp | 0; fm += a.mmr | 0; }
+        const fSeg = lpSeg(fl / fn), fAvg = fm / fn;
+        const fMmrs = mmrs.concat(mine.map(a => a.mmr | 0));
+        const fMis = Math.max.apply(null, fMmrs) - Math.min.apply(null, fMmrs) > RS_THRESHOLD;
+        const fMean = fMmrs.reduce((x, y) => x + y, 0) / fMmrs.length;
+        let ff = 1;
+        if (fMis && fAvg < fMean) ff = fSeg.rs;                   // the weak team, its loss compressed
+        else if (fMis && fAvg > fMean) ff = RS_STRONG_UPSET_LOSS; // the strong team, a mild upset loss
+        const fAdj = Math.round(-fSeg.loss * ff / 2 + ownSeg.drip);
+        if (fAdj > adjDelta) { adjDelta = fAdj; normalDelta = Math.round(-fSeg.loss / 2 + ownSeg.drip); }
+      }
+      if (protectedLoss && normalDelta < 0 && flag === 0) flag = 2;
+      out[p.steamID] = { adjDelta, flag, normalDelta, won, why };   // won feeds the series clamp at settle; why = O774 labels
+    }
+    return out;
+  }
+  // ---- the plan of one ranked match, as the settle calls it (O480: the settle, lateShadow and the client go through here) ----
+  //   parts: the rated players [{ steamID, seat, mmr, rank, lp }]; team (team codes only): { scores: the full frozen seat vector,
+  //   leaverSeats: the convicted / named absent seats (their teammates' shield), winTeam: the sub-score winner of a mode-2 code
+  //   (null = the money fallback of a mode-1 code), absent: the losing team's leavers at their pre-match rating and points (Q167),
+  //   finished: seats seen agreeing whose record is gone (Q183) }. An FFA code reads its own party bits. Returns the plan rows
+  //   ({ [steamID]: { adjDelta, flag, normalDelta, won } }) or null (no plan applies: the plain lpDelta at each own place).
+  function matchPlan(parts, matchType, team) {
+    const t = team || {};
+    return isTeamMt(matchType)
+      ? teamLpPlan(parts, matchType, t.scores, t.leaverSeats, t.winTeam, t.absent, t.finished)
+      : reducedStakesPlan(parts, matchType, premadeMaskOf(matchType), premadeTrioAtOf(matchType));
+  }
+  // ---- the points line of one rated player at a ranked settle (O480: one composition for the settle, lateShadow and the client) ----
+  //   cur: his points before the match; plan: his row of the match plan (reducedStakesPlan / teamLpPlan: { adjDelta, flag, won }),
+  //   null / undefined when no plan applies (a fair all-solo match: the plain lpDelta at his own place); rank / pc: his place and the
+  //   number of rated players (plain path only); mode (O717): { seeded, placing }, a boolean reads as { seeded: it } (the calls
+  //   written before O717 pass one):
+  //     seeded: this settle seeded his points (his first settle this season): the series clamp is skipped (the seed is his
+  //       placement already), nothing else changes;
+  //     placing: a placement match of the season (placementOf below; from season 1 on -- the job and the client decide that, this
+  //       file reads no clock): the promotion series as ever (a top-half finish in the promotion band crosses up), NO relegation
+  //       series (a bottom-half finish in the relegation band takes its natural delta: the tier stays hidden while he places), and
+  //       the points stay under the master line (PLACE_CAP; never pushed below his points before the match). seeded wins when
+  //       both are set.
+  //   The series clamp is skipped for a PROTECTED end too (flag 2 keeps its compressed loss); the result stays on the board's 0..LP_MAX.
+  //   Returns { d0: the delta before the series clamp, d: after it (and the placement cap), won: the side the clamp read, nv: his
+  //   new points, clamped: the series clamp moved the delta (the receipt's SERIES), capped: the placement cap moved it }.
+  function settleLine(cur, plan, rank, pc, mode) {
+    const m = (mode !== null && typeof mode === 'object') ? mode : { seeded: !!mode };
+    const seeded = !!m.seeded, placing = !seeded && !!m.placing;
+    const d0 = plan ? plan.adjDelta : lpDelta(cur, rank, pc);
+    const won = plan ? !!plan.won : ((rank | 0) <= (pc + 1) / 2);
+    let d = ((plan && plan.flag === 2) || seeded || (placing && !won)) ? d0 : crosslineDelta(cur, d0, won);
+    const clamped = d !== d0;
+    let capped = false;
+    if (placing) {
+      const room = Math.max(cur | 0, PLACE_CAP) - (cur | 0);
+      if (d > room) { d = room; capped = true; }
+    }
+    return { d0, d, won, nv: Math.max(0, Math.min(LP_MAX, cur + d)), clamped, capped };
+  }
+  // ---- the rating the points plan reads, on the player's rating-board row (O480) ----
+  //   rating-board details = [RATING_MAGIC, rating, RULES_VER, 0]: rating = the display rating the next ranked settle feeds this
+  //   player's mismatch check (his ranked rating; the stored one until he has one). The row's score stays the stored rating after
+  //   the repeat-group decay, a different number. A row written before O480 carries no details: ratingDetailsOf() gives null and
+  //   the reader falls back to the score.
+  const RATING_MAGIC = 0xCB;   // (0xCD / 0xCE are taken: card_box claims / redeem_box wants; the companion repo keeps the magic registry)
+  function ratingDetails(rating) { return [RATING_MAGIC, rating | 0, RULES_VER, 0]; }
+  function ratingDetailsOf(det) {
+    if (!Array.isArray(det) || det.length < 3 || (det[0] & 0xff) !== RATING_MAGIC) return null;
+    return { rating: det[1] | 0, rulesVer: det[2] | 0 };
+  }
+  // ---- points receipts on the player's own points-board row (O480) ----
+  //   lp row details = [the RS reveal slot: 6 ints (an RS_MAGIC reveal, or six zeros)] + [RECEIPT_MAGIC, n, (matchHash, delta,
+  //   flags) x n]: the n <= RECEIPT_CAP newest matches that moved, or voided, the player's points on this board, newest first.
+  //   delta = the net change the match caused on this board while its entry stays in the ring (a fine, its refund and the settle
+  //   of the same match add up on one entry); flags: the low byte = RECEIPT_F bits, bits 8..23 = the RULES_VER of the job that
+  //   touched the entry last. A row from before O480 (no details, or the reveal alone) reads as an empty ring.
+  //   RECEIPT_F: RS = the settle's reveal flag (1 upset, 2 protected); LEAVE = a leaver fine is in delta; SERIES = the series clamp
+  //   moved the settle's delta; SEEDED = the settle seeded his points (delta counts from the seed, not from a row); VOID = the match
+  //   moved nobody's points (a consensus void, or never settled); RULES = the entry after it in the ring was written under
+  //   another RULES_VER (the first receipt after a rules change); COMP = a compensation (reserved).
+  const RECEIPT_MAGIC = 0xC6, RECEIPT_CAP = 8, RS_SLOT = 6;
+  const RECEIPT_F = Object.freeze({ RS: 3, LEAVE: 4, SERIES: 8, SEEDED: 16, VOID: 32, RULES: 64, COMP: 128 });
+  function receiptVer(flags) { return ((flags | 0) >>> 8) & 0xffff; }
+  // { rs: the 6-int reveal or null, ring: [{ mh, delta, flags }] newest first } of a row's details
+  function lpDetailsOf(det) {
+    const d = Array.isArray(det) ? det : [];
+    const rs = (d.length >= RS_SLOT && (d[0] & 0xff) === RS_MAGIC) ? d.slice(0, RS_SLOT).map((x) => x | 0) : null;
+    const ring = [];
+    if (d.length >= RS_SLOT + 2 && (d[RS_SLOT] & 0xff) === RECEIPT_MAGIC) {
+      const n = Math.min(RECEIPT_CAP, Math.max(0, d[RS_SLOT + 1] | 0));
+      for (let i = 0; i < n && RS_SLOT + 4 + 3 * i < d.length; i++) {
+        const o = RS_SLOT + 2 + 3 * i;
+        ring.push({ mh: d[o] | 0, delta: d[o + 1] | 0, flags: d[o + 2] | 0 });
+      }
+    }
+    return { rs, ring };
+  }
+  // the details a points write carries: the reveal slot (rs, or zeros) then the ring
+  function lpDetails(rs, ring) {
+    const r = (ring || []).slice(0, RECEIPT_CAP);
+    const out = (rs && rs.length >= RS_SLOT) ? rs.slice(0, RS_SLOT).map((x) => x | 0) : [0, 0, 0, 0, 0, 0];
+    out.push(RECEIPT_MAGIC, r.length);
+    for (const e of r) out.push(e.mh | 0, e.delta | 0, e.flags | 0);
+    return out;
+  }
+  // one event of match mh on the ring: change = the points it moved (0 for a void); set / clear = the RECEIPT_F bits it sets /
+  //   clears (a settle passes clear 0xff: its flags replace the entry's; a refund clears LEAVE). The entry moves to the front
+  //   carrying the net delta; past RECEIPT_CAP the oldest drops. Returns a new ring.
+  function receiptPush(ring, mh, change, set, clear) {
+    const r = Array.isArray(ring) ? ring : [];
+    const key = mh | 0;
+    const old = r.find((e) => (e.mh | 0) === key) || null;
+    const rest = r.filter((e) => (e.mh | 0) !== key);
+    let low = (((old ? (old.flags & 0xff) & ~(clear | 0) : 0) | (set | 0)) & 0xff) & ~RECEIPT_F.RULES;
+    if (rest.length && receiptVer(rest[0].flags) !== (RULES_VER & 0xffff)) low |= RECEIPT_F.RULES;
+    const e = { mh: key, delta: ((old ? old.delta | 0 : 0) + (change | 0)) | 0, flags: low | ((RULES_VER & 0xffff) << 8) };
+    return [e].concat(rest).slice(0, RECEIPT_CAP);
+  }
+  // the receipt of match mh on a row's details, or null
+  function receiptOf(det, mh) { return lpDetailsOf(det).ring.find((e) => e.mh === (mh | 0)) || null; }
+  // ---- O717 placement matches of a season (companion KNIFE_O717 sections 3.1-3.3; the user's calls A64-A72, 2026-11-09) ----
+  //   From season 1 on every player's first PLACEMENT_TARGET settled matches of a season are placement matches: his tier stays
+  //   hidden (the client), and they settle by settleLine mode.placing. The count is his row of the season's points board (each
+  //   season a new board, so a new row): the receipt ring, one entry per match that moved or voided his points there, the first
+  //   one SEEDED. placementOf(det, target) -> { placed, n, ring, seen }: n = the entries carrying neither VOID (the match moved
+  //   nobody's points) nor LEAVE (a leaver fine) = the matches settled for him; placed = n >= target (default PLACEMENT_TARGET);
+  //   seen = the entries read. Two readings cannot count: a full ring whose SEEDED entry was pushed out = at least RECEIPT_CAP
+  //   matches -> placed, n null; a row with no ring at all (written before O480, test boards only) -> placed, n null, ring false.
+  //   The client reads everyone's row through this (the "calibrating" state of others, O782) and its own at the read-back, so
+  //   the job and both ends count one way. No new persistent field: the ring was there already (architecture decision 9).
+  //   Known deviations (architecture decision 10's side: early, never a loss): RECEIPT_CAP - PLACEMENT_TARGET + 1 (6) or more
+  //   VOID / LEAVE entries among the first RECEIPT_CAP (8) of a season count a player placed before PLACEMENT_TARGET settled
+  //   matches (his tier shows early, a relegation series can come early); a fine refunded later (the refund clears LEAVE)
+  //   counts as a match.
+  //   2026-11-18 (user call): 5 -> 3 matches. The ONE number of the placement length: the job and the client (its copy of this
+  //   file; the "n / 3" on screen is drawn from it) read it here, so changing it again is this line on both sides.
+  const PLACEMENT_TARGET = 3;
+  const PLACE_CAP = LP_SEG[5].min - 1;   // 5999: one under the master line (the reveal of a placement is at most diamond)
+  function placementOf(det, target) {
+    const t = (target | 0) > 0 ? (target | 0) : PLACEMENT_TARGET;
+    const d = Array.isArray(det) ? det : [];
+    if (!(d.length >= RS_SLOT + 2 && ((d[RS_SLOT] | 0) & 0xff) === RECEIPT_MAGIC)) return { placed: true, n: null, ring: false, seen: 0 };
+    const k = Math.min(RECEIPT_CAP, Math.max(0, d[RS_SLOT + 1] | 0));
+    let n = 0, seeded = false, seen = 0;
+    for (let i = 0; i < k && RS_SLOT + 4 + 3 * i < d.length; i++) {
+      const fl = d[RS_SLOT + 4 + 3 * i] | 0;
+      seen++;
+      if (fl & RECEIPT_F.SEEDED) seeded = true;
+      if (!(fl & (RECEIPT_F.VOID | RECEIPT_F.LEAVE))) n++;
+    }
+    if (seen >= RECEIPT_CAP && !seeded) return { placed: true, n: null, ring: true, seen };
+    return { placed: n >= t, n, ring: true, seen };
+  }
+
+  // ===== O728 endless competitive points (user calls 2026-11-08; companion KNIFE_O728_ENDLESS_LP_PLAN sections 2-3) =====
+  // A competitive endless run of a family (solo / duo / trio / quad) settles on the versus points scale 0..LP_MAX with the versus
+  //   tier table LP_SEG, built like a versus match (the user's call 2026-11-08, "the same structure as versus"): versus matches a
+  //   player against his level, so he wins about half; here the target comes from his own level the same way -- the base line is
+  //   TARGET_Q of his hidden skill (the trimmed mean depth of the last WINDOW runs: about half the runs pass it), moved by an offset
+  //   of -SPREAD..+SPREAD drawn from the run seed. A run that passes level T gains points, one that does not loses -- the sign never
+  //   flips. The size is the tier's win (or loss) scaled by two per-mille factors, plus the tier's drip, all x MUL (an endless run
+  //   is several versus matches long), capped at SWING_CAP:
+  //     gap:   the hidden skill tier above the points tier -> a pass x GAP_UP, a miss x GAP_DOWN (a player rated too low climbs
+  //            faster); below it -> the reverse, at master and up only (below master grinding always climbs: the win / loss table
+  //            gains more than it takes, and the drip); the same tier (or no skill yet) -> 1000;
+  //     stake: a harder target (offset o > 0) gains more and loses less: a pass 1000 + STAKE_STEP x o, a miss 1000 - STAKE_STEP x o.
+  //   The run settles through settleLine (the series clamp: a pass in the promotion band always crosses up, a miss in the relegation
+  //   band always crosses down) except under the demotion protection: a miss whose hidden skill tier is at or above the points tier
+  //   skips the clamp and never drops below the floor of the tier (O785, user call 2026-11-09 "below master it should go up and
+  //   down normally; I meant that grinding gets you to diamond in the end": the floor that also held EVERY miss under master is
+  //   gone -- a player rated above his skill below master drops on a relegation miss like in versus; the positive table still
+  //   carries a grinder of any level to diamond, about 140-150 runs from the placement in test/endless-lp-sim.js). The master gate: below GATE_TIER (master) in hidden skill, the
+  //   points of a player under master stop BOUNDARY_MARGIN + 1 under the master line (no master promotion match); a player already
+  //   at master or up is held by the gap factor instead. The first MIN_RUNS runs of a season are placement (no points; their
+  //   target from the runs so far, the silver line before any); the last one seeds the points from the hidden skill
+  //   (endlessSeedLp). All pure: the job settles the runs in start order.
+  // ELP.PRIOR: the loose pass lines (levels, bronze .. grandmaster) per family: what a typical player of each tier reaches. They place
+  //   a player's hidden skill in a tier (the gap factor, the protection, the gate, the placement seed); the job blends them into
+  //   the live lines as players place and publishes them every day in the tier-cut table v2 (elpTableDetails) the client reads.
+  //   Moving a constant of ELP other than PRIOR moves settled runs: ELP.VER + 1 in the same change (the table carries it; a client
+  //   built with other constants shows "to be confirmed"). RULES_VER stays the versus rules version.
+  // MUL / TARGET_Q: tuned by test/endless-lp-sim.js (2026-11-08): about half the runs pass; from placement to diamond about 150 runs
+  //   for a silver-level player, 80 gold, 40 platinum, 20 diamond (the user's table); a grandmaster drifts nowhere (zero-sum top).
+  // Invariant (test/endless-lp.js): one run never moves the points by BOUNDARY_MARGIN or more (SWING_CAP), so a tier line is
+  //   crossed in a series run only.
+  // O803 (2026-11-09, VER 3): a team run (duo / trio / quad) has ONE target for every seat, read from the team's usual level
+  //   teamHiddenOf(the hidden skills of the roster) in the hidden100 position of targetLineOf / targetOf; the points of each seat
+  //   (endlessDelta / endlessSettle: the gap factor, the protection, the gate), the placement seed and the skill tier keep reading
+  //   his own skill. Solo (and the couch pair, one account) are unchanged: the roster is the player alone, teamHiddenOf([h]) = h.
+  // O825 (2026-11-10, VER 4, the user's calls of that day): ONE points value a player a season. The runs of every family (solo /
+  //   duo / trio / quad) settle onto the same points, one placement (the season's first MIN_RUNS runs of any family), one receipt
+  //   ring, one row (ROW_VER 2 on endless_rating_all). The hidden skill, the pass lines, the run's target and the team target
+  //   (O803) stay per family -- that is what keeps about half the runs passing at every party size. Four additions:
+  //     - a family short of MIN_RUNS runs borrows the player's runs of the other families, each read on this family's scale
+  //       through the two line tables (elpConvert; elpHiddenFor) -- without it a new party size starts from the silver line again
+  //       (about 300 free points per family a season);
+  //     - a team run is longer than a solo one: below GATE_TIER (master) a team pass gains MUL x TEAM_GAIN / 1000 and a team miss
+  //       loses MUL x 1000 / TEAM_GAIN (endlessDelta, fam; the swing cap and the sign floor unchanged; reported as team);
+  //     - the master / grandmaster gate of a team family asks the skill to reach the line x TEAM_GATE / 100 (skillTierOf, fam);
+  //     - the placement seeds from its runs read on the solo scale: endlessSeedLp(elpSeedHidden(runs, lines), solo lines), at most
+  //       SEED_CAP 2800 (version 6;
+  //       before: elpHiddenFor('solo', the five runs, lines)).
+  //   A call that leaves fam out reads as solo: every value of version 3 stays (test/endless-lp.js holds the version 3 cases).
+  // O785 (2026-11-09, VER 5; written as VER 3 before O803 / O825 took 3 and 4, replayed after them): the demotion protection lost
+  //   its "every miss under master" half and the series landings moved to +-150 (BOUNDARY_MARGIN block above): settled runs of
+  //   every family move.
+  // Version 6 (user calls 2026-11-18, D7: "three runs, the worst one dropped, the other two averaged"): MIN_RUNS 5 -> 3 in all of
+  //   its roles -- the placement is the season's first three settled runs; the hidden skill trims from three runs on; a family
+  //   short of three own runs borrows up to three; fewer than three values = no skill (the silver line); the pass lines of a
+  //   family read the players with three own settled runs. The one new reading is the seed (elpSeedHidden): the lowest run leaves,
+  //   the rest average -- with the trimmed mean (three runs = the middle one) a single weak first run pulled the seed down
+  //   (archive/PLACE3_EVAL_2026-11-16 in the companion repo: every profile seeds at or above the five-run rule). hiddenOf /
+  //   elpHiddenFor take the count as an optional last argument: the job reads version 5 (MIN_RUNS_OLD) beside version 6 for runs an
+  //   older client may have started (validate.js, the old-client window); a call without it reads this version.
+  // Version 7 (O942, 2026-11-21): the level rules below (ELP7) -- a run ends at its target, the target follows a per-family level.
+  //   ELP.VER was 7; VER_OK = the published table versions this copy reads as its own (6: the job published version 6 tables until
+  //   the gate of the version 7 package was raised -- the lines were the same kind; the job passes the version it publishes to
+  //   elpTableDetails, it never takes ELP.VER for it). Runs of version 6 clients still settle under the version 6 functions.
+  // Version 8 (O991, 2026-11-23): the grow phase (ELP8 below) -- the money curve is low for the first GROW_END levels and steep
+  //   after; the level, its steps and the target read the depth past the grow phase. ELP.VER is 8. VER_OK is [8] only: a version 7
+  //   table carries version 7 lines (2..45 levels), another scale than the version 8 levels (20 levels and up) -- a version 8 copy
+  //   reads it as the version 7 lines of the conversion (elpLevelInit8), never as its own (rulesSame false). Runs of version 7
+  //   clients still settle under the version 7 functions (kept until their acceptance window is over).
+  const ELP = Object.freeze({
+    WINDOW: 10, MIN_RUNS: 3, TRIM: 1, GAP_UP: 1500, GAP_DOWN: 500, STAKE_STEP: 100, SPREAD: 2, SEED_CAP: 2800, VER: 8,
+    VER_OK: Object.freeze([8]),
+    MIN_RUNS_OLD: 5,               // MIN_RUNS of versions 1..5: what a client built before version 6 counts with. Read in two places: the job's old-client window (validate.js), and a version 6 client while the published pass-line table still carries an older rule version (the job not pushed yet, or rolled back: the client then counts and reads as this job does). Keep it while either may happen.
+    MUL: Object.freeze([850, 850, 1500, 3100, 2800, 2800, 2800]), TARGET_Q: 990, SWING_CAP: 119, GATE_TIER: 5,
+    TEAM_GAIN: 1300,               // O825: per mille; a team run below master: a pass x TEAM_GAIN / 1000, a miss x 1000 / TEAM_GAIN
+    TEAM_GATE: 110,                // O825: per cent of the master / grandmaster line a team family's skill must reach (solo: 100)
+    // 2026-11-08 board read (best run per player; a usual run is about 0.7 of the best): playtest solo n 74 -- top 60 % 7, 35 % 13,
+    //   20 % 20, 10 % 30, 4 % 63; trial solo n 318 (capped at 20) -- top 80 % 2, 60 % 7, 35 % 14. Bronze is 2 (0.7 x the top-80 %
+    //   best of 2..3); the team lines are solo x 1.6 (trial team bests sit far above them, the lines stay loose).
+    // O781 (client 2026-11-09, ships with the EA package): the competitive endless curve got a deep wall (past level 30 the goal ratio
+    //   climbs 25 per mille a level up to 2000; teams pay x1.06 / 1.12 / 1.18 for 2 / 3 / 4 seats, phased in over levels 10..30). Before
+    //   it a player averaging 70 % of the field never hit a wall, so the top lines only measured play time. The lines keep their level
+    //   up to platinum (levels 30 and under did not change for one seat) and the diamond / master / grandmaster lines move under the new
+    //   wall: each depth the old curve put a constant-efficiency player at maps to that player's wall on the new one (the client's
+    //   test/endless-curve.js T6 pins the grandmaster line under the 0.75-efficiency wall and the top gaps >= 2 x SPREAD + 1). The team
+    //   lines collapse to about solo x 1.05 at the top (the team factor offsets the denser field). Only PRIOR moved: no ELP.VER bump
+    //   (settled runs stay as they are; the daily table blends these with the live lines).
+    PRIOR: Object.freeze({
+      solo: Object.freeze([2, 6, 10, 15, 24, 35, 42]),
+      duo: Object.freeze([3, 10, 16, 24, 32, 38, 44]),
+      trio: Object.freeze([3, 10, 16, 24, 32, 38, 44]),
+      quad: Object.freeze([3, 10, 16, 24, 32, 38, 44]),
+    }),
+    ROW_MAGIC: 0xEE, ROW_VER: 2,   // the points row (elpRowDetails; v1 = the per-family row before O825, read as no row)
+    ROW_VER_LV: 3,                 // O942 version 7: the row of a player holding a level (elpRowDetails) -- v2 + the four families' level states
+    ROW_VER_LV8: 4,                // O991 version 8: the row of a player holding a version 8 level -- v3 + the four families' version 8 level states
+    TC_MAGIC: 0xEC, TC_VER: 2,     // the published pass-line table (elpTableDetails; v1 = the O103 cut table, read as no table)
+    PROTECT_RS: 2,                 // a protected miss carries the RS value 2 (protected, as a versus row) on its receipt
+  });
+  const ELP_FAMS = Object.freeze(['solo', 'duo', 'trio', 'quad']);
+  // O942 (version 7, 2026-11-21; the user's calls D1-D13 and Q1 = B that day; plan mvp/KNIFE_O942_ELP_LINE_SETTLE_PLAN.md in the
+  //   companion repo, simulations archive/ELP_LINE_SETTLE_2026-11-21/sim there). A competitive endless run ENDS the moment it passes its
+  //   target (the client ends it at the verdict of level T; the guard's end judges that open level, so the final segment's tail is T).
+  //   A passed run's depth is then its target: a mean of depths only drifts down, so the target follows a per-player, per-family
+  //   LEVEL L (x 100, a staircase) instead of the hidden skill:
+  //     - a pass multiplies L by STEP[s] / 1000, a miss divides it (never under L_MIN); a result unlike the last one (a reversal)
+  //       moves s one step smaller, the second same result in a row (and every further one) one step bigger, between S_MIN and
+  //       S_MAX: aggressive while the level is unknown or a streak runs, settling once the results alternate;
+  //     - Lm = the level smoothed (Lm += (L - Lm) x ALPHA / 1000): the gap factor, the protection, the gate and the skill tier read
+  //       Lm (in the hidden100 place of endlessDelta's reading), never the jumpy L;
+  //     - placement (the season's first MIN_RUNS settled runs, any family): PLACE[i] steps from the start level, big to small (a
+  //       binary search); a missed placement run never leaves L under the depth it reached x MISS_FLOOR / 1000 (a miss's depth is
+  //       exact, the target does not cut it); the last placement step starts the staircase (s = S_START, Lm = L); the seed reads L;
+  //     - R1: a quit (the record's disposition USER_QUIT) misses for the points but leaves the level as it was; R2: a miss with no
+  //       level passed (depth 0), a target >= R2_T_MIN and Lm >= R2_LM_MIN leaves the level too (architecture decision 10: the
+  //       narrow rules, zero effect on an honest player in the simulations) -- placement steps always move;
+  //     - Q1 = B (user 11-21, "points grow with the target's depth"): every run's points x lambda = clamp(the run's line x 100 x 1000 /
+  //       PROP.REF, PROP.LO, PROP.HI) per mille (the line of a 10-level target = x1; a short target is worth less, so short runs on
+  //       purpose farm nothing; HI 2000 keeps a deep player's pass and miss off the swing cap, so "a pass gains more than a miss
+  //       loses" still holds); MUL is retuned with it (to be settled by test/endless-lp-sim.js before the push: see the plan);
+  //     - a team run's line is the HIGHEST level of the roster (D5), every seat then steps his OWN level by the run's result
+  //       (everybody taking the team's level ratchets up: 20 % passes in the simulation; each his own: 50 %);
+  //     - PRIOR = the pass lines (the expected depth of each tier's middle player) of version 7: one line for all four families
+  //       (the O941 money curve makes a team as deep as a solo player of the same level). Published only under version 7.
+  const ELP7 = Object.freeze({
+    STEP: Object.freeze([1500, 1350, 1250, 1180, 1130, 1100, 1080]), S_START: 2, S_MIN: 1, S_MAX: 6,
+    PLACE: Object.freeze([1800, 1500, 1300]), MISS_FLOOR: 1150,   // the user's P1 (2026-11-21 night): the steps + a miss floored at its depth x 1.15 (closest to 0.6.0's "the worst run dropped")
+    ALPHA: 300, L_MIN: 100, RUN_CAP: 15,
+    // MUL retuned with lambda (2026-11-21 night, the companion repo's archive/ELP_LINE_SETTLE_2026-11-21/sim/o942-tune7.js against the 0.6.0
+    //   rules played out): hours to diamond v7 / 0.6.0 = 2.86 / 1.96 / 1.39 / 1.19 / 1.00 / 0.82 for players averaging 3 / 5 / 8 / 12 / 18 / 25
+    //   levels (50 / 45 / 33 / 25 / 20 / 14 h), to master 0.99 / 0.81 at 35 / 45; every one of them reaches diamond; a placement in the
+    //   bottom fifth catches the median seed in 1-8 h. The weak are slower: the user's Q1 = B, and 11-21 night "the low ones a bit
+    //   lower is fine -- can they all climb back?" (they can: the numbers above)
+    MUL: Object.freeze([1800, 1800, 2100, 2200, 2800, 2800, 2800]),
+    R2_T_MIN: 3, R2_LM_MIN: 500,
+    PROP: Object.freeze({ REF: 1000, LO: 250, HI: 2000 }),
+    PRIOR: Object.freeze({
+      solo: Object.freeze([2, 6, 10, 16, 25, 35, 45]),
+      duo: Object.freeze([2, 6, 10, 16, 25, 35, 45]),
+      trio: Object.freeze([2, 6, 10, 16, 25, 35, 45]),
+      quad: Object.freeze([2, 6, 10, 16, 25, 35, 45]),
+    }),
+  });
+  // O991 (version 8, 2026-11-23; the user's calls Q1-Q6 that day; plan mvp/KNIFE_O991_ENDLESS_GROW_PLAN.md in the companion repo,
+  //   simulations archive/O991_GROW_2026-11-23/sim there). The competitive money curve has a GROW PHASE: levels 1..GROW_END ask for
+  //   very little money (a run fills its perk slots there), the levels after it get steep. So every level rule reads the depth PAST
+  //   the grow phase, and the target never sits under T_MIN:
+  //     - the target T = max(T_MIN, round(L / 100) + offset) (elpTargetOfL8); a level never goes under T_MIN x 100;
+  //     - a step multiplies / divides the part of L past GROW_END: L' = G + (L - G) x STEP / 1000 (G = GROW_END x 100), the steps,
+  //       the reversals and Lm as version 7 (Lm follows the new L, floored); the placement steps PLACE the same way, a missed
+  //       placement run floored at G + (its depth x 100 - G) x MISS_FLOOR / 1000;
+  //     - R1 (a quit) as version 7; R2: a miss that passed GROW_END levels or fewer (it died in the grow phase) leaves the level --
+  //       an honest player almost never dies there (0.0-0.2 % in the model), and the earliest death that moves the level is the
+  //       one right after level GROW_END + 1 (sandbagging the target costs more than it saves from platinum up: plan section 2.4);
+  //     - lambda = clamp(the line x 100 x 1000 / PROP.REF, PROP.LO, PROP.HI) per mille with REF 2000 (the line of a 20-level target
+  //       = x1): every version 8 line is 20 or more, with the version 7 base nobody would read under the cap;
+  //     - the master / grandmaster gate asks the smoothed level to reach GATE (solo) / TEAM_GATE (team) per cent of the line (the
+  //       version 8 diamond and master lines sit three levels apart: at 100 % a diamond player wandered into master, D3);
+  //     - the first version 8 run of a family starts from the player's version 7 level of that family read through the two line
+  //       tables (elpConvert: the same tier position on both curves), capped at the deepest of his newest CONV_RUNS runs of the
+  //       family x CONV_CAP / 1000 read the same way (a level too high for what he played -- the duo tail of 0.6.1 -- is not carried
+  //       on); without a version 7 level the silver line (elpLevelInit8);
+  //     - PRIOR: the expected depth of each tier's middle player on the version 8 curve: solo, and a deeper team line (the user's
+  //       Q4 "another, deeper line for teams" + "quite a bit deeper", the team money factor of the companion repo's world core);
+  //     - MILESTONES: the first arrival at these depths a family a season pays the CP (version 7: 10 / 20 / 30 for every family; the
+  //       user's Q3 "by the tier position": gold / between platinum and diamond / between diamond and master of each family's line).
+  //   Published only under version 8 (the job's ELP_PUB_VER). The constants that carry over from version 7 are written out (the
+  //   version 7 block leaves once its acceptance window is over).
+  const ELP8 = Object.freeze({
+    GROW_END: 15, T_MIN: 20,
+    STEP: Object.freeze([1500, 1350, 1250, 1180, 1130, 1100, 1080]), S_START: 2, S_MIN: 1, S_MAX: 6, ALPHA: 300, RUN_CAP: 15,
+    PLACE: Object.freeze([1800, 1500, 1300]), MISS_FLOOR: 1150,   // both on the part past GROW_END
+    CONV_CAP: 1150, CONV_RUNS: 3,   // the first version 8 level: at most the deepest of the newest CONV_RUNS runs x CONV_CAP / 1000, converted
+    MUL: Object.freeze([2800, 2500, 2400, 2500, 2900, 2800, 2800]),
+    PROP: Object.freeze({ REF: 2000, LO: 500, HI: 2000 }),
+    GATE: 103, TEAM_GATE: 104,   // per cent of the master / grandmaster line the smoothed level must reach (version 7: 100 solo / ELP.TEAM_GATE 110 team).
+                                 //   O991 2026-11-23, the user: solo 103 = the least that holds D3 on these rules (a diamond player 1-6 / 40 into master
+                                 //   within 300 runs over six seed groups; 104 held 0-3 / 40 but slowed the master players to master about 1.18x, 103 about
+                                 //   1.11x); the team gate stays 104 (a team gate above solo is the carry guard of O825; carried runs are not simulated)
+    PRIOR: Object.freeze({
+      solo: Object.freeze([22, 24, 26, 28, 31, 34, 40]),
+      duo: Object.freeze([25, 29, 32, 35, 38, 43, 48]),
+      trio: Object.freeze([25, 29, 32, 35, 38, 43, 48]),
+      quad: Object.freeze([27, 31, 35, 38, 42, 47, 51]),
+    }),
+    MILESTONES: Object.freeze({   // [depth, CP] per family (the job pays them on a version 8 run's segments)
+      solo: Object.freeze([Object.freeze([26, 40]), Object.freeze([29, 80]), Object.freeze([33, 150])]),
+      duo: Object.freeze([Object.freeze([32, 40]), Object.freeze([36, 80]), Object.freeze([41, 150])]),
+      trio: Object.freeze([Object.freeze([32, 40]), Object.freeze([36, 80]), Object.freeze([41, 150])]),
+      quad: Object.freeze([Object.freeze([35, 40]), Object.freeze([40, 80]), Object.freeze([44, 150])]),
+    }),
+  });
+  // the tier index (0 bronze .. 6 grandmaster) of a points value
+  function lpTierIdx(lp) { let i = 0; for (let k = 0; k < LP_SEG.length; k++) if ((lp | 0) >= LP_SEG[k].min) i = k; return i; }
+  function elpHash(s) { let h = 0x811c9dc5; s = String(s); for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); } return h >>> 0; }
+  const elpLinesOk = (pass) => Array.isArray(pass) && pass.length >= LP_SEG.length;
+  // the hidden skill x 100 of a family's runs this season. depths = the levels each run passed, NEWEST first; the first WINDOW count.
+  //   From MIN_RUNS runs the TRIM highest and the TRIM lowest leave before the mean. Fewer runs than minRuns (default MIN_RUNS) = null;
+  //   the placement target reads it with minRuns 1 (the plain mean of the runs so far). min (optional, default MIN_RUNS): the
+  //   count the reading trims from -- MIN_RUNS_OLD reads as a version 5 client did.
+  function hiddenOf(depths, minRuns, min) {
+    const d = (Array.isArray(depths) ? depths : []).slice(0, ELP.WINDOW).map((x) => Math.max(0, x | 0));
+    const M = min == null ? ELP.MIN_RUNS : Math.max(1, min | 0);
+    const need = minRuns == null ? M : Math.max(1, minRuns | 0);
+    if (!d.length || d.length < need) return null;
+    const use = d.length >= M ? d.slice().sort((a, b) => a - b).slice(ELP.TRIM, d.length - ELP.TRIM) : d;
+    let sum = 0; for (const x of use) sum += x;
+    return Math.round(sum * 100 / use.length);
+  }
+  // O803: the usual level of a team: list = the hidden skill (hidden100, or null = no run of the family this season) of every
+  //   seat of the roster, in any order. The nulls leave; the rest average with equal weights, rounded to the nearest integer;
+  //   nobody with a skill = null (the target then falls to the silver line, as a first placement run). One account = its own skill.
+  function teamHiddenOf(list) {
+    const xs = (Array.isArray(list) ? list : []).filter((x) => x != null).map((x) => x | 0);
+    if (!xs.length) return null;
+    let sum = 0; for (const x of xs) sum += x;
+    return Math.round(sum / xs.length) | 0;
+  }
+  // O825: a team family (two seats or more)
+  function elpIsTeam(fam) { return fam === 'duo' || fam === 'trio' || fam === 'quad'; }
+  // O825: a depth x 100 of one family read on another family's scale, through the two pass-line tables (7 levels each): between
+  //   two lines of passFrom it lands at the same share of the way between the same two lines of passTo; under the bronze line /
+  //   at or over the grandmaster line it keeps its ratio to that line. Integers in and out, never below 0, never lower for a
+  //   deeper run; the same table twice = the depth itself. No lines = the depth unchanged.
+  function elpConvert(d100, passFrom, passTo) {
+    const x = Math.max(0, d100 | 0);
+    if (!elpLinesOk(passFrom) || !elpLinesOk(passTo)) return x;
+    const n = LP_SEG.length;
+    if (x <= (passFrom[0] | 0) * 100) return Math.round(x * (passTo[0] | 0) / Math.max(1, passFrom[0] | 0));
+    for (let k = 0; k < n - 1; k++) {
+      const f0 = passFrom[k] | 0, f1 = passFrom[k + 1] | 0, t0 = passTo[k] | 0, t1 = passTo[k + 1] | 0;
+      if (x < f1 * 100) return t0 * 100 + Math.round((x - f0 * 100) * (t1 - t0) / Math.max(1, f1 - f0));
+    }
+    return Math.round(x * (passTo[n - 1] | 0) / Math.max(1, passFrom[n - 1] | 0));
+  }
+  // O825: the hidden skill x 100 of family fam for a player whose settled runs of the season are runs = [[fam, depth], ..], NEWEST
+  //   first, the four families mixed; linesByFam = { solo: [7], duo: [7], trio: [7], quad: [7] }. The family's own newest WINDOW
+  //   runs; with MIN_RUNS of them or more this IS hiddenOf of them (a player of one family reads what version 3 read). Short of
+  //   MIN_RUNS, the runs of the other families (newest first, each through elpConvert onto this family's scale) fill the list up
+  //   to MIN_RUNS; then MIN_RUNS values = the trimmed mean (as hiddenOf), fewer = null, or their plain mean when minRuns is
+  //   relaxed (a placement target passes 1). No run at all = null. A run of a family without lines is left out. min (optional,
+  //   default MIN_RUNS): the count in every role above -- MIN_RUNS_OLD reads as a version 5 client did.
+  function elpHiddenFor(fam, runs, linesByFam, minRuns, min) {
+    const list = Array.isArray(runs) ? runs : [], lines = linesByFam || {}, to = lines[fam];
+    const own = [];
+    for (const r of list) { if (r && r[0] === fam) { own.push(Math.max(0, r[1] | 0)); if (own.length >= ELP.WINDOW) break; } }
+    const M = min == null ? ELP.MIN_RUNS : Math.max(1, min | 0);
+    if (own.length >= M) return hiddenOf(own, minRuns, M);
+    const all = own.map((x) => x * 100);
+    if (elpLinesOk(to)) {
+      for (const r of list) {
+        if (all.length >= M) break;
+        if (!r || r[0] === fam || !elpLinesOk(lines[r[0]])) continue;
+        all.push(elpConvert(Math.max(0, r[1] | 0) * 100, lines[r[0]], to));
+      }
+    }
+    const need = minRuns == null ? M : Math.max(1, minRuns | 0);
+    if (!all.length || all.length < need) return null;
+    const use = all.length >= M ? all.slice().sort((a, b) => a - b).slice(ELP.TRIM, all.length - ELP.TRIM) : all;
+    let sum = 0; for (const x of use) sum += x;
+    return Math.round(sum / use.length);
+  }
+  // Version 6: the skill x 100 a placement seeds from. runs = every settled run of the season with the run that completes the
+  //   placement, [[fam, depth], ..] NEWEST first, the four families mixed; linesByFam as elpHiddenFor. The newest WINDOW runs, each
+  //   read on the solo scale (a solo run as it is, a team run through elpConvert; a run of a family without lines is left out);
+  //   the single lowest value leaves, the rest average. One value = itself; none = null. Defined for any count: three runs (the
+  //   placement) = the mean of the better two; a player the job seeds from four runs on the day the rule changed = the mean of
+  //   his best three; a seed taken back by a conviction and read again over more runs = all but the lowest.
+  function elpSeedHidden(runs, linesByFam) {
+    const list = Array.isArray(runs) ? runs : [], lines = linesByFam || {}, to = lines.solo, xs = [];
+    for (const r of list) {
+      if (xs.length >= ELP.WINDOW) break;
+      if (!r) continue;
+      const d100 = Math.max(0, r[1] | 0) * 100;
+      if (r[0] === 'solo') xs.push(d100);
+      else if (elpLinesOk(to) && elpLinesOk(lines[r[0]])) xs.push(elpConvert(d100, lines[r[0]], to));
+    }
+    if (!xs.length) return null;
+    if (xs.length === 1) return xs[0];
+    xs.sort((a, b) => a - b);
+    let sum = 0; for (let i = 1; i < xs.length; i++) sum += xs[i];
+    return Math.round(sum / (xs.length - 1));
+  }
+  // the tier (0..6) a hidden skill sits in: the pass line nearest to it, the lower tier on a tie. No skill (or no lines) = null.
+  function tierOfHidden(hidden100, pass) {
+    if (hidden100 == null || !elpLinesOk(pass)) return null;
+    let at = 0, best = Infinity;
+    for (let k = 0; k < LP_SEG.length; k++) { const g = Math.abs((hidden100 | 0) - (pass[k] | 0) * 100); if (g < best) { best = g; at = k; } }
+    return at;
+  }
+  // the target offset of a run, -SPREAD..+SPREAD (> 0 = a harder target), from its run seed (signed or unsigned 32-bit: the same)
+  function targetOffset(runSeed) { return (elpHash((runSeed >>> 0) + ':tgt') % (2 * ELP.SPREAD + 1)) - ELP.SPREAD; }
+  // the skill tier the rules read (0..6, or null without a skill): the tier of the nearest pass line (tierOfHidden), except that
+  //   GATE_TIER (master) and up count only once the skill reached that tier's own line -- the gate: a lucky window of ten runs
+  //   that sits nearer the master line than the diamond one does not open master. O825: a team family (fam duo / trio / quad)
+  //   must reach the line x TEAM_GATE / 100 (the team diamond and master lines sit close together); fam left out = solo.
+  function skillTierOf(hidden100, pass, fam) {
+    const ht = tierOfHidden(hidden100, pass);
+    if (ht == null || ht < ELP.GATE_TIER) return ht;
+    const q = elpIsTeam(fam) ? ELP.TEAM_GATE : 100;
+    let at = ELP.GATE_TIER - 1;
+    for (let k = ELP.GATE_TIER; k <= ht; k++) { if ((hidden100 | 0) >= (pass[k] | 0) * q) at = k; else break; }
+    return at;
+  }
+  // the base line of a run's target, before its offset (the client's dial sits its middle here): TARGET_Q of the hidden skill hidden100
+  //   (a placed run: hiddenOf of the runs before it; a placement run: hiddenOf of the runs so far with minRuns 1; a team run, O803:
+  //   teamHiddenOf over the roster), the silver line of pass with none yet. lpBefore and placing no longer move it (kept in the
+  //   signature: version 1 read them).
+  function targetLineOf(lpBefore, pass, hidden100, placing) {
+    void lpBefore; void placing;
+    return hidden100 == null ? (elpLinesOk(pass) ? (pass[1] | 0) : 0) : Math.round((hidden100 | 0) * ELP.TARGET_Q / 100000);
+  }
+  // the target T of a run (the run passes when it passes level T): the base line plus the run's offset, at least 1
+  function targetOf(lpBefore, pass, runSeed, hidden100, placing) {
+    return Math.max(1, targetLineOf(lpBefore, pass, hidden100, placing) + targetOffset(runSeed));
+  }
+  // the points of one settled run before the series clamp: { d (never 0: a pass >= 1, a miss <= -1; |d| <= SWING_CAP), base (the
+  //   tier's win or -loss), gap, stake (per mille), drip, mul (the multiplier the run used), st (the skill tier, skillTierOf, or
+  //   null), protect (the demotion protection holds: a miss with the skill tier >= the points tier), team (O825: the team length
+  //   factor moved mul) }. fam (O825) = the run's family; left out = solo. hidden100 and pass are that family's.
+  function endlessDelta(lpBefore, isPass, hidden100, pass, offset, fam) {
+    const seg = lpSeg(lpBefore | 0), cur = lpTierIdx(lpBefore), ht = tierOfHidden(hidden100, pass), st = skillTierOf(hidden100, pass, fam);
+    const o = Math.max(-ELP.SPREAD, Math.min(ELP.SPREAD, offset | 0));
+    const base = isPass ? seg.win : -seg.loss;
+    let gap = 1000;
+    if (ht != null && ht > cur) gap = isPass ? ELP.GAP_UP : ELP.GAP_DOWN;                                    // rated too low: climbs faster
+    else if (ht != null && ht < cur && cur >= ELP.GATE_TIER) gap = isPass ? ELP.GAP_DOWN : ELP.GAP_UP;       // master and up only: rated too high
+    const stake = isPass ? 1000 + ELP.STAKE_STEP * o : 1000 - ELP.STAKE_STEP * o, team = elpIsTeam(fam) && cur < ELP.GATE_TIER;
+    const mul = team ? Math.round(isPass ? ELP.MUL[cur] * ELP.TEAM_GAIN / 1000 : ELP.MUL[cur] * 1000 / ELP.TEAM_GAIN) : ELP.MUL[cur];
+    let d = Math.round((base * gap * stake / 1000000 + seg.drip) * mul / 1000);
+    d = Math.max(-ELP.SWING_CAP, Math.min(ELP.SWING_CAP, d));
+    d = isPass ? Math.max(1, d) : Math.min(-1, d);
+    return { d, base, gap, stake, drip: seg.drip, mul, ht, st, protect: !isPass && ht != null && ht >= cur, team };
+  }
+  // the points line of one settled run: { d0 (endlessDelta's d), d (the change after the clamp / the protection / the gate), nv (the new
+  //   points, 0..LP_MAX), series (boundaryOf the points before: 'promotion' / 'relegation' / null), clamped (the series clamp moved
+  //   the delta: the receipt's SERIES), protect (the protection moved the result: the clamp skipped and / or the tier floor held --
+  //   the receipt's PROTECT_RS; a protected miss at the floor changes nothing, d 0), gated (the gate held the points BOUNDARY_MARGIN
+  //   + 1 under the line of a tier the skill does not reach yet, master or grandmaster: no promotion match into it), plan
+  //   (endlessDelta's result) }. fam (O825) = the run's family, as endlessDelta; left out = solo.
+  function endlessSettle(lpBefore, isPass, hidden100, pass, offset, fam) {
+    const cur = Math.max(0, Math.min(LP_MAX, lpBefore | 0));
+    const r = endlessDelta(cur, isPass, hidden100, pass, offset, fam);
+    const plain = settleLine(cur, { adjDelta: r.d, flag: 0, won: !!isPass }, 0, 0, false);
+    let nv = plain.nv, protect = false, gated = false;
+    if (r.protect) {
+      const pv = Math.max(LP_SEG[lpTierIdx(cur)].min, Math.max(0, Math.min(LP_MAX, cur + r.d)));
+      if (pv !== plain.nv) { nv = pv; protect = true; }
+    }
+    const top = Math.max(ELP.GATE_TIER - 1, r.st == null ? 0 : r.st, lpTierIdx(cur));   // the highest tier the points may reach: the skill's (every tier under master), or the one they are in
+    if (top < LP_SEG.length - 1) {
+      const line = LP_SEG[top + 1].min, cap = line - BOUNDARY_MARGIN - 1;
+      if (cur < line && nv > Math.max(cur, cap)) { nv = Math.max(cur, cap); gated = true; }
+    }
+    return { d0: r.d, d: nv - cur, nv, series: boundaryOf(cur), clamped: !protect && !gated && plain.d !== plain.d0, protect, gated, plan: r };
+  }
+  // the points a finished placement seeds from the hidden skill: between the pass lines k and k+1 the skill interpolates over the
+  //   tier's width, kept out of both series bands (BOUNDARY_MARGIN + 1 from either line; bronze has no relegation band and starts
+  //   at 0), capped at SEED_CAP. Version 6 (user call 2026-11-18, "cap it at 2800 for everybody"): 2800 = the top of gold under the
+  //   promotion band -- a placement never hands out platinum, it is won in a promotion run. (Before: 3200, mid platinum, as the
+  //   versus LP_SEED.CAP, which stays.) Why: with three runs and the lowest left out, ONE deep team run -- read on the solo scale
+  //   through the loose team priors -- is half of the seed: of the 8 real players the rule would seed on the day it was measured,
+  //   6 landed on the cap, 3 of them on one deep duo run alone. No skill / no lines = 0.
+  function endlessSeedLp(hidden100, pass) {
+    if (hidden100 == null || !elpLinesOk(pass)) return 0;
+    const h = hidden100 | 0, top = LP_SEG.length - 1;
+    if (h >= (pass[top] | 0) * 100) return ELP.SEED_CAP;
+    let k = 0; for (let i = 0; i < top; i++) if (h >= (pass[i] | 0) * 100) k = i;
+    const lo = LP_SEG[k].min, hi = LP_SEG[k + 1].min, span = Math.max(1, ((pass[k + 1] | 0) - (pass[k] | 0)) * 100);
+    let lp = lo + Math.round((h - (pass[k] | 0) * 100) * (hi - lo) / span);
+    lp = Math.max(k === 0 ? 0 : lo + BOUNDARY_MARGIN + 1, Math.min(hi - BOUNDARY_MARGIN - 1, lp));
+    return Math.max(0, Math.min(ELP.SEED_CAP, lp));
+  }
+  // ---- O942 version 7: the level (ELP7 above) ----
+  // a level state { L, Lm, s, last, run }: L / Lm the level and the smoothed level (x 100, >= L_MIN), s the step index (S_MIN..S_MAX;
+  //   0..S_MAX accepted), last the result of the last stepped run (-1 none, 0 a miss, 1 a pass), run how many stepped runs in a row
+  //   ended that way (0..RUN_CAP). Anything else = not a state (null from elpLevelOf).
+  function elpLevelOf(x) {
+    if (!x || typeof x !== 'object') return null;
+    const ok = (v, lo, hi) => Number.isInteger(v) && v >= lo && v <= hi;
+    if (!ok(x.L, ELP7.L_MIN, 1e7) || !ok(x.Lm, ELP7.L_MIN, 1e7) || !ok(x.s, 0, ELP7.S_MAX) || !ok(x.last, -1, 1) || !ok(x.run, 0, ELP7.RUN_CAP)) return null;
+    return { L: x.L, Lm: x.Lm, s: x.s, last: x.last, run: x.run };
+  }
+  // the state a family's level starts from: L = Lm = TARGET_Q of the hidden skill h100 (the middle of the dial a version 6 client
+  //   showed him last; a placement player: the plain mean of his runs so far, minRuns 1), the silver line of pass with none
+  function elpLevelInit(h100, pass) {
+    const L = Math.max(ELP7.L_MIN, h100 == null ? (elpLinesOk(pass) ? (pass[1] | 0) * 100 : ELP7.L_MIN) : Math.round((h100 | 0) * ELP.TARGET_Q / 1000));
+    return { L, Lm: L, s: ELP7.S_START, last: -1, run: 0 };
+  }
+  // the line (levels) of a level x 100 -- the middle of the dial; the target = the line plus the run's offset, at least 1
+  function elpLineOfL(L100) { return Math.max(1, Math.round((L100 | 0) / 100)); }
+  function elpTargetOfL(L100, runSeed) { return Math.max(1, elpLineOfL(L100) + targetOffset(runSeed)); }
+  // a team run's level x 100: the highest of the roster's levels of the run's family (D5; null = a seat without one leaves; none = null)
+  function elpTeamLine(levels) {
+    const xs = (Array.isArray(levels) ? levels : []).filter((x) => x != null).map((x) => x | 0);
+    return xs.length ? Math.max.apply(null, xs) : null;
+  }
+  // the state after one settled run of the family. o = { pass, depth (levels passed), T (its target), quit (the disposition was
+  //   USER_QUIT), placing (the run's placement index 0..PLACE.length - 1, or null / -1 for a points run) }. Pure: st is not written.
+  //   A placement step always moves (R1 / R2 hold for points runs only: a placement quit must not keep a silver start).
+  function elpLevelStep(st, o) {
+    const x = elpLevelOf(st);
+    if (!x) return null;
+    const a = o || {}, pass = !!a.pass, depth = Math.max(0, a.depth | 0), T = Math.max(1, a.T | 0);
+    const pi = (a.placing == null || (a.placing | 0) < 0) ? -1 : Math.min(ELP7.PLACE.length - 1, a.placing | 0);
+    if (pi >= 0) {
+      const f = ELP7.PLACE[pi];
+      let L = pass ? Math.round(x.L * f / 1000) : Math.round(x.L * 1000 / f);
+      if (!pass) L = Math.max(L, Math.round(depth * 100 * ELP7.MISS_FLOOR / 1000));
+      x.L = Math.max(ELP7.L_MIN, L); x.Lm = x.L;
+      if (pi === ELP7.PLACE.length - 1) { x.s = ELP7.S_START; x.last = -1; x.run = 0; }   // the placement's last step starts the staircase
+      return x;
+    }
+    if (!pass && a.quit) return x;                                                                         // R1
+    if (!pass && depth === 0 && T >= ELP7.R2_T_MIN && x.Lm >= ELP7.R2_LM_MIN) return x;                     // R2
+    const f = ELP7.STEP[Math.max(ELP7.S_MIN, Math.min(ELP7.S_MAX, x.s))];
+    x.L = Math.max(ELP7.L_MIN, pass ? Math.round(x.L * f / 1000) : Math.round(x.L * 1000 / f));
+    const r = pass ? 1 : 0;
+    if (x.last !== -1 && r !== x.last) { x.s = Math.min(ELP7.S_MAX, Math.max(ELP7.S_MIN, x.s) + 1); x.run = 1; }
+    else { x.run = Math.min(ELP7.RUN_CAP, x.run + 1); if (x.run >= 2) x.s = Math.max(ELP7.S_MIN, x.s - 1); }
+    x.last = r;
+    x.Lm = Math.max(ELP7.L_MIN, Math.round(x.Lm + (x.L - x.Lm) * ELP7.ALPHA / 1000));
+    return x;
+  }
+  // the points a finished version 7 placement seeds: the level L100 of the family of the run that completes it, read on the solo
+  //   scale (elpConvert through that family's lines and the solo lines), then endlessSeedLp (capped at SEED_CAP) on the solo lines
+  function elpLevelSeed(L100, famLines, soloLines) {
+    return endlessSeedLp(elpLinesOk(famLines) && elpLinesOk(soloLines) ? elpConvert(L100 | 0, famLines, soloLines) : (L100 | 0), soloLines);
+  }
+  // lambda per mille of a run whose line is `line` levels (Q1 = B): clamp(line x 100 x 1000 / PROP.REF, PROP.LO, PROP.HI)
+  function elpPropK(line) { return Math.max(ELP7.PROP.LO, Math.min(ELP7.PROP.HI, Math.round(Math.max(0, line | 0) * 100 * 1000 / ELP7.PROP.REF))); }
+  // endlessDelta of version 7: the same table, gap factor, stake, team length factor, swing cap and sign floor, read with the
+  //   smoothed level lm100 in the skill's place; the multiplier ELP7.MUL; the whole x elpPropK(line) / 1000 before the cap. Returns
+  //   endlessDelta's shape + k (lambda per mille).
+  function endlessDeltaLv(lpBefore, isPass, lm100, pass, offset, fam, line) {
+    const seg = lpSeg(lpBefore | 0), cur = lpTierIdx(lpBefore), ht = tierOfHidden(lm100, pass), st = skillTierOf(lm100, pass, fam);
+    const o = Math.max(-ELP.SPREAD, Math.min(ELP.SPREAD, offset | 0));
+    const base = isPass ? seg.win : -seg.loss;
+    let gap = 1000;
+    if (ht != null && ht > cur) gap = isPass ? ELP.GAP_UP : ELP.GAP_DOWN;
+    else if (ht != null && ht < cur && cur >= ELP.GATE_TIER) gap = isPass ? ELP.GAP_DOWN : ELP.GAP_UP;
+    const stake = isPass ? 1000 + ELP.STAKE_STEP * o : 1000 - ELP.STAKE_STEP * o, team = elpIsTeam(fam) && cur < ELP.GATE_TIER;
+    const mul = team ? Math.round(isPass ? ELP7.MUL[cur] * ELP.TEAM_GAIN / 1000 : ELP7.MUL[cur] * 1000 / ELP.TEAM_GAIN) : ELP7.MUL[cur];
+    const k = elpPropK(line);
+    let d = Math.round((base * gap * stake / 1000000 + seg.drip) * mul * k / 1000000);
+    d = Math.max(-ELP.SWING_CAP, Math.min(ELP.SWING_CAP, d));
+    d = isPass ? Math.max(1, d) : Math.min(-1, d);
+    return { d, base, gap, stake, drip: seg.drip, mul, k, ht, st, protect: !isPass && ht != null && ht >= cur, team };
+  }
+  // endlessSettle of version 7 (endlessDeltaLv; the series clamp, the protection and the gate as version 6)
+  function endlessSettleLv(lpBefore, isPass, lm100, pass, offset, fam, line) {
+    const cur = Math.max(0, Math.min(LP_MAX, lpBefore | 0));
+    const r = endlessDeltaLv(cur, isPass, lm100, pass, offset, fam, line);
+    const plain = settleLine(cur, { adjDelta: r.d, flag: 0, won: !!isPass }, 0, 0, false);
+    let nv = plain.nv, protect = false, gated = false;
+    if (r.protect) {
+      const pv = Math.max(LP_SEG[lpTierIdx(cur)].min, Math.max(0, Math.min(LP_MAX, cur + r.d)));
+      if (pv !== plain.nv) { nv = pv; protect = true; }
+    }
+    const top = Math.max(ELP.GATE_TIER - 1, r.st == null ? 0 : r.st, lpTierIdx(cur));
+    if (top < LP_SEG.length - 1) {
+      const lineMin = LP_SEG[top + 1].min, cap = lineMin - BOUNDARY_MARGIN - 1;
+      if (cur < lineMin && nv > Math.max(cur, cap)) { nv = Math.max(cur, cap); gated = true; }
+    }
+    return { d0: r.d, d: nv - cur, nv, series: boundaryOf(cur), clamped: !protect && !gated && plain.d !== plain.d0, protect, gated, plan: r };
+  }
+  // ---- O991 version 8: the grow phase (ELP8 above) ----
+  // a version 8 level state: the shape of version 7's ({ L, Lm, s, last, run }), L / Lm at least T_MIN x 100. Anything else = null
+  function elpLevelOf8(x) {
+    if (!x || typeof x !== 'object') return null;
+    const ok = (v, lo, hi) => Number.isInteger(v) && v >= lo && v <= hi, F = ELP8.T_MIN * 100;
+    if (!ok(x.L, F, 1e7) || !ok(x.Lm, F, 1e7) || !ok(x.s, 0, ELP8.S_MAX) || !ok(x.last, -1, 1) || !ok(x.run, 0, ELP8.RUN_CAP)) return null;
+    return { L: x.L, Lm: x.Lm, s: x.s, last: x.last, run: x.run };
+  }
+  // the line (levels) of a version 8 level x 100 (the middle of the dial; at least T_MIN) and the target of a level and a run seed
+  //   (the line plus the run's offset, at least T_MIN). A team run reads its team line (the highest level of the roster, elpTeamLine)
+  function elpLineOfL8(L100) { return Math.max(ELP8.T_MIN, Math.round((L100 | 0) / 100)); }
+  function elpTargetOfL8(L100, runSeed) { return Math.max(ELP8.T_MIN, elpLineOfL8(L100) + targetOffset(runSeed)); }
+  // the target of a run read from a version 8 level state (null when st is not one)
+  function elpLevelTarget8(st, runSeed) { const x = elpLevelOf8(st); return x ? elpTargetOfL8(x.L, runSeed) : null; }
+  // the state after one settled version 8 run of the family. o = { pass, depth (levels passed), T (its target; read by nothing in
+  //   version 8, kept for the shape of version 7), quit (USER_QUIT), placing (the placement index 0..PLACE.length - 1, or null / -1) }.
+  //   Every step scales the part of L past the grow phase (G = GROW_END x 100); L and Lm never go under T_MIN x 100. A placement step
+  //   always moves; R1 (a quit) and R2 (a miss that passed GROW_END levels or fewer) leave a points run's level. Pure.
+  function elpLevelStep8(st, o) {
+    const x = elpLevelOf8(st);
+    if (!x) return null;
+    const a = o || {}, pass = !!a.pass, depth = Math.max(0, a.depth | 0), G = ELP8.GROW_END * 100, FL = ELP8.T_MIN * 100;
+    const up = (L, f) => G + Math.round((L - G) * f / 1000), down = (L, f) => G + Math.round((L - G) * 1000 / f);
+    const pi = (a.placing == null || (a.placing | 0) < 0) ? -1 : Math.min(ELP8.PLACE.length - 1, a.placing | 0);
+    if (pi >= 0) {
+      const f = ELP8.PLACE[pi];
+      let L = pass ? up(x.L, f) : down(x.L, f);
+      if (!pass) L = Math.max(L, G + Math.round(Math.max(0, depth * 100 - G) * ELP8.MISS_FLOOR / 1000));
+      x.L = Math.max(FL, L); x.Lm = x.L;
+      if (pi === ELP8.PLACE.length - 1) { x.s = ELP8.S_START; x.last = -1; x.run = 0; }   // the placement's last step starts the staircase
+      return x;
+    }
+    if (!pass && a.quit) return x;                                                                         // R1
+    if (!pass && depth <= ELP8.GROW_END) return x;                                                         // R2: died in the grow phase
+    const f = ELP8.STEP[Math.max(ELP8.S_MIN, Math.min(ELP8.S_MAX, x.s))];
+    x.L = Math.max(FL, pass ? up(x.L, f) : down(x.L, f));
+    const r = pass ? 1 : 0;
+    if (x.last !== -1 && r !== x.last) { x.s = Math.min(ELP8.S_MAX, Math.max(ELP8.S_MIN, x.s) + 1); x.run = 1; }
+    else { x.run = Math.min(ELP8.RUN_CAP, x.run + 1); if (x.run >= 2) x.s = Math.max(ELP8.S_MIN, x.s - 1); }
+    x.last = r;
+    x.Lm = Math.max(FL, Math.round(x.Lm + (x.L - x.Lm) * ELP8.ALPHA / 1000));
+    return x;
+  }
+  // the state a family's FIRST version 8 run starts from (plan section 3.2). lv7 = the player's version 7 level state of the family
+  //   (elpLevelOf; null = none), recentDepths = the depths of his newest settled runs of the family (newest first; the first CONV_RUNS
+  //   count), lines7 / lines8 = the family's version 7 / version 8 pass lines. L and Lm = the version 7 ones read on the version 8
+  //   scale (elpConvert: the same share of the way between the same two tier lines), each capped at the deepest of those runs x
+  //   CONV_CAP / 1000 read the same way, never under T_MIN x 100; a fresh staircase (S_START). No version 7 level = the silver line
+  //   of lines8 (T_MIN without lines). No lines on a side = the values as they are (elpConvert's rule).
+  function elpLevelInit8(lv7, recentDepths, lines7, lines8) {
+    const FL = ELP8.T_MIN * 100, x7 = elpLevelOf(lv7), fresh = (L) => ({ L, Lm: L, s: ELP8.S_START, last: -1, run: 0 });
+    if (!x7) return fresh(Math.max(FL, elpLinesOk(lines8) ? (lines8[1] | 0) * 100 : FL));
+    const ds = (Array.isArray(recentDepths) ? recentDepths : []).slice(0, ELP8.CONV_RUNS).map((d) => Math.max(0, d | 0));
+    const cap = ds.length ? elpConvert(Math.round(Math.max.apply(null, ds) * 100 * ELP8.CONV_CAP / 1000), lines7, lines8) : Infinity;
+    const L = Math.max(FL, Math.min(cap, elpConvert(x7.L, lines7, lines8))), Lm = Math.max(FL, Math.min(cap, elpConvert(x7.Lm, lines7, lines8)));
+    return { L, Lm, s: ELP8.S_START, last: -1, run: 0 };
+  }
+  // the points a finished version 8 placement seeds: the level L100 of the family of the run that completes it, read on the solo
+  //   scale (elpConvert through that family's version 8 lines and the solo ones), then endlessSeedLp (capped at SEED_CAP) on the solo lines
+  function elpLevelSeed8(L100, famLines, soloLines) {
+    return endlessSeedLp(elpLinesOk(famLines) && elpLinesOk(soloLines) ? elpConvert(L100 | 0, famLines, soloLines) : (L100 | 0), soloLines);
+  }
+  // lambda per mille of a version 8 run whose line is `line` levels: clamp(line x 100 x 1000 / PROP.REF, PROP.LO, PROP.HI)
+  function elpPropK8(line) { return Math.max(ELP8.PROP.LO, Math.min(ELP8.PROP.HI, Math.round(Math.max(0, line | 0) * 100 * 1000 / ELP8.PROP.REF))); }
+  // skillTierOf of version 8: the master / grandmaster gate asks GATE (solo) / TEAM_GATE (team) per cent of the line
+  function skillTierOf8(hidden100, pass, fam) {
+    const ht = tierOfHidden(hidden100, pass);
+    if (ht == null || ht < ELP.GATE_TIER) return ht;
+    const q = elpIsTeam(fam) ? ELP8.TEAM_GATE : ELP8.GATE;
+    let at = ELP.GATE_TIER - 1;
+    for (let k = ELP.GATE_TIER; k <= ht; k++) { if ((hidden100 | 0) >= (pass[k] | 0) * q) at = k; else break; }
+    return at;
+  }
+  // endlessDeltaLv of version 8: the same table, gap factor, stake, team length factor (ELP.TEAM_GAIN), swing cap and sign floor, read
+  //   with the smoothed version 8 level lm100 and the version 8 lines; the multiplier ELP8.MUL; x elpPropK8(line) / 1000 before the cap;
+  //   the gate of skillTierOf8. Returns endlessDeltaLv's shape.
+  function endlessDeltaLv8(lpBefore, isPass, lm100, pass, offset, fam, line) {
+    const seg = lpSeg(lpBefore | 0), cur = lpTierIdx(lpBefore), ht = tierOfHidden(lm100, pass), st = skillTierOf8(lm100, pass, fam);
+    const o = Math.max(-ELP.SPREAD, Math.min(ELP.SPREAD, offset | 0));
+    const base = isPass ? seg.win : -seg.loss;
+    let gap = 1000;
+    if (ht != null && ht > cur) gap = isPass ? ELP.GAP_UP : ELP.GAP_DOWN;
+    else if (ht != null && ht < cur && cur >= ELP.GATE_TIER) gap = isPass ? ELP.GAP_DOWN : ELP.GAP_UP;
+    const stake = isPass ? 1000 + ELP.STAKE_STEP * o : 1000 - ELP.STAKE_STEP * o, team = elpIsTeam(fam) && cur < ELP.GATE_TIER;
+    const mul = team ? Math.round(isPass ? ELP8.MUL[cur] * ELP.TEAM_GAIN / 1000 : ELP8.MUL[cur] * 1000 / ELP.TEAM_GAIN) : ELP8.MUL[cur];
+    const k = elpPropK8(line);
+    let d = Math.round((base * gap * stake / 1000000 + seg.drip) * mul * k / 1000000);
+    d = Math.max(-ELP.SWING_CAP, Math.min(ELP.SWING_CAP, d));
+    d = isPass ? Math.max(1, d) : Math.min(-1, d);
+    return { d, base, gap, stake, drip: seg.drip, mul, k, ht, st, protect: !isPass && ht != null && ht >= cur, team };
+  }
+  // endlessSettle of version 8 (endlessDeltaLv8; the series clamp, the protection and the gate as version 7)
+  function endlessSettleLv8(lpBefore, isPass, lm100, pass, offset, fam, line) {
+    const cur = Math.max(0, Math.min(LP_MAX, lpBefore | 0));
+    const r = endlessDeltaLv8(cur, isPass, lm100, pass, offset, fam, line);
+    const plain = settleLine(cur, { adjDelta: r.d, flag: 0, won: !!isPass }, 0, 0, false);
+    let nv = plain.nv, protect = false, gated = false;
+    if (r.protect) {
+      const pv = Math.max(LP_SEG[lpTierIdx(cur)].min, Math.max(0, Math.min(LP_MAX, cur + r.d)));
+      if (pv !== plain.nv) { nv = pv; protect = true; }
+    }
+    const top = Math.max(ELP.GATE_TIER - 1, r.st == null ? 0 : r.st, lpTierIdx(cur));
+    if (top < LP_SEG.length - 1) {
+      const lineMin = LP_SEG[top + 1].min, cap = lineMin - BOUNDARY_MARGIN - 1;
+      if (cur < lineMin && nv > Math.max(cur, cap)) { nv = Math.max(cur, cap); gated = true; }
+    }
+    return { d0: r.d, d: nv - cur, nv, series: boundaryOf(cur), clamped: !protect && !gated && plain.d !== plain.d0, protect, gated, plan: r };
+  }
+  // the CP milestones a version 8 run of family fam pays ([[depth, CP], ..]; a family without a list = solo's)
+  function elpMilestones8(fam) { return ELP8.MILESTONES[fam] || ELP8.MILESTONES.solo; }
+  // the points row of a player (O825: one row a season on endless_rating_all[_test][_s<N>]; the job writes it, the client reads
+  //   it). score = the points (no row before the placement ends). details = [ROW_MAGIC | ROW_VER << 8, runs settled this season
+  //   (every family), points tier 0..6, placed (1), the hidden skill x 100 of solo, duo, trio, quad (elpHiddenFor of each family
+  //   over every settled run under the lines of the day; -1 = none), RECEIPT_MAGIC, n, (runId, delta, flags) x n]: the receipt
+  //   ring of receiptPush with mh = the run seed | 0 (the record's d[4]; both sides know it). Receipt flags: RS bits PROTECT_RS on
+  //   a protected miss, SERIES when the clamp moved the delta, SEEDED on the placement's last run, VOID on a run refunded after a
+  //   conviction. row = { n, tier, placed, h: { solo, duo, trio, quad } }. 34 ints at most.
+  //   O942 version 7: a row whose player holds a level of any family is ROW_VER_LV (3): the four hidden skills are followed by the
+  //   four families' level states, (L, Lm, bits) each (bits = s | (last + 1) << 4 | run << 6; a family without one = -1, -1, -1),
+  //   before the ring -- 46 ints at most. The client replays its runs still waiting for a receipt on top of them. row.lv = { fam:
+  //   a level state } (elpLevelOf); none = a v2 row exactly as before.
+  //   O991 version 8: a row whose player holds a version 8 level of any family is ROW_VER_LV8 (4): the v3 layout (the four version 7
+  //   states, -1, -1, -1 for a family without one) followed by the four families' version 8 states, the same three ints each, before
+  //   the ring -- 58 ints at most (a Steam row holds 64). row.lv8 = { fam: a version 8 state } (elpLevelOf8); none = v3 / v2 as before.
+  function elpRowDetails(row, ring) {
+    const r = (ring || []).slice(0, RECEIPT_CAP), x = row || {}, h = x.h || {}, lv = x.lv || {}, lv8 = x.lv8 || {};
+    const has8 = ELP_FAMS.some((fam) => elpLevelOf8(lv8[fam])), has = has8 || ELP_FAMS.some((fam) => elpLevelOf(lv[fam]));
+    const bits = (s) => s.s | ((s.last + 1) << 4) | (s.run << 6);
+    const out = [ELP.ROW_MAGIC | ((has8 ? ELP.ROW_VER_LV8 : has ? ELP.ROW_VER_LV : ELP.ROW_VER) << 8), x.n | 0, x.tier | 0, x.placed ? 1 : 0];
+    for (const fam of ELP_FAMS) out.push(h[fam] == null ? -1 : (h[fam] | 0));
+    if (has) for (const fam of ELP_FAMS) { const s = elpLevelOf(lv[fam]); if (s) out.push(s.L, s.Lm, bits(s)); else out.push(-1, -1, -1); }
+    if (has8) for (const fam of ELP_FAMS) { const s = elpLevelOf8(lv8[fam]); if (s) out.push(s.L, s.Lm, bits(s)); else out.push(-1, -1, -1); }
+    out.push(RECEIPT_MAGIC, r.length);
+    for (const e of r) out.push(e.mh | 0, e.delta | 0, e.flags | 0);
+    return out;
+  }
+  // { n, tier, placed, h: { solo, duo, trio, quad } (each hidden100 or null), lv: { fam: a level state or null } (version 7 rows;
+  //   a v2 row = every family null), lv8: { fam: a version 8 level state or null } (v4 rows; v2 / v3 = every family null), ring:
+  //   [{ mh, delta, flags }] newest first } of a row's details; another layout (the v1 per-family row too) = null
+  function elpRowOf(det) {
+    if (!Array.isArray(det) || det.length < 1 || ((det[0] | 0) & 0xff) !== ELP.ROW_MAGIC) return null;
+    const ver = ((det[0] | 0) >>> 8) & 0xff, lvAt = 4 + ELP_FAMS.length, lv8At = lvAt + 3 * ELP_FAMS.length;
+    if (ver !== ELP.ROW_VER && ver !== ELP.ROW_VER_LV && ver !== ELP.ROW_VER_LV8) return null;
+    const at = lvAt + (ver === ELP.ROW_VER_LV ? 3 * ELP_FAMS.length : ver === ELP.ROW_VER_LV8 ? 6 * ELP_FAMS.length : 0);
+    if (det.length < at + 2) return null;
+    const h = {}, lv = {}, lv8 = {}, ring = [];
+    ELP_FAMS.forEach((fam, i) => { h[fam] = (det[4 + i] | 0) < 0 ? null : (det[4 + i] | 0); lv[fam] = null; lv8[fam] = null; });
+    const stateAt = (o, of) => { const b = det[o + 2] | 0; return b < 0 ? null : of({ L: det[o] | 0, Lm: det[o + 1] | 0, s: b & 15, last: ((b >> 4) & 3) - 1, run: (b >> 6) & 15 }); };
+    if (ver === ELP.ROW_VER_LV || ver === ELP.ROW_VER_LV8) ELP_FAMS.forEach((fam, i) => { lv[fam] = stateAt(lvAt + 3 * i, elpLevelOf); });
+    if (ver === ELP.ROW_VER_LV8) ELP_FAMS.forEach((fam, i) => { lv8[fam] = stateAt(lv8At + 3 * i, elpLevelOf8); });
+    if (((det[at] | 0) & 0xff) === RECEIPT_MAGIC) {
+      const n = Math.min(RECEIPT_CAP, Math.max(0, det[at + 1] | 0));
+      for (let i = 0; i < n && at + 5 + 3 * i <= det.length; i++) { const o = at + 2 + 3 * i; ring.push({ mh: det[o] | 0, delta: det[o + 1] | 0, flags: det[o + 2] | 0 }); }
+    }
+    return { n: det[1] | 0, tier: det[2] | 0, placed: (det[3] | 0) === 1, h, lv, lv8, ring };
+  }
+  // the receipt of a run on a points row's details (runId here = the run seed | 0), or null
+  function elpReceiptOf(det, runId) { const r = elpRowOf(det); return r ? (r.ring.find((e) => e.mh === (runId | 0)) || null) : null; }
+  // the published pass-line table (tier-cut carrier v2 on endless_tiercut; the job writes it once a UTC day and at once when the
+  //   season, a line or a rules constant moves). score = the UTC day YYYYMMDD; details = [TC_MAGIC | TC_VER << 8, season, VER, GAP_UP,
+  //   GAP_DOWN, STAKE_STEP, SPREAD, (N, pass x 7) x ELP_FAMS] = 39 ints; N = the family's players placed this season.
+  //   byFam = { fam: { N, pass } } (a missing family writes N 0 and its prior).
+  //   ver (O942): the rules version the table carries (the job passes the version it publishes: 6 until the gate of the version 7
+  //   package is raised, then 7); left out = ELP.VER. A missing family falls back to that version's priors (7: ELP7.PRIOR; O991:
+  //   8 and up ELP8.PRIOR).
+  function elpTableDetails(season, byFam, ver) {
+    const v = ver == null ? ELP.VER : (ver | 0);
+    const out = [ELP.TC_MAGIC | (ELP.TC_VER << 8), season | 0, v, ELP.GAP_UP, ELP.GAP_DOWN, ELP.STAKE_STEP, ELP.SPREAD];
+    for (const fam of ELP_FAMS) {
+      const c = (byFam || {})[fam] || null, p = (c && elpLinesOk(c.pass)) ? c.pass : (v >= 8 ? ELP8.PRIOR[fam] : v >= 7 ? ELP7.PRIOR[fam] : ELP.PRIOR[fam]);
+      out.push(c ? (c.N | 0) : 0);
+      for (let k = 0; k < LP_SEG.length; k++) out.push(p[k] | 0);
+    }
+    return out;
+  }
+  // { day, season, ver, gapUp, gapDown, stakeStep, spread, rulesSame (the constants are this copy's), byFam } of a table row; a v1 row
+  //   (the O103 cut table), another version or a short row = null (no table: the client shows "being rated")
+  function elpTableOf(score, det) {
+    const need = 7 + ELP_FAMS.length * (1 + LP_SEG.length);
+    if (!Array.isArray(det) || det.length < need || ((det[0] | 0) & 0xff) !== ELP.TC_MAGIC || (((det[0] | 0) >>> 8) & 0xff) !== ELP.TC_VER) return null;
+    const byFam = {}; let at = 7;
+    for (const fam of ELP_FAMS) { byFam[fam] = { N: det[at] | 0, pass: det.slice(at + 1, at + 1 + LP_SEG.length).map((x) => x | 0) }; at += 1 + LP_SEG.length; }
+    const t = { day: score | 0, season: det[1] | 0, ver: det[2] | 0, gapUp: det[3] | 0, gapDown: det[4] | 0, stakeStep: det[5] | 0, spread: det[6] | 0, byFam };
+    t.rulesSame = ELP.VER_OK.indexOf(t.ver) >= 0 && t.gapUp === ELP.GAP_UP && t.gapDown === ELP.GAP_DOWN && t.stakeStep === ELP.STAKE_STEP && t.spread === ELP.SPREAD;   // O942: version 6 and 7 tables both; O991: version 8 tables only (a version 7 table is the other scale)
+    return t;
+  }
+  // ---- the job's pulse (O480): one cron_pulse row per channel ----
+  //   score = the unix minute a run of the job reached its end; details = [PULSE_MAGIC, RULES_VER]. A client reads it on idle
+  //   screens: a pulse a few ticks old = the job is behind, a RULES_VER other than its own = the rules moved since its build.
+  const PULSE_MAGIC = 0xCC;
+  function pulseDetails() { return [PULSE_MAGIC, RULES_VER]; }
+  function pulseOf(score, det) {
+    if (!Array.isArray(det) || det.length < 2 || (det[0] & 0xff) !== PULSE_MAGIC) return null;
+    return { minute: score | 0, rulesVer: det[1] | 0 };
+  }
+  // configure({ NAME: value }): the job hands its environment overrides in here (validate.js passes process.env.<NAME>). A missing,
+  //   null or empty value keeps the default, anything else reads as Number(value) -- the reading of the job's old
+  //   `Number(process.env.NAME || default)`. Returns the names whose value now differs from the default.
+  function configure(o) {
+    const v = (k) => ((o && o[k] != null && o[k] !== '') ? Number(o[k]) : DEFAULTS[k]);
+    RS_THRESHOLD = v('RS_THRESHOLD'); RS_UPSET_BONUS = v('RS_UPSET_BONUS'); RS_STRONG_UPSET_LOSS = v('RS_STRONG_UPSET_LOSS');
+    RS_SOLO_VS_TRIO = v('RS_SOLO_VS_TRIO'); RS_TRIO_WIN = v('RS_TRIO_WIN'); LEAVER_LP_PENALTY = v('LEAVER_LP_PENALTY');
+    Object.assign(api, knobs());
+    return Object.keys(DEFAULTS).filter((k) => !Object.is(api[k], DEFAULTS[k]));
+  }
+  function knobs() { return { RS_THRESHOLD, RS_UPSET_BONUS, RS_STRONG_UPSET_LOSS, RS_SOLO_VS_TRIO, RS_TRIO_WIN, LEAVER_LP_PENALTY }; }
+  const api = Object.assign({
+    RULES_VER, FIXTURES_HASH, DEFAULTS, configure,
+    LP_MAX, LP_SEG, lpSeg, LP_SEED, seedLp, SOFT_RESET, softResetLp, seasonSeedLp, lpDelta,
+    BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, boundaryOf, crosslineDelta, matchPlan, settleLine,
+    baseMt, premadeMaskOf, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, appliesLp, isTeamMt,
+    RANKED_SEAT_SHIFT, rankedSeatMaskOf, mtSansSeats, seatAppliesLp, anyAppliesLp,
+    leaverLpPenalty, RS_MAGIC, reducedStakesPlan, teamLpPlan,
+    RATING_MAGIC, ratingDetails, ratingDetailsOf,
+    RECEIPT_MAGIC, RECEIPT_CAP, RS_SLOT, RECEIPT_F, receiptVer, lpDetailsOf, lpDetails, receiptPush, receiptOf,
+    PLACEMENT_TARGET, PLACE_CAP, placementOf,
+    PULSE_MAGIC, pulseDetails, pulseOf,
+    ELP, ELP_FAMS, lpTierIdx, hiddenOf, teamHiddenOf, elpIsTeam, elpConvert, elpHiddenFor, elpSeedHidden, tierOfHidden, skillTierOf, targetOffset, targetLineOf, targetOf, endlessDelta, endlessSettle, endlessSeedLp,
+    ELP7, elpLevelOf, elpLevelInit, elpLineOfL, elpTargetOfL, elpTeamLine, elpLevelStep, elpLevelSeed, elpPropK, endlessDeltaLv, endlessSettleLv,   // O942 version 7
+    ELP8, elpLevelOf8, elpLineOfL8, elpTargetOfL8, elpLevelTarget8, elpLevelStep8, elpLevelInit8, elpLevelSeed8, elpPropK8, skillTierOf8, endlessDeltaLv8, endlessSettleLv8, elpMilestones8,   // O991 version 8
+    elpRowDetails, elpRowOf, elpReceiptOf, elpTableDetails, elpTableOf,
+  }, knobs());
+  return api;
+});

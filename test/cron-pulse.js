@@ -46,8 +46,10 @@ const nowMin = () => Math.floor(Date.now() / 60000);
   const w = pulseWrites(r);
   T('[2] the run succeeds on the quiet path', r.code === 0 && /no consistent matches/.test(r.out), r.out.slice(-400));
   T('[2] the cron_pulse board is created (trusted writes)', findCreate(r, 'cron_pulse').length === 1 && /onlytrustedwrites=1/.test(findCreate(r, 'cron_pulse')[0].body));
-  T('[2] one pulse write by the version_gate account: score = this minute, details [0xCC, RULES_VER]', w.length === 1 && w[0].sid === OPS && w[0].score >= t0 && w[0].score <= nowMin()
-    && J(w[0].details) === J([0xCC, PP.RULES_VER]), J(w));
+  // O989: the main job's pulse also carries its rules-cfg (no file = revision 0, the four defaults in permille): the first two
+  //   numbers are what every build before O989 reads (test/guest-seat-rules.js replays their decoder on it)
+  T('[2] one pulse write by the version_gate account: score = this minute, details [0xCC, RULES_VER] + the rules-cfg tail [0xC9, 0, the defaults]', w.length === 1 && w[0].sid === OPS && w[0].score >= t0 && w[0].score <= nowMin()
+    && J(w[0].details.slice(0, 2)) === J([0xCC, PP.RULES_VER]) && J(w[0].details) === J([0xCC, PP.RULES_VER, 0xC9, 0, 800, 850, 1000, 1000]), J(w));
   T('[2] logged and summarized', /cron pulse: cron_pulse = minute [0-9]+, rules [0-9]+/.test(r.out) && /cron pulse \(O480\) \| [0-9]+ \/ [0-9]+; [0-9]+ \|/.test(r.summary), r.summary.slice(-300));
 }
 // ---- [3] carrier from the row itself; TIERCUT_CARRIER_SID first ----
