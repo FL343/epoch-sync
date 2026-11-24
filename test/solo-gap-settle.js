@@ -19,6 +19,12 @@
 //   [3] main(): a couch casual run whose FIRST segment never came (the V078 run 14721703 shape): [5,10] + [10,15] settle after the wait
 //   [4] mutation self-checks: the solo lane without gapSettle -> [2] rejects everything (chain-gap); without the ordering guard ->
 //       [15,20] jumps [10,15] and [10,15] is then a chain-back reject (lost)
+//   [5] the floor (user 2026-11-24, ASK_USER A88): the late debits of a settle that only happens because a chain gap was waited out
+//       (the segment that settles on its own and the ones already waiting behind it when it did: plan.waitedOut / run.gapT) -- the
+//       casual solo / couch casual continue ladder and a competitive resume -- take at most the CP balance they find: down to 0, never
+//       below, nothing from a balance already at 0 or below; a balance that covers them pays in full (the charge version the user
+//       chose 11-23); segments not behind a waited-out gap pay as before (even below 0); a class pin on the solo lane's debit lines;
+//       mutants (the floor, its lower bound, each of the three debit sites, the marks, run.gapT, the wait-start check)
 // State isolation is structural (every *_FILE var redirected, cwd = temp dir), harness as test/couch-casual-settle.js.
 const { spawnSync } = require('child_process');
 const fs = require('fs'), path = require('path'), os = require('os'), crypto = require('crypto');
@@ -264,12 +270,13 @@ function advance(state, ms) {
   return files;
 }
 const LB = { xp: 5, cp: 8, casSolo: 15, couchCas: 20 };
+const CPBANK = {};   // [5] Q428 floor: an account's cp_bank balance (world() default 1000)
 function world(recs) {
   const boards = [];
   for (let i = 0; i < 50; i++) boards.push({ id: 1000 + i, name: 'shard_' + i, entries: [] });
   const sids = new Set();
   for (const r of recs) { sids.add(r.sid); boards[r.shard].entries.push({ steamID: r.sid, score: 1, details: r.d }); }
-  boards.push({ id: LB.xp, name: 'progress', entries: [] }, { id: LB.cp, name: 'cp_bank', entries: [...sids].map(s => ({ steamID: s, score: 1000 })) },
+  boards.push({ id: LB.xp, name: 'progress', entries: [] }, { id: LB.cp, name: 'cp_bank', entries: [...sids].map(s => ({ steamID: s, score: CPBANK[s] != null ? CPBANK[s] : 1000 })) },
     { id: 9, name: 'trust_tier', entries: [] }, { id: 10, name: 'report_box', entries: [] },
     { id: 11, name: 'endless_board', entries: [] }, { id: 12, name: 'endless_board_trio', entries: [] }, { id: 13, name: 'endless_board_quad', entries: [] },
     { id: LB.casSolo, name: 'endless_board_solo', entries: [] }, { id: 16, name: 'endless_comp_duo', entries: [] }, { id: 17, name: 'endless_board_overall', entries: [] },
@@ -295,7 +302,7 @@ const start7 = (hash, sid, runSeed) => { const p = sidPair(sid); return [0xB2, 1
 // a guard-signed solo segment (attest.js layout attVer 3, as test/solo-chain-keep.js)
 function soloSeg(o) {
   const [lo, hi] = sidPair(o.sid);
-  const b = [0xB1, 3, 7, A.hash32(o.id), o.runSeed, 0, 1, 0, 1, 300, o.score == null ? 1000 : o.score, o.disp | 0, lo, hi, o.sd, o.ed, 0, 0, 0, o.flags | 0,
+  const b = [0xB1, 3, 7, A.hash32(o.id), o.runSeed, 0, 1, 0, 1, 300, o.score == null ? 1000 : o.score, o.disp | 0, lo, hi, o.sd, o.ed, o.cont | 0, 0, 0, o.flags | 0,
     KEY_ID, 5, 0, 0, 0, 0, 0, 0, 0, 0];
   const sig = crypto.sign(null, A.toBytes(b), PRIV);
   for (let i = 0; i < 16; i++) b.push(sig.readInt32LE(i * 4));
@@ -309,7 +316,7 @@ function couchSeg(sid, id, runSeed, o) {
   for (let i = 0; i < n; i++) d.push(seats[i] | 0);
   d.push(o.disp | 0);
   for (let i = 0; i < n; i++) { const p = sidPair(sid); d.push(p[0], p[1]); }
-  d.push(o.sd | 0, o.ed, 0, 0, 0, o.flags == null ? (A.SEG_CASUAL | A.SEG_COUCH) : o.flags, 0, 0, 0, 0, 0, 0);
+  d.push(o.sd | 0, o.ed, o.cont | 0, 0, 0, o.flags == null ? (A.SEG_CASUAL | A.SEG_COUCH) : o.flags, 0, 0, 0, 0, 0, 0);
   d.push(0xD8 | (1 << 8) | (n << 16), 1 | (2 << 8) | (3 << 16) | (4 << 24));
   d.push(0xE8 | (1 << 8) | (21 << 16), KEY_ID, 1, 0, 0x1234, 0x5678);
   const sig = crypto.sign(null, A.toBytes(d), PRIV);
@@ -397,6 +404,259 @@ const TREE = copyTree('fix');
       R2.rs.length === 6 && sum(R2.rs, (r) => lines(r, R2.m3, /chain gap waited out/)) === 1 && sum(R2.rs, (r) => lines(r, R2.m2, /chain REJECT \((after-final|chain-back)\)/)) === 1 &&
       sum(R2.rs, (r) => lines(r, R2.m2, /solo settle /)) === 0, linesOf(R2.rs, R2.m2) + '\n' + linesOf(R2.rs, R2.m3));
     for (const d of [M1, M2]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch (err) {} }
+  }
+}
+// ---- [5] Q428 floor: the late debits of a settle that only happens because a chain gap was waited out never take the balance below 0 ----
+//   (the user 2026-11-24 on B190, ASK_USER A88, asked whether the late continue fees may take a balance below 0: charged, down to 0,
+//   never below it). The selection (plan.waitedOut / run.gapT) is the reviewed one of the no-fee option; the debit takes at most the
+//   balance it finds.
+{
+  const C = (k) => v.endlessContinueCost(k);
+  // a: the wrapper's mark (pure); W5 = a run whose chain moved past a waited-out gap an hour ago (run.gapT, set by soloAdvance)
+  const key = v.soloRunKey('p5', 0, 5555);
+  const W5 = (gapT) => ({ runs: { [key]: Object.assign({ max: 15, ms: 0, saves: {}, t: NOW }, gapT == null ? {} : { gapT }) }, wait: {}, held: {} });
+  const markCases = (PP) => {
+    const st1 = W5(NOW - HOUR); st1.wait.mo = { t0: NOW - 2 * HOUR };
+    const a1 = PP(st1, key, seg(15, 20, A.SEG_CASUAL), 'mo', NOW, { gapSettle: gs() });
+    const st2 = W5(NOW - HOUR); st2.wait.mf = { t0: NOW - 30 * MIN };
+    const a2 = PP(st2, key, seg(15, 20, A.SEG_CASUAL), 'mf', NOW, { gapSettle: gs() });
+    const stB = W5(null); stB.wait.mb = { t0: NOW - G - 1 };
+    const aB = PP(stB, key, seg(15, 20, A.SEG_CASUAL), 'mb', NOW, { gapSettle: gs() });
+    const a3 = PP(W5(NOW - HOUR), key, seg(15, 20, A.SEG_CASUAL), 'mn', NOW, { gapSettle: gs() });
+    const st4 = W5(NOW - HOUR); st4.wait.mo = { t0: NOW - 2 * HOUR };
+    const a4 = PP(st4, key, seg(15, 20, A.SEG_CASUAL), 'mo', NOW);
+    const st5 = W5(null); PP(st5, key, seg(25, 30, A.SEG_CASUAL), 'mg', NOW - G - 1, { gapSettle: gs() });
+    const a5 = PP(st5, key, seg(25, 30, A.SEG_CASUAL), 'mg', NOW, { gapSettle: gs() });
+    return { a1, a2, aB, a3, a4, a5 };
+  };
+  const { a1, a2, aB, a3, a4, a5 } = markCases(P);
+  T('[5a] a chained segment that was already waiting when the gap settled (wait t0 <= run.gapT) is marked waitedOut', a1.ok === true && !a1.gap && a1.waitedOut === true, JSON.stringify(a1));
+  T('[5a] one that started waiting after the gap settled, or never waited, is not marked (charged as before)', a2.ok === true && !a2.waitedOut && a3.ok === true && !a3.waitedOut, JSON.stringify([a2, a3]));
+  T('[5a] no gap settle on the run (run.gapT absent): even a wait past the window is not marked (a late predecessor, no rescue)', aB.ok === true && !aB.waitedOut, JSON.stringify(aB));
+  T('[5a] without gapSettle (team lanes) nothing is marked', a4.ok === true && !a4.waitedOut, JSON.stringify(a4));
+  T('[5a] the segment that settles on its own is marked', a5.ok === true && a5.gap === true && a5.waitedOut === true, JSON.stringify(a5));
+  const pin = (label, x, n) => T('[5] ' + label, SRC.split(x).length === (n || 1) + 1, 'not found ' + (n || 1) + 'x: ' + x.slice(0, 140));
+  pin('the casual solo and couch casual continue debits of a waitedOut settle both go through the floor', 'if (debit > 0 && plan.waitedOut && !resettleFree.has(m)) debit = gapFloor(cp, m, sid, debit, ', 2);
+  pin('the competitive resume debit of a waitedOut settle goes through the floor', "const resumeCp = plan.waitedOut ? gapFloor(cp, m, sid, COMP.RESUME_CP, 'resume (save@' + plan.consume + ')') : COMP.RESUME_CP;");
+  pin('the floor takes at most the balance, nothing from a balance at 0 or below', 'const take = Math.max(0, Math.min(debit, have));');
+  pin('summary row', "'| solo / couch segments settling only because a chain gap was waited out: late debits (continues, resume) cut so the balance stays at 0 or above / CP not taken (Q428 floor) | ' + s('soloGapCpFloor', 0) + ' / ' + s('soloGapCpFloorCp', 0) + ' |',");
+  // tripwire (class-wide): every CP debit line of the solo lane (cp[sid] = ... - X) is one of the known ones -- a new debit there must
+  //   decide whether a late settle floors it (the user's "down to 0") before this list grows
+  {
+    const a = SRC.indexOf('const soloSettleOwner = async'), b = a < 0 ? -1 : SRC.indexOf('\n  const soloSettle = async', a);
+    const lane = (a >= 0 && b > a) ? SRC.slice(a, b) : '';
+    const deb = lane.split('\n').filter((l) => /cp\[sid\] = \(cp\[sid\] == null \? 0 : cp\[sid\]\) - /.test(l)).map((l) => /\) - ([A-Za-z_.]+);/.exec(l)).map((x) => x && x[1]);
+    T('[5] the solo lane debits exactly three ways: the competitive resume (resumeCp) and the two casual continue ladders (debit) -- each floored for a late settle',
+      !!lane && JSON.stringify(deb) === JSON.stringify(['resumeCp', 'debit', 'debit']), lane ? JSON.stringify(deb) : 'solo lane not found');
+  }
+  // the balance this case's account reads from cp_bank (world() default 1000)
+  const bank = (sid, bal) => { if (bal == null) delete CPBANK[sid]; else CPBANK[sid] = bal; };
+  // b: casual solo: [0,5] (no continue) settles; [5,10] (the 1st continue) never written; [10,15] (2 so far) waits, [15,20] (3)
+  //    written 3 hours later waits too; past [10,15]'s window it settles on its own and [15,20] chains behind it in the same run (its
+  //    own wait still inside the window) -- both late; [20,25] (the 4th) written after that chains and pays the 4th rung as before
+  const caseFee = (tree, n, bal) => {
+    const S = SID(4300 + n), RS = 430000 + n, F = A.SEG_CASUAL;
+    bank(S, bal);
+    const s0 = soloSeg({ sid: S, id: 'q428f-s0-' + n, runSeed: RS, sd: 0, ed: 5, flags: F });
+    const s2 = soloSeg({ sid: S, id: 'q428f-s2-' + n, runSeed: RS, sd: 10, ed: 15, flags: F, cont: 2 });
+    const s3 = soloSeg({ sid: S, id: 'q428f-s3-' + n, runSeed: RS, sd: 15, ed: 20, flags: F, cont: 3 });
+    const s4 = soloSeg({ sid: S, id: 'q428f-s4-' + n, runSeed: RS, sd: 20, ed: 25, flags: F | A.SEG_FINAL, cont: 4 });
+    const pre = [{ sid: S, d: start7(s0[3], S, RS), shard: 0 }, { sid: S, d: s0, shard: 1 }];
+    const late2 = pre.concat([{ sid: S, d: s2, shard: 2 }]);
+    const late = late2.concat([{ sid: S, d: start7(s3[3], S, RS), shard: 3 }, { sid: S, d: s3, shard: 4 }]);
+    const after = late.concat([{ sid: S, d: start7(s4[3], S, RS), shard: 5 }, { sid: S, d: s4, shard: 6 }]);
+    const rs = timeline(tree, [[0, pre], [2 * HOUR, pre], [HOUR, late2], [3 * HOUR, late], [G - 2 * HOUR, late], [HOUR, late], [HOUR, after], [HOUR, after]]);
+    bank(S, null);
+    return { rs, S, m2: keyOf(s2), m3: keyOf(s3), m4: keyOf(s4) };
+  };
+  // c: couch casual: [5,10] (1st continue) and [10,15] (2nd, written 2 hours later) wait for the missing [0,5]
+  const couchFee = (tree, n, bal) => {
+    const S = SID(4310 + n), RS = 431000 + n;
+    bank(S, bal);
+    const c1 = couchSeg(S, 'q428f-c1-' + n, RS, { sd: 5, ed: 10, cont: 1 }), c2 = couchSeg(S, 'q428f-c2-' + n, RS, { sd: 10, ed: 15, cont: 2 });
+    const recs1 = [{ sid: S, d: start7(c1[3], S, RS), shard: 0 }, { sid: S, d: c1, shard: 2 }];
+    const recs = recs1.concat([{ sid: S, d: start7(c2[3], S, RS), shard: 1 }, { sid: S, d: c2, shard: 3 }]);
+    const rs = timeline(tree, [[0, recs1], [2 * HOUR, recs], [G - HOUR, recs], [HOUR, recs]]);
+    bank(S, null);
+    return { rs, S, m1: keyOf(c1), m2: keyOf(c2) };
+  };
+  // e: pushed a run (review round 1 of the no-fee option, probe A): as b without [20,25], but a day later the player starts a NEW run
+  //    whose [0,5] settles in the run [10,15]'s window runs out -- the one-match-at-a-time slot pushes [10,15] a run, [15,20] one more
+  const casePushed = (tree, n, bal) => {
+    const S = SID(4320 + n), RS = 432000 + n, RS2 = 432100 + n, F = A.SEG_CASUAL;
+    bank(S, bal);
+    const s0 = soloSeg({ sid: S, id: 'q428p-s0-' + n, runSeed: RS, sd: 0, ed: 5, flags: F });
+    const s2 = soloSeg({ sid: S, id: 'q428p-s2-' + n, runSeed: RS, sd: 10, ed: 15, flags: F, cont: 2 });
+    const s3 = soloSeg({ sid: S, id: 'q428p-s3-' + n, runSeed: RS, sd: 15, ed: 20, flags: F | A.SEG_FINAL, cont: 3 });
+    const n0 = soloSeg({ sid: S, id: 'q428p-n0-' + n, runSeed: RS2, sd: 0, ed: 5, flags: F | A.SEG_FINAL });
+    const pre = [{ sid: S, d: start7(s0[3], S, RS), shard: 0 }, { sid: S, d: s0, shard: 1 }];
+    const r2 = pre.concat([{ sid: S, d: start7(s2[3], S, RS), shard: 2 }, { sid: S, d: s2, shard: 3 }]);
+    const r3 = r2.concat([{ sid: S, d: start7(s3[3], S, RS), shard: 4 }, { sid: S, d: s3, shard: 5 }]);
+    const r4 = r3.concat([{ sid: S, d: start7(n0[3], S, RS2), shard: 6 }]);
+    const r5 = r4.concat([{ sid: S, d: n0, shard: 7 }]);
+    const rs = timeline(tree, [[0, pre], [2 * HOUR, pre], [HOUR, r2], [3 * HOUR, r3], [G - 3 * HOUR - 5 * MIN, r4], [6 * MIN, r5], [5 * MIN, r5], [5 * MIN, r5], [5 * MIN, r5], [HOUR, r5]]);
+    bank(S, null);
+    return { rs, S, m2: keyOf(s2), m3: keyOf(s3), n0: keyOf(n0) };
+  };
+  // f: no gap settle at all (review round 1 of the no-fee option, probe B): [5,10] arrives a little after a day (inside the 7-day
+  //    wait); [15,20] was uploaded before [10,15], so it waits past its own window behind [10,15]; then [5,10] comes and all three chain
+  //    normally -- not late in the Q428 sense: charged as before, the floor does not apply
+  const caseNoGap = (tree, n, bal) => {
+    const S = SID(4330 + n), RS = 433000 + n, F = A.SEG_CASUAL;
+    bank(S, bal);
+    const s0 = soloSeg({ sid: S, id: 'q428n-s0-' + n, runSeed: RS, sd: 0, ed: 5, flags: F });
+    const x1 = soloSeg({ sid: S, id: 'q428n-x1-' + n, runSeed: RS, sd: 5, ed: 10, flags: F, cont: 1 });
+    const p2 = soloSeg({ sid: S, id: 'q428n-p2-' + n, runSeed: RS, sd: 10, ed: 15, flags: F, cont: 2 });
+    const s3 = soloSeg({ sid: S, id: 'q428n-s3-' + n, runSeed: RS, sd: 15, ed: 20, flags: F | A.SEG_FINAL, cont: 3 });
+    const pre = [{ sid: S, d: start7(s0[3], S, RS), shard: 0 }, { sid: S, d: s0, shard: 1 }];
+    const b2 = pre.concat([{ sid: S, d: start7(x1[3], S, RS), shard: 2 }, { sid: S, d: start7(p2[3], S, RS), shard: 3 }, { sid: S, d: start7(s3[3], S, RS), shard: 4 }, { sid: S, d: s3, shard: 5 }]);
+    const b3 = b2.concat([{ sid: S, d: p2, shard: 6 }]);
+    const b4 = b3.concat([{ sid: S, d: x1, shard: 7 }]);
+    const rs = timeline(tree, [[0, pre], [2 * HOUR, pre], [HOUR, b2], [2 * HOUR, b3], [G - 2 * HOUR + 10 * MIN, b3], [20 * MIN, b4], [HOUR, b4]]);
+    bank(S, null);
+    return { rs, S, mx: keyOf(x1), mp: keyOf(p2), ms: keyOf(s3) };
+  };
+  // g: competitive solo: [0,5] settles; [5,10] never written; [10,15] ends in a save & quit (SUSPENDED: the save point at 15) and
+  //    waits; [15,20] resumes from that save (RESUMED) and waits for the save point (save-orphan) -- past [10,15]'s window it settles
+  //    on its own (the save point recorded), then [15,20] consumes it: a late resume fee (COMP.RESUME_CP)
+  const caseResume = (tree, n, bal) => {
+    const S = SID(4340 + n), RS = 434000 + n;
+    bank(S, bal);
+    const s0 = soloSeg({ sid: S, id: 'q428r-s0-' + n, runSeed: RS, sd: 0, ed: 5, flags: 0 });
+    const s2 = soloSeg({ sid: S, id: 'q428r-s2-' + n, runSeed: RS, sd: 10, ed: 15, flags: A.SEG_SUSPENDED });
+    const s3 = soloSeg({ sid: S, id: 'q428r-s3-' + n, runSeed: RS, sd: 15, ed: 20, flags: A.SEG_RESUMED | A.SEG_FINAL });
+    const pre = [{ sid: S, d: start7(s0[3], S, RS), shard: 0 }, { sid: S, d: s0, shard: 1 }];
+    const late = pre.concat([{ sid: S, d: start7(s2[3], S, RS), shard: 2 }, { sid: S, d: s2, shard: 3 }, { sid: S, d: start7(s3[3], S, RS), shard: 4 }, { sid: S, d: s3, shard: 5 }]);
+    const rs = timeline(tree, [[0, pre], [2 * HOUR, pre], [HOUR, late], [G + 5 * MIN, late], [HOUR, late], [HOUR, late], [HOUR, late]]);
+    bank(S, null);
+    return { rs, S, m2: keyOf(s2), m3: keyOf(s3) };
+  };
+  // the debits a segment paid ([taken, balance after]), its floor cuts ([owed, taken]), the summary row ([cuts, CP not taken])
+  const paid = (rs, m, lane, what) => { const out = []; for (const r of rs) for (const l of r.out.split('\n')) { if (l.indexOf(lane + ' cp ' + m + ':') < 0) continue; const x = new RegExp(' -(\\d+) ' + what + '.* -> (-?\\d+)$').exec(l); if (x) out.push([Number(x[1]), Number(x[2])]); } return out; };
+  const cuts = (rs, m) => { const out = []; for (const r of rs) for (const l of r.out.split('\n')) { if (l.indexOf('gap cp ' + m + ':') < 0) continue; const x = / \((\d+)\) cut to (-?\d+) -- a late settle/.exec(l); if (x) out.push([Number(x[1]), Number(x[2])]); } return out; };
+  const floorRow = (r) => { const x = /late debits \(continues, resume\) cut so the balance stays at 0 or above \/ CP not taken \(Q428 floor\) \| (\d+) \/ (\d+) \|/.exec(r.summary || ''); return x ? [Number(x[1]), Number(x[2])] : null; };
+  const settleRun = (rs, m, lane) => rs.findIndex((r) => lines(r, m, new RegExp(lane + ' settle ')) > 0);
+  const J = (x) => JSON.stringify(x);
+  const gapTs = (r) => Object.values(((r.state || {}).SOLO_FILE || {}).runs || {}).filter((x) => x && x.gapT != null).map((x) => x.gapT);
+  const CC = 'casual continues';
+  // [5b] low balance (43, under the 50 its rungs 1..2 owe)
+  const B = C(1) + C(2) - 7;
+  const R = caseFee(TREE, 0, B);
+  if (!brk(R.rs, 8, '[5b]')) {
+    const rs = R.rs;
+    T('[5b] solo casual, balance ' + B + ': [10,15] settles on its own; its late rungs 1..2 (' + (C(1) + C(2)) + ' CP) are cut to the balance -- the balance goes to 0, not below',
+      lines(rs[5], R.m2, /solo settle .*chain gap waited out/) === 1 && J(cuts(rs, R.m2)) === J([[C(1) + C(2), B]]) && J(paid(rs, R.m2, 'solo', CC)) === J([[B, 0]]), linesOf(rs, R.m2));
+    T('[5b] ... the run keeps when its chain moved past the gap (run.gapT = that job run\'s clock)', gapTs(rs[4]).length === 0 && gapTs(rs[5]).length === 1, J([gapTs(rs[4]), gapTs(rs[5])]));
+    T('[5b] ... [15,20], stuck behind it (own wait inside the window), chains in the same run on a balance of 0: its late rung 3 (' + C(3) + ' CP) takes nothing',
+      lines(rs[5], R.m3, /solo settle /) === 1 && J(cuts(rs, R.m3)) === J([[C(3), 0]]) && paid(rs, R.m3, 'solo', CC).length === 0, linesOf(rs, R.m3));
+    T('[5b] [20,25], written after the gap settled, pays its own rung (4th, ' + C(4) + ' CP) as before -- no floor', sum(rs, (r) => lines(r, R.m4, /solo settle /)) === 1 &&
+      paid(rs, R.m4, 'solo', CC).length === 1 && paid(rs, R.m4, 'solo', CC)[0][0] === C(4) && cuts(rs, R.m4).length === 0, linesOf(rs, R.m4));
+    const fr = floorRow(rs[5]);
+    T('[5b] summary: 2 debits cut, ' + (C(1) + C(2) - B + C(3)) + ' CP not taken', !!fr && fr[0] === 2 && fr[1] === C(1) + C(2) - B + C(3), J(fr));
+    const bankW = rs[5].posts.filter((x) => /SetLeaderboardScore/.test(x.url) && new RegExp('leaderboardid=' + LB.cp + '(&|$)').test(x.body) && x.body.indexOf(R.S) >= 0).map((x) => (/(?:^|&)score=(-?\d+)/.exec(x.body) || [])[1]);
+    T('[5b] the cp_bank row written for the account in that run is 0', bankW.length >= 1 && bankW.every((s) => s === '0'), J(bankW));
+  }
+  // [5b] a balance that covers the late debits: charged in full, exactly as the reviewed "charge" version (the user's 11-23 choice)
+  const RF = caseFee(TREE, 1, null);
+  if (!brk(RF.rs, 8, '[5b-full]')) {
+    const rs = RF.rs;
+    T('[5b] balance 1000: the late rungs 1..2 and 3 are charged in full (' + (C(1) + C(2)) + ' / ' + C(3) + '), nothing cut, summary 0 / 0',
+      J(paid(rs, RF.m2, 'solo', CC).map((x) => x[0])) === J([C(1) + C(2)]) && J(paid(rs, RF.m3, 'solo', CC).map((x) => x[0])) === J([C(3)]) &&
+      J(paid(rs, RF.m4, 'solo', CC).map((x) => x[0])) === J([C(4)]) && cuts(rs, RF.m2).length + cuts(rs, RF.m3).length + cuts(rs, RF.m4).length === 0 && J(floorRow(rs[5])) === J([0, 0]),
+      linesOf(rs, RF.m2) + '\n' + linesOf(rs, RF.m3));
+  }
+  // [5b] a balance already below 0 (-30): the late debits take nothing (the balance stays where it is)
+  const RG = caseFee(TREE, 2, -30);
+  if (!brk(RG.rs, 8, '[5b-neg]')) {
+    const rs = RG.rs;
+    T('[5b] balance -30: both late debits are cut to 0 (nothing taken, the balance not moved further down)',
+      J(cuts(rs, RG.m2)) === J([[C(1) + C(2), 0]]) && J(cuts(rs, RG.m3)) === J([[C(3), 0]]) && paid(rs, RG.m2, 'solo', CC).length + paid(rs, RG.m3, 'solo', CC).length === 0 &&
+      J(floorRow(rs[5])) === J([2, C(1) + C(2) + C(3)]), linesOf(rs, RG.m2) + '\n' + linesOf(rs, RG.m3));
+  }
+  const BC = C(1) - 3;
+  const RC = couchFee(TREE, 0, BC);
+  if (!brk(RC.rs, 4, '[5c]')) {
+    const rs = RC.rs;
+    T('[5c] couch casual, balance ' + BC + ': [5,10] settles on its own (head 0) and its late rung 1 (' + C(1) + ') is cut to ' + BC + '; [10,15] chains behind it and its rung 2 takes nothing',
+      lines(rs[2], RC.m1, /chain gap waited out/) === 1 && lines(rs[2], RC.m2, /couch settle /) === 1 &&
+      J(cuts(rs, RC.m1)) === J([[C(1), BC]]) && J(paid(rs, RC.m1, 'couch', CC)) === J([[BC, 0]]) && J(cuts(rs, RC.m2)) === J([[C(2), 0]]) && paid(rs, RC.m2, 'couch', CC).length === 0,
+      linesOf([rs[2]], RC.m1) + '\n' + linesOf([rs[2]], RC.m2));
+  }
+  const RP = casePushed(TREE, 0, 10);
+  if (!brk(RP.rs, 10, '[5e]')) {
+    const rs = RP.rs, a = settleRun(rs, RP.n0, 'solo'), b = settleRun(rs, RP.m2, 'solo'), c = settleRun(rs, RP.m3, 'solo');
+    T('[5e] pushed: the new run\'s [0,5] takes the one-match slot, [10,15] settles on its own a run later, [15,20] a run after that', a >= 0 && b > a && c > b && lines(rs[b], RP.m2, /chain gap waited out/) === 1,
+      J({ n0: a, s2: b, s3: c }) + '\n' + linesOf(rs, RP.m3));
+    const c2 = cuts(rs, RP.m2), c3 = cuts(rs, RP.m3), p2 = paid(rs, RP.m2, 'solo', CC), p3 = paid(rs, RP.m3, 'solo', CC);
+    const okCut = (cs, ps, owed) => cs.length === 1 && cs[0][0] === owed && cs[0][1] <= 10 && ps.reduce((s, x) => s + x[0], 0) === cs[0][1] && ps.every((x) => x[1] === 0);
+    T('[5e] ... both are still late, each a run apart: rungs 1..2 (' + (C(1) + C(2)) + ') and rung 3 (' + C(3) + ') each cut to the balance it finds (10), never below 0',
+      okCut(c2, p2, C(1) + C(2)) && okCut(c3, p3, C(3)), J({ c2, p2, c3, p3 }));
+  }
+  const RN = caseNoGap(TREE, 0, 10);
+  if (!brk(RN.rs, 7, '[5f]')) {
+    const rs = RN.rs, gapAny = sum(rs, (r) => (r.out.match(/chain gap waited out/g) || []).length);
+    T('[5f] no gap settle (a predecessor late but inside the wait), balance 10: all three chain normally and pay their rungs in full (as before, the floor does not apply)',
+      gapAny === 0 && settleRun(rs, RN.ms, 'solo') >= 0 && J(paid(rs, RN.mx, 'solo', CC).map((x) => x[0])) === J([C(1)]) && J(paid(rs, RN.mp, 'solo', CC).map((x) => x[0])) === J([C(2)]) &&
+      J(paid(rs, RN.ms, 'solo', CC).map((x) => x[0])) === J([C(3)]) && cuts(rs, RN.ms).length + cuts(rs, RN.mp).length + cuts(rs, RN.mx).length === 0,
+      linesOf(rs, RN.ms));
+  }
+  const RR = caseResume(TREE, 0, -60);
+  if (!brk(RR.rs, 7, '[5g]')) {
+    const rs = RR.rs, b = settleRun(rs, RR.m2, 'solo'), c = settleRun(rs, RR.m3, 'solo');
+    T('[5g] competitive, balance -60: [10,15] (save & quit) settles on its own, [15,20] resumes from its save point and its late resume fee (' + v.COMP.RESUME_CP + ') takes nothing',
+      b >= 0 && c >= b && lines(rs[b], RR.m2, /chain gap waited out/) === 1 && lines(rs[c], RR.m3, /solo settle /) === 1 &&
+      J(cuts(rs, RR.m3)) === J([[v.COMP.RESUME_CP, 0]]) && paid(rs, RR.m3, 'solo', 'resume').length === 0, linesOf(rs, RR.m2) + '\n' + linesOf(rs, RR.m3));
+  }
+  const RRF = caseResume(TREE, 1, null);
+  if (!brk(RRF.rs, 7, '[5g-full]')) {
+    const rs = RRF.rs;
+    T('[5g] competitive, balance 1000: the late resume fee is charged in full (' + v.COMP.RESUME_CP + '), nothing cut',
+      J(paid(rs, RRF.m3, 'solo', 'resume').map((x) => x[0])) === J([v.COMP.RESUME_CP]) && cuts(rs, RRF.m3).length === 0, linesOf(rs, RRF.m3));
+  }
+  // d: mutants -- each must turn [5a] / [5b] / [5c] / [5e] / [5g] red
+  const markGap = '    if (plan.gap) plan.waitedOut = true;\n';
+  const markStuck = '    else if (w && run && run.gapT != null && (w.t0 || 0) <= run.gapT) plan.waitedOut = true;\n';
+  const keepT = '  if (plan.gap) run.gapT = nowMs;', tCheck = ' && (w.t0 || 0) <= run.gapT';
+  const soloFix = "      if (debit > 0 && plan.waitedOut && !resettleFree.has(m)) debit = gapFloor(cp, m, sid, debit, 'solo casual continues (rung ' + (prev + 1) + '..' + n + ')');   // Q428 floor: never below 0 (a reopened key keeps its Q413 line below)\n";
+  const couchFix = "      if (debit > 0 && plan.waitedOut && !resettleFree.has(m)) debit = gapFloor(cp, m, sid, debit, 'couch casual continues (rung ' + (prev + 1) + '..' + n + ')');   // Q428 floor: never below 0 (a reopened key keeps its Q413 line below)\n";
+  const resumeFix = "plan.waitedOut ? gapFloor(cp, m, sid, COMP.RESUME_CP, 'resume (save@' + plan.consume + ')') : COMP.RESUME_CP;";
+  const clamp = 'const take = Math.max(0, Math.min(debit, have));';
+  if ([markGap, markStuck, keepT, soloFix, couchFix, resumeFix, clamp].some((x) => SRC.split(x).length !== 2) || markStuck.split(tCheck).length !== 2) bad('[5d] the floor lines were not found -- the mutants cannot be built');
+  else {
+    const fullAt = (rs, m, lane, what, owed) => { const p = paid(rs, m, lane, what); return p.length === 1 && p[0][0] === owed && p[0][1] < 0 && cuts(rs, m).length === 0; };
+    const M1 = copyTree('mut-clamp', SRC.replace(clamp, 'const take = debit;'));
+    const R1 = caseFee(M1, 11, B), R1c = couchFee(M1, 11, BC), R1r = caseResume(M1, 11, -60);
+    T('[5d] mutant (the floor removed: the late debit takes it all): [10,15] / [15,20] / the couch pair / the late resume each take the balance below 0',
+      fullAt(R1.rs, R1.m2, 'solo', CC, C(1) + C(2)) && fullAt(R1.rs, R1.m3, 'solo', CC, C(3)) && fullAt(R1c.rs, R1c.m1, 'couch', CC, C(1)) && fullAt(R1c.rs, R1c.m2, 'couch', CC, C(2)) &&
+      fullAt(R1r.rs, R1r.m3, 'solo', 'resume', v.COMP.RESUME_CP), linesOf(R1.rs, R1.m2) + '\n' + linesOf(R1r.rs, R1r.m3));
+    const M2 = copyTree('mut-zero', SRC.replace(clamp, 'const take = Math.min(debit, have);'));
+    const R2 = caseFee(M2, 12, -30);
+    T('[5d] mutant (no lower bound at 0: a balance already below 0 reads as a negative take): the cut is not "to 0", the summary miscounts', J(cuts(R2.rs, R2.m2)) !== J([[C(1) + C(2), 0]]) ||
+      J(floorRow(R2.rs[5])) !== J([2, C(1) + C(2) + C(3)]), linesOf(R2.rs, R2.m2));
+    const M3 = copyTree('mut-mark', SRC.replace(markGap + markStuck, ''));
+    const R3 = caseFee(M3, 3, B), R3c = couchFee(M3, 3, BC);
+    T('[5d] mutant (no waitedOut mark): [10,15] and [15,20] take the balance below 0, the couch pair too', fullAt(R3.rs, R3.m2, 'solo', CC, C(1) + C(2)) && fullAt(R3.rs, R3.m3, 'solo', CC, C(3)) &&
+      fullAt(R3c.rs, R3c.m1, 'couch', CC, C(1)) && fullAt(R3c.rs, R3c.m2, 'couch', CC, C(2)), linesOf(R3.rs, R3.m2));
+    const M4 = copyTree('mut-solo', SRC.replace(soloFix, ''));
+    const R4 = caseFee(M4, 4, B);
+    T('[5d] mutant (the casual solo debit skips the floor): [10,15] and [15,20] take the balance below 0', fullAt(R4.rs, R4.m2, 'solo', CC, C(1) + C(2)) && fullAt(R4.rs, R4.m3, 'solo', CC, C(3)), linesOf(R4.rs, R4.m2));
+    const M5 = copyTree('mut-couch', SRC.replace(couchFix, ''));
+    const R5 = couchFee(M5, 5, BC);
+    T('[5d] mutant (the couch casual debit skips the floor): both couch segments take the balance below 0', fullAt(R5.rs, R5.m1, 'couch', CC, C(1)) && fullAt(R5.rs, R5.m2, 'couch', CC, C(2)), linesOf(R5.rs, R5.m1));
+    const M6 = copyTree('mut-stuck', SRC.replace(markStuck, ''));
+    const R6 = caseFee(M6, 6, B);
+    T('[5d] mutant (only the segment that settles on its own is floored): [15,20], stuck behind it, takes the balance below 0', J(cuts(R6.rs, R6.m2)) === J([[C(1) + C(2), B]]) && fullAt(R6.rs, R6.m3, 'solo', CC, C(3)), linesOf(R6.rs, R6.m3));
+    const M7 = copyTree('mut-gapt', SRC.replace(keepT, '  {}'));
+    const R7 = casePushed(M7, 7, 10), R7c = couchFee(M7, 7, BC);
+    T('[5d] mutant (soloAdvance keeps no gap time): the pushed [15,20] and the couch [10,15] behind the gap take the balance below 0',
+      cuts(R7.rs, R7.m2).length === 1 && fullAt(R7.rs, R7.m3, 'solo', CC, C(3)) && cuts(R7c.rs, R7c.m1).length === 1 && fullAt(R7c.rs, R7c.m2, 'couch', CC, C(2)), linesOf(R7.rs, R7.m3));
+    const M8 = copyTree('mut-t0', SRC.replace(markStuck, markStuck.replace(tCheck, '')));
+    let b2 = null; try { const v8 = require(path.join(M8, 'validate.js')); b2 = markCases((st, k, f, m, t, o) => v8.soloChainPlan(st, k, f, m, t, Object.assign({ requireTag: false }, o || {}))).a2; } catch (err) { b2 = { err: String(err && err.message) }; }
+    T('[5d] mutant (no wait-start check): a segment that started waiting after the gap settled is marked too', !!b2 && b2.ok === true && b2.waitedOut === true, J(b2));
+    const M9 = copyTree('mut-resume', SRC.replace(resumeFix, 'COMP.RESUME_CP;'));
+    const R9 = caseResume(M9, 9, -60);
+    T('[5d] mutant (the competitive resume skips the floor): the late resume fee takes the balance further below 0', fullAt(R9.rs, R9.m3, 'solo', 'resume', v.COMP.RESUME_CP), linesOf(R9.rs, R9.m3));
+    for (const d of [M1, M2, M3, M4, M5, M6, M7, M8, M9]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch (err) {} }
   }
 }
 try { fs.rmSync(TREE, { recursive: true, force: true }); } catch (err) {}

@@ -4576,6 +4576,7 @@ function writeRunSummary() {
       '| backlog writes answered result 27 (the account no longer owns the app): accounts marked this run / waiting writes not sent (they go a day after the last 27, or with a settle of his) / marks cleared by a settle of his (O775) | ' + s('wGone', 0) + ' / ' + s('wHeld', 0) + ' / ' + s('wBack', 0) + ' |',
       '| solo segments held by the key policy (other channel / retired key; new this run) | ' + s('keyHeld', 0) + ' (' + s('keyHeldNew', 0) + ') |',
       '| solo / couch segments whose predecessor never came, settled on their own once the wait ran out (Q428: XP from their own start, nothing taken) | ' + s('soloGapSettled', 0) + ' |',
+      '| solo / couch segments settling only because a chain gap was waited out: late debits (continues, resume) cut so the balance stays at 0 or above / CP not taken (Q428 floor) | ' + s('soloGapCpFloor', 0) + ' / ' + s('soloGapCpFloorCp', 0) + ' |',
       '| duration | ' + ((Date.now() - (RUN.t0 || Date.now())) / 1000).toFixed(1) + 's |',
       '',
     ].join('\n'));
@@ -9233,6 +9234,19 @@ function soloChainPlan(st, key, f, m, nowMs, opts) {
   const plan = soloChainVerdict(st, key, f, m, nowMs, opts);
   const gs = opts && opts.gapSettle;
   if (gs && plan.ok !== false) (gs.seen[key] = gs.seen[key] || []).push([f.startDepth | 0, f.endDepth | 0]);   // open this run: may still move the head
+  // Q428 floor (the user 2026-11-24 on B190, ASK_USER A88: the late fees are charged, "down to 0" -- never below it): a settle that
+  //   only happens because a chain gap was waited out is marked waitedOut -- the segment that settles on its own (plan.gap) and the
+  //   ones stuck behind it: a segment that was already waiting (its wait entry) when that gap settle happened (run.gapT, set by
+  //   soloAdvance), whatever run it chains in afterwards (the one-match-at-a-time slot or the pacing gate may push it a run or two).
+  //   Its late debits (the casual / couch casual continue ladder, a competitive resume) then take at most the CP balance they find
+  //   (gapFloor in main(): the player may have spent the CP these rejected segments never took); the rung count still moves on, so
+  //   a later segment of the run is not charged for those rungs either. A segment that chains without a gap settle in front of it
+  //   (normal play, a predecessor that came late but inside the window, one first written after the gap settled) is charged as before.
+  if (gs && plan.ok === true) {
+    const w = st.wait[m], run = st.runs[key];
+    if (plan.gap) plan.waitedOut = true;
+    else if (w && run && run.gapT != null && (w.t0 || 0) <= run.gapT) plan.waitedOut = true;
+  }
   return plan;
 }
 // Q428: an earlier segment of this run (a lower start) seen this run that would still move the chain head
@@ -9343,6 +9357,7 @@ function soloAdvance(st, key, f, m, plan, nowMs) {
   if (f.rerollLo != null) run.rr = { lo: f.rerollLo >>> 0, hi: f.rerollHi >>> 0 };   // reroll bitmap at close (rerollChain: monotone across segments)
   if ((f.flags | 0) & attest.SEG_SUSPENDED) { const sk = String(f.endDepth | 0); run.saves[sk] = Object.assign(run.saves[sk] || {}, { t: nowMs }); }   // audit B-F6: merge -- never drop `by` (one save, one resume)
   if (plan.rtags && plan.rtags.length) { run.revs = run.revs || {}; for (const t of plan.rtags) if (!run.revs[t]) run.revs[t] = m; }   // R1-A3-02: this row (tag) has started its one session
+  if (plan.gap) run.gapT = nowMs;                              // Q428 floor: when this run's chain last moved past a waited-out gap (segments waiting then never pay below a 0 balance)
   if (plan.revive) run.final = 0;                              // O218 casual token resume brings a FINAL run back (its own FINAL below may close it again)
   if ((f.flags | 0) & attest.SEG_RESUMED) run.contN = 0;       // O218: the continue ladder restarts with the guard session (renderer / guard / cron alike)
   if ((f.flags | 0) & attest.SEG_FINAL) run.final = 1;
@@ -12147,6 +12162,19 @@ async function main() {
     RUN.resettleCpFreeCp = (RUN.resettleCpFreeCp || 0) + (debit | 0);
     console.log('  resettle cp ' + m + ': ' + plog(sid) + ' ' + what + ' (' + debit + ') not charged -- a reopened key (Q413 / O920 / O922)');
   };
+  // Q428 floor (user 2026-11-24, ASK_USER A88): a debit of a segment that settles only because its chain gap was waited out
+  //   (soloChainPlan plan.waitedOut) takes at most the balance it finds -- down to 0, never below it; nothing when the balance is
+  //   already 0 or below. The part not taken is counted and logged. Returns the CP to take.
+  const gapFloor = (bank, m, sid, debit, what) => {
+    const have = bank[sid] == null ? 0 : bank[sid];
+    const take = Math.max(0, Math.min(debit, have));
+    if (take < debit) {
+      RUN.soloGapCpFloor = (RUN.soloGapCpFloor | 0) + 1;
+      RUN.soloGapCpFloorCp = (RUN.soloGapCpFloorCp || 0) + (debit - take);
+      console.log('  gap cp ' + m + ': ' + plog(sid) + ' ' + what + ' (' + debit + ') cut to ' + take + ' -- a late settle (its chain gap was waited out) never takes the balance below 0 (Q428)');
+    }
+    return take;
+  };
   // O618: game-error reports (err_sig, client-writable) -> their first sightings by this job + evidence on the confession entries.
   //   Record-only until confirmed-errors.json lists an error (err-refund.js header); a read failure / an absent board changes nothing.
   const errSt = errRefund.loadErrState(ERR_STATE_FILE);
@@ -14614,8 +14642,11 @@ async function main() {
     if (plan.gap) RUN.soloGapSettled = (RUN.soloGapSettled | 0) + 1;   // Q428
     if (untaggedResume(f)) RUN.resumeUntagged = (RUN.resumeUntagged | 0) + 1;
     if (plan.consume) {
-      cp[sid] = (cp[sid] == null ? 0 : cp[sid]) - COMP.RESUME_CP; changedCp[sid] = cp[sid];
-      console.log('  solo cp ' + m + ': ' + plog(sid) + ' -' + COMP.RESUME_CP + ' resume (save@' + plan.consume + ') -> ' + cp[sid]);
+      const resumeCp = plan.waitedOut ? gapFloor(cp, m, sid, COMP.RESUME_CP, 'resume (save@' + plan.consume + ')') : COMP.RESUME_CP;   // Q428 floor: a late resume never below 0
+      if (resumeCp > 0) {
+        cp[sid] = (cp[sid] == null ? 0 : cp[sid]) - resumeCp; changedCp[sid] = cp[sid];
+        console.log('  solo cp ' + m + ': ' + plog(sid) + ' -' + resumeCp + ' resume (save@' + plan.consume + ') -> ' + cp[sid]);
+      }
     }
     if (ccCas) {
       // knife C3a (O278) casual couch: P1's continue ladder (the guard counts every continue on seat 0, cumulative over the guard session;
@@ -14625,6 +14656,7 @@ async function main() {
       //   count). No milestones, no cup, no rating history.
       const n = endlessNib(f.continuesUsed, 0), prev = run.contN | 0;
       let debit = 0; for (let k = prev + 1; k <= n; k++) debit += endlessContinueCost(k);
+      if (debit > 0 && plan.waitedOut && !resettleFree.has(m)) debit = gapFloor(cp, m, sid, debit, 'couch casual continues (rung ' + (prev + 1) + '..' + n + ')');   // Q428 floor: never below 0 (a reopened key keeps its Q413 line below)
       if (debit > 0 && resettleFree.has(m)) resettleNoCharge(m, sid, debit, 'couch casual continues (rung ' + (prev + 1) + '..' + n + ')');   // Q413: a reopened key pays nothing
       else if (debit > 0) { cp[sid] = (cp[sid] == null ? 0 : cp[sid]) - debit; changedCp[sid] = cp[sid]; console.log('  couch cp ' + m + ': ' + plog(sid) + ' -' + debit + ' casual continues (rung ' + (prev + 1) + '..' + n + ') -> ' + cp[sid]); }
       if (n > prev) run.contN = n;
@@ -14661,6 +14693,7 @@ async function main() {
       //   client RatingStore.continueCost = guard ENDLESS_CONT_COST. No milestones (competitive-only), the ladder is the casual solo pair.
       const n = endlessNib(f.continuesUsed, 0), prev = run.contN | 0;
       let debit = 0; for (let k = prev + 1; k <= n; k++) debit += endlessContinueCost(k);
+      if (debit > 0 && plan.waitedOut && !resettleFree.has(m)) debit = gapFloor(cp, m, sid, debit, 'solo casual continues (rung ' + (prev + 1) + '..' + n + ')');   // Q428 floor: never below 0 (a reopened key keeps its Q413 line below)
       if (debit > 0 && resettleFree.has(m)) resettleNoCharge(m, sid, debit, 'solo casual continues (rung ' + (prev + 1) + '..' + n + ')');   // Q413: a reopened key pays nothing
       else if (debit > 0) { cp[sid] = (cp[sid] == null ? 0 : cp[sid]) - debit; changedCp[sid] = cp[sid]; console.log('  solo cp ' + m + ': ' + plog(sid) + ' -' + debit + ' casual continues (rung ' + (prev + 1) + '..' + n + ') -> ' + cp[sid]); }
       if (n > prev) run.contN = n;
