@@ -478,7 +478,8 @@
     const d0 = plan ? plan.adjDelta : lpDelta(cur, rank, pc);
     const won = plan ? !!plan.won : ((rank | 0) <= (pc + 1) / 2);
     // O989: a `still` row (a couch main under a couch multiplier of 0) moves nothing, a series match included
-    let d = ((plan && (plan.flag === 2 || plan.still)) || seeded || (placing && !won)) ? d0 : crosslineDelta(cur, d0, won);
+    if (plan && plan.still) return { d0, d: d0, won, nv: Math.max(0, Math.min(LP_MAX, cur + d0)), clamped: false, capped: false };
+    let d = ((plan && plan.flag === 2) || seeded || (placing && !won)) ? d0 : crosslineDelta(cur, d0, won);
     const clamped = d !== d0;
     let capped = false;
     if (placing) {

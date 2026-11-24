@@ -252,7 +252,7 @@ const sum = (rs) => ({ fJ: fOf(last(rs), J), fH: fOf(last(rs), H), pdJ: pdOf(las
     [res([R(H, rec(0xB1, 10, h, 0, 1, true, [H, J], [7000, 4000])), R(J, durBad(rec(0xB1, 10, h, 1, 1, true, [H, J], [4000, 7000])))]).own, res(g2(10, [H, J], 10, [H, J], 5)).own],
     [[J + ':duration'], []]);
   eq('[1] an endless run past DUR_CAP is no duration fault (endless has no cap)', res([R(H, rec(0xB1, 7, h, 0, 1, true, [H, J], [7000, 4000])), R(J, durBad(rec(0xB1, 7, h, 1, 1, true, [H, J], [4000, 7000])))]), two);
-  eq('[1] SANITY_HOST_SLUGS: the roster reasons and the seat', v.SANITY_HOST_SLUGS, ['self-seat', 'sid-range', 'dup-sid', 'seat']);
+  eq('[1] SANITY_HOST_SLUGS: the roster reasons and the seat', v.SANITY_HOST_SLUGS, ['self-seat', 'sid-range', 'dup-sid', 'guest-roster', 'seat', 'guest-seat']);   // O989: + the two guest-seat reasons of a couch table
   }
 }
 

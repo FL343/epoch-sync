@@ -3385,7 +3385,7 @@ function sanityFlags(g) {
   //   main's -- another guest, the other team of a team code, or a brawl's premade trio / another party pair over the two.
   const guestMask = guestSeatMaskOf(mt);
   if (guestMask) {
-    if (PT_MODE && out.indexOf('mt') < 0) out.push('mt');
+    if (PT_MODE && !out.includes('mt')) out.push('mt');
     if (SEAT_MASK_BASES.indexOf(base) < 0 || (guestMask & seatMask) !== 0) out.push('guest-mask');
     if ((guestMask >> Math.max(0, Math.min(pc, 6))) !== 0 || (guestMask & 1) || accountSeatsOf(mt, pc) < 2) out.push('guest-range');
     else for (let s = 1; s < pc; s++) {
@@ -16427,7 +16427,8 @@ async function main() {
     // O989: a couch match waits while the rules-cfg file is not usable (RULES_CFG): its multipliers are not guessed
     if (RULES_CFG.bad && guestSeatMaskOf(matchType)) {
       RUN.cfgHeld = (RUN.cfgHeld | 0) + 1;
-      RUN.keptKeep = (RUN.keptKeep | 0) + keptKeep(pend, g.concat(dropRecs), nowMs, keptKeys(SALT));   // Q373: what it read, should the shards lose it
+      const heldRecs = g.concat(dropRecs);
+      RUN.keptKeep = (RUN.keptKeep | 0) + keptKeep(pend, heldRecs, nowMs, keptKeys(SALT));   // Q373: what it read, should the shards lose it
       console.log('  couch-cfg-hold ' + c.m + ': the rules-cfg file is not usable (' + RULES_CFG.bad + ') -- deferred until it is fixed (O989)');
       continue;
     }
@@ -16691,7 +16692,8 @@ async function main() {
     const partsG = guests.length ? parts.concat(guests).sort((a, b) => a.seat - b.seat) : parts;
     const isGuestId = (id) => guests.some((x) => x.steamID === id);
     const couchRev = guestSeatMaskOf(matchType) ? RULES_CFG.rev : null;   // the rules-cfg revision a couch match's receipts carry
-    const sorted = [...partsG].sort((a, b) => b.score - a.score);
+    const sorted = [...parts].sort((a, b) => b.score - a.score);
+    if (guests.length) { sorted.length = 0; for (const p of [...partsG].sort((a, b) => b.score - a.score)) sorted.push(p); }   // O989: the guests in the ranking
     let rank = 1; const rankOf = {};
     for (let i = 0; i < sorted.length; i++) { if (i > 0 && sorted[i].score < sorted[i - 1].score) rank = i + 1; sorted[i].rank = rank; rankOf[sorted[i].steamID] = rank; }
     // team modes: overwrite with the team-convention ranks BEFORE XP/TrueSkill so both consume the

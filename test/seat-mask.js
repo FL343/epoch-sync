@@ -54,8 +54,8 @@ ok('[3] validate.js compares no raw match type to a number', () => {
   assert.deepStrictEqual(hits, [], 'compare mtSansSeats(d[2]) or baseMt(d[2]) instead: ' + hits.join(' | '));
 });
 ok('[4] mutation: a raw comparison put back is caught (a record\'s d[2], a pending entry\'s mt)', () => {
-  // a record's d[2]: the W103 lane's record check (Q446 moved lone1v1Claim's old exact code 2 into lone1v1Mt)
-  for (const [from, to] of [['mtSansSeats(r.d[2]) !== QUIT_LONE.MT', '(r.d[2] | 0) !== QUIT_LONE.MT'], ['mtSansSeats(p.mt) !== QUIT_LONE.MT || consistentKeys', '(p.mt | 0) !== QUIT_LONE.MT || consistentKeys']]) {
+  // a record's d[2]: the W103 lane's record check (Q446 moved lone1v1Claim's old exact code 2 into lone1v1Mt; O989: the lane reads the code through quitLoneMt)
+  for (const [from, to] of [['quitLoneMt(r.d[2]) !== QUIT_LONE.MT', '(r.d[2] | 0) !== QUIT_LONE.MT'], ['quitLoneMt(p.mt) !== QUIT_LONE.MT || consistentKeys', '(p.mt | 0) !== QUIT_LONE.MT || consistentKeys']]) {   // O989: the lane reads the code through quitLoneMt (mtSansSeats, less a couch pair's own party bit)
     assert.strictEqual(VSRC.split(from).length, 2, 'anchor once: ' + from);
     assert.strictEqual(rawCompares(VSRC.replace(from, to)).length, 1, from);
   }

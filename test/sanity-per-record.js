@@ -218,10 +218,10 @@ else {
     T('[1] every record bad (1v1, both durations): no throw, both dropped, keep empty', !err && spA && spA.drop.length === 2 && spA.keep.length === 0,
       err ? String(err) : JSON.stringify(spA && spA.drop.map(x => [x.sid, x.why])));
   }
-  T('[1] (rework 2) SANITY_ROSTER_SLUGS pinned: the roster reasons that flag nobody', JSON.stringify(v.SANITY_ROSTER_SLUGS) === JSON.stringify(['self-seat', 'sid-range', 'dup-sid']), JSON.stringify(v.SANITY_ROSTER_SLUGS));
-  T('[1] (Q292) SANITY_HOST_SLUGS pinned: the roster reasons and the seat', JSON.stringify(v.SANITY_HOST_SLUGS) === JSON.stringify(['self-seat', 'sid-range', 'dup-sid', 'seat']), JSON.stringify(v.SANITY_HOST_SLUGS));
+  T('[1] (rework 2) SANITY_ROSTER_SLUGS pinned: the roster reasons that flag nobody', JSON.stringify(v.SANITY_ROSTER_SLUGS) === JSON.stringify(['self-seat', 'sid-range', 'dup-sid', 'guest-roster']), JSON.stringify(v.SANITY_ROSTER_SLUGS));   // O989: + a roster naming an account on a couch pair's guest seat
+  T('[1] (Q292) SANITY_HOST_SLUGS pinned: the roster reasons and the seat', JSON.stringify(v.SANITY_HOST_SLUGS) === JSON.stringify(['self-seat', 'sid-range', 'dup-sid', 'guest-roster', 'seat', 'guest-seat']), JSON.stringify(v.SANITY_HOST_SLUGS));   // O989: + a record written from a guest seat
   // the per-record half covers every per-record reason sanityFlags can return
-  T('[1] SANITY_RECORD_SLUGS pinned', JSON.stringify(v.SANITY_RECORD_SLUGS) === JSON.stringify(['duration', 'seat', 'self-seat', 'sid-range', 'dup-sid', 'dup-writer']));
+  T('[1] SANITY_RECORD_SLUGS pinned', JSON.stringify(v.SANITY_RECORD_SLUGS) === JSON.stringify(['duration', 'seat', 'self-seat', 'sid-range', 'dup-sid', 'dup-writer', 'guest-seat', 'guest-roster']));   // O989: + the two guest-seat reasons (test/guest-seat-settle.js [7])
 }
 
 // ---- [2] ranked FFA 3P: C's duration out of bounds ----

@@ -16,7 +16,9 @@ const bad = (m) => { failN++; console.log('  FAIL  ' + m); };
 const T = (label, cond, detail) => { if (cond) ok(label); else bad(label + (detail ? ' -- ' + detail : '')); };
 const J = JSON.stringify;
 const load = (src) => { const w = {}; new Function('window', src)(w); return w.POINTS_PLAN; };
-const KNOWN = ['upset', 'mismatch', 'expected', 'upset_loss', 'solo_shield', 'trio_tax', 'teammate_left'];
+const KNOWN = ['upset', 'mismatch', 'expected', 'upset_loss', 'solo_shield', 'trio_tax', 'teammate_left',
+  'couch_shield', 'couch_tax'];   // O989: a couch pair at the table (the seven above are the labels of every case without a guest seat; a third,
+//   'couch_mult', comes only with a rules-cfg multiplier under 1 -- no golden case runs one: test/guest-seat-settle.js [5] / [8])
 
 function checks(PP) {
   const out = {};

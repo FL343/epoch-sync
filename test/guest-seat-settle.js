@@ -206,6 +206,18 @@ if (on(3)) {
     const mx = run(SETTLE(c2), {}, { SKILL_FILE: sk(A) }, f);
     T('[3] mutant (the stand-in at the default rating, not his main\'s): B moves otherwise -- caught', mx.okAll && settled(mx, c2.key) && J(mu2(skillOf(mx, B))) !== J(mu2(skillOf(m, B))), J([skillOf(mx, B), skillOf(m, B)]));
   }
+  // a known residual (the companion plan keeps "the main is rated at his own place of the whole table"): the main and his own
+  //   guest are rated against each other when they finish next to each other. Pinned so it stays small: for a settled main
+  //   (sigma 1.5) a place right above his guest is worth about half of a place above a known equal player, right below it
+  //   costs less than that; the guest is never rated, so nothing accumulates on his side.
+  {
+    const dr = (q) => ts.displayRating(q.mu, q.sigma);
+    const main = { id: 'm', mu: 30, sigma: 1.5 }, guest = { id: 'g', mu: 30, sigma: ts.DEFAULTS.sigma }, known = { id: 'k', mu: 30, sigma: 1.5 };
+    const of = (a, b) => ts.updateMatch([Object.assign({ rank: 1 }, a), Object.assign({ rank: 2 }, b)]).find((x) => x.id === 'm');
+    const up = dr(of(main, guest)) - dr(main), down = dr(of(guest, main)) - dr(main), upKnown = dr(of(main, known)) - dr(main);
+    T('[3] unit (known residual): a settled main right above his own guest +' + up + ' / right below ' + down + ' display points; above a known equal player +' + upKnown,
+      up > 0 && up <= 10 && down < 0 && down >= -10 && up * 2 <= upKnown + 2, J([up, down, upKnown]));
+  }
   // three and six seats
   const [E1, E2] = SIDS(98960), [F1, F2, F3, F4, F5] = SIDS(98970);
   const t3 = match(1 | G(0b010), 0x98925, [E1, Z, E2], [0, 2]);

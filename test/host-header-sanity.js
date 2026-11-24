@@ -233,7 +233,7 @@ function sum(p, sids, n) {
 
 // ---- [1] units ----
 {
-  eq('[1] SANITY_HEADER_SLUGS', v.SANITY_HEADER_SLUGS, ['mt', 'pc', 'mask-range', 'trio-range', 'unit-overlap', 'nobot', 'seat-mask', 'seat-mask-range']);   // O716: the ranked-seat mask rides START_GAME too
+  eq('[1] SANITY_HEADER_SLUGS', v.SANITY_HEADER_SLUGS, ['mt', 'pc', 'mask-range', 'trio-range', 'unit-overlap', 'nobot', 'seat-mask', 'seat-mask-range', 'guest-mask', 'guest-range', 'guest-pair']);   // O989: so does the guest-seat mask of a couch pair (test/guest-seat-settle.js [7])   // O716: the ranked-seat mask rides START_GAME too
   const g1 = (mt, ros, pc, extra) => ros.map((s, i) => s == null ? null : R(s, rec(0xB1, mt, 0x2900, i, i + 1, i === 0, ros, null, pc))).filter(Boolean).concat(extra || []);
   const held = (g) => v.sanityHeaderHeld(g);
   const cases = [

@@ -166,6 +166,24 @@ absent, so a run is unaffected before it is provisioned.
   codes, mismatch UPSET / PROTECTED, the series clamp, seeds, the leaver fine, the board bounds) that
   both repos replay (`test/points-plan-fixtures.js` here); `tools/gen-points-fixtures.js` regenerates
   them with a rules change and prints the `FIXTURES_HASH` the module must carry.
+- Couch pairs (O989, 2026-11-24): a matchmade table may seat one machine's two players -- one account (the
+  main) and, at the next seat, a guest with no account. Bits 17-22 of the match type name the guest seats
+  (`points-plan.js` `GUEST_SEAT_SHIFT`; part of the match key), the roster leaves them empty, a team code
+  seats both on one team. `validate.js` counts the guest as a player while his main is at the settle
+  (ranking, player count, the rating update at the main's rating with a newcomer's uncertainty, the points
+  plan) and writes nothing for him; a start written from a guest seat or naming an account on one counts
+  nowhere; the sanity reasons `guest-mask` / `guest-range` / `guest-pair` hold a table whose header is off
+  and `guest-seat` / `guest-roster` drop one record, nobody flagged. In a brawl the pair is one unit of the
+  points plan (the average place of its two seats); a solo's loss there is compressed and the pair's win
+  taxed. A record without the mask is read exactly as before (`test/guest-seat-rules.js` replays a frozen
+  copy of the rules file against it), so `RULES_VER` did not move. Tests: `test/guest-seat-settle.js`.
+- `rules-cfg.json` (O989; absent = the defaults) -- the four couch numbers of `points-plan.js` that move
+  without a build (`CFG_KEYS`). `validate.js` reads it at the start of a run, publishes it on the pulse row
+  (`[0xCC, RULES_VER, 0xC9, rev, four values in permille]`: the tail is also the job's word that it reads
+  guest seats) and stamps `rev` on the receipts of the couch matches it settles (bits 24-30 of the flags);
+  a settled match is never read again under a later revision. A file the job cannot use holds every couch
+  match until it is fixed. Write it with `tools/rules-cfg.js set ...` only (`test/rules-cfg-tool.js`); a
+  change is a commit on the job's branch.
 - `streak-plan.js` — the matchmade win streak rules (O181): events ordered by the match's start minute
   (this job settles out of order), a 12 h window folded into a prefix, freezes (interrupted matches, a
   loss after a teammate left, the first convicted absence in a week), breaks (a confessed quit, a
