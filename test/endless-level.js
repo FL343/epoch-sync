@@ -466,7 +466,18 @@ function sReplayCarry(m) {
 //   one short of it, or a death three short: no run his client ended at its line is judged a miss (the P0: the screen said "target
 //   reached"); deaths judged passes (the set's price, in his favour) stay under 10 %. Carrying only the lowest reading (rule (c)
 //   alone) fails it: the chains cross after a death between the two targets
-function sCarryLong(m, out) {
+// O1015 (2026-11-24): the restart readings (elpRestartReads: a relaunched 0.6.1-0.6.3 client's start, verdict only) are switched off in
+//   [16] / [17] -- the job past the version 8 gate (PUB_VER 8, its cutover before these worlds) -- so they keep checking the Q432 set /
+//   lift ALONE: a client here that never reads its row walks the job's own chain, which the restart readings would read too and mask.
+//   Those readings have their own checks (test/elp-restart-start.js); with them on, deaths judged passes here rise to about 13 % (the
+//   chance cost the user accepted for O1015).
+function restartOff(m) {
+  const R = m.RATING, keep = { pub: R.PUB_VER, cut: R.CUTOVER_MS };
+  R.PUB_VER = 8; R.CUTOVER_MS = 1;
+  return () => { R.PUB_VER = keep.pub; R.CUTOVER_MS = keep.cut; };
+}
+function sCarryLong(m, out) { const undo = restartOff(m); try { return sCarryLongOn(m, out); } finally { undo(); } }
+function sCarryLongOn(m, out) {
   const e = [], t0 = T0 + 7000 * MIN, seeds = [7801, 7802, 7803, 7804];
   let deaths = 0, lenient = 0;
   const nexts = (Tc) => [{ pass: true, d: Tc }, { pass: false, d: Math.max(0, Tc - 1) }, { pass: false, d: Math.max(0, Tc - 3) }];
@@ -499,8 +510,10 @@ function sCarryLong(m, out) {
 //   line was judged a miss; elpQ432Lift of the real job turns those runs into passes (target = the depth), adds the difference (the
 //   points only go up, every player), leaves quits / deaths no reading of the replayed set passes as they were, and a second lift
 //   changes nothing
-function sLift(m) {
+function sLift(m) { const undo = restartOff(m); try { return sLiftOn(m); } finally { undo(); } }
+function sLiftOn(m) {
   const e = [], old = mutantOf([['const set = elpLvSetOf(after, ch.outs);', 'const set = [after];'], ['if (have) return elpLvUniq([have].concat(elpLvSet(c, fam)));', 'if (have) return [have];']]);
+  restartOff(old);   // the old job had no restart readings either (O1015 came after the Q432 lift)
   const t0 = T0 + 8000 * MIN, seeds = [7901, 7902, 7903];
   const nexts = (Tc) => [{ pass: true, d: Tc }, { pass: false, d: Math.max(0, Tc - 1) }, { pass: false, d: Math.max(0, Tc - 3) }];
   let harmed = 0, worlds = 0;
