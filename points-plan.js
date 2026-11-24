@@ -23,7 +23,7 @@
   else if (root) root.POINTS_PLAN = api;
 })(typeof module === 'object' && !!module && typeof exports === 'object' && this === exports, typeof window !== 'undefined' ? window : null, function () {
   const RULES_VER = 2;
-  const FIXTURES_HASH = 'e482ca6f7351bb55';
+  const FIXTURES_HASH = '909c6146c5f93399';
   // the knobs configure() can move (production runs these defaults)
   const DEFAULTS_0 = Object.freeze({ RS_THRESHOLD: 400, RS_UPSET_BONUS: 1.0, RS_STRONG_UPSET_LOSS: 0.5, RS_SOLO_VS_TRIO: 0.6, RS_TRIO_WIN: 0.7, LEAVER_LP_PENALTY: 100 });
   // ... plus the couch-pair four (O989, see the couch-pair note below): the job moves these through its rules-cfg, not the environment

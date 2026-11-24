@@ -180,7 +180,46 @@ const CASES = [
   ...endlessCases(),
   // ---- O991 version 8 (the grow phase): kind elpLevel8 ----
   ...level8Cases(),
+  // ---- O989 a couch pair (the guest-seat mask, bits 17-22; the guest's row carries his main's rating and points) ----
+  //   Added at the end, every name starting with "couch": the cases above are the file of before O989, byte for byte
+  //   (test/guest-seat-rules.js [2]). No settled delta of a table without a guest moves, so RULES_VER stays.
+  ...couchCases(),
 ];
+// the couch cases (O989): one account + his guest (g*) as one unit of a brawl, a full member of his team
+function couchCases() {
+  const guest = (mt, mask) => (mt | ((mask | 0) << 17));   // GUEST_SEAT_SHIFT
+  const B4 = guest(seats(1, 0b0101), 0b0010);              // a brawl of four: seat 0 the main (ranked), seat 1 his guest, seat 2 ranked, seat 3 quick
+  return [
+    { name: 'couch ffa4: the main 1st, his guest 2nd (average place 1.5, the win of the pair taxed); a solo loses (shielded)', kind: 'match', mt: B4,
+      parts: [P('m', 0, 1300, 1, 1000), P('g1', 1, 1300, 2, 1000), P('s', 2, 1300, 3, 1000), P('q', 3, 1300, 4, 900)] },
+    { name: 'couch ffa4: the main 1st, his guest last (average place 2.5: the drip alone); a solo wins (as ever)', kind: 'match', mt: B4,
+      parts: [P('m', 0, 1300, 1, 1000), P('g1', 1, 1300, 4, 1000), P('s', 2, 1300, 2, 1000), P('q', 3, 1300, 3, 900)] },
+    { name: 'couch ffa4: the pair in the lower half (its loss is not shielded), the solo 1st', kind: 'match', mt: B4,
+      parts: [P('m', 0, 1300, 3, 2400), P('g1', 1, 1300, 4, 2400), P('s', 2, 1300, 1, 2500), P('q', 3, 1300, 2, 900)] },
+    { name: 'couch ffa4: the main left (no row of his, none of his guest): the others as a table of two', kind: 'match', mt: B4,
+      parts: [P('s', 2, 1300, 1, 1000), P('q', 3, 1300, 2, 900)] },
+    { name: 'couch ffa4 with a mismatch: the loss of the weak solo takes the stronger of the two protections, the win of the strong pair the stronger compression', kind: 'match', mt: guest(seats(1, 0b1101), 0b0010),
+      parts: [P('m', 0, 2100, 1, 3300), P('g1', 1, 2100, 2, 3300), P('s', 2, 1300, 3, 1200), P('w', 3, 1250, 4, 700)] },
+    { name: 'couch ffa3: the pair off the seat-pair grid (main at seat 1, guest at 2), no party bit', kind: 'match', mt: guest(seats(1, 0b011), 0b100),
+      parts: [P('s', 0, 1300, 3, 1000), P('m', 1, 1300, 1, 1000), P('g2', 2, 1300, 2, 1000)] },
+    { name: 'couch ffa4: the party bit of the pair itself set as well (the same unit)', kind: 'match', mt: guest(seats(ffa(1, 1, 0), 0b0101), 0b0010),
+      parts: [P('m', 0, 1300, 1, 1000), P('g1', 1, 1300, 2, 1000), P('s', 2, 1300, 3, 1000), P('q', 3, 1300, 4, 900)] },
+    { name: 'couch ffa6: a couch pair, a premade trio and a solo (the loss of the solo: the trio shield is the stronger)', kind: 'match', mt: guest(seats(ffa(1, 0, 4), 0b111101), 0b000010),
+      parts: [P('m', 0, 1500, 2, 2300), P('g1', 1, 1500, 5, 2300), P('s', 2, 1500, 6, 2300), P('t3', 3, 1500, 1, 2300), P('t4', 4, 1500, 3, 2300), P('t5', 5, 1500, 4, 2300)] },
+    { name: 'couch ffa6: two couch pairs and two solos', kind: 'match', mt: guest(seats(1, 0b110101), 0b001010),
+      parts: [P('m0', 0, 1500, 1, 2300), P('g1', 1, 1500, 2, 2300), P('m2', 2, 1500, 5, 4100), P('g3', 3, 1500, 6, 4100), P('s4', 4, 1500, 3, 2300), P('s5', 5, 1500, 4, 6100)] },
+    { name: 'couch 2v2 (team brawl 3): a couch pair against two accounts, the pair wins on money', kind: 'match', mt: guest(seats(3, 0b0101), 0b0010),
+      parts: [P('m', 0, 1500, 1, 1000), P('g1', 1, 1500, 2, 1000), P('a2', 2, 1500, 3, 1000), P('q3', 3, 1500, 4, 500)], team: { scores: [900, 700, 600, 500], leaverSeats: [], winTeam: null } },
+    { name: 'couch 2v2 (team brawl 3): two accounts, a guest each (the couch duo table)', kind: 'match', mt: guest(seats(3, 0b0101), 0b1010),
+      parts: [P('m0', 0, 1500, 1, 1000), P('g1', 1, 1500, 2, 1000), P('m2', 2, 1500, 3, 2400), P('g3', 3, 1500, 4, 2400)], team: { scores: [900, 700, 600, 500], leaverSeats: [], winTeam: null } },
+    { name: 'couch 2V2 (5): the couch pair loses on the sub-score, in a relegation match', kind: 'match', mt: guest(seats(5, 0b0111), 0b1000),
+      parts: [P('a0', 0, 1600, 1, 2300), P('a1', 1, 1600, 2, 2600), P('m', 2, 1500, 3, 2050), P('g3', 3, 1500, 4, 2050)], team: { scores: [100, 40, 95, 60], leaverSeats: [], winTeam: 0 } },
+    { name: 'couch 3V3 (8): guests at seats 1 and 5, the team of seat 0 wins', kind: 'match', mt: guest(seats(8, 0b011101), 0b100010),
+      parts: [P('m0', 0, 1600, 1, 3100), P('g1', 1, 1600, 2, 3100), P('a2', 2, 1600, 3, 2900), P('a3', 3, 1600, 4, 3000), P('m4', 4, 1600, 5, 3200), P('g5', 5, 1600, 6, 3200)],
+      team: { scores: [500, 400, 300, 200, 250, 100], leaverSeats: [], winTeam: 0 } },
+    { name: 'couch seat: a brawl of four (the guest seat is never a ranked one; the code without its seat masks)', kind: 'seat', mt: B4 },
+  ];
+}
 // the endless cases (O728): fixed pass lines (not ELP.PRIOR, so retuning the prior moves no case)
 function endlessCases() {
   const SOLO = [2, 6, 10, 15, 24, 38, 55], DUO = [3, 10, 16, 24, 38, 61, 88], TRIO = [3, 11, 18, 27, 40, 60, 85], QUAD = [4, 12, 20, 30, 44, 66, 90];
