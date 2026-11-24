@@ -4575,6 +4575,7 @@ function writeRunSummary() {
       '| classic ladder rows in the old key of accounts that no longer own the app (result 27), not rewritten for 7 days (O624) | ' + s('classicRepackGone', 0) + ' |',
       '| backlog writes answered result 27 (the account no longer owns the app): accounts marked this run / waiting writes not sent (they go a day after the last 27, or with a settle of his) / marks cleared by a settle of his (O775) | ' + s('wGone', 0) + ' / ' + s('wHeld', 0) + ' / ' + s('wBack', 0) + ' |',
       '| solo segments held by the key policy (other channel / retired key; new this run) | ' + s('keyHeld', 0) + ' (' + s('keyHeldNew', 0) + ') |',
+      '| solo / couch segments whose predecessor never came, settled on their own once the wait ran out (Q428: XP from their own start, nothing taken) | ' + s('soloGapSettled', 0) + ' |',
       '| duration | ' + ((Date.now() - (RUN.t0 || Date.now())) / 1000).toFixed(1) + 's |',
       '',
     ].join('\n'));
@@ -6847,7 +6848,8 @@ function creditXpEndless(g, tail, xp, changedXp, spSet, mult) {   // O216: class
 //   debit once per consumed save) under these rules:
 //   - a segment settles only when its predecessor settled ending exactly at its startDepth (or its
 //     startDepth is 0): the pacing gate credits the chained depth; an unchained claim waits up to
-//     CHAIN_WAIT_MS for the predecessor and is then rejected;
+//     CHAIN_WAIT_MS for the predecessor and is then rejected (cloud audit Q428: in this signed lane it
+//     settles on its own then instead -- soloChainPlan opts.gapSettle);
 //   - a RESUMED segment needs a settled SUSPENDED segment of the same run ending at its startDepth,
 //     and that save point resumes ONCE (a replay of the same signed save row is rejected);
 //   - nothing follows a FINAL segment; a second depth-0 segment on the same run is a replay.
@@ -6900,6 +6902,9 @@ const COMP = {
   MILESTONES: [[10, 40], [20, 80], [30, 150]],                                // lockstep: ENDLESS.COMP.MILESTONES (depth -> CP, once per run)
   CKPT_EVERY: 5,                                                              // lockstep: ENDLESS.CHECKPOINT_EVERY (guard segment cadence = max span)
   CHAIN_WAIT_MS: Number(process.env.COMP_CHAIN_WAIT_MS || 7 * 86400000),      // unchained segment waits this long for its predecessor, then rejects
+  // cloud audit Q428: a guard-signed segment (solo / couch lane) still waiting for its predecessor this long settles on its own
+  //   instead (soloChainPlan opts.gapSettle); never longer than CHAIN_WAIT_MS (the wait clock is pruned a day after it). Default = it
+  GAP_SETTLE_MS: Number(process.env.COMP_GAP_SETTLE_MS || process.env.COMP_CHAIN_WAIT_MS || 7 * 86400000),
   MS_TTL_MS: Number(process.env.COMP_MS_TTL_MS || 120 * 86400000),           // milestone bitmaps (player x season x ladder family) outlive a season
   RUN_TTL_MS: Number(process.env.COMP_RUN_TTL_MS || 45 * 86400000),           // run chain memory (saves included) pruned after -- unless a save can still bring the run back (soloRunKept, Q327)
   RUN_CAP: Number(process.env.COMP_RUN_CAP || 100000),                       // fuse: chain memory entries past it forget the oldest idle past RUN_TTL_MS, never a run inside it (about 15 MB at ~150 bytes each; Q327)
@@ -9214,15 +9219,42 @@ function soloTagReused(run, tags, m) {
 //   { ok: true, proven, consume?, revive?, rtags? }  settle (proven = depth credited to the pacing gate; consume = save point used;
 //                                                    rtags = resume tags soloAdvance records as used by this segment)
 //   { ok: false, reason }           reject (processed, no credit)      { ok: null, reason }  wait
+// cloud audit Q428 (user 11-22, ASK_USER A82 option 1): a segment of a guard-signed lane (solo + couch: the signature and the owner
+//   binding are the gate, checked before the planner) that waited out its window for a predecessor that never came -- a record
+//   that never reached the shards, so the run's every later segment waited 7 days and was rejected (live: 54 runs, 240 segments
+//   on 11-22) -- settles on its own instead: the 5.0i truncated rule (XP from its own start depth, the ladder at its end depth,
+//   pacing from the chain head; its successors then chain from its end). Only a 'chain-gap' wait, never a missing save point
+//   ('save-orphan': one save, one resume) nor the consensus lanes (team competitive / classic: no signature, a forged mid-run
+//   segment would buy a depth). opts.gapSettle = { seen: {} }, one object per run of the job: a later segment never jumps an
+//   earlier segment of its run that is still open this run (waiting, or chained and deferred by pacing) -- that one settles first.
+//   { ok: true, proven, truncated: true, gap: true }  settled past a gap (proven = the chain head, 0 when there is none)
 function soloChainPlan(st, key, f, m, nowMs, opts) {
+  const plan = soloChainVerdict(st, key, f, m, nowMs, opts);
+  const gs = opts && opts.gapSettle;
+  if (gs && plan.ok !== false) (gs.seen[key] = gs.seen[key] || []).push([f.startDepth | 0, f.endDepth | 0]);   // open this run: may still move the head
+  return plan;
+}
+// Q428: an earlier segment of this run (a lower start) seen this run that would still move the chain head
+function soloGapBehind(gs, key, run, sd) {
+  const head = run ? (run.max | 0) : 0;
+  for (const [s, e] of (gs.seen[key] || [])) if (s < sd && e > head) return true;
+  return false;
+}
+function soloChainVerdict(st, key, f, m, nowMs, opts) {
   const run = st.runs[key];
   if (run && run.burnt) return { ok: false, reason: 'run-burnt' };   // R1-A3-02: a run caught resuming a used row settles nothing more
   const needTag = (opts && opts.requireTag != null) ? !!opts.requireTag : RESUME_TAG_REQUIRED;   // R1-A3-02 pre-fix window lever (tests pass it)
+  const gs = (opts && opts.gapSettle) || null, gapMs = Math.min(COMP.GAP_SETTLE_MS, COMP.CHAIN_WAIT_MS);   // Q428
   const waitOr = (reason) => {
     if (soloRunHasHeld(st, key, m, nowMs)) { st.wait[m] = { t0: nowMs }; return { ok: null, reason: reason + ' (a segment of this run is held by the key policy)' }; }   // R1-A5-07: a held segment of this run restarts the wait clock (soloKeyHeld)
     const w = st.wait[m] || (st.wait[m] = { t0: nowMs });
+    if (gs && reason === 'chain-gap' && nowMs - (w.t0 || 0) > gapMs) {   // Q428: waited out -> settle past the gap (the caller turns { gap } into a verdict)
+      if (soloGapBehind(gs, key, run, f.startDepth | 0)) return { ok: null, reason: reason + ' (an earlier segment of this run is still open)' };
+      return { gap: true };
+    }
     return (nowMs - (w.t0 || 0) > COMP.CHAIN_WAIT_MS) ? { ok: false, reason } : { ok: null, reason };
   };
+  const gapped = () => ({ ok: true, proven: run ? (run.max | 0) : 0, truncated: true, gap: true });   // Q428: the 5.0i truncated credit
   const sd = f.startDepth | 0, fl = f.flags | 0;
   const casualResume = !!(fl & attest.SEG_RESUMED) && !!(fl & attest.SEG_CASUAL);
   const classicResume = !!(fl & attest.SEG_RESUMED) && !!(fl & attest.SEG_CLASSIC);   // O216: shop-token row cut at the purchase depth (any depth)
@@ -9237,10 +9269,12 @@ function soloChainPlan(st, key, f, m, nowMs, opts) {
       //   PROVEN (run.max >= sd) -- no checkpoint-multiple rule; no resume debit. Replay defence: the guard tombstones the row on consume,
       //   but the box is client-writable (the original row bytes can be written back and the guard accepts them again), so the cron
       //   holds the line: one row (resume tag) starts one resumed session per run (R1-A3-02).
-      if (!run || (run.max | 0) < sd) return waitOr('chain-gap');
+      let gap = false;
+      if (!run || (run.max | 0) < sd) { const w = waitOr('chain-gap'); if (!w.gap) return w; gap = true; }   // Q428: waited out -> on its own (the tag rule below still holds)
       const rtags = resumeTagsOf(f);
       if (!rtags.length && needTag) return { ok: false, reason: 'resume-untagged' };   // lever on: a build before the fix can no longer token-resume
       if (soloTagReused(run, rtags, m)) { run.burnt = 1; return { ok: false, reason: 'save-reused' }; }
+      if (gap) return rtags.length ? Object.assign(gapped(), { revive: !!(run && run.final), rtags }) : Object.assign(gapped(), { revive: !!(run && run.final) });
       return rtags.length ? { ok: true, proven: sd, revive: !!run.final, rtags } : { ok: true, proven: sd, revive: !!run.final };   // no tag (a build before the fix) = as before
     }
     if (casualResume) {
@@ -9251,10 +9285,12 @@ function soloChainPlan(st, key, f, m, nowMs, opts) {
       //   writes a second row at the same checkpoint): the row's resume tag may start one session per run (R1-A3-02 -- the guard
       //   tombstone alone does not hold, the box is client-writable and the original row bytes can be written back).
       if (sd % COMP.CKPT_EVERY !== 0) return { ok: false, reason: 'resume-not-checkpoint' };
-      if (!run || (run.max | 0) < sd) return waitOr('chain-gap');
+      let gap = false;
+      if (!run || (run.max | 0) < sd) { const w = waitOr('chain-gap'); if (!w.gap) return w; gap = true; }   // Q428: waited out -> on its own (the tag rule below still holds)
       const rtags = resumeTagsOf(f);
       if (!rtags.length && needTag) return { ok: false, reason: 'resume-untagged' };   // lever on: a build before the fix can no longer token-resume
       if (soloTagReused(run, rtags, m)) { run.burnt = 1; return { ok: false, reason: 'save-reused' }; }
+      if (gap) return rtags.length ? Object.assign(gapped(), { revive: !!(run && run.final), rtags }) : Object.assign(gapped(), { revive: !!(run && run.final) });
       return rtags.length ? { ok: true, proven: sd, revive: !!run.final, rtags } : { ok: true, proven: sd, revive: !!run.final };   // no tag (a build before the fix) = as before
     }
     const sv = run && run.saves && run.saves[String(sd)];
@@ -9267,7 +9303,8 @@ function soloChainPlan(st, key, f, m, nowMs, opts) {
   //   predecessors are gone is credited from its own start: ladder = its end depth, XP from its start depth, pacing from the chain
   //   head (0 when there is none). A RESUMED segment still needs its save / checkpoint proof (branch above). Live shards: unchanged.
   const truncated = () => ({ ok: true, proven: run ? (run.max | 0) : 0, truncated: true });
-  if (!run) return (opts && opts.recovered) ? truncated() : waitOr('chain-gap');
+  const gapOr = () => { const w = waitOr('chain-gap'); return w.gap ? gapped() : w; };   // Q428
+  if (!run) return (opts && opts.recovered) ? truncated() : gapOr();
   if ((run.max | 0) === sd) return { ok: true, proven: sd };
   if ((run.max | 0) > sd) {
     // audit 2026-09-06 B-F2: the chain head is a FLOOR, not an equality. An overlapping segment that still reaches past the head
@@ -9278,7 +9315,7 @@ function soloChainPlan(st, key, f, m, nowMs, opts) {
     if ((f.endDepth | 0) > (run.max | 0)) return { ok: true, proven: run.max | 0, overlap: sd };
     return { ok: false, reason: 'chain-back' };
   }
-  return (opts && opts.recovered) ? truncated() : waitOr('chain-gap');
+  return (opts && opts.recovered) ? truncated() : gapOr();
 }
 // milestones newly crossed by this segment (bitmap on the holder: a soloMsSlot = once per player x season x ladder family). Mutates holder.ms only.
 //   O991 (the user's Q3, 2026-11-23): list = the [depth, CP] list of the run's rules -- a version 8 run passes points-plan.js
@@ -14272,6 +14309,7 @@ async function main() {
   // ===== O93 solo competitive segment settle (COMP block above) =====
   //   (soloState is read before the fresh list -- cloud audit Q245)
   const ratingTouched = new Set();   // O103: sids whose competitive run history moved this run (settled segment / conviction) -> their rating row is redone in maintainRating
+  const soloGapTick = { seen: {} };   // cloud audit Q428: soloChainPlan opts.gapSettle -- the solo lane's segments open this run, per chain key
   // O180 (client knife 5.1c-1): this week's boards -- the id from the chain memory (kept when the week's first write created the
   //   board; the listing can lag behind a fresh board) or the listing; neither = no row this week yet (created at the first write).
   //   A read failure leaves cupWeekOk false: weekly rows are skipped this run (a KeepBest against an unread board could overwrite a
@@ -14499,7 +14537,7 @@ async function main() {
       return false;
     }
     const key = laneKeyOf(f, p);
-    const plan = soloChainPlan(soloState, key, f, m, nowMs, { recovered: !!r.recovered });
+    const plan = soloChainPlan(soloState, key, f, m, nowMs, { recovered: !!r.recovered, gapSettle: soloGapTick });   // Q428: signed lane -- a waited-out chain gap settles on its own
     if (plan.ok === null) { console.log('  solo ' + m + ': ' + plog(sid) + ' depth ' + f.startDepth + '->' + f.endDepth + ' waiting for its chain (' + plan.reason + ')'); return false; }
     if (plan.ok === false) {
       RUN.soloRej = (RUN.soloRej | 0) + 1;
@@ -14548,7 +14586,7 @@ async function main() {
     // (a recovered pool segment whose start row was overwritten by the pool rotation is not a missing-start signal)
     if (!pend) {
       pend = startsPending[m] = { t0: nowMs, mt: r.d[2] | 0, roster: {}, settled: [], synth: true };
-      if (!(soloState.held && soloState.held[m])) { if (!r.recovered) sigPlayer(signals, p, nowMs).ns += 1; }   // R1-A5-07: a segment released from a key hold may have outlived its start row
+      if (!(soloState.held && soloState.held[m])) { if (!r.recovered && !plan.gap) sigPlayer(signals, p, nowMs).ns += 1; }   // R1-A5-07: a segment released from a key hold may have outlived its start row; Q428: so may one that waited out a chain gap
       sigDirty = true;
     }
     const reqMs = endlessRequiredMs({ startDepth: f.startDepth, endDepth: f.endDepth }, plan.proven, classic ? CLASSIC.LEVEL_S_SOLO : 0);   // O216: classic 60s levels
@@ -14572,6 +14610,7 @@ async function main() {
     recordEndlessSignals(signals, [sid], nowMs); sigDirty = true;
     seedStarterCp(cp, changedCp, [sid]);   // O789 (1): every channel (cpId resolved: the lane returned above without it)
     const run = soloAdvance(soloState, key, f, m, plan, nowMs);
+    if (plan.gap) RUN.soloGapSettled = (RUN.soloGapSettled | 0) + 1;   // Q428
     if (untaggedResume(f)) RUN.resumeUntagged = (RUN.resumeUntagged | 0) + 1;
     if (plan.consume) {
       cp[sid] = (cp[sid] == null ? 0 : cp[sid]) - COMP.RESUME_CP; changedCp[sid] = cp[sid];
@@ -14648,7 +14687,7 @@ async function main() {
     // 5.4a career: solo endless = the default miner (forced); one game per session end; an overlap segment with no new depth adds nothing
     //   O606: a couch run's character block (the guard writes each seat's character) -> P1's own seat (forced: false)
     if (xpId && (plan.overlap == null || (f.endDepth | 0) > (plan.proven | 0))) creditCareerEndless(c.g, { startDepth: Math.max(f.startDepth | 0, plan.proven | 0), endDepth: f.endDepth | 0, flags: f.flags | 0 }, xpState, careerTouched, { segmented: true, forced: !cc });
-    console.log('  ' + laneTag + ' settle ' + m + ': ' + plog(sid) + (cc ? ' couch pc ' + f.N + (ccCas ? ' casual' : '') : classic ? ' classic' : (casual ? ' casual' : '')) + ' depth ' + f.startDepth + '->' + f.endDepth + ' bank ' + f.score + ' flags ' + f.flags + ((f.dispCode | 0) === attest.DISP_USER_QUIT ? ' (quit)' : '') + ' key=' + f.keyName + (v.sealed ? '' : ' [dev]') + (plan.overlap != null ? ' (overlap from ' + plan.overlap + ', proven ' + plan.proven + ')' : '') + (plan.truncated ? ' (recovered pool segment: truncated chain, head ' + plan.proven + ')' : '') + (plan.revive ? (classic ? ' (revived by a classic token resume)' : ' (revived by a casual token resume)') : ''));
+    console.log('  ' + laneTag + ' settle ' + m + ': ' + plog(sid) + (cc ? ' couch pc ' + f.N + (ccCas ? ' casual' : '') : classic ? ' classic' : (casual ? ' casual' : '')) + ' depth ' + f.startDepth + '->' + f.endDepth + ' bank ' + f.score + ' flags ' + f.flags + ((f.dispCode | 0) === attest.DISP_USER_QUIT ? ' (quit)' : '') + ' key=' + f.keyName + (v.sealed ? '' : ' [dev]') + (plan.overlap != null ? ' (overlap from ' + plan.overlap + ', proven ' + plan.proven + ')' : '') + (plan.gap ? ' (chain gap waited out: settled on its own, head ' + plan.proven + ', Q428)' : plan.truncated ? ' (recovered pool segment: truncated chain, head ' + plan.proven + ')' : '') + (plan.revive ? (classic ? ' (revived by a classic token resume)' : ' (revived by a casual token resume)') : ''));
     soloDone();
     return true;
   };

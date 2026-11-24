@@ -130,7 +130,7 @@ console.log('-- D) wiring --');
   T('reconcile reads the pools only on the demo app', /APPID === DEMO_APPID\) \? loadRecover\(RECOVER_FILE, 'demo', Date\.now\(\)\)/.test(vSrc));
   T('reconcile pushes recovered segments + starts into the normal pipeline', /for \(const r of fresh\) recs\.push\(r\);/.test(vSrc) && /for \(const s of got\.starts\) starts\.push\(s\);/.test(vSrc));
   T('seedcap twin reads the same filtered set', /v\.loadRecover\(v\.RECOVER_FILE, SEEDCAP_CHANNEL, Date\.now\(\)\)/.test(sSrc) && /v\.recoverPick\(rows, rc,/.test(sSrc));
-  T('recovered segment without a start row is not a missing-start signal', /if \(!r\.recovered\) sigPlayer\(signals, p, nowMs\)\.ns \+= 1;/.test(vSrc));
+  T('recovered segment without a start row is not a missing-start signal', /if \(!r\.recovered(?: && !plan\.gap)?\) sigPlayer\(signals, p, nowMs\)\.ns \+= 1;/.test(vSrc));
 }
 
 console.log('-- E) truncated chain (recovered rows only) --');
@@ -159,7 +159,7 @@ console.log('-- E) truncated chain (recovered rows only) --');
   p = V.soloChainPlan(st4, 'k', seg(15, 20), 'm7', now, { recovered: true });
   T('recovered row after the run is final -> rejected (unchanged)', p.ok === false && p.reason === 'after-final');
   const vSrc = fs.readFileSync(path.join(__dirname, '..', 'validate.js'), 'utf8');
-  T('solo lane passes the recovered flag; team lanes do not', /soloChainPlan\(soloState, key, f, m, nowMs, \{ recovered: !!r\.recovered \}\)/.test(vSrc)
+  T('solo lane passes the recovered flag; team lanes do not', /soloChainPlan\(soloState, key, f, m, nowMs, \{ recovered: !!r\.recovered(?:, gapSettle: soloGapTick)? \}\)/.test(vSrc)
     && (vSrc.match(/soloChainPlan\(soloState, key, f, c\.m, nowMs\)/g) || []).length === 2);
 }
 
