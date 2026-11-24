@@ -158,14 +158,12 @@ for (let i = 0; i < 4000; i++) TABLES.push(i % 3 === 2 ? team() : brawl());
   };
   const m1 = load('if (couch.size && !isCouch && u.length === 1 && base < 0) {', 'if (units.some((q) => q.length === 2) && u.length === 1 && base < 0) {');
   if (m1) T('[5] mutant (the solo shield on every brawl with a premade pair, mask or not): [1] goes red', TABLES.some((t) => reading(m1, t) !== reading(OLD, t)));
-  const m2 = load("const cMult = guestSeatMaskOf(matchType) ? couchMult(roster.filter(p => !isGuestSeat(matchType, p.seat)).length) : 1;", 'const cMult = 0.5;');
-  const m2b = m2 && load('if (cMult !== 1 && guestSeatOfMain(matchType, p.seat) >= 0) {', 'if (cMult !== 1) {');
-  if (m2) T('[5] (a multiplier alone moves nothing while the row test still reads the mask)', TABLES.every((t) => reading(m2, t) === reading(OLD, t)));
-  const m3 = load('if (cMult !== 1 && guestSeatOfMain(matchType, p.seat) >= 0) {', 'if (guestSeatOfMain(matchType, p.seat) < 0) {');
+  const m2 = load('return gs >= 0 && seatHere.has(gs); }).length) : 1;', 'return gs >= 0 && seatHere.has(gs); }).length) : 0.5;');
+  if (m2) T('[5] (a team multiplier on every table moves nothing while the row test still reads the mask)', TABLES.every((t) => reading(m2, t) === reading(OLD, t)));
+  const m3 = load('if (cMult !== 1 && guestSeatOfMain(matchType, p.seat) >= 0 && seatHere.has(guestSeatOfMain(matchType, p.seat))) {', 'if (guestSeatOfMain(matchType, p.seat) < 0) {');
   if (m3) T('[5] mutant (the couch multiplier row test reversed: every ordinary team row marked): [1] goes red', TABLES.some((t) => reading(m3, t) !== reading(OLD, t)));
   const m4 = load('const rev = cfgRev == null ? (old ? receiptCfgRev(old.flags) : 0) : ((cfgRev | 0) & 0x7f);', 'const rev = 1;');
   if (m4) T('[5] mutant (a revision on every receipt): the ring differs from the old one', J(m4.receiptPush([], 1, 2, 0, 0xff)) !== J(OLD.receiptPush([], 1, 2, 0, 0xff)));
-  void m2b;
 }
 console.log(failN ? ('guest-seat-rules: ' + failN + ' FAIL') : 'guest-seat-rules: all ok');
 process.exit(failN ? 1 : 0);
