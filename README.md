@@ -175,7 +175,7 @@ absent, so a run is unaffected before it is provisioned.
   nowhere; the sanity reasons `guest-mask` / `guest-range` / `guest-pair` hold a table whose header is off
   and `guest-seat` / `guest-roster` drop one record, nobody flagged. In a brawl the pair is one unit of the
   points plan (the average place of its two seats); a solo's loss there is compressed and the pair's win
-  taxed. A record without the mask is read exactly as before (`test/guest-seat-rules.js` replays a frozen
+  taxed; a table whose two rated accounts are both couch mains takes one more multiplier. A record without the mask is read exactly as before (`test/guest-seat-rules.js` replays a frozen
   copy of the rules file against it), so `RULES_VER` did not move. Tests: `test/guest-seat-settle.js`.
 - `rules-cfg.json` (O989; absent = the defaults) -- the four couch numbers of `points-plan.js` that move
   without a build (`CFG_KEYS`). `validate.js` reads it at the start of a run, publishes it on the pulse row

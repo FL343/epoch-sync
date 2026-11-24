@@ -23,6 +23,7 @@
 //       revision does not move a settled match (mutant: the key not remembered -> settled again under the new numbers);
 //       COUCH_LP_MULT 0 moves no points, a series match included; an unusable file holds the couch matches only
 //   [9] the couch-match signal; the guest's id is in no state file and no board write
+//   [10] Q208 (the cap on an outside account's contests): a couch table is a complete table on its account seats; mutant
 const fs = require('fs'), path = require('path'), os = require('os');
 const { spawnSync } = require('child_process');
 const H = require('./lib/settle-stub.js');
@@ -304,6 +305,30 @@ if (on(5)) {
     const mx = run(SETTLE(lx), {}, null, fb);
     T('[5] mutant (the guest seat left unaccounted): the lost match moves no rating -- the pair can only win -- caught', mx.okAll && settled(mx, lx.key) && new RegExp('named-loser ' + lx.key).test(mx.out) && !skillOf(mx, A3), J(skillOf(mx, A3)));
   }
+  // COUCH_DUO_MULT is the couch-against-couch rule only: two rated accounts, both of them couch mains
+  {
+    const row = (id, seat, rank) => ({ steamID: id, seat, mmr: 1000, rank, lp: 1000 });
+    const B3 = 1 | S(0b101) | G(0b010);   // a brawl of three: the main, his guest, one solo -- two accounts, ONE couch main
+    const b3 = () => PP.matchPlan([row('m', 0, 1), row('g', 1, 3), row('s', 2, 2)], B3, null);
+    const B4 = 1 | S(0b0101) | G(0b1010);   // a brawl of four: two couch pairs -- two accounts, both couch mains
+    const b4 = () => PP.matchPlan([row('m0', 0, 1), row('g1', 1, 2), row('m2', 2, 3), row('g3', 3, 4)], B4, null);
+    const T3 = 8 | S(0b011011) | G(0b100100);   // a 3V3 with two couch pairs and two solos: four accounts
+    const t3 = () => PP.matchPlan([row('a0', 0, 0), row('m1', 1, 0), row('g2', 2, 0), row('a3', 3, 0), row('m4', 4, 0), row('g5', 5, 0)], T3, { scores: [5, 4, 3, 2, 1, 0], leaverSeats: [], winTeam: 0, absent: [], finished: [] });
+    const full = { b3: b3(), b4: b4(), t3: t3() };
+    PP.configure(cfgOf(1, { COUCH_DUO_MULT: 0.5 }).vals);
+    const half = { b3: b3(), b4: b4(), t3: t3() };
+    PP.configure({});
+    T('[5] unit: COUCH_DUO_MULT 0.5 -- a couch pair with one solo (two accounts, one main) and a 3V3 with solos settle as at 1; two couch pairs alone (both accounts mains) are halved',
+      J(half.b3) === J(full.b3) && J(half.t3) === J(full.t3) && half.b4.m0.adjDelta === Math.round(full.b4.m0.adjDelta * 0.5) && half.b4.m2.adjDelta === Math.round(full.b4.m2.adjDelta * 0.5)
+      && half.b4.m0.adjDelta !== full.b4.m0.adjDelta && J(half.b4.m0.why) === J(full.b4.m0.why.concat(['couch_mult'])), J([half.b3, full.b3, half.b4, full.b4]));
+    const pf = mutantOf(path.join(H.ROOT, 'points-plan.js'), [["(((accounts | 0) === 2 && (mains | 0) === 2) ? COUCH_DUO_MULT : 1)", "(((accounts | 0) === 2) ? COUCH_DUO_MULT : 1)"]], '[5c]');
+    if (pf) {
+      const M = require(pf);
+      M.configure(cfgOf(1, { COUCH_DUO_MULT: 0.5 }).vals);
+      const mx = M.matchPlan([row('m', 0, 1), row('g', 1, 3), row('s', 2, 2)], B3, null);
+      T('[5] mutant (any table of two rated accounts): the couch pair with one solo is halved too -- caught', mx.m.adjDelta !== full.b3.m.adjDelta && mx.m.why.indexOf('couch_mult') >= 0, J([mx.m, full.b3.m]));
+    }
+  }
   // the couch 2V2: two accounts, a guest each, both ranked
   const [P, Q] = SIDS(99050), [P2, Q2] = SIDS(99060);
   const DUO = 3 | S(0b0101) | G(0b1010);
@@ -422,6 +447,21 @@ if (on(7)) {
   const mm = match(mt, hash, [P, Z, Q, R], [0, 2]);
   const rBad = { sid: R, seat: 3, d: rec(0xB1, mt, hash, 3, 4, false, [P, X, Q, R], mm.sc, 0) };
   const m = run(SETTLE(mm, []).map((st, i) => (i === 0 ? st : [st[0], st[1].concat([rBad])])), {});
+  // ... and one a modded host hands the guest seat INDEX: his start and his result both come from seat 1
+  {
+    const [P2, Q2, R2] = SIDS(99105);
+    const h2 = 0x98963, ros2 = [P2, Z, Q2, R2];
+    const m2 = match(mt, h2, ros2, [0, 2], { noStart: [3] });
+    const rs = { sid: R2, seat: 1, d: rec(0xB2, mt, h2, 1, 0, false, ros2, m2.sc) };
+    const rr = { sid: R2, seat: 1, d: rec(0xB1, mt, h2, 1, 2, false, ros2, m2.sc, 0) };
+    const LEAVE = v.LEAVE_CONFIRM_MS + MIN;
+    const st = [[0, m2.S.concat([rs])], [5 * MIN, m2.all.concat([rs, rr])], [GRACE, m2.all.concat([rs, rr])], [LEAVE, m2.all.concat([rs, rr])], [3 * HOUR, m2.all.concat([rs, rr])]];
+    const mh = run(st, {});
+    T('[7] end to end: a joiner handed the guest seat index (his start and result both written from it) -- both count nowhere, the other two settle, he is named only: no leave, nobody flagged',
+      mh.okAll && settled(mh, m2.key) && leavesOf(mh, R2) === 0 && flaggedN(mh) === 0 && xpOf(mh, R2) == null && xpOf(mh, P2) > 0 && xpOf(mh, Q2) > 0
+      && /named by the others but never wrote his own record for this match -- not a leaver \(Q69\)/.test(mh.out),
+      mh.out.split('\n').filter((l) => /leaver|not counted|sanity/.test(l)).join(' | ').slice(-900));
+  }
   T('[7] end to end: his record is dropped alone, the other two settle; he is ranked at his own seat, no leaver, nobody flagged, no XP for the dropped record',
     m.okAll && settled(m, mm.key) && /only that record dropped, nobody flagged/.test(m.out) && !!skillOf(m, R) && leavesOf(m, R) === 0 && flaggedN(m) === 0 && xpOf(m, R) == null && xpOf(m, P) > 0 && !skillOf(m, X),
     m.out.split('\n').filter((l) => /sanity|leaver/.test(l)).join(' | ').slice(-700));
@@ -496,6 +536,17 @@ if (on(8)) {
       m.rs[3].out.split('\n').filter((l) => /couch|rules-cfg|cron pulse/.test(l)).join(' | '));
     T('[8] ... and settles with the fixed file\'s numbers on the next run', settled(m, couch.key) && ringOf(m, A)[0].delta === want(c1, [A, B, C])[A].adjDelta && PP.receiptCfgRev(ringOf(m, A)[0].flags) === 1, J(ringOf(m, A)));
   }
+}
+// ---- [10] Q208: a couch table is a complete table ----
+if (on(10)) {
+  const [A, B, C] = SIDS(99160);
+  const starts = (mod, mt, ros) => ros.map((sid, seat) => ({ sid, seat })).filter((x) => x.sid !== Z).map((x) => { const d = rec(0xB2, mt, 0x98981, x.seat, 0, false, ros, null); return { steamID: x.sid, d, roster: mod.decodeRoster(d) }; });
+  const couch = v.completeTables(starts(v, 1 | G(0b0010), [A, Z, B, C])), plain = v.completeTables(starts(v, 1, [A, Z, B, C])), full = v.completeTables(starts(v, 1, [A, B, C]));
+  T('[10] unit: every account seat of a couch table wrote the same table from its own seat -> one complete table of three writers (the guest seat asks for none)', couch.length === 1 && couch[0].writers.size === 3 && couch[0].pc === 4, J(couch.map((t) => [t.pc, t.writers.size])));
+  T('[10] unit: the same roster without the mask (a seat left blank) is no complete table; an ordinary table of three is, as before', plain.length === 0 && full.length === 1 && full[0].writers.size === 3);
+  T('[10] unit: a couch table with an account seat\'s start missing is not complete', v.completeTables(starts(v, 1 | G(0b0010), [A, Z, B, C]).slice(0, 2)).length === 0);
+  const f = vMut(['      if (!ro[s] && isGuestSeat(r.d[2], s)) continue;   // O989: a declared guest seat of a couch pair carries no account -- the table is complete on its account seats\n', ''], '[10]');
+  if (f) { const vm = require(f); T('[10] mutant (the guest seat asked for an account): the couch table is never complete -- the contest cap would not cover it -- caught', vm.completeTables(starts(vm, 1 | G(0b0010), [A, Z, B, C])).length === 0); }
 }
 console.log(failN ? ('guest-seat-settle: ' + failN + ' FAIL') : 'guest-seat-settle: all ok');
 process.exit(failN ? 1 : 0);

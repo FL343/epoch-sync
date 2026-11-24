@@ -214,15 +214,17 @@
   //     rule above; the guest's row is read, never written), a team code by the team's outcome as ever;
   //   - a solo's LOSS in a brawl with a live couch pair is compressed x COUCH_SOLO_LOSS (PROTECTED reveal on a real net loss)
   //     and the pair's WIN x COUCH_PAIR_WIN (no reveal); min-composed with the mismatch factor like the trio tilt;
-  //   - a ranked table of exactly two accounts, each with a guest (the couch 2V2), multiplies the mains' whole delta by
-  //     COUCH_DUO_MULT; every couch main's whole delta is multiplied by COUCH_LP_MULT (0 = a couch match moves no points:
-  //     the row is marked `still` and settleLine applies no series clamp to it). Both 0..1, default 1.
+  //   - a ranked table whose rated accounts are exactly two, each of them a couch main (the couch 2V2; two accounts could
+  //     trade such matches between themselves), multiplies the mains' whole delta by COUCH_DUO_MULT -- a couch pair with one
+  //     solo is two accounts too, but only one of them a main: not this rule; every couch main's whole delta is multiplied
+  //     by COUCH_LP_MULT (0 = a couch match moves no points: the row is marked `still` and settleLine applies no series
+  //     clamp to it). Both 0..1, default 1.
   let COUCH_SOLO_LOSS = DEFAULTS.COUCH_SOLO_LOSS;
   let COUCH_PAIR_WIN = DEFAULTS.COUCH_PAIR_WIN;
   let COUCH_DUO_MULT = DEFAULTS.COUCH_DUO_MULT;
   let COUCH_LP_MULT = DEFAULTS.COUCH_LP_MULT;
-  // the multiplier of a couch main's whole delta at a table of `accounts` account seats
-  function couchMult(accounts) { return COUCH_LP_MULT * ((accounts | 0) === 2 ? COUCH_DUO_MULT : 1); }
+  // the multiplier of a couch main's whole delta at a table where `accounts` account rows are rated, `mains` of them couch mains
+  function couchMult(accounts, mains) { return COUCH_LP_MULT * (((accounts | 0) === 2 && (mains | 0) === 2) ? COUCH_DUO_MULT : 1); }
   const RS_MAGIC = 0xC5;                                                   // reveal-details marker; flags: 0 none / 1 upset / 2 protected
   // pure: parts = [{ steamID, seat, mmr (pre-match display rating), rank (1-based), lp (current) }]. returns null if
   //   not applicable, else { [steamID]: { adjDelta, flag, normalDelta } }. Drip is never discounted (only the
@@ -270,8 +272,8 @@
     const mean = mmrs.reduce((a, b) => a + b, 0) / mmrs.length;
     const trioLive = units.some(u => u.length === 3);   // O82 solo-tilt applies only against a LIVE trio
     const pc = parts.length, out = {};
-    // O989: the couch multiplier reads the accounts rated here (the rows that are not a guest's)
-    const cMult = couch.size ? couchMult(parts.filter(p => !isGuestSeat(matchType, p.seat)).length) : 1;
+    // O989: the couch multiplier reads the accounts rated here (the rows that are not a guest's) and how many of them are couch mains
+    const cMult = couch.size ? couchMult(parts.filter(p => !isGuestSeat(matchType, p.seat)).length, couch.size) : 1;
     for (const u of units) {
       const uRank = u.reduce((s, p) => s + (p.rank | 0), 0) / u.length;
       const uLp = u.reduce((s, p) => s + (p.lp | 0), 0) / u.length;
@@ -374,8 +376,11 @@
     const mmrsA = mmrs.concat((absent || []).map(a => a.mmr | 0));
     const mismatchA = mmrsA.length >= 2 && (Math.max.apply(null, mmrsA) - Math.min.apply(null, mmrsA) > RS_THRESHOLD);
     const meanA = mmrsA.reduce((a, b) => a + b, 0) / (mmrsA.length || 1);
-    // O989: the couch multiplier reads the accounts that played the match out (the rows that are not a guest's), as the brawl's
-    const cMult = guestSeatMaskOf(matchType) ? couchMult(roster.filter(p => !isGuestSeat(matchType, p.seat)).length) : 1;
+    // O989: the couch multiplier reads the accounts that played the match out (the rows that are not a guest's) and how many of
+    //   them are couch mains with their guest beside them, as the brawl's
+    const seatHere = new Set(roster.map(p => p.seat | 0));
+    const cMult = guestSeatMaskOf(matchType) ? couchMult(roster.filter(p => !isGuestSeat(matchType, p.seat)).length,
+      roster.filter(p => { const gs = guestSeatOfMain(matchType, p.seat); return gs >= 0 && seatHere.has(gs); }).length) : 1;
     const shielded = new Set();
     for (const s of (leaverSeats || [])) for (const p of parts) {
       if (teamOf(p.seat) === teamOf(s) && (p.seat | 0) !== (s | 0)) shielded.add(p.steamID);
@@ -437,7 +442,7 @@
       out[p.steamID] = { adjDelta, flag, normalDelta, won, why };   // won feeds the series clamp at settle; why = O774 labels
       // O989: a couch main's whole delta takes the couch multiplier (his guest's row counts in the team readings above like
       //   any member's and has no output the settle reads); a 0 marks the row `still`
-      if (cMult !== 1 && guestSeatOfMain(matchType, p.seat) >= 0) {
+      if (cMult !== 1 && guestSeatOfMain(matchType, p.seat) >= 0 && seatHere.has(guestSeatOfMain(matchType, p.seat))) {
         out[p.steamID].adjDelta = Math.round(adjDelta * cMult);
         if (cMult === 0) out[p.steamID].still = true;
         why.push('couch_mult');

@@ -1852,11 +1852,12 @@ function completeTables(recs) {
     if (pc < 2) continue;
     const writers = new Set();
     for (let s = 0; s < pc; s++) {
+      if (!ro[s] && isGuestSeat(r.d[2], s)) continue;   // O989: a declared guest seat of a couch pair carries no account -- the table is complete on its account seats
       const h = ro[s] ? pid(String(ro[s])) : null;
       if (!h || story[h] !== sig + '@' + s) { writers.clear(); break; }
       writers.add(h);
     }
-    if (writers.size === pc) out.push({ sig, pc, writers });
+    if (writers.size === accountSeatsOf(r.d[2], pc)) out.push({ sig, pc, writers });   // (accountSeatsOf = pc without a guest mask)
   }
   return out;
 }
@@ -18176,7 +18177,7 @@ Object.assign(module.exports, { placementMode, PLACEMENT_TARGET, placementOf });
 Object.assign(module.exports, { rosterContestSeats, applyRosterContest, seatLayout, seatLayoutsDisagree });   // cloud audit Q75 one account per seat per match key (+ Q80 third review seat layout)
 Object.assign(module.exports, { registerStartRosters, startRosterSplit, rosterCanon, startRosterDisagrees, seatGateRoster, seatedOnRoster, applySeatGate });   // cloud audit Q80 seat gate
 Object.assign(module.exports, { seatlessPrivate, dropSeatlessPrivate });   // cloud audit Q123
-Object.assign(module.exports, { guestSeatClaim, dropGuestSeatStarts, quitLoneMt, loadRulesCfg, RULES_CFG, RULES_CFG_FILE, guestIdOf, blankSeatStart, sanityDropFlags });   // O989
+Object.assign(module.exports, { guestSeatClaim, dropGuestSeatStarts, quitLoneMt, loadRulesCfg, RULES_CFG, RULES_CFG_FILE, guestIdOf, blankSeatStart, sanityDropFlags, completeTables });   // O989
 Object.assign(module.exports, { recTable, splitKey, splitMark, applyTableSplit });   // cloud audit Q214 / Q220 a held friends' room / bot match: each table on a key of its own
 Object.assign(module.exports, { LONE1V1, lone1v1Claim, lone1v1Verdicts, lone1v1Count });   // cloud audit Q184 a ranked 1V1 only its winner wrote
 Object.assign(module.exports, { repUpgrade, sortKeys });   // cloud audit Q209 report state with no key that stays with one reporter

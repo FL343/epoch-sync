@@ -15,7 +15,7 @@
 //   node tools/rules-cfg.js set --pair-win=0.8 ...    write the next revision; a number not given keeps its value
 //       --solo-loss=X   COUCH_SOLO_LOSS  a solo's loss in a brawl with a live couch pair is multiplied by X   (default 0.8)
 //       --pair-win=X    COUCH_PAIR_WIN   the couch pair's win in a brawl is multiplied by X                    (default 0.85)
-//       --duo-mult=X    COUCH_DUO_MULT   a couch main's whole delta when only two accounts are rated          (default 1)
+//       --duo-mult=X    COUCH_DUO_MULT   a couch main's whole delta at a table of two accounts, both couch    (default 1)
 //       --lp-mult=X     COUCH_LP_MULT    every couch main's whole delta (0 = a couch match moves no points)    (default 1)
 //     each X in 0..1, at most three decimals
 //   --file=PATH  another file than rules-cfg.json beside validate.js (tests)
