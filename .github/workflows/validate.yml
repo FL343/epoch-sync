@@ -120,6 +120,21 @@ jobs:
         with:
           path: .tests-passed
           key: ${{ steps.code.outputs.key }}
+      # O1018 (2026-11-24): fallback state (GitLab tier 2 branch fallback-state / Cloud Run tier 3 bucket) newer than this branch's
+      # last state commit was never handed back: its processed.json marks are not here, and settling now would apply those
+      # matches' points / XP / CP a second time on top of the boards the fallback already wrote. tools/fallback-guard.js fails
+      # this run then (run + persist skipped; the monitor sees no success and calls the fallback tiers again, which carry on
+      # from their own state). Older = an earlier incident's leftover, warned only. Unreadable = settle as usual (fail-open,
+      # like the gate). test/fallback-guard.js pins the tool and this step.
+      - name: fallback guard
+        if: steps.gate.outputs.yield != 'true'
+        timeout-minutes: 3
+        env:
+          MIRROR_URL: ${{ secrets.MIRROR_URL }}
+          MIRROR_SSH_KEY: ${{ secrets.MIRROR_SSH_KEY }}
+          MIRROR_KNOWN_HOSTS: ${{ secrets.MIRROR_KNOWN_HOSTS }}
+          VAULT_URL: ${{ secrets.VAULT_URL }}
+        run: node tools/fallback-guard.js
       # O689: a run whose state push failed kept its state files in the Actions cache (another service than the git push that
       # failed). The newest copy of this channel is applied only when nothing moved the branch's copy of those files since
       # (tools/state-stash.js restore); otherwise the checkout stays as it is = the behaviour before (settle from the branch).
