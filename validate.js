@@ -16839,17 +16839,6 @@ async function main() {
     if (parts.length < 2) { processed.add(c.m); continue; }
     // B6 collection for a real settle: per-player counters + pairwise co-occurrence.
     recordMatchSignals(signals, g, live, rankOf, matchType, false, nowMs);
-    // O989: a main's couch matches, counted on his account (cm; cmr = of those from a ranked seat) -- data for the balance
-    //   numbers of the companion plan, nobody flagged. A main standing in himself (Q227) wrote nothing here: not counted.
-    if (guests.length) {
-      for (const x of guests) {
-        const mp = live.find((q) => q.steamID === x.main);
-        if (!mp) continue;
-        const h = sigPlayer(signals, pid(String(x.main)), nowMs);
-        h.cm = (h.cm | 0) + 1; if (seatAppliesLp(matchType, mp.seat)) h.cmr = (h.cmr | 0) + 1;
-      }
-      sigDirty = true; RUN.couchSettled = (RUN.couchSettled | 0) + 1; if (anyAppliesLp(matchType)) RUN.couchRanked = (RUN.couchRanked | 0) + 1;
-    }
     for (const p of live) if (stoodOwn.has(String(p.steamID)) && rankNo[p.steamID] === 1 && rankOf[p.steamID] !== 1) signals.players[pid(String(p.steamID))].w += 1;   // Q264: his win as before Q227
     const ratedIds = parts.filter((p) => p.rated).map((p) => String(p.steamID));   // Q265: the seats rated where they would have stood in
     if (stoodIds.size || ratedIds.length) {   // Q263 / Q264 / Q265 (see STAND_IN_WINDOW_MS): a stand-in (or a seat rated instead) marked, a player rated with them paired with each of them
@@ -16861,6 +16850,17 @@ async function main() {
         else e.sxw = (e.sxw || []).filter((y) => nowMs - y[1] < STAND_IN_WINDOW_MS && sh.indexOf(y[0]) < 0).concat(sh.map((h) => [h, nowMs]));
       }
       sigDirty = true;
+    }
+    // O989: a main's couch matches, counted on his account (cm; cmr = of those from a ranked seat) -- data for the balance
+    //   numbers of the companion plan, nobody flagged. A main standing in himself (Q227) wrote nothing here: not counted.
+    if (guests.length) {
+      for (const x of guests) {
+        const mp = live.find((q) => q.steamID === x.main);
+        if (!mp) continue;
+        const h = sigPlayer(signals, pid(String(x.main)), nowMs);
+        h.cm = (h.cm | 0) + 1; if (seatAppliesLp(matchType, mp.seat)) h.cmr = (h.cmr | 0) + 1;
+      }
+      sigDirty = true; RUN.couchSettled = (RUN.couchSettled | 0) + 1; if (anyAppliesLp(matchType)) RUN.couchRanked = (RUN.couchRanked | 0) + 1;
     }
     // (no start attestation ever sighted = the per-writer ns signal, counted once when the synthetic
     //  first-sighting entry was created at the pacing gate above -- a cheap fabrication tell for the
