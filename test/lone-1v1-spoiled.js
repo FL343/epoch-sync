@@ -265,7 +265,8 @@ console.log('=== a ranked 1V1 whose loser wrote only records the job cannot use:
   no('a registered roster naming somebody else', note([stW], { c: 1, w: [v.pid(L) + 'o'] }), [resW, bU], true, [v.pid(w), v.pid(C)]);
   no('he confessed (counted earlier)', note([stW]), [resW, bV], false, null, { [v.pid(L) + '|' + key]: { t0: 1 } });
   no('he confessed (read this run)', note([stW]), [resW, bV], false, null, {}, new Set([v.pid(L) + '|' + key]));
-  no('a quick 1V1', note([S(v1start(h, 0, ro).map((x, i) => i === 2 ? 1 : x), w)]), [R(v1settle(h, 0, ro, 0).map((x, i) => i === 2 ? 1 : x), w), R(durBad(lost(h, ro)).map((x, i) => i === 2 ? 1 : x), L)]);
+  T('[1] a quick 1V1 (Q446: the one quick + ranked queue\'s 1V1s too, paid the consolation XP only) -> a claim', !!v.lone1v1Spoiled(note([S(v1start(h, 0, ro).map((x, i) => i === 2 ? 1 : x), w)]), key,
+    [R(v1settle(h, 0, ro, 0).map((x, i) => i === 2 ? 1 : x), w), R(durBad(lost(h, ro)).map((x, i) => i === 2 ? 1 : x), L)], {}, new Set(), false, null));
   no('party bits on the match type', note([stW]), [R(v1settle(h, 0, ro, 0).map((x, i) => i === 2 ? 0x12 : x), w), R(durBad(lost(h, ro)).map((x, i) => i === 2 ? 0x12 : x), L)]);
   no('a peers-gone result of the winner\'s', note([stW]), [R(v1settle(h, 0, ro, 0).map((x, i) => i === 12 ? 1 : x), w), bV]);
   no('no note', null, [resW, bV]);
@@ -277,7 +278,7 @@ console.log('=== a ranked 1V1 whose loser wrote only records the job cannot use:
   T('[1] void claims: a start-orphan void that consoled him -> x0', c.length === 1 && c[0].x0 === 1, JSON.stringify(c));
   c = v.lone1v1VoidClaims([{ m: key, pids: [], note: e }], g, [], {}, new Set(), false);
   T('[1] void claims: an incomplete read -> nothing claimed', c.length === 0);
-  T('[1] void claims: no note / another match type -> nothing', v.lone1v1VoidClaims([{ m: key, pids: [] }, { m: h + '_1234_1', pids: [], note: e }], Object.assign({ [h + '_1234_1']: [resW, bU] }, g), [], {}, new Set(), true).length === 0);
+  T('[1] void claims: no note / another match type (a quick 2V2; Q446: a quick 1V1 is claimed) -> nothing', v.lone1v1VoidClaims([{ m: key, pids: [] }, { m: h + '_1234_5', pids: [], note: e }], Object.assign({ [h + '_1234_5']: [resW, bU] }, g), [], {}, new Set(), true).length === 0);
   // lone1v1Count: x0 rides the payment and the waiting claim
   const now = 50 * DAY, sid = (h2) => O.find(s => v.pid(s) === h2) || null;
   const sg = sigOn([L]).SIGNALS_FILE;

@@ -1480,15 +1480,36 @@ const SEEN_PER_WRITER = 64;
 // read in the run that read his result too (a stalled or partially read run in between), it was late and left out, and the
 // Q184 verdict paid nobody: s was empty (the outside start past its room, only n) or held the outside id -- an honest winner
 // whose loser wrote nothing lost his win to an account that never sat in the match. So a late start of a ranked 1V1 (match
-// type 2, two seats) whose own table seats its writer at the seat he writes from, and whose writer also has a result of the
+// type 2, two seats; Q446: or the quick family's, lone1v1Mt) whose own table seats its writer at the seat he writes from, and whose writer also has a result of the
 // key read in this same run, is remembered in the note's lo (at most LONE1V1_LATE_CAP ids, first come). It still counts
 // nowhere else -- no vote, no split, no contest, nobody's own start (Q127 / Q138 unchanged) -- and lone1v1Claim reads only
 // the ids of the two accounts the winner's table seats. Nothing gets lower: a verdict that pays nobody today may now pay the
 // winner the points of his win; the silent seat is only counted, as in Q184. An outside start that votes (it registers or
 // contests the key) is the start-proof plan's (O462), not this one's.
 const LONE1V1_LATE_CAP = 2;
+// ---- the lone 1V1 verdicts since the one quick + ranked queue (cloud audit Q446, O716 D12) ----
+// Q184 / Q216 / Q254 were written for the old ranked 1V1 code (match type 2). Since O716 (2026-11-07, clients 0.5.0 on) every
+// matchmade 1V1 is written as the quick family base 1 with the ranked-seat mask (bits 11-16), so the exact test on 2 let no
+// new record in: an honest winner whose loser wrote nothing (or only records the job cannot use) got nothing at all, not
+// even the consolation XP a loser who wrote his own start leaves him (the start-orphan verdict). lone1v1Mt lets in both: the
+// old ranked code and the quick family base 1 with any seat mask -- no party bits (mtSansSeats keeps them, so 1 / 2 is
+// exactly "none"), the two seats checked where each verdict checks them. The rules (gate, caps, the silent seat only
+// counted) are the same for both. What a claim pays is not (lone1v1PaysPoints, main): the old ranked code pays the points of
+// a win plus the consolation XP as before; the quick family pays the consolation XP only -- the owner's ruling for a 1V1
+// of the one queue whose other player went silent or gave up (O716 D12, 2026-11-07: before EA only the XP is made up, the
+// mixed 1V1 by the quick rules, and the points added later are not paid back for these). Its points, its rating and the
+// silent seat's rows are untouched, whichever seat came in through ranked (the seat mask decides nothing here).
+// A quick family key also waits longer (LONE1V1.QUICK_WAIT_MS, lone1v1Verdicts): before Q446 nothing decided it, so a loser
+// whose own start and result came in late (his game's outbox keeps re-sending a result for OB.TTL_MS = 2 hours from the
+// match's end, client result-reporter.js; a start it does not re-send) still settled the match as usual, both seats paid in
+// full -- the verdict at the start maturity (2 hours from the first start) would now close the key under that last upload
+// and pay the winner the consolation alone, the honest loser nothing. QUICK_WAIT_MS = the outbox's 2 hours after a 1V1's
+// end (about 40 minutes at most) plus a run's slack: the verdict comes after the last upload his game would try.
+const LONE1V1_MTS = [1, 2];
+function lone1v1Mt(mt) { return LONE1V1_MTS.indexOf(mtSansSeats(mt)) >= 0; }
+function lone1v1PaysPoints(mt) { return mtSansSeats(mt) === 2; }   // the old ranked 1V1 code only (Q446: never a quick family key)
 function keepLateOwn(e, r, id, resW) {
-  if (mtSansSeats(r.d[2]) !== 2 || (r.d[8] | 0) !== 2 || !resW) return false;
+  if (!lone1v1Mt(r.d[2]) || (r.d[8] | 0) !== 2 || !resW) return false;   // Q446: the quick family's 1V1s too
   const w = id.split('@')[0], seat = r.d[5] | 0;
   if (!resW.has(w) || String((r.roster || {})[seat]) !== String(r.steamID)) return false;
   const lo = Array.isArray(e.lo) ? e.lo : (e.lo = []);
@@ -2189,7 +2210,8 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
 // The loser is never charged on the winner's word: any account that owns the game can write a start and a result for a
 // 1V1 that never happened naming anybody (Q69 / Q80). So the job pays the winner and only counts the loser.
 // lone1v1Verdicts: at the note's age STARTS_MATURITY_MS (the start-orphan verdict's), on a complete read, a key is decided
-// when lone1v1Claim holds -- a plain ranked 1V1 (match type 2, no party bits), no roster registered, never contested, and
+// when lone1v1Claim holds -- a plain ranked 1V1 (match type 2, no party bits; Q446: or a 1V1 of the one quick + ranked
+// queue, the quick family base 1 with any ranked-seat mask, which pays the consolation XP only: lone1v1Mt), no roster registered, never contested, and
 // every record of it is one account's: the starts the two seated accounts wrote that were read before the result (the
 // note's s, Q127) are all his, from one seat, naming one table -- at least one, or his own start read late with his result
 // (the note's lo, Q254; an account the table does not seat counts nowhere here: when its start votes it registers or
@@ -2210,11 +2232,11 @@ function reconcileStarts(starts, groups, consistentKeys, processed, pending, lea
 // CONSOLATION_XP of a lone writer at the start-orphan verdict. No rating, career or win XP; the silent seat's points,
 // rating and exits are untouched. At most once: the key is processed and the claimant's l1t is on disk before the write
 // (saveEarlyMarks), a failed points write is forfeited (the consolation XP of a failed write is owed to a later run, Q315).
-const LONE1V1 = { GATE: 2, OPP_CAP: 8, QUEUE_CAP: 4, RETRO_MS: 14 * 86400000, WEEK_MS: 7 * 86400000, WEEK_CAP: 3 };
+const LONE1V1 = { GATE: 2, OPP_CAP: 8, QUEUE_CAP: 4, RETRO_MS: 14 * 86400000, WEEK_MS: 7 * 86400000, WEEK_CAP: 3, QUICK_WAIT_MS: 3 * 3600000 };   // Q446: QUICK_WAIT_MS (see lone1v1Mt)
 function lone1v1Claim(e, key, g, confState, confSeen) {
   if (!e || e.c || !Array.isArray(e.s) || !g || !g.length) return null;
   const r0 = g[0];
-  if (mtSansSeats(r0.d[2]) !== 2 || (r0.d[8] | 0) !== 2) return null;   // ranked brawl with two seats; quick, party bits and teams keep their rules
+  if (!lone1v1Mt(r0.d[2]) || (r0.d[8] | 0) !== 2) return null;   // a 1V1 brawl (Q446: the old ranked code or the quick family's, any seat mask); party bits and teams keep their rules
   const w = String(r0.steamID), seat = r0.d[5] | 0, ro = r0.roster || {};
   if ((seat !== 0 && seat !== 1) || String(ro[seat]) !== w) return null;
   const o = ro[1 - seat] != null ? String(ro[1 - seat]) : '';
@@ -2240,7 +2262,7 @@ function lone1v1Claim(e, key, g, confState, confSeen) {
 // out), the winner's start stays the key's only usable vote (no roster, or a split one) and the key never settles: flagged
 // until it rots (V), or held by the Q75 contest and voided at maturity (Q127: U, S6), nobody rated -- the honest winner's win
 // was lost, the loser lost nothing (cloud audit Q216, from R1-X12-Q109 README section 10 and REVIEW-3 S6). lone1v1Spoiled is
-// lone1v1Claim with the loser's own records let in when each of them spoils itself:
+// lone1v1Claim with the loser's own records let in when each of them spoils itself (Q446: the same match types, lone1v1Mt):
 //   - every result of the key is the winner's -- lone1v1Claim's tests on them: a plain ranked 1V1, his seat and table, the
 //     same sanity-clean 'finished' record, his score above the other seat's -- or the other seat's account's (a third writer:
 //     no claim);
@@ -2261,7 +2283,7 @@ function lone1v1Claim(e, key, g, confState, confSeen) {
 // honest winner whose opponent's record was spoiled by somebody else (a modded host's seat table, Q109) is paid only when
 // that record admits the loss.
 function lone1v1Spoiled(e, key, g, confState, confSeen, strict, pids) {
-  if (!e || !Array.isArray(e.s) || !g || !g.length || mtSansSeats(g[0].d[2]) !== 2) return null;
+  if (!e || !Array.isArray(e.s) || !g || !g.length || !lone1v1Mt(g[0].d[2])) return null;   // Q446: as lone1v1Claim
   const writers = [...new Set(g.map((r) => String(r.steamID)))];
   if (writers.length !== 2) return null;
   let out = null;
@@ -2302,7 +2324,7 @@ function lone1v1Spoiled(e, key, g, confState, confSeen, strict, pids) {
 function lone1v1VoidClaims(voided, groups, consoledSids, confState, confSeen, readComplete) {
   const out = [];
   for (const vk of voided || []) {
-    if (!vk || !vk.note || (String(vk.m).split('_')[2] | 0) !== 2) continue;
+    if (!vk || !vk.note || !lone1v1Mt(String(vk.m).split('_')[2] | 0)) continue;   // Q446: the quick family's 1V1s too
     const c = lone1v1Spoiled(vk.note, vk.m, groups[vk.m], confState, confSeen, true, vk.pids && vk.pids.length ? vk.pids : null);
     if (!c) continue;
     if (readComplete === false) { RUN.lone1v1VoidHeld = (RUN.lone1v1VoidHeld | 0) + 1; console.log('  lone-1v1 ' + vk.m + ': voided on an incomplete shard read -- not claimed (Q216)'); continue; }
@@ -2320,6 +2342,7 @@ function lone1v1Verdicts(pending, groups, processed, now, maturityMs, confState,
     if (pending[key] || processed.has(key) || !e || e.c || now - (e.t0 || 0) < maturityMs) continue;
     const c = lone1v1Claim(e, key, groups[key], confState, confSeen) || lone1v1Spoiled(e, key, groups[key], confState, confSeen, false, null);   // Q216: or his bad records
     if (!c) continue;
+    if (!lone1v1PaysPoints(String(key).split('_')[2] | 0) && now - (e.t0 || 0) < Math.max(maturityMs, LONE1V1.QUICK_WAIT_MS)) continue;   // Q446: past the loser's last upload
     if (readComplete === false) { held += 1; continue; }   // his opponent's row may sit on the unread shard
     processed.add(key);
     delete pending[k];
@@ -2349,7 +2372,8 @@ function lone1v1Count(claims, signals, now, sidOfPid) {
     }
     if (c.spoiled) RUN.lone1v1Spoiled = (RUN.lone1v1Spoiled | 0) + 1;
     console.log('  lone-1v1 ' + c.m + ': ' + plog(c.w) + ' won, ' + plog(c.o) + what + ' -- counted on him (' + so.l1 + ' such match(es), '
-      + ol.length + ' different opponent(s)), nobody flagged; ' + (atGate ? 'winner paid' : 'payment waits for a second opponent\'s claim') + ' (Q184)');
+      + ol.length + ' different opponent(s)), nobody flagged; ' + (atGate ? 'winner paid' : 'payment waits for a second opponent\'s claim')
+      + (lone1v1PaysPoints(String(c.m).split('_')[2] | 0) ? '' : ' (the consolation XP only: a 1V1 of the one quick + ranked queue, Q446 / O716 D12)') + ' (Q184)');
   }
   // claims waiting on an entry that has reached the gate (this run's or an earlier one's): paid once their writer is named
   for (const op of Object.keys(signals.players)) {
@@ -4492,6 +4516,7 @@ function writeRunSummary() {
       '| leaves convicted at a settle this run, kept for a late result / late results forgiven (points of the finish, exit retracted) / late results over the cap, the leave stands (Q228) | ' + s('lateCv', 0) + ' / ' + s('lateForgive', 0) + ' / ' + s('lateCapped', 0) + ' |',
       '| win streak events landing before matches already counted (a late settle; its own tier counts what came before it) / stale (older than the fold, ignored) / absences frozen (the first in a week) / absences that broke a streak (O181) | ' + s('streakLate', 0) + ' / ' + s('streakStale', 0) + ' / ' + s('streakAbsFreeze', 0) + ' / ' + s('streakAbsBreak', 0) + ' |',
       '| ranked 1V1s only the winner wrote (Q184): counted on the silent seat / waiting for a second opponent / paid (points written) / not counted, no signals of his own / over the weekly cap | ' + s('lone1v1', '0 / 0 / 0 / 0 / 0') + ' (' + s('lone1v1Paid', 0) + ') |',
+      '| of those paid, 1V1s of the one quick + ranked queue (match type 1, any ranked-seat mask): the consolation XP only, no points (Q446, O716 D12) | ' + s('lone1v1XpOnly', 0) + ' |',
       '| friends\' rooms only one player wrote a result for, the other seat(s) started (Q316): due / waiting / held (incomplete read) (settled for him alone) | ' + s('pvLone', '0 / 0 / 0') + ' (' + s('pvLonePaid', 0) + ') |',
       '| endless co-op segments only one player wrote a result for, the other seat(s) started (Q406): due / waiting / held (incomplete read) (settled for him alone) / CP of the silent seats not charged | ' + s('enLone', '0 / 0 / 0') + ' (' + s('enLonePaid', 0) + ') / ' + s('endlessLoneUncharged', 0) + ' |',
       '| quick matches whose other player(s) all quit and confessed, only the stayer wrote a result (W103, 3-6 seats Q427): due / waiting / held (incomplete read) (settled for him) | ' + s('quitLone', '0 / 0 / 0') + ' (' + s('quitLonePaid', 0) + ') |',
@@ -12430,11 +12455,18 @@ async function main() {
   // Q184: the 1V1 winners paid by lone1v1Count -- the points of a normal 1V1 win against the silent seat's pre-match rating,
   //   one write per account (several payments add up in order). The consolation XP above was their XP. The base read follows
   //   the settle path: this season's entry, else the previous season soft-reset, else the display-derived seed (no clamp).
-  if (l1Res.pay.length && !lpBoardId) console.log('  lone-1v1: no points board -> ' + l1Res.pay.length + ' payment(s) not written (Q184)');
-  else if (l1Res.pay.length) {
+  // Q446: a payment of a quick family key (the one quick + ranked queue since O716, the seat mask whatever it is) is the consolation
+  //   XP above alone (O716 D12) -- no points, no receipt; a claim queued before O480 carries no key and is the old ranked code's.
+  const l1Pts = l1Res.pay.filter((p) => !p.m || lone1v1PaysPoints(String(p.m).split('_')[2] | 0));
+  if (l1Pts.length < l1Res.pay.length) {
+    RUN.lone1v1XpOnly = (RUN.lone1v1XpOnly | 0) + (l1Res.pay.length - l1Pts.length);
+    for (const p of l1Res.pay) if (l1Pts.indexOf(p) < 0) console.log('  lone-1v1 ' + p.m + ': ' + plog(p.sid) + ' paid the consolation XP only, no points (a 1V1 of the one quick + ranked queue, Q446 / O716 D12)');
+  }
+  if (l1Pts.length && !lpBoardId) console.log('  lone-1v1: no points board -> ' + l1Pts.length + ' payment(s) not written (Q184)');
+  else if (l1Pts.length) {
     const skillL = loadSkill();
     const bySid = new Map();
-    for (const p of l1Res.pay) { if (!bySid.has(p.sid)) bySid.set(p.sid, []); bySid.get(p.sid).push(p); }
+    for (const p of l1Pts) { if (!bySid.has(p.sid)) bySid.set(p.sid, []); bySid.get(p.sid).push(p); }
     for (const [sid, ps] of bySid) {
       try {
         const e = await lpRowOf(sid, 'points');
@@ -17162,6 +17194,7 @@ Object.assign(module.exports, { recTable, splitKey, splitMark, applyTableSplit }
 Object.assign(module.exports, { LONE1V1, lone1v1Claim, lone1v1Verdicts, lone1v1Count });   // cloud audit Q184 a ranked 1V1 only its winner wrote
 Object.assign(module.exports, { repUpgrade, sortKeys });   // cloud audit Q209 report state with no key that stays with one reporter
 Object.assign(module.exports, { LONE1V1_LATE_CAP, keepLateOwn });   // cloud audit Q254 a lone 1V1 winner's own start read late with his result
+Object.assign(module.exports, { LONE1V1_MTS, lone1v1Mt, lone1v1PaysPoints });   // cloud audit Q446 the lone 1V1 verdicts on the one quick + ranked queue (test/lone-1v1-quick-family.js)
 Object.assign(module.exports, { ORPH_MAGIC, ORPH_VER, LIFT_ORPHAN, liftOrphanBlockOf, liftOrphanVerdict, liftOrphanSignal, applyLiftOrphans });   // cloud audit Q339 (test/lift-orphan.js)
 Object.assign(module.exports, { GT_MAGIC, GT_VER, GT_LEN, GTAC, gambleTagOf, gambleUnitOf, oneRecordPerAccount, gambleAccusation, gtacVerdict, applyGambleAccusations });   // cloud audit Q61 gamble-frame refusals naming the host
 Object.assign(module.exports, { startSig, lateStartSplit, START_CONFIRM_MS, START_CONFIRM_MIN_MS });   // cloud audit Q118 provisional start roster

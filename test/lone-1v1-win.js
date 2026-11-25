@@ -20,7 +20,8 @@
 //       second account Y joins (pinned, same floor as two colluders settling matches between themselves): Y and X's three
 //       waiting claims paid; the weekly cap holds X's next ones; a week later he is paid again
 //   [4] honest controls, nothing decided by Q184: the loser wrote his own start (the start-orphan verdict, as before);
-//       a peers-gone result; a quick 1V1; a result that says its writer lost (mutant: no win check -> counted); the silent
+//       a peers-gone result; (a quick 1V1 is decided since Q446, the consolation XP only: [4c] here, the rest in
+//       test/lone-1v1-quick-family.js); a result that says its writer lost (mutant: no win check -> counted); the silent
 //       seat has no signals of his own (logged, no entry made); he confessed (mutant: no confession check -> counted); an
 //       outside start naming another table (the roster contest voids it, as before; the starts check itself is a unit in
 //       [1]); an incomplete read holds the verdict until a full one (mutant: no hold -> decided on the partial read)
@@ -233,7 +234,8 @@ console.log('=== a ranked 1V1 only its winner wrote: counted on the silent seat,
   const no = (label, e, g, cs, seen) => T('[1] no claim: ' + label, v.lone1v1Claim(e, key, g, cs || {}, seen || new Set()) === null);
   no('no start read before the result', note([]), [res]);
   no('a contested note', Object.assign(note([st]), { c: 1 }), [res]);
-  no('a quick 1V1', note([S(v1start(h, 0, ro).map((x, i) => i === 2 ? 1 : x))]), [R(v1settle(h, 0, ro, 0).map((x, i) => i === 2 ? 1 : x))]);
+  T('[1] claim: a quick 1V1 (Q446: the one quick + ranked queue\'s 1V1s are claimed too, paid the consolation XP only)',
+    !!v.lone1v1Claim(note([S(v1start(h, 0, ro).map((x, i) => i === 2 ? 1 : x))]), key, [R(v1settle(h, 0, ro, 0).map((x, i) => i === 2 ? 1 : x))], {}, new Set()));
   no('party bits on the match type', note([st]), [R(v1settle(h, 0, ro, 0).map((x, i) => i === 2 ? 0x12 : x))]);
   no('three seats', note([st]), [R(rec(0xB1, 2, h, 0, 1, true, [O[0], M, V], [7000, 4000, 3000]))]);
   no('his result says he lost', note([st]), [R(v1settle(h, 0, ro, 1))]);
@@ -403,7 +405,14 @@ console.log('=== a ranked 1V1 only its winner wrote: counted on the silent seat,
   const hb = 0x8432;
   nothing('[4b] a peers-gone result: nothing decided', one(hb, { res: v1settle(hb, 0, ro, 0).map((x, i) => i === 12 ? 1 : x) }), keyOf(v1start(hb, 0, ro)));
   const hc = 0x8433, q1 = (d) => d.map((x, i) => i === 2 ? 1 : x);
-  nothing('[4c] a quick 1V1: nothing decided', one(hc, { start: q1(v1start(hc, 0, ro)), res: q1(v1settle(hc, 0, ro, 0)) }), keyOf(q1(v1start(hc, 0, ro))));
+  // Q446: a quick 1V1 (the one quick + ranked queue since O716) is decided as Q184's: counted on the silent seat, the winner
+  //   waits for a second opponent's claim and is then paid the consolation XP only (test/lone-1v1-quick-family.js), no points
+  //   (at LONE1V1.QUICK_WAIT_MS, an hour past the start maturity: a run more here)
+  const st4 = lone(hc, O[5], M, [], { start: q1(v1start(hc, 0, ro)), res: q1(v1settle(hc, 0, ro, 0)) });
+  const rc4 = timeline(stepsOf(st4, [[HOUR, st4[2][1]]]), null, sigState([M, O[5]]));
+  T('[4c] a quick 1V1 (Q446): not decided at the start maturity; decided at QUICK_WAIT_MS -- counted on the silent seat, the winner waits, no points', allOk(rc4, 4) && !LINE.test(rc4[2].out)
+    && LINE.test(rc4[3].out) && /the consolation XP only/.test(rc4[3].out)
+    && !ptsIn(rc4, O[5]).length && (sigOf(last(rc4), M) || {}).l1 === 1 && processedOf(last(rc4)).has(keyOf(q1(v1start(hc, 0, ro)))), outOf(rc4).split('\n').filter(l => /lone-1v1/.test(l)).join(' | '));
   const hd = 0x8434, lost = { res: v1settle(hd, 0, ro, 1) };
   nothing('[4d] his result says he lost: nothing decided', one(hd, lost), keyOf(v1start(hd, 0, ro)));
   withMutant('  if (!((r0.d[10 + seat] | 0) > (r0.d[11 - seat] | 0))) return null;', '', '4d', (s) => {
@@ -441,7 +450,7 @@ console.log('=== a ranked 1V1 only its winner wrote: counted on the silent seat,
   const at = (re) => { const m = re.exec(SRC); return m ? m.index : -1; };
   const iVer = at(/const l1Res = lone1v1Count\(lone1v1Verdicts\(startsPending, groups, processed, nowMs, STARTS_MATURITY_MS, confState, confSeen, shardsComplete\)/);
   const iMarks = at(/\n  saveEarlyMarks\(startsRes\.convicted > 0\);/), iSig = at(/\n  if \(APPLY_MMR && l1Res\.pay\.length\) saveSignals\(signals, nowMs\);/);
-  const iCons = at(/\n  if \(paySids\.length && XP_LB\) \{/), iPay = at(/\n  else if \(l1Res\.pay\.length\) \{/);   // Q315: iCons = the consoled (+ the owed) accounts
+  const iCons = at(/\n  if \(paySids\.length && XP_LB\) \{/), iPay = at(/\n  else if \(l1Pts\.length\) \{/);   // Q446: the points of the old ranked claims only (l1Pts)   // Q315: iCons = the consoled (+ the owed) accounts
   T('[5] main: the verdicts after reconcileStarts, then the early marks and the signals, then the consolation, then the points',
     iVer > at(/const startsRes = reconcileStarts\(/) && iMarks > iVer && iSig > iMarks && iCons > iSig && iPay > iCons, JSON.stringify([iVer, iMarks, iSig, iCons, iPay]));
   T('[5] main: the paid winners join the consolation list (Q216: but one the void already consoled, x0)', /for \(const p of l1Res\.pay\) if \(!p\.x0 && startsRes\.consoledSids\.indexOf\(p\.sid\) < 0\) startsRes\.consoledSids\.push\(p\.sid\);/.test(SRC));

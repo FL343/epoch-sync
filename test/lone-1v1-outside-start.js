@@ -9,7 +9,7 @@
 //   note's lo (keepLateOwn, at most LONE1V1_LATE_CAP) for the lone verdict only -- it still votes nowhere -- and the claim
 //   reads only the starts of the two accounts the winner's table seats.
 // End-to-end over the REAL validate.js main() against an offline board stub (the harness of test/lone-1v1-win.js).
-//   [1] units: keepLateOwn (kept; the same id twice; the cap; a quick 1V1; a 2V2; no result of his this run; a table that
+//   [1] units: keepLateOwn (kept; the same id twice; the cap; a quick 1V1 kept too since Q446; a 2V2; no result of his this run; a table that
 //       does not seat him there), lone1v1Claim with lo and outside ids (paid / not paid, each condition)
 //   [2] the n path: the outside account holds SEEN_PER_WRITER remembered starts, its copy of the winner's start is read
 //       first (n only), the winner's start is first read with his result -> the winner is paid, the silent seat counted,
@@ -250,7 +250,8 @@ const FILTER_FROM = "  const theirs = e.s.filter((id) => { const h = String(id).
     T('[1] keep: a second id of his (another seat / table) -> kept up to the cap', v.keepLateOwn(e, st2, idOf(st2), resW) === true && e.lo.length === 2);
     T('[1] keep: past LONE1V1_LATE_CAP -> not kept', v.keepLateOwn(e, st3, idOf(st3), resW) === false && e.lo.length === 2);
     const no = (label, s, rw) => { const e2 = { t0: 0, s: [], r: 1, c: 0 }; T('[1] not kept: ' + label, v.keepLateOwn(e2, s, idOf(s), rw) === false && !(e2.lo && e2.lo.length)); };
-    no('a quick 1V1 (match type 1)', S(v1start(h, 0, ro).map((x, i) => i === 2 ? 1 : x), Wn), resW);
+    const sq = S(v1start(h, 0, ro).map((x, i) => i === 2 ? 1 : x), Wn), eq = { t0: 0, s: [], r: 1, c: 0 };
+    T('[1] keep: a quick 1V1 (match type 1; Q446: the one quick + ranked queue\'s 1V1s too) -> noted in lo', v.keepLateOwn(eq, sq, idOf(sq), resW) === true && JSON.stringify(eq.lo) === JSON.stringify([idOf(sq)]));
     no('party bits on the match type', S(v1start(h, 0, ro).map((x, i) => i === 2 ? 0x12 : x), Wn), resW);
     no('a ranked 2V2', S(t2start(h, 0, [Wn, X, Y, Z]), Wn), resW);
     no('no result of his read this run', st, new Set([v.pid(X)]));
