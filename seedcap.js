@@ -484,6 +484,12 @@ function seatOnlyRecs(m, g, starts) {
 }
 // opt (optional): { starts } -- the reconcile's start rosters (the Q418 seat-only audit; without them that shape is not read)
 function pendingOfGroup(st, m, g, opt) {
+  // cloud audit Q415: a writer's own earlier 'host-left' / 'level-begin-timeout' / 'migrate-disband' result of a friends' room he
+  //   came back to and finished leaves the group first, as in the reconcile (validate.rejoinAsideVerdict, ahead of every lane
+  //   there): the key settles on the others' records, so those are audited -- one extra short record of his would otherwise
+  //   keep this audit off the key for good (the vectors differ) while the reconcile settles it
+  const ra = v.rejoinAsideVerdict(g);
+  if (ra) g = ra.g;
   {
     let all = g;   // the records whose writers can be seats the verdict convicts (cloud audit Q68: those claiming the audited scores)
     let seatOnly = false;   // Q418: audited with each seat's highest score, convicting nobody (below)
@@ -555,6 +561,7 @@ function pendingOfGroup(st, m, g, opt) {
       w: new Set(all.map(r => String((r && (r.w || r.steamID)) || ''))).size,
       couch: !!(tail && pc >= 2 && ((tail.flags | 0) & attest.SEG_COUCH)) };   // O606: judged like an observed core (SC_COUCH_CONVICT)
     if (seatOnly) { out.so = 1; out.self = []; out.chainSelf = selfSeatsOf(all, roster); }
+    if (ra) out.ra = 1;   // Q415: audited with the earlier record set aside
     return out;
   }
 }
@@ -600,6 +607,16 @@ function auditLossOf(st) {
 function pickAuditable(st, groups, opt) {
   const re = !!(opt && opt.re);
   const pending = [];
+  // cloud audit Q415: the earlier record lands minutes before the others' (he wrote it when the migration failed, they finished
+  //   the match with him later): this job may have audited the key on it alone, and an audit is once per key -- the scores the
+  //   key settles on were never capped. A remembered audit not marked ra (applyAudit marks one taken with the earlier record
+  //   set aside, an error too) is taken again, once, as a re-audit (out of the core counts); the loop below then skips the key.
+  for (const m of Object.keys(groups)) {
+    const a = st.audited[m];
+    if (!a || a.ra || !v.rejoinAsideVerdict(groups[m])) continue;
+    const x = pendingOfGroup(st, m, groups[m]);
+    if (x) { x.re = 1; pending.push(x); }
+  }
   for (const m of Object.keys(groups)) {
     if (knownAudit(st, m)) continue;
     const x = pendingOfGroup(st, m, groups[m], opt);
@@ -734,11 +751,11 @@ function applyAudit(st, pending, cliMap, processed, t, opt) {
   });
   pending.forEach((x, i) => {
     const r = cliMap['m' + i];
-    if (!r) { errN++; st.audited[x.m] = { e: 'no-out', t }; return; }
+    if (!r) { errN++; st.audited[x.m] = Object.assign({ e: 'no-out', t }, x.ra ? { ra: 1 } : {}); return; }   // Q415: an audit of that shape that errs is not taken again
     if (r.err != null) {
       // cannot cap = step aside (fail-open); remember so a structurally bad
       // record does not loop forever -- reconcile sanity owns that lane
-      errN++; st.audited[x.m] = { e: r.err, t };
+      errN++; st.audited[x.m] = Object.assign({ e: r.err, t }, x.ra ? { ra: 1 } : {});
       console.log('seedcap: ERR ' + r.err + ' m=' + x.m);
       return;
     }
@@ -754,6 +771,7 @@ function applyAudit(st, pending, cliMap, processed, t, opt) {
     if (x.re) st.audited[x.m].re = 1;
     else coreStat(st, k, t, overSeats.length > 0);
     if (x.so) st.audited[x.m].so = 1;   // Q418: a seat-only segment (each seat's highest score, nobody convicted)
+    if (x.ra) st.audited[x.m].ra = 1;   // Q415: audited with the earlier record set aside (pickAuditable takes no other audit of the key after it)
     if (overSeats.length) {
       over++;
       // the veto (no settlement) and the correction (reverse a settled gain) stay on every over-cap seat; a

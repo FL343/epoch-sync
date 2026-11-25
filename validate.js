@@ -3827,6 +3827,57 @@ function roomDispute(g, vecOf) {
   for (const sids of byVec.values()) if (sids.length > most.length) most = sids;
   return { base, writers: bySid.size, own, most, apart: [...bySid.keys()].filter((x) => most.indexOf(x) < 0) };
 }
+// ---- a joiner's own earlier result of a friends' room he came back to and finished (cloud audit Q415, round-3 R3-B2-01) ----
+// Launch night: a six-player friends' room 3V3 (1436293812_1720557369_10) never settled although its six 'finished' records
+//   agree to the last score. Its seventh record was seat 3's own: a host migration failed for him alone at level 2, the
+//   client kept his rejoin record (O44, three seats or more: mp.js _migrateFailDisband) and, a team-gamble joiner (the
+//   t2Leave lane), sent him to the results page, which wrote a 'migrate-disband' (4) result of the two levels he had seen.
+//   He rejoined from the menu card, played the match out with the others and the results page wrote his 'finished' record
+//   to the next shard; nothing takes the first one back. The group compared every record as one more voice, so one account's
+//   two records left the room unsettled (before Q407 it flagged all six as suspected forgers).
+// Such an earlier record is taken out of the group before anything weighs it, only when the record says by itself that it
+//   was written before its writer finished the match:
+//   - a friends' room (10) or a bot match (11), never endless (Q306 / Q317 keep their lanes): quick / ranked joiners whose
+//     migration fails go to the menu and write an exit note (0xBD), and a team-gamble refusal there is a rank-0 record whose
+//     key is not meant to settle (Q74 / Q76) -- their records keep the old rule;
+//   - its writer also wrote a 'finished' record (0, or 10 without the final summary) of the key, every such record of his
+//     from one seat and one seat count;
+//   - it is 'host-left' (2), 'level-begin-timeout' (3) or 'migrate-disband' (4) -- the ends the client keeps a rejoin record
+//     for -- from that same seat and seat count, at FEWER levels than every 'finished' record of his.
+//   Nothing else moves: his 'finished' record still has to agree with every other writer's for the key to settle, and a
+//   group whose records still differ goes on to the lanes below as before. Writing such a record can only have made a key
+//   harder to settle, so taking it out gives nothing to a modified client -- but the per-seed cap audits the group the same
+//   way (seedcap.js pendingOfGroup), or an extra record would keep the cap from ever reading the key.
+// Pure. Reads the disposition from the record itself (a record without the slot is 'finished', as the parser reads it);
+//   the writer is r.steamID, or r.w on the cap's copies. null, or { g: the other records (same objects, same order), aside:
+//   the records taken out, sids: their writers }.
+const REJOIN_ASIDE = { DISP: [2, 3, 4], FIN: [0, DISP_NOSUMMARY] };
+function rejoinAsideVerdict(g) {
+  if (!g || g.length < 2) return null;
+  const base = baseMt(g[0].d[2] | 0);
+  if (base !== PRIVATE_XP.MT && base !== BOT_XP.MT) return null;   // friends' room / bot match only (the t2Leave lane)
+  const who = (r) => String(r.steamID != null ? r.steamID : (r.w || ''));
+  const pcOf = (r) => { const p = r.d[8] | 0; return (p >= 1 && p <= 8 && r.d.length >= 10 + p) ? p : 0; };
+  const dispOf = (r) => { const p = r.d[8] | 0; return (r.d.length > 10 + p && p >= 1) ? (r.d[10 + p] | 0) : 0; };
+  const lv = (r) => (r.d[7] | 0) >> 1;
+  const by = new Map();
+  for (const r of g) { const s = who(r); if (!by.has(s)) by.set(s, []); by.get(s).push(r); }
+  const aside = [], sids = [];
+  for (const [sid, rs] of by) {
+    if (!sid || rs.length < 2 || rs.some((r) => !pcOf(r))) continue;
+    const fin = rs.filter((r) => REJOIN_ASIDE.FIN.indexOf(dispOf(r)) >= 0);
+    if (!fin.length) continue;
+    const seat = fin[0].d[5] | 0, pc = pcOf(fin[0]);
+    if (fin.some((r) => (r.d[5] | 0) !== seat || pcOf(r) !== pc)) continue;
+    const top = Math.min(...fin.map(lv));
+    const out = rs.filter((r) => fin.indexOf(r) < 0 && r.d.length > 10 + pc && REJOIN_ASIDE.DISP.indexOf(dispOf(r)) >= 0
+      && (r.d[5] | 0) === seat && pcOf(r) === pc && lv(r) < top);
+    if (!out.length) continue;
+    aside.push(...out); sids.push(sid);
+  }
+  if (!aside.length) return null;
+  return { g: g.filter((r) => aside.indexOf(r) < 0), aside, sids };
+}
 // pacing gate: true = this settle group must wait (its start attestation is younger than the
 // physical minimum). No pending entry -> no constraint here; the settle loop never passes one any
 // more (since 2026-10-07 a group with no attestation ever sighted gets a synthetic entry stamped
@@ -4586,6 +4637,7 @@ function writeRunSummary() {
       '| endless runs of three writers or more whose records disagree, nobody flagged for it, not settled (Q317) / of them a writer flagged alone for a negative duration on his own record | ' + s('endlessDispute', 0) + ' / ' + s('endlessDisputeOwn', 0) + ' |',
       '| endless keys without a seat gate whose records disagree, nobody flagged (Q128) | ' + s('endlessUngated', 0) + ' |',
       '| friends\' rooms / bot matches of three writers or more whose records disagree, nobody flagged for it, not settled (Q407) / of them a writer flagged alone for his own record\'s duration | ' + s('roomDispute', 0) + ' / ' + s('roomDisputeOwn', 0) + ' |',
+      '| friends\' room / bot match keys with an earlier host-left / level-begin-timeout / migrate-disband record of a writer who came back and finished, set aside before the records were compared, nobody flagged for it (Q415) | ' + s('rejoinAside', 0) + ' |',
       '| keys of two voices (a 1V1, a friends\' room / endless run / bot match of two) whose writers disagree, nobody flagged for it (Q289 / Q291) / of them a writer flagged alone for his own record\'s duration / accounts newly at ' + PAIR_DISPUTE.LOOK + ' different dispute opponents (record only) | ' + s('pairDispute', 0) + ' / ' + s('pairDisputeOwn', 0) + ' / ' + s('pairDisputeLook', 0) + ' |',
       '| voided disputed 1V1s: writers paid the loser\'s XP instead of the flat ' + CONSOLATION_XP + ' (Q308) / kept at ' + CONSOLATION_XP + ', past ' + DISPUTE_FLOOR.DAY_CAP + ' such payments in a day | ' + s('disputeFloor', 0) + ' / ' + s('disputeFloorCapped', 0) + ' |',
       '| consolation XP writes that failed, owed to a later run / owed credits paid (of them on an XP row moved since) / owed writes found landed after all / owed given up, unpaid ' + Math.round(CONSOLE_OWED.MAX_MS / 86400000) + ' days / still owed, account not seen this run (Q315) | ' + s('owedNew', 0) + ' / ' + s('owedPaid', 0) + ' (' + s('owedMoved', 0) + ') / ' + s('owedLanded', 0) + ' / ' + s('owedExpired', 0) + ' / ' + s('owedWaiting', 0) + ' |',
@@ -11213,6 +11265,16 @@ function groupRecords(recs, opts) {
       console.log('  match=' + m + ': couch segment ' + plog(couches[0].steamID) + (g.length > couches.length ? ' (+' + (g.length - couches.length) + ' foreign record(s) ignored)' : '') + ' (attested; verified at settle)');
       continue;
     }
+    // Q415: a writer's own earlier 'host-left' / 'level-begin-timeout' / 'migrate-disband' result of a friends' room or bot match
+    //   he came back to and finished (rejoinAsideVerdict) leaves the group in place, before any lane below reads it (a group
+    //   that still differs takes them as before; the pre-settle checks then see one record of his, not two)
+    const ra = rejoinAsideVerdict(g);
+    if (ra) {
+      const was = ra.aside.map((r) => plog(r.steamID) + '@' + r.shard + '=' + r.disp + ' after ' + ((r.d[7] | 0) >> 1) + ' level(s)').join('  ');
+      g.splice(0, g.length, ...ra.g);   // in place: groups[m] is this array (the later passes and the start cross-check read it)
+      g.rejoinAside = ra.aside.length;   // the run summary's count (main)
+      console.log('  match=' + m + ': ' + ra.aside.length + ' earlier record(s) of ' + ra.sids.length + ' writer(s) who came back and finished the match set aside, nobody flagged for them (Q415): ' + was);
+    }
     const writers = new Set(g.map(r => String(r.steamID))).size;
     const vecs = g.map(vecOf);
     let same = vecs.every(v => v === vecs[0] && v.indexOf('BAD') !== 0);
@@ -12295,6 +12357,7 @@ async function main() {
   RUN.tableSplit = tableSplit.keys.length; RUN.tableOne = tableSplit.one.length; RUN.tableHeld = tableSplit.held.length;
   const gr = groupRecords(recs, { vecOf, MAX_SEATS, starts: startsPending });   // audit 2026-09-06: pure, testable consensus grouping (writer-deduped); O156 lone bot lane (type 11, every channel)
   const groups = gr.groups, consistentMatches = gr.consistentMatches, inconsistentGroups = gr.inconsistentGroups;
+  RUN.rejoinAside = Object.keys(groups).filter((m) => groups[m].rejoinAside > 0).length;   // Q415 (groupRecords marks the group)
   RUN.flagged = gr.flagged;
   RUN.nosum = gr.nosum.settle + ' / ' + gr.nosum.pending + ' / ' + gr.nosum.host;   // Q68
   RUN.lorph = gr.lorph.settle + ' / ' + gr.lorph.hold;   // Q339
@@ -17438,6 +17501,7 @@ Object.assign(module.exports, { casualLateResumeAt, casualLateMark });   // clou
 Object.assign(module.exports, { endlessRecordSplit, endlessRerollCanon, SANITY_ENDLESS_OWN_SLUGS, SANITY_ENDLESS_REC_SLUGS, SANITY_ENDLESS_GROUP_HOST });   // cloud audit Q306 endless: one record's own fields drop that record (test/endless-own-fields.js)
 Object.assign(module.exports, { endlessDispute });   // cloud audit Q317 endless co-op run of three writers or more whose records disagree (test/endless-co-op-dispute.js)
 Object.assign(module.exports, { roomDispute });   // cloud audit Q407 friends' room / bot match of three writers or more whose records disagree (test/room-dispute.js)
+Object.assign(module.exports, { REJOIN_ASIDE, rejoinAsideVerdict });   // cloud audit Q415 a writer's own earlier record of a friends' room / bot match he came back to and finished (test/rejoin-aside.js; seedcap.js reads it)
 Object.assign(module.exports, { noteOwnStarts, hasOwnStart, OWN_START_CAP });   // cloud audit Q69 own-record evidence for leaver verdicts
 Object.assign(module.exports, { resultRecOf, keptKeys, keptSeal, keptOpen, keptKeep, keptRecords, KEPT_REC_MAX_MS, KEPT_REC_CAP, KEPT_TAG, SETTLE_MAGIC });   // cloud audit Q373 a held group's results kept against shard rotation (test/kept-held-records.js)
 Object.assign(module.exports, { leaverXpRecordOnlyUntil, LEAVER_XP_RECORD_ONLY, LEAVER_XP_RECORD_ONLY_MAX_MS });   // M194 / W57 demo Next Fest: leaves recorded, XP not discounted
