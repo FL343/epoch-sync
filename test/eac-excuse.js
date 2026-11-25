@@ -317,7 +317,7 @@ try {
     T('[10] every reader of the local t2ex set is one of those four or the conviction loop (a new one must be decided here)', (SRC.slice(iT2).match(/\bt2ex\.has\(/g) || []).length === 7, String((SRC.slice(iT2).match(/\bt2ex\.has\(/g) || []).length));
     const iSpend = SRC.indexOf('noteEacExcuse(leavers, hx, nowMs);'), iDone = SRC.indexOf('processed.add(c.m); settled++; likeKeys.push(c.m);');
     T('[10] the cap is spent in the conviction loop only (after it the settle cannot be deferred), once', iSpend > iJoin && iSpend < iDone && SRC.split('noteEacExcuse(').length === 3, [iSpend, iDone, SRC.split('noteEacExcuse(').length].join(','));
-    T('[10] a confessed or already excused seat is not the plan\'s', SRC.indexOf("eacExcusePlan(g, leavers0, pend, leavers, nowMs, (h) => !!confState[h + '|' + c.m] || confSeen.has(h + '|' + c.m) || t2ex.has(h));") > iT2);
+    T('[10] a confessed or already excused seat is not the plan\'s', SRC.indexOf("eacExcusePlan(g, leavers0, pend, leavers, nowMs, (h) => !!confState[h + '|' + c.m] || confSeen.has(h + '|' + c.m) || t2ex.has(h), c.early);") > iT2);
 
     const MT = [
       ['[10a] majority', 'if (votes[s].length >= 2 && votes[s].length * 2 > seen.size) out[s] = votes[s];', 'if (votes[s].length >= 2 && votes[s].length * 2 >= seen.size) out[s] = votes[s];',

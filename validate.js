@@ -611,10 +611,14 @@ function noteEacExcuse(leavers, p, now) {
   e.ed = (Array.isArray(e.ed) ? e.ed.filter((t) => Number(t) > from) : []).concat([Math.floor(now / 1000)]);
   return e;
 }
-// which of a settle's convictable absent seats are excused, and why: Map(pid -> { by: 'block' | 'note', seat, who: [sids] }).
+// which of a settle's convictable absent seats are excused, and why: Map(pid -> { by: 'block' | 'note' | 'early', seat, who: [sids] }).
 //   Pure (the cap is read, not spent: the settle loop spends it where it would have convicted). skip(pid) = not his to
-//   excuse (confessed, already excused). An account past the cap is left out and counted in capped.
-function eacExcusePlan(g, leavers0, pend, leavers, now, skip) {
+//   excuse (confessed, already excused). An account past the cap is left out and counted in capped. early = the group's
+//   Q414 entry (earlyEndVerdict's early: the writer the others outlived, his record set aside), or null: his seat is
+//   excused by 'early' under the same cap (one list per account for both kinds).
+// Q414: is this absent seat the early writer the group set aside (same account, same seat)?
+function earlySeatOf(early, x) { return !!early && !!x && (x.seat | 0) === (early.seat | 0) && pid(String(x.steamID)) === pid(String(early.sid)); }
+function eacExcusePlan(g, leavers0, pend, leavers, now, skip, early) {
   const ex = new Map(), capped = [];
   if (!leavers0 || !leavers0.length) return { ex, capped };
   const named = eacDropSeats(g), nd = (pend && Array.isArray(pend.nd)) ? pend.nd : [];
@@ -622,7 +626,7 @@ function eacExcusePlan(g, leavers0, pend, leavers, now, skip) {
     const h = pid(String(x.steamID));
     if (ex.has(h) || (skip && skip(h))) continue;
     const who = named[x.seat | 0];
-    const by = who ? 'block' : (nd.indexOf(h) >= 0 ? 'note' : '');
+    const by = who ? 'block' : (nd.indexOf(h) >= 0 ? 'note' : (earlySeatOf(early, x) ? 'early' : ''));
     if (!by) continue;
     if (eacExcuseUsed(leavers, h, now) >= EAC_EXCUSE.CAP) { capped.push({ h, seat: x.seat | 0, by }); continue; }
     ex.set(h, { by, seat: x.seat | 0, who: who || [] });
@@ -4500,6 +4504,7 @@ function writeRunSummary() {
       '| starts pending / exit-rate hits | ' + s('pending', 0) + ' / ' + s('convicted', 0) + ' |',
       '| start-orphan seats spared by their own exit note (Q64) | ' + s('exitNoteSpared', 0) + ' |',
       '| absent seats the anti-cheat removed, excused at a settle: named by the finishers / by their own exit note / past the cap, convicted as before (O886) | ' + s('eacExcused', 0) + ' / ' + s('eacExcusedNote', 0) + ' / ' + s('eacExcuseCapped', 0) + ' |',
+      '| keys whose one early \'peers-gone\' writer the others outlived (Q414): his record set aside, the rest settled, nobody flagged / excused at the settle (the O886 cap) / past the cap, convicted / consolation owed | ' + s('earlySetAside', 0) + ' / ' + s('earlyExcused', 0) + ' / ' + s('earlyExcuseCapped', 0) + ' / ' + s('earlyOwed', 0) + ' |',
       '| keys the host\'s match header held voided at maturity / seats spared there (Q294) | ' + s('headerVoid', 0) + ' / ' + s('headerSpared', 0) + ' |',
       '| starts-state notes / endless, friends\' room and bot entries dropped, no record of the key left on the shards (Q144) | ' + s('noteGone', 0) + ' / ' + s('entryGone', 0) + ' |',
       '| processed keys remembered / dropped past the cap (Q144) | ' + s('processedN', 0) + ' / ' + s('processedPruned', 0) + ' |',
@@ -11097,6 +11102,70 @@ function applyLiftOrphans(gr, signals, processed, now) {
   return res;
 }
 
+// ---- an opening host left alone by a host migration he never saw (cloud audit Q414, round-3 R3-B2-02 / R3-B3-01) ----
+// Launch week: in 3+ seat quick matches and friends' rooms the host lost the others for a moment, they moved to a new host
+//   and played the match out, and the old host settled on the spot as the one player left: a 'peers-gone' (1) result of
+//   the levels he had seen, himself on top. Client cause (mp.js, master 6beb21f96): the promote step closes the old host's
+//   connection (A4 promote 4, p2pCloseConnsExcept), that close reaches him as a peer's close (state-change-4) and
+//   _anyVoluntaryPeerLoss reads it as somebody leaving on purpose, so the O44 exit (to the menu with a rejoin record, no
+//   result) is skipped and the host writes the result of a match the others are still playing. Here the two kinds of
+//   record differ, so every writer was flagged as a suspected forger and the key voided at the start verdict (each writer
+//   the 50): six such keys in two days (four quick, one 5-seat quick, one friends' room).
+// The early record is set aside, never weighed against the others (the user's call A42 stands: a group of three or more
+//   whose finishers disagree is not settled by a majority). It is taken out only when the record says by itself that its
+//   match ended early for its writer and every other writer finished the same match without him:
+//   - one account wrote it, every record of his is 'peers-gone' from one seat, at FEWER levels than the finishers;
+//   - at least two other accounts, every record of theirs 'finished' (0), the same score vector, the same levels;
+//   - one table: no two records name different accounts at a seat, each writer sits where his own record says he does,
+//     and nobody else names the early writer at another seat;
+//   - a free-for-all of three to six seats (quick, ranked, friends' room): no team, endless or bot code (their lanes keep
+//     their rules), no gamble tail on any record, nothing the Q68 / Q339 passes read first (a 10, a lift block).
+//   The finishers settle on their own scores as if the early record had not been written; the early writer is an absent
+//   seat with a record of his own, excused like an anti-cheat removal (eacExcusePlan by 'early': the same per-account cap,
+//   past it convicted as a leave) and owed the consolation a void paid him (CONSOLATION_XP, through the Q315 queue). A
+//   match the early writer finished himself (the 5-seat key: a 'finished' record of his own with other scores) is not
+//   this shape and stays as it was.
+// Pure. vecOf: the reconcile's consistency vector (a 'BAD' one is never taken). null, or { kind: 'early', g: the
+//   finishers' records (same objects, same order), early: { sid, seat, levels, fLevels, n: his records }, fin: [sids] }.
+function earlyEndVerdict(g, vecOf) {
+  if (!g || g.length < 3) return null;
+  const mt = g[0].d[2] | 0, pc = g[0].d[8] | 0;
+  if (isEndlessMt(mt) || isBotMt(mt) || isTeamMt(mt) || pc < 3 || pc > 6) return null;
+  const vo = vecOf || ((r) => JSON.stringify(r.d.slice(10, 10 + pc)));
+  const who = (r) => String(r.steamID != null ? r.steamID : (r.w || ''));
+  for (const r of g) {
+    if ((r.d[8] | 0) !== pc || (r.d[2] | 0) !== mt || r.d.length < 11 + 3 * pc || !who(r) || String(vo(r)).indexOf('BAD') === 0) return null;
+    const i = 11 + 3 * pc;
+    if ((r.d.length > i && ((r.d[i] | 0) & ~0x3F) === T2BY_TAG) || gambleTagOf(r) || liftOrphanBlockOf(r)) return null;
+  }
+  const dispOf = (r) => r.d[10 + pc] | 0, lv = (r) => (r.d[7] | 0) >> 1;
+  const early = g.filter((r) => dispOf(r) === 1), fin = g.filter((r) => dispOf(r) === 0);
+  if (!early.length || !fin.length || early.length + fin.length !== g.length) return null;
+  const es = who(early[0]), eSeat = early[0].d[5] | 0;
+  if (early.some((r) => who(r) !== es || (r.d[5] | 0) !== eSeat) || fin.some((r) => who(r) === es)) return null;
+  const fs = [...new Set(fin.map(who))];
+  if (fs.length < 2) return null;
+  const v0 = vo(fin[0]), fl = lv(fin[0]);
+  if (fl < 1 || !fin.every((r) => vo(r) === v0 && lv(r) === fl) || !early.every((r) => lv(r) < fl)) return null;
+  const table = {};
+  for (const r of g) {
+    const ro = r.roster || decodeRoster(r.d);
+    for (const k of Object.keys(ro)) {
+      const s = k | 0, sid = String(ro[k]);
+      if (s < 0 || s >= pc) return null;
+      if (table[s] != null && table[s] !== sid) return null;
+      table[s] = sid;
+    }
+  }
+  if (table[eSeat] !== es) return null;
+  // the finishers' own rosters seat him there (a strict majority of their records, as detectLeavers counts): the settle
+  //   names him an absent seat, so the excuse below is what keeps him from being convicted
+  if (fin.filter((r) => String((r.roster || decodeRoster(r.d))[eSeat]) === es).length * 2 <= fin.length) return null;
+  for (const s of Object.keys(table)) if ((s | 0) !== eSeat && table[s] === es) return null;
+  for (const r of fin) if (table[r.d[5] | 0] !== who(r)) return null;
+  return { kind: 'early', g: fin, early: { sid: es, seat: eSeat, levels: Math.max(...early.map(lv)), fLevels: fl, n: early.length }, fin: fs };
+}
+
 // ===== consensus grouping (audit 2026-09-06 D-F11 / B-F10 / E-G3: extracted from main() so the "N ends agree" rule is testable) =====
 //   - one voice per ACCOUNT: consensus counts distinct writers, not records. The same account writing the same key twice (cold
 //     reconnect double-write; a results record written on a suspended segment's key) used to pass as "2 consistent" = a single
@@ -11110,7 +11179,9 @@ function applyLiftOrphans(gr, signals, processed, now) {
 //   - Q339: ahead of that, a group whose blocks name a host migration's orphan lifts (liftOrphanVerdict): a settle is a
 //     consistent entry with lorph = the verdict, a hold an inconsistent one with lorph (applyLiftOrphans takes it out ahead of the flag loop);
 //     opts.starts (startsPending) gives the seats seen agreeing and the registered start roster.
-//   Returns { groups, consistentMatches, inconsistentGroups, consistent, flagged, lone, soloN, nosum, nosumHost, nosumHeld, lorph }.
+//   - Q414: a group neither of those passes claims, whose one early 'peers-gone' writer the others outlived (earlyEndVerdict):
+//     a consistent entry of the finishers' records with early = { sid, seat, levels, fLevels, n } (the settle excuses him).
+//   Returns { groups, consistentMatches, inconsistentGroups, consistent, flagged, lone, soloN, nosum, nosumHost, nosumHeld, lorph, early }.
 function groupRecords(recs, opts) {
   const vecOf = opts.vecOf, MAX_SEATS = opts.MAX_SEATS || 8;
   const groups = {};
@@ -11119,6 +11190,7 @@ function groupRecords(recs, opts) {
   const consistentMatches = [], inconsistentGroups = [];
   const nosum = { settle: 0, pending: 0, host: 0 }, nosumHost = [], nosumHeld = [];   // Q68
   const lorph = { settle: 0, hold: 0 };   // Q339
+  const early = { settle: 0 };   // Q414
   for (const m of Object.keys(groups)) {
     const g = groups[m];
     // O93 solo competitive segment (pc=1 endless, guard-signed): one seat = no consensus lane. It enters
@@ -11182,6 +11254,7 @@ function groupRecords(recs, opts) {
       const pend0 = opts.starts ? opts.starts[m] : null;
       const lo = liftOrphanVerdict(g, { agreed: (pend0 && pend0.agreed) || [], gate: seatGateRoster(pend0) });
       const named = () => lo ? Object.keys(lo.named).map((s) => 'seat ' + s + ' -' + lo.named[s]).join(', ') : '';
+      const ee = (!lo && !ns) ? earlyEndVerdict(g, vecOf) : null;   // Q414 (pure; read only where nothing above claims the group)
       if (lo && lo.kind === 'settle') {
         const was = own();
         g.splice(0, g.length, ...lo.g);   // in place, as Q68's settle
@@ -11212,6 +11285,16 @@ function groupRecords(recs, opts) {
           + (ns.host ? 'the opening host ' + plog(ns.host) + ' flagged at the start verdict if the key is still in this shape then and a start roster seats that host at 0 (Q68)' : 'nobody flagged (' + ns.why + ', Q68)')
           : 'only ' + ns.recv.length + ' writer got the final summary, ' + ns.nos.length + ' judged without it and differ -- not settled, nobody flagged, waits for the start verdict (Q68)')
           + ': ' + own());
+      } else if (ee) {
+        const was = own();
+        g.splice(0, g.length, ...ee.g);   // in place, as Q68's settle: the early writer's records leave the group
+        consistent++; early.settle++;
+        const cons = voidByConsensus(g.map(r => r.dispCode));
+        consistentMatches.push({ m, g, void: cons.isVoid, early: ee.early });
+        console.log('  match=' + m + ': ' + plog(ee.early.sid) + ' (seat ' + ee.early.seat + ') settled alone as the one player left after '
+          + ee.early.levels + ' level(s), ' + ee.fin.length + ' others finished all ' + ee.early.fLevels + ' on one vector -- his record set aside,'
+          + ' the rest consistent, nobody flagged (Q414) disp=[' + g.map(r => r.disp).join(',') + ']'
+          + (cons.isVoid ? ' -> consensus VOID, not settled (' + cons.voidVotes + '/' + cons.present + ')' : '') + ' -- as written: ' + was);
       } else {
         flagged++;
         const aside = (ns && ns.kind === 'fork') ? ns.exempt : [];
@@ -11225,8 +11308,9 @@ function groupRecords(recs, opts) {
   }
   console.log('reconciled: ' + Object.keys(groups).length + ' (consistent ' + consistent + ' / lone ' + lone + ' / inconsistent ' + flagged + (soloN ? ' / solo ' + soloN : '')
     + ((nosum.settle || nosum.pending || nosum.host) ? ' / without the final summary: settled ' + nosum.settle + ', held ' + nosum.pending + ', nobody got it ' + nosum.host : '')
-    + ((lorph.settle || lorph.hold) ? ' / host migration lifts named: settled ' + lorph.settle + ', held ' + lorph.hold : '') + ')');
-  return { groups, consistentMatches, inconsistentGroups, consistent, flagged, lone, soloN, nosum, nosumHost, nosumHeld, lorph };
+    + ((lorph.settle || lorph.hold) ? ' / host migration lifts named: settled ' + lorph.settle + ', held ' + lorph.hold : '')
+    + (early.settle ? ' / an early end set aside: ' + early.settle : '') + ')');
+  return { groups, consistentMatches, inconsistentGroups, consistent, flagged, lone, soloN, nosum, nosumHost, nosumHeld, lorph, early };
 }
 
 async function main() {
@@ -12214,6 +12298,7 @@ async function main() {
   RUN.flagged = gr.flagged;
   RUN.nosum = gr.nosum.settle + ' / ' + gr.nosum.pending + ' / ' + gr.nosum.host;   // Q68
   RUN.lorph = gr.lorph.settle + ' / ' + gr.lorph.hold;   // Q339
+  RUN.earlySetAside = gr.early.settle;   // Q414
 
   // start/settle cross-check runs BEFORE the early returns: the very scenario it exists for
   // (a match that started and was never settled by anyone) produces no consistent matches at all,
@@ -15711,6 +15796,8 @@ async function main() {
     //   and of every lane: matchmade (leaver conviction), private and bot (a late finisher's XP).
     const absentNow = absentRosterSeats(g).filter((x) => agreed.indexOf(pid(String(x.steamID))) < 0);
     if (dropSeat) for (let i = absentNow.length - 1; i >= 0; i--) if (dropped(absentNow[i].steamID)) absentNow.splice(i, 1);   // Q109: a dropped record's writer is not absent
+    // Q414: the early writer set aside is no late record to wait for -- his own is read (the excuse below decides him)
+    if (c.early) for (let i = absentNow.length - 1; i >= 0; i--) if (earlySeatOf(c.early, absentNow[i])) absentNow.splice(i, 1);
     const absHold = absenceHold(absentNow, pend, nowMs, shardsComplete, ABSENT_GRACE_MS);
     if (pacingDefer(pend, nowMs, SANITY.MIN_START_AGE_MS)) {
       console.log('  pacing ' + c.m + ': start ' + (pend.synth ? 'first sighted' : 'attested') + ' ' + Math.round((nowMs - (pend.t0 || 0)) / 1000) + 's ago < ' + Math.round(SANITY.MIN_START_AGE_MS / 1000) + 's -- deferred');
@@ -16129,8 +16216,8 @@ async function main() {
     const t2ex = new Set(Array.isArray(c.t2ex) ? c.t2ex.map(String) : []);
     // O886: the absent seats the anti-cheat took out (the finishers' tail block / the seat's own 'eac-drop' note), under the
     //   per-account cap -- excused like a Q56 dissenter at every site that reads t2ex below (see EAC_EXCUSE). The cap is
-    //   spent at the conviction loop, where the settle can no longer be deferred.
-    const edPlan = eacExcusePlan(g, leavers0, pend, leavers, nowMs, (h) => !!confState[h + '|' + c.m] || confSeen.has(h + '|' + c.m) || t2ex.has(h));
+    //   spent at the conviction loop, where the settle can no longer be deferred. Q414: the early writer set aside (c.early) too.
+    const edPlan = eacExcusePlan(g, leavers0, pend, leavers, nowMs, (h) => !!confState[h + '|' + c.m] || confSeen.has(h + '|' + c.m) || t2ex.has(h), c.early);
     for (const h of edPlan.ex.keys()) t2ex.add(h);
     // Q136 (see teamLossCounted): a team match whose losing team counts nobody at this settle -- no writer on a losing seat,
     //   no losing seat convicted on his own record -- moves no rating: no TrueSkill update, no points, no placement seed of a
@@ -16667,10 +16754,19 @@ async function main() {
       if (edX) {   // O886: removed by the anti-cheat -- excused (EAC_EXCUSE): the cap is spent here, nothing else of his moves
         const hx = pid(String(x.steamID));
         noteEacExcuse(leavers, hx, nowMs);
-        RUN[edX.by === 'block' ? 'eacExcused' : 'eacExcusedNote'] = (RUN[edX.by === 'block' ? 'eacExcused' : 'eacExcusedNote'] | 0) + 1;
+        const edRun = edX.by === 'block' ? 'eacExcused' : (edX.by === 'early' ? 'earlyExcused' : 'eacExcusedNote');
+        RUN[edRun] = (RUN[edRun] | 0) + 1;
         for (const sid of edX.who) { const sg = sigPlayer(signals, pid(sid), nowMs); sg.ew = (sg.ew | 0) + 1; }   // who vouched (record only)
         if (edX.who.length) sigDirty = true;
-        console.log('  leaver ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' removed by the anti-cheat ('
+        if (edX.by === 'early') {
+          // Q414: the consolation the void paid him (CONSOLATION_XP), owed through the Q315 queue: the consolation loop ran
+          //   ahead of this settle, the next run that names him (his record is on the shards) pays it in his one write
+          let owed = false;
+          if (XP_LB) { const pe = sigPlayer(signals, hx, nowMs); pe.cq = owedUnsent(pe, pe.cq, owedItem(null, Math.floor(nowMs / 86400000)), nowMs); sigDirty = true; owed = true; RUN.earlyOwed = (RUN.earlyOwed | 0) + 1; }
+          console.log('  leaver ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' settled alone after ' + c.early.levels + ' of the ' + c.early.fLevels
+            + ' level(s) the others finished (his record set aside) -- excused, no conviction (Q414; ' + eacExcuseUsed(leavers, hx, nowMs) + ' of ' + EAC_EXCUSE.CAP
+            + ' in the window)' + (owed ? ', the ' + CONSOLATION_XP + ' consolation owed to the next run' : ''));
+        } else console.log('  leaver ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' removed by the anti-cheat ('
           + (edX.by === 'block' ? 'named by ' + edX.who.length + ' of ' + writerSids.length + ' writers' : 'his own exit note')
           + ') -- excused, no conviction (O886; ' + eacExcuseUsed(leavers, hx, nowMs) + ' of ' + EAC_EXCUSE.CAP + ' in the window)');
         if (EAC_EXCUSE.FINE > 0 && lpId && seatAppliesLp(matchType, x.seat)) {   // 0 today (see EAC_EXCUSE)
@@ -16686,7 +16782,11 @@ async function main() {
         continue;
       }
       const edCap = edPlan.capped.find((y) => y.h === pid(String(x.steamID)));
-      if (edCap) {   // O886: past the cap -- convicted below as any leave
+      if (edCap && edCap.by === 'early') {   // Q414: past the shared cap -- convicted below as any leave
+        RUN.earlyExcuseCapped = (RUN.earlyExcuseCapped | 0) + 1;
+        console.log('  leaver ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' settled alone after ' + c.early.levels + ' level(s) (his record set aside) but past '
+          + EAC_EXCUSE.CAP + ' excuses in the window -- convicted as a leave (Q414)');
+      } else if (edCap) {   // O886: past the cap -- convicted below as any leave
         RUN.eacExcuseCapped = (RUN.eacExcuseCapped | 0) + 1;
         console.log('  leaver ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' removed by the anti-cheat (' + (edCap.by === 'block' ? 'the finishers named him' : 'his own exit note')
           + ') but past ' + EAC_EXCUSE.CAP + ' excuses in the window -- convicted as a leave (O886)');
@@ -17301,7 +17401,7 @@ async function main() {
 if (require.main === module) {
   main().catch(e => { ghErr('run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
-module.exports = { ED_MAGIC, ED_VER, ED_LEN, EAC_EXCUSE, EAC_NOTE_DISP, eacDropMaskOf, eacDropSeats, eacExcusePlan, eacExcuseUsed, noteEacExcuse, SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CLASSIC_OWNERS: classicOwners.CLASSIC, CLASSIC_FILE, CHAT_MUTE: chatMute.CHAT_MUTE, CHAT_MUTE_FILE, CHAT_MUTE_LB, CHAT_REPORT_LB, isVoidDisp, voidByConsensus, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, RS_SOLO_VS_TRIO, RS_TRIO_WIN, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, DISPUTE_FLOOR, disputeFloorOf, disputeFloorAdmit, disputeFloorXp, CONSOLE_OWED, owedTag, owedItem, owedItemXp, owedRefund, owedUnsent, consoleOwedTake, consoleOwedPlan, consoleOwedRebase, CONFESS_MAGIC, NOTE_MAGIC, NOTE_DISP, reconcileConfessions, SANITY, sanityFlags, sanitySplit, recordSanityFlags, SANITY_RECORD_SLUGS, SANITY_ROSTER_SLUGS, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, rekeyReports, repKeysReady, REP_KEYS, REP_KEYS_VER, CHAT_KEYS, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, trustIndex, TRUST_T, TRUST_LB, TRUST_REJ_BIT, SHADOW_POOL, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan, postForm, postFormDetails, findOrCreateBoard, isTestBoardName, sandboxOn, ghWarn, ghErr, PT_MODE, PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, ACTIVE_MATCH_LB, seedStarterCp, ptBoardPlan, PRIVATE_XP, isPrivateMt, privateProgressOf, creditXpPrivate, BOT_XP, isBotMt, botTierOf, botTierMult, botSeatSplit, botRanksOf, botRankEffOf, botXpGain, botProgressOf, creditXpBot, DEMO_APPID, ENDLESS_XP, computeXpEndless, creditXpEndless, CAMPAIGN_LB, SEEDCAP_REJECT_LADDER_MIN, seedcapRejectWindowMin, seedcapRejectUntilMin, seedcapRejectActive, seedcapNEff,
+module.exports = { ED_MAGIC, ED_VER, ED_LEN, EAC_EXCUSE, EAC_NOTE_DISP, eacDropMaskOf, eacDropSeats, eacExcusePlan, eacExcuseUsed, noteEacExcuse, earlyEndVerdict, earlySeatOf, SUPPORTER: supporters.SUPPORTER, SUPPORTERS_FILE, CLASSIC_OWNERS: classicOwners.CLASSIC, CLASSIC_FILE, CHAT_MUTE: chatMute.CHAT_MUTE, CHAT_MUTE_FILE, CHAT_MUTE_LB, CHAT_REPORT_LB, isVoidDisp, voidByConsensus, premadeTrioAtOf, teamSizeOfMt, teamOfSeat, RS_SOLO_VS_TRIO, RS_TRIO_WIN, lpDelta, lpSeg, eloDeltas, decodeDetails, encodeDetails, dispName, decodeSid, decodeRoster, detectLeavers, appliesLp, isTeamMt, isSubScoreMt, team2WinTeamOf, team2RankOf, TEAM2, baseMt, premadeMaskOf, teamRankOf, leaverLpPenalty, dispClassOf, effectiveLeaverFactor, computeXpGain, creditXp, xpProgressFrac, matchProgressOf, careerWon, xpLevelCost, xpLevelOf, xpBoostMult, CAREER_MAGIC, CAREER_VER, pid, XP_CFG, LEAVER_XP, LP_SEG, LP_SEED, seedLp, reducedStakesPlan, teamLpPlan, RS_MAGIC, readBoardAll, readUserEntry, PAGE_SIZE, PAGE_CAP, boundaryOf, crosslineDelta, BOUNDARY_MARGIN, PROMO_LAND, RELEG_LAND, reconcileStarts, START_MAGIC, STARTS_MATURITY_MS, CONSOLATION_XP, DISPUTE_FLOOR, disputeFloorOf, disputeFloorAdmit, disputeFloorXp, CONSOLE_OWED, owedTag, owedItem, owedItemXp, owedRefund, owedUnsent, consoleOwedTake, consoleOwedPlan, consoleOwedRebase, CONFESS_MAGIC, NOTE_MAGIC, NOTE_DISP, reconcileConfessions, SANITY, sanityFlags, sanitySplit, recordSanityFlags, SANITY_RECORD_SLUGS, SANITY_ROSTER_SLUGS, sidPlausible, pacingDefer, recordFlag, recordMatchSignals, sigDay, sigPlayer, pruneSignals, pairKey, harvestReports, rekeyReports, repKeysReady, REP_KEYS, REP_KEYS_VER, CHAT_KEYS, REPORT_MAGIC, REPORT_DAILY_CAP, trustTierOf, trustPlan, verifiedUniqueReporters, trustIndex, TRUST_T, TRUST_LB, TRUST_REJ_BIT, SHADOW_POOL, getJson, BASE, REPORT_LB, ENDLESS, isEndlessMt, endlessTail, endlessAbstention, endlessGoalBase, endlessGoalFor, endlessCpGain, endlessContinueCost, endlessNib, endlessDebits, packEndlessScore, unpackEndlessScore, endlessRequiredMs, rosterConsensus, recordEndlessSignals, creditCp, CP_LB, ENDLESS_LB, ENDLESS_LB_TRIO, groupDecayPlan, GROUP_DECAY, SEASONS, seasonAt, seasonBoardName, SOFT_RESET, softResetLp, seasonSeedLp, seasonNowMs, resolveSeasonBoard, REDEEM_LB, GRANT_LB, REDEEM_MAGIC, GRANT_MAGIC, GRANT_WORDS, REDEEM_CATALOG, decodeRedeemWant, decodeGrantMask, grantBit, setGrantBit, popcountWords, redeemPlan, postForm, postFormDetails, findOrCreateBoard, isTestBoardName, sandboxOn, ghWarn, ghErr, PT_MODE, PT_MT_ALLOWED, PT_SEED_CP, PT_SHARD_COUNT, PT_MIRROR_LB, ACTIVE_MATCH_LB, seedStarterCp, ptBoardPlan, PRIVATE_XP, isPrivateMt, privateProgressOf, creditXpPrivate, BOT_XP, isBotMt, botTierOf, botTierMult, botSeatSplit, botRanksOf, botRankEffOf, botXpGain, botProgressOf, creditXpBot, DEMO_APPID, ENDLESS_XP, computeXpEndless, creditXpEndless, CAMPAIGN_LB, SEEDCAP_REJECT_LADDER_MIN, seedcapRejectWindowMin, seedcapRejectUntilMin, seedcapRejectActive, seedcapNEff,
   ENDLESS_COMP_LB, SAVE_BOX_LB, SOLO_FILE, COMP, soloSanity, soloChainPlan, rerollChain, soloMilestones, soloAdvance, soloRunKey, soloRunKind, soloRunKept, soloRunSeason, seasonEndMs, pruneSolo, soloStartAttested, loadSolo, saveSolo, segOrderOf, segStartOf, freshOrder, freshOrderPaced, freshSeqPlan, seqStartMs, seqKeptLag, seqKeep, seqAddKept, SEQ_KEPT_MAX, writerReadyAt, writerClaim,
   ENDLESS_COMP_LB_DUO, ENDLESS_COMP_LB_TRIO, SAVE_BOX_LB_DUO, SAVE_BOX_LB_TRIO, teamRunKey, soloMsSlot, groupRecords, nosumVerdict, DISP_NOSUMMARY, isFinishDisp,
   ENDLESS_COMP_LB_QUAD, SAVE_BOX_LB_QUAD, ENDLESS_LB_QUAD, ENDLESS_MAX_PC, compFamKeyOf,   // client knife 3.7a (O178 four seats)

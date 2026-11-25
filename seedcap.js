@@ -497,6 +497,7 @@ function pendingOfGroup(st, m, g, opt) {
       const vg = g.filter(r => !nos(r.d));
       if (vg.length && vg.length < g.length && g.every(r => (r.d[8] | 0) === pc0) && vg.every(r => vk(r) === vk(vg[0]))) g = vg;
       else {
+        const ee = v.earlyEndVerdict(g);   // cloud audit Q414: the reconcile sets the early writer's records aside (see pickAuditable); read where Q339 does not claim the group
         // cloud audit Q339: records that differ only by the lifts a host migration left unchecked, every seat they name gone
         //   from the match -- the reconcile settles on the lowered scores (liftOrphanVerdict), so those are audited here; the
         //   records written with the summary carry them (rewritten copies: the seats their writers sit on read as written), a
@@ -504,6 +505,7 @@ function pendingOfGroup(st, m, g, opt) {
         //   are the reconcile's to read: a key it holds for them settles nothing, whatever this audit says.
         const lo = v.liftOrphanVerdict(g, {});
         if (lo && lo.kind === 'settle') g = all = lo.g.filter(r => r.nosumOwn == null);
+        else if (!lo && ee) g = all = ee.g;
         else {
           const side = (v.baseMt(mt0) === 1 || v.baseMt(mt0) === 2) ? signedSideOf(g) : null;
           const so = side ? null : seatOnlyRecs(m, g, opt && opt.starts);   // Q418
@@ -602,6 +604,18 @@ function pickAuditable(st, groups, opt) {
     if (knownAudit(st, m)) continue;
     const x = pendingOfGroup(st, m, groups[m], opt);
     if (x) { if (re) x.re = 1; pending.push(x); }
+  }
+  // cloud audit Q414: a group whose one early 'peers-gone' writer the others outlived (validate.earlyEndVerdict) settles on the
+  //   finishers' scores, so theirs is the vector audited (pendingOfGroup reads it so) and only they can be convicted. The early record
+  //   lands minutes before theirs (he settled when the others moved to a new host): this job had already audited the key on it alone,
+  //   and an audit is once per key -- the finishers' scores were never capped. A remembered audit not marked ee is taken again, once
+  //   (a re-audit: out of the core counts); an audit of this shape is marked (applyAudit) and never taken again.
+  for (const x of pending) if (!x.ee && v.earlyEndVerdict(groups[x.m])) x.ee = 1;
+  for (const m of Object.keys(groups)) {
+    const a = st.audited[m];
+    if (!a || a.ee || !v.earlyEndVerdict(groups[m])) continue;
+    const x = pendingOfGroup(st, m, groups[m]);
+    if (x) { x.re = 1; x.ee = 1; pending.push(x); }
   }
   return pending;
 }
@@ -734,6 +748,7 @@ function applyAudit(st, pending, cliMap, processed, t, opt) {
     const k = coreOfVerdict(r, primary), ov = r.via === 'overlap';   // O198 v1: which world answered (k) + overlap max
     st.audited[x.m] = { c: capEff, s: Math.max.apply(null, x.scores), o: overSeats.length ? 1 : 0, t, k };
     if (ov) st.audited[x.m].ov = 1;
+    if (x.ee) st.audited[x.m].ee = 1;   // Q414: audited on the finishers' vector (pickAuditable takes no other audit of the key after it)
     // O784: only a first audit counts toward the core's honest audits (the O285 (1) observation exit) and its hourly over-cap
     //   rate (the O198 alert): a re-audit of a group the state forgot would fill a new core's window with old matches
     if (x.re) st.audited[x.m].re = 1;
