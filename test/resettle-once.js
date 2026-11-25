@@ -809,6 +809,7 @@ function liveRepo(tag) {
   for (const f of ['tools/resettle-once.js', 'tools/resettle-steam.js']) fs.copyFileSync(path.join(ROOT, f), path.join(dir, f));
   const vf = path.join(dir, 'validate.js'), s0 = fs.readFileSync(vf, 'utf8'), s1 = OLD_RULE(s0);
   if (s1 === s0) throw new Error('[13] the old-rule anchor is gone from validate.js (perk lane, verifyPerkPicks)');
+  if (s1.indexOf('(the old rule had no wait)') < 0) throw new Error('[13] the Q425 anchor is gone from validate.js (perk lane, lateResume) -- the simulated old rule would wait, not reject');   // Q425 review P3-c
   fs.writeFileSync(vf, s1);
   const kf = path.join(dir, 'attest-keys.json'), j = JSON.parse(fs.readFileSync(kf, 'utf8'));
   j.keys[String(KEY_ID)] = { pubs: [PUB], sealed: true, at: '2026-10-01T00:00:00.000Z' }; fs.writeFileSync(kf, JSON.stringify(j, null, 2));

@@ -9374,8 +9374,10 @@ function soloAdvance(st, key, f, m, plan, nowMs) {
   if (plan.rtags && plan.rtags.length) { run.revs = run.revs || {}; for (const t of plan.rtags) if (!run.revs[t]) run.revs[t] = m; }   // R1-A3-02: this row (tag) has started its one session
   if (plan.gap) run.gapT = nowMs;                              // Q428 floor: when this run's chain last moved past a waited-out gap (segments waiting then never pay below a 0 balance)
   if (plan.revive) run.final = 0;                              // O218 casual token resume brings a FINAL run back (its own FINAL below may close it again)
-  if ((f.flags | 0) & attest.SEG_RESUMED) run.contN = 0;       // O218: the continue ladder restarts with the guard session (renderer / guard / cron alike)
-  if (((f.flags | 0) & attest.SEG_RESUMED) && ((f.flags | 0) & attest.SEG_CASUAL) && !((f.flags | 0) & (attest.SEG_COMP | attest.SEG_CLASSIC))) run.rd = Math.max(run.rd | 0, f.startDepth | 0);   // Q425: the deepest casual token resume so far (optional field; absent = 0)
+  const casTok = ((f.flags | 0) & attest.SEG_RESUMED) && ((f.flags | 0) & attest.SEG_CASUAL) && !((f.flags | 0) & (attest.SEG_COMP | attest.SEG_CLASSIC));
+  const lateSeen = casTok && (run.lw | 0) >= (f.startDepth | 0);   // Q425 rework 1: segments that fit this resume were seen before it (casualLateMark)
+  if (((f.flags | 0) & attest.SEG_RESUMED) && !lateSeen) run.contN = 0;       // O218: the continue ladder restarts with the guard session (renderer / guard / cron alike)
+  if (casTok) { run.rd = Math.max(run.rd | 0, f.startDepth | 0); delete run.lw; }   // Q425: the deepest casual token resume so far (optional field; absent = 0); the late mark is used up
   if ((f.flags | 0) & attest.SEG_FINAL) run.final = 1;
   delete st.wait[m];
   if (st.held) delete st.held[m];
@@ -10053,6 +10055,16 @@ function rerollChain(f, run, slackDepth, casualResumeAt) {
 //   It credits nothing: only a resume -- one row, one session (R1-A3-02) -- makes the segment chain. A competitive (save points, no
 //   token) / classic (no picks) segment, a resume, a burnt run, a log that fails perk_forge or contradicts the run before the first
 //   checkpoint: null = the old path.
+// Q425 rework 1 (review round 1): the continue ladder across the two sessions. Before the resume record, a segment of the resumed
+//   session that fits the old line as well (the same card at every draw past C) settles on the run memory and pays its rungs from the
+//   old session's count; the resume then restarted the count at 0 (O218) and the session's later segments -- the one that waited for it
+//   among them, or a segment of the old line that waited for it and settles on the resumed line -- paid those rungs again (the review's
+//   seed 23: one rung twice). So once a segment of this run was seen fitting a token resume at depth >= C (it waited, or its wait ran
+//   out), the resume at C keeps the count instead (soloAdvance): the rungs paid past C count for either session -- at worst a rung of
+//   the resumed session goes unpaid (what both sessions used past C), never a rung paid twice (Q424's rule, user ruling 10). With no
+//   such segment seen (the usual order: the old line, the resume, then its session) the count restarts at 0 as before. run.lw =
+//   the deepest such C; optional (absent = none), used up by the next casual token resume.
+function casualLateMark(run, at) { if (run && (at | 0) > (run.lw | 0)) run.lw = at | 0; }
 function casualLateResumeAt(run, f, pc, ch) {
   const fl = (f && f.flags) | 0;
   if (!run || run.burnt) return null;
@@ -14624,6 +14636,7 @@ async function main() {
       if (!(casual || ccCas)) return null;
       const at = casualLateResumeAt(soloState.runs[key], f, cc ? 2 : 1, PERK_CH);
       if (at == null) return null;
+      casualLateMark(soloState.runs[key], at);   // Q425 rework 1: that resume, when it comes, keeps the continue count
       const w = soloState.wait[m] || (soloState.wait[m] = { t0: nowMs });
       const gone = nowMs - (w.t0 || 0) > COMP.CHAIN_WAIT_MS;
       if (gone) RUN.resumeLateGone = (RUN.resumeLateGone | 0) + 1; else RUN.resumeLateWait = (RUN.resumeLateWait | 0) + 1;
@@ -17126,7 +17139,7 @@ Object.assign(module.exports, { MSIG, botSignedOf, signedPairOf, signedPairSynth
 Object.assign(module.exports, { BOT_KEY_WAIT_MS, botKeyPending });   // cloud audit Q408 a lone bot record with a pending signature block waits for its key (test/bot-key-wait.js)
 Object.assign(module.exports, { flagPlayer, flagsInWindow, stampLegacyFlags, TRUST_F_WINDOW_MS, SIG_FLAG_KEYS_CAP });   // cloud audit Q98 forgery flags age out of the trust tier (test/trust-decay.js)
 Object.assign(module.exports, { endlessHostOnly, SANITY_ENDLESS_HOST_SLUGS });   // cloud audit Q305 endless sanity on host-copied fields flags nobody (test/endless-host-fields.js)
-Object.assign(module.exports, { casualLateResumeAt });   // cloud audit Q425 a resumed session's segment seen before its resume record waits for it (test/casual-resume-late.js)
+Object.assign(module.exports, { casualLateResumeAt, casualLateMark });   // cloud audit Q425 a resumed session's segment seen before its resume record waits for it (test/casual-resume-late.js)
 Object.assign(module.exports, { endlessRecordSplit, endlessRerollCanon, SANITY_ENDLESS_OWN_SLUGS, SANITY_ENDLESS_REC_SLUGS, SANITY_ENDLESS_GROUP_HOST });   // cloud audit Q306 endless: one record's own fields drop that record (test/endless-own-fields.js)
 Object.assign(module.exports, { endlessDispute });   // cloud audit Q317 endless co-op run of three writers or more whose records disagree (test/endless-co-op-dispute.js)
 Object.assign(module.exports, { roomDispute });   // cloud audit Q407 friends' room / bot match of three writers or more whose records disagree (test/room-dispute.js)

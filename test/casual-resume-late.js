@@ -16,7 +16,12 @@
 //       part), never flagged
 //   [3] main(): a reroll bit the dead timeline took past the checkpoint (reroll-lost): the resumed line's segment waits, then settles
 //   [4] main(): the resume a few days late still settles; the resume that never comes: after the chain wait the segment is rejected,
-//       nobody flagged; still flagged at once: a pick before the first checkpoint rewritten, a build its log does not replay
+//       nobody flagged (perk_chain, after-final, reroll-lost: processed, never waiting forever); still flagged at once: a pick before
+//       the first checkpoint rewritten, a build its log does not replay
+//   [6] rework 1 (review round 1): the continue ladder -- a casual token resume keeps the run's continue count once a segment that fits
+//       it was seen before it (casualLateMark / soloAdvance; unit: kept, used up, a shallower mark, not a resume, competitive); the
+//       review's seed 23 shapes (solo + couch): the usual order charges the bound as before, the review's order never above it (no
+//       rung twice), ladder / XP equal to the usual order
 //   [5] mutations (each must turn this file red)
 // Usage: node test/casual-resume-late.js [<epoch-sync root>] [--no-mut] [--fail-fast]   (root defaults to this checkout; --no-mut =
 //   the mutation children, --fail-fast = stop at the first red part). Outside the tree it is the Q425 repro: an epoch-sync without
@@ -399,6 +404,19 @@ const DAY = 24 * HOUR;
     T('[4] the resume never comes: waits first, then rejected (processed, not settled) past the chain wait', waitedQ425(X, 3) && procHas(last, X.segs[3].m) && !settledAny(X, 3) && /never came, nobody flagged \(Q425\)/.test(linesOf(last, X.segs[3].m)), allLines(X, [3]));
   }
 }
+// review P3-a: the other two refusals whose wait runs out (after-final, reroll-lost) -- rejected and processed, never waiting forever
+for (const [nm, passes, segs, i, why] of [
+  ['after-final', [[0, 1], [3]], (L, FL) => shape(L, FL), 3, 'after-final'],
+  ['reroll-lost', [[0], [2]], (L, FL) => shapeR(L, FL), 2, 'reroll-lost']]) {
+  const X = play(TT, 'gone-' + nm, { sidN: 9425430 + nm.length, rs: 942543 + nm.length, passes, tail: [2 * HOUR, 8 * DAY, 2 * HOUR], segs });
+  if (!brk(X.rs, passes.length + 3, '[4] ' + nm + ' never')) {
+    const last = X.rs[X.rs.length - 1];
+    eq('[4] ' + nm + ': the resume never comes -- nobody flagged', lastFlag(X), 0);
+    T('[4] ' + nm + ': the resume never comes -- waits first, then rejected (processed, not settled) past the chain wait, and stays so',
+      X.rs.some((r) => new RegExp(why + " on the run's line.*waits for it \\(Q425\\)").test(linesOf(r, X.segs[i].m))) && procHas(X.rs[X.rs.length - 2], X.segs[i].m) && procHas(last, X.segs[i].m) && !settledAny(X, i) &&
+      X.rs.some((r) => /never came -- not settled, nobody flagged \(Q425\)/.test(linesOf(r, X.segs[i].m))) && !/waits for it \(Q425\)/.test(linesOf(last, X.segs[i].m)), allLines(X, [i]));
+  }
+}
 for (const [nm, mk] of [
   ['a pick before the first checkpoint rewritten', (L, FL, ex) => ({ log: ex.z13 })],
   ['a build its log does not replay', (L, FL, ex) => ({ log: L.y13, build: (ex.yBuild + 1) >>> 0 })],
@@ -419,6 +437,59 @@ for (const [nm, mk] of [
 }
 stopIfRed();
 
+// ---- [6] rework 1 (review round 1): the continue ladder across the two sessions ----
+// The review's seed 23 shapes. The rungs a session crosses cost endlessContinueCost(1, 2, 3) = 20 / 30 / 45; the bound is what the two
+//   sessions cost on their own (the dead line alone + the resumed line alone as a plain line); the usual order charges exactly that.
+const cost = (a, b) => { let s = 0; for (let k = a; k <= b; k++) s += v.endlessContinueCost(k); return s; };
+if (typeof v.casualLateMark === 'function') {
+  const st = { runs: { k: { max: 75, ms: 0, saves: {}, t: 0, contN: 2, lw: 70 } }, wait: {} };
+  const adv = (fl, sd, n) => { v.soloAdvance(st, 'k', { flags: fl, startDepth: sd, endDepth: sd + 5, continuesUsed: n | 0 }, 'm' + sd + fl, { ok: true, proven: sd }, 1); return [st.runs.k.contN | 0, st.runs.k.lw]; };
+  eq('[6] soloAdvance: a casual token resume at 60 after a segment that fits a resume at 70 was seen keeps the count, the mark is used up', adv(CAS | RES, 60), [2, undefined]);
+  st.runs.k.contN = 3;
+  eq('[6] soloAdvance: the next casual token resume (no mark) restarts it', adv(CAS | RES, 65), [0, undefined]);
+  st.runs.k.contN = 2; st.runs.k.lw = 55;
+  eq('[6] soloAdvance: a mark for a shallower resume (55) does not keep the count of a resume at 60', adv(CAS | COUCH | RES, 60), [0, undefined]);
+  st.runs.k.contN = 2; st.runs.k.lw = 60;
+  eq('[6] soloAdvance: a segment that is not a resume leaves count and mark', adv(CAS, 75), [2, 60]);
+  eq('[6] soloAdvance: a competitive resume restarts its count as before (the mark is the casual lane\'s)', adv(A.SEG_COMP | RES, 60), [0, 60]);
+  const r0 = { lw: 65 };
+  v.casualLateMark(r0, 60); v.casualLateMark(r0, 70); v.casualLateMark(undefined, 70);
+  eq('[6] casualLateMark: only goes up', r0.lw, 70);
+} else bad('[6] validate.js exports casualLateMark');
+const shapeA = (L, FL) => [   // seed 23 #0: the same card at 65 / 70 / 75 on both lines
+  { name: 'dead 60->65 (1 continue)', sd: 60, ed: 65, flags: FL, log: L.x13, conts: 1 },
+  { name: 'dead 65->70 (1)', sd: 65, ed: 70, flags: FL, log: L.x14, conts: 1 },
+  { name: 'dead 70->71 FINAL (1)', sd: 70, ed: 71, flags: FL | FIN, log: L.x14, conts: 1 },
+  { name: 'resumed 60->65 (1)', sd: 60, ed: 65, flags: FL | RES, log: L.x13, tag: 0x4254, conts: 1 },
+  { name: 'resumed 65->70 (2)', sd: 65, ed: 70, flags: FL, log: L.x14, conts: 2 },
+  { name: 'resumed 70->75 (3)', sd: 70, ed: 75, flags: FL, log: L.x15, conts: 3 },
+  { name: 'resumed 75->77 FINAL (3)', sd: 75, ed: 77, flags: FL | FIN, log: L.x15, conts: 3 }];
+const shapeB = (L, FL) => [   // seed 23 #15: the same card at 65, another at 70; the resumed line ends at 70 with no draw there
+  { name: 'dead 60->65 (1 continue)', sd: 60, ed: 65, flags: FL, log: L.x13, conts: 1 },
+  { name: 'dead 65->70 (2)', sd: 65, ed: 70, flags: FL, log: L.x14, conts: 2 },
+  { name: 'dead 70->73 FINAL (3)', sd: 70, ed: 73, flags: FL | FIN, log: L.x14, conts: 3 },
+  { name: 'resumed 60->65 (0)', sd: 60, ed: 65, flags: FL | RES, log: L.x13, tag: 0x4255, conts: 0 },
+  { name: 'resumed 65->70 FINAL (0)', sd: 65, ed: 70, flags: FL | FIN, log: L.x13, conts: 0 }];
+const LADDER = [
+  // shape, usual order, the review's order, bound (dead alone + resumed alone), what the review's order charges now, ladder, the segment that waited
+  ['A: the resumed 65->70 settles on the old line before the resume; its 70->75 waits for it', shapeA, [[0, 1, 2], [3], [4, 5, 6]], [[0], [4], [1, 2], [5], [3, 6]], cost(1, 1) + cost(1, 3), cost(1, 3), 770001, 5],
+  ['B: the resumed FINAL settles on the old line before the resume; the dead FINAL waits for it', shapeB, [[0, 1, 2], [3], [4]], [[0], [4], [1, 2], [3]], cost(1, 3) + 0, cost(1, 3), 730001, 2]];
+LADDER.forEach(([nm, segs, usualP, p, bound, want, lad, wi], j) => {
+  for (const couch of [false, true]) {
+    const tg = couch ? 'couch' : 'solo';
+    const U = play(TT, 'lu' + j + tg, { couch, sidN: 9425600 + 2 * j + (couch ? 10 : 0), rs: 942560 + 2 * j + (couch ? 10 : 0), passes: usualP, segs });
+    const X = play(TT, 'lx' + j + tg, { couch, sidN: 9425601 + 2 * j + (couch ? 10 : 0), rs: 942561 + 2 * j + (couch ? 10 : 0), passes: p, segs });
+    if (brk(U.rs, usualP.length + 1, '[6] ' + tg + ' ' + nm + ' (usual)') || brk(X.rs, p.length + 1, '[6] ' + tg + ' ' + nm)) continue;
+    eq('[6] ' + tg + ' ' + nm + ': the usual order charges the bound (unchanged: the resume restarts the count)', cpCharged(U), bound);
+    eq('[6] ' + tg + ' ' + nm + ': nobody flagged', lastFlag(X), 0);
+    T('[6] ' + tg + ' ' + nm + ': the waiting segment waited for the resume, then settled', waitedQ425(X, wi) && settledAny(X, wi), allLines(X, [wi]));
+    eq('[6] ' + tg + ' ' + nm + ': ladder / XP equal to the usual order', [ladderBest(X, ladId(X)), xpSum(X)], [lad, xpSum(U)]);
+    T('[6] ' + tg + ' ' + nm + ': CP never above the bound ' + bound + ' (no rung charged twice)', cpCharged(X) <= bound, 'charged ' + cpCharged(X) + '\n' + allLines(X));
+    eq('[6] ' + tg + ' ' + nm + ': CP charged (the rungs paid past 60 before the resume count for both sessions)', cpCharged(X), want);
+  }
+  stopIfRed();
+});
+
 // ---- [5] mutations: each must turn this file red ----
 if (!NO_MUT) {
   const VAL = fs.readFileSync(path.join(ROOT, 'validate.js'), 'utf8');
@@ -435,6 +506,12 @@ if (!NO_MUT) {
     ['a burnt run waits too', 'if (!run || run.burnt) return null;', 'if (!run) return null;'],
     ['competitive / classic wait too', 'if (!run || run.burnt) return null;\n  if (!(fl & attest.SEG_CASUAL) || (fl & (attest.SEG_RESUMED | attest.SEG_COMP | attest.SEG_CLASSIC))) return null;', 'if (!run || run.burnt) return null;\n  if (fl & attest.SEG_RESUMED) return null;'],
     ['the reroll reading not cut at C (every bit of the run must be kept)', 'if (rerollChain(f, run, CASUAL_LIVES, c)) continue;', 'if (rerollChain(f, run, CASUAL_LIVES, null)) continue;'],
+    ['after-final: a wait that ran out returns too (never processed; review RM3)', "plan.reason === 'after-final' && lateResume('after-final') === 'wait')", "plan.reason === 'after-final' && lateResume('after-final'))"],
+    ['reroll-lost: a wait that ran out returns too (never processed; review RM4)', "rc === 'reroll-lost' && lateResume('reroll-lost') === 'wait')", "rc === 'reroll-lost' && lateResume('reroll-lost'))"],
+    ['rework 1: the resume always restarts the count (the late mark ignored)', 'const lateSeen = casTok && (run.lw | 0) >= (f.startDepth | 0);', 'const lateSeen = false;'],
+    ['rework 1: the lane never marks a late resume', 'casualLateMark(soloState.runs[key], at);', 'void at;'],
+    ['rework 1: any mark keeps the count (its depth ignored)', '(run.lw | 0) >= (f.startDepth | 0)', '(run.lw | 0) > 0'],
+    ['rework 1: the mark is never used up', 'delete run.lw; }', '}'],
   ];
   for (const [label, from, to] of MUTS) {
     const n = VAL.split(from).length - 1;
