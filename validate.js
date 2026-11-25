@@ -3839,7 +3839,8 @@ function roomDispute(g, vecOf) {
 //   was written before its writer finished the match:
 //   - a friends' room (10) or a bot match (11), never endless (Q306 / Q317 keep their lanes): quick / ranked joiners whose
 //     migration fails go to the menu and write an exit note (0xBD), and a team-gamble refusal there is a rank-0 record whose
-//     key is not meant to settle (Q74 / Q76) -- their records keep the old rule;
+//     key is not meant to settle (Q74 / Q76) -- their records keep the old rule (Q435: except the 2V2 / 3V3 refusal of a
+//     joiner who came back and played the match out, rejoinAsideTeam below);
 //   - its writer also wrote a 'finished' record (0, or 10 without the final summary) of the key, every such record of his
 //     from one seat and one seat count;
 //   - it is 'host-left' (2), 'level-begin-timeout' (3) or 'migrate-disband' (4) -- the ends the client keeps a rejoin record
@@ -3855,6 +3856,7 @@ const REJOIN_ASIDE = { DISP: [2, 3, 4], FIN: [0, DISP_NOSUMMARY] };
 function rejoinAsideVerdict(g) {
   if (!g || g.length < 2) return null;
   const base = baseMt(g[0].d[2] | 0);
+  if (isSubScoreMt(base)) return rejoinAsideTeam(g);   // Q435: quick / ranked 2V2 / 3V3, below
   if (base !== PRIVATE_XP.MT && base !== BOT_XP.MT) return null;   // friends' room / bot match only (the t2Leave lane)
   const who = (r) => String(r.steamID != null ? r.steamID : (r.w || ''));
   const pcOf = (r) => { const p = r.d[8] | 0; return (p >= 1 && p <= 8 && r.d.length >= 10 + p) ? p : 0; };
@@ -3877,6 +3879,99 @@ function rejoinAsideVerdict(g) {
   }
   if (!aside.length) return null;
   return { g: g.filter((r) => aside.indexOf(r) < 0), aside, sids };
+}
+// ---- the same for a quick / ranked 2V2 / 3V3 joiner's team-gamble refusal (cloud audit Q435, W374) ----
+// Since 11-20 eight team keys of the matchmade codes went to the lone dissent pass (Q51), every one a first strike ('free'),
+//   44 seats unsettled; one of them (104176189_1502820882_8, quick 3V3) had seven records of six accounts. The honest way to
+//   write two: the joiner's host migration fails in the team-gamble round or the level before it (three seats or more keep
+//   his rejoin record, mp.js _migrateFailDisband), t2OnLeave has no proof he was gone (Steam stayed up) and sends him to the
+//   results page with the unnamed 't2-forfeit' taint (it cannot tell a host's cut from his own dropped link), which writes
+//   the rank-0 refusal (results.js Q74, result-reporter.js) as 'migrate-disband' (4) of the levels he had seen. He comes
+//   back from the menu card, plays the match out, and the results page writes his finished record to the next shard. The
+//   taint lives in GAME.team2, which only a new match clears (state.reset) and a warm rejoin from the menu does not, so
+//   that record is the rank-0 refusal again, its scores and levels as everyone's; after a restart (cold rejoin) it claims
+//   his rank. team2Refused (Q76) read one account on both sides, and the key never settled: everyone consoled, he flagged
+//   and struck (his second strike in the window: a leaver), the opposing host charged.
+// Taken out before anything weighs the group, per account, on Q415's shape (two records or more, all well formed; his
+//   'finished' records (0 / 10) and the earlier ones (2 / 3 / 4) from one seat and one seat count, the earlier ones at fewer
+//   levels than every 'finished' one) and only when also:
+//   - every record of his is one of the two, the earlier ones are the refusal (a rank outside 1..2*ts) and no record of his
+//     names a seat: no Q43 T2BY_TAG int, no Q61 gamble block -- the unnamed leave; a refusal that names a seat is an
+//     accusation and keeps the Q43 / Q51 / Q56 / Q61 rules;
+//   - his 'finished' records carry the score vector of the other writers' records that claim a rank, cell by cell, and
+//     those agree on one winner (two writers or more, team2WinTeamOf); a 'finished' record of his that claims a rank claims
+//     that winner from his seat.
+//   A 'finished' record of his that is the refusal (the warm rejoin) is replaced by a copy claiming that winner from his seat
+//   -- rank 1 on the winning team, teamSize + 1 on the other, as Q68's set-aside copies (the settle reads the ranks again
+//   from the scores; the copy keeps his rank in rejoinOwn) -- and only when no other writer of the key refuses: there his
+//   own word would decide whether the others' refusals are one team's (Q56) or a conflict. Another writer's refusal stays
+//   as it is (a second joiner who never came back is the lone dissent pass's, as before).
+// A modified client gains nothing: the shape only takes refusals of his own away, so the key settles as the others wrote it.
+//   Given up: Q51's 'a host cuts an opponent through the gamble window, the cut player's refusal voids the match' -- when the
+//   cut player came back and played it out, the match settles as written. The opposing host is still charged for him (Q57,
+//   a trust input only; applyTeam2LoneDissent reads the group's t2Aside), so a host who cuts players again and again still
+//   loses his trust tier. A finished record that has not landed yet: applyTeam2LoneDissent waits for it (rejoinEarlyOnly).
+// Pure, read as rejoinAsideVerdict reads (the writer is r.steamID, or r.w on the cap's copies; the vector is the seat scores,
+//   the reconcile's vecOf on these codes). null, or { g, aside, sids } as above plus t2: [{ sid, seat, recs: his earlier
+//   records, own: how many of his 'finished' records were refusals read as the winner }].
+function rejoinNamesSeat(r) {   // a record that names a seat: Q43's T2BY_TAG int right after the roster, or Q61's gamble block
+  const at = 11 + 3 * (r.d[8] | 0);
+  return (r.d.length > at && ((r.d[at] | 0) & ~0x3F) === T2BY_TAG) || gambleTagOf(r) !== 0;
+}
+function rejoinAsideTeam(g) {
+  const ts = teamSizeOfMt(g[0].d[2] | 0);
+  const who = (r) => String(r.steamID != null ? r.steamID : (r.w || ''));
+  const nOf = (r) => { const p = r.d[8] | 0; return (p >= 1 && p <= 8 && r.d.length >= 10 + p) ? p : 0; };
+  const endOf = (r) => { const p = nOf(r); return (p && r.d.length > 10 + p) ? (r.d[10 + p] | 0) : 0; };
+  const lvOf = (r) => (r.d[7] | 0) >> 1;
+  const refused = (r) => { const k = r.d[6] | 0; return k < 1 || k > 2 * ts; };
+  const vk = (r) => JSON.stringify(r.d.slice(10, 10 + nOf(r)));
+  const by = new Map();
+  for (const r of g) { const s = who(r); if (!by.has(s)) by.set(s, []); by.get(s).push(r); }
+  const cand = [];
+  for (const [sid, rs] of by) {
+    if (!sid || rs.length < 2 || !rs.every(nOf) || rs.some(rejoinNamesSeat)) continue;
+    const done = rs.filter((r) => REJOIN_ASIDE.FIN.indexOf(endOf(r)) >= 0);
+    if (!done.length) continue;
+    const seat = done[0].d[5] | 0, n = nOf(done[0]);
+    if (!rs.every((r) => (r.d[5] | 0) === seat && nOf(r) === n)) continue;   // every record of his: one seat, one seat count
+    const least = Math.min(...done.map(lvOf));
+    const early = rs.filter((r) => done.indexOf(r) < 0);
+    if (!early.length || !early.every((r) => r.d.length > 10 + n && REJOIN_ASIDE.DISP.indexOf(endOf(r)) >= 0 && refused(r) && lvOf(r) < least)) continue;
+    cand.push({ sid, seat, early, done });
+  }
+  if (!cand.length) return null;
+  const mine = new Set(cand.map((c) => c.sid));
+  const claims = g.filter((r) => !mine.has(who(r)) && !refused(r));
+  if (new Set(claims.map(who)).size < 2) return null;
+  const v0 = vk(claims[0]);
+  if (!claims.every((r) => nOf(r) && vk(r) === v0) || !cand.every((c) => c.done.every((r) => vk(r) === v0))) return null;
+  const win = team2WinTeamOf(claims);
+  if (win == null) return null;
+  const othersRefuse = g.some((r) => !mine.has(who(r)) && refused(r));
+  const copy = new Map();
+  for (const c of cand) for (const r of c.done) {
+    if (!refused(r)) { if (team2WinTeamOf([r]) !== win) return null; continue; }
+    if (othersRefuse) return null;
+    const d = r.d.slice();
+    d[6] = (teamOfSeat(c.seat, ts) === win) ? 1 : ts + 1;
+    copy.set(r, Object.assign({}, r, { d, rejoinOwn: r.d[6] | 0 }));
+  }
+  const aside = [].concat(...cand.map((c) => c.early));
+  return { g: g.filter((r) => aside.indexOf(r) < 0).map((r) => copy.get(r) || r), aside, sids: cand.map((c) => c.sid),
+    t2: cand.map((c) => ({ sid: c.sid, seat: c.seat, recs: c.early, own: c.done.filter((r) => copy.has(r)).length })) };
+}
+// Q435: a dissenter every one of whose records is the early refusal rejoinAsideTeam takes out once his finished record lands
+//   ('host-left' / 'level-begin-timeout' / 'migrate-disband', a rank outside 1..2*ts, naming no seat, at fewer levels than
+//   every record of the agreeing side `rest`) -- applyTeam2LoneDissent waits for that record before it strikes him
+function rejoinEarlyOnly(recs, rest) {
+  if (!recs || !recs.length || !rest || !rest.length) return false;
+  const ts = teamSizeOfMt(recs[0].d[2] | 0), least = Math.min(...rest.map((r) => (r.d[7] | 0) >> 1));
+  return recs.every((r) => {
+    const p = r.d[8] | 0, k = r.d[6] | 0;
+    return p >= 1 && p <= 8 && r.d.length > 10 + p && REJOIN_ASIDE.DISP.indexOf(r.d[10 + p] | 0) >= 0 && (k < 1 || k > 2 * ts)
+      && ((r.d[7] | 0) >> 1) < least && !rejoinNamesSeat(r);
+  });
 }
 // pacing gate: true = this settle group must wait (its start attestation is younger than the
 // physical minimum). No pending entry -> no constraint here; the settle loop never passes one any
@@ -4040,6 +4135,7 @@ function pruneSignals(s, now) {
   }
   for (const k of Object.keys(s.t2av || {})) if (now - ((s.t2av[k] && s.t2av[k].t) || 0) > SIG_PAIR_WINDOW_MS) delete s.t2av[k];
   for (const k of Object.keys(s.t2ah || {})) if (now - (Number(s.t2ah[k]) || 0) > SIG_PAIR_WINDOW_MS) delete s.t2ah[k];
+  for (const k of Object.keys(s.t2rh || {})) if (now - (Number(s.t2rh[k]) || 0) > SIG_PAIR_WINDOW_MS) delete s.t2rh[k];   // Q435 holds
   const pk = Object.keys(s.pairs);
   if (pk.length > SIG_PAIRS_CAP) {   // size fuse: same escalation path as skill.json growth -> external storage
     ghWarn('signals pairs ' + pk.length + ' > cap ' + SIG_PAIRS_CAP + ' -- oldest evicted; plan the move to external state storage');
@@ -4638,6 +4734,7 @@ function writeRunSummary() {
       '| endless keys without a seat gate whose records disagree, nobody flagged (Q128) | ' + s('endlessUngated', 0) + ' |',
       '| friends\' rooms / bot matches of three writers or more whose records disagree, nobody flagged for it, not settled (Q407) / of them a writer flagged alone for his own record\'s duration | ' + s('roomDispute', 0) + ' / ' + s('roomDisputeOwn', 0) + ' |',
       '| friends\' room / bot match keys with an earlier host-left / level-begin-timeout / migrate-disband record of a writer who came back and finished, set aside before the records were compared, nobody flagged for it (Q415) | ' + s('rejoinAside', 0) + ' |',
+      '| quick / ranked 2V2 / 3V3 keys with an earlier team-gamble refusal (host-left / level-begin-timeout / migrate-disband, naming nobody) of a joiner who came back and finished, set aside before the records were compared, nobody flagged for it / of them his finished record a refusal too, read as the agreed winner / opposing hosts still charged for him / dissenters whose only record is such a refusal, held for his finished record (Q435) | ' + s('rejoinAsideT2', 0) + ' / ' + s('rejoinAsideOwn', 0) + ' / ' + s('rejoinAsideHost', 0) + ' / ' + s('rejoinHeld', 0) + ' |',
       '| keys of two voices (a 1V1, a friends\' room / endless run / bot match of two) whose writers disagree, nobody flagged for it (Q289 / Q291) / of them a writer flagged alone for his own record\'s duration / accounts newly at ' + PAIR_DISPUTE.LOOK + ' different dispute opponents (record only) | ' + s('pairDispute', 0) + ' / ' + s('pairDisputeOwn', 0) + ' / ' + s('pairDisputeLook', 0) + ' |',
       '| voided disputed 1V1s: writers paid the loser\'s XP instead of the flat ' + CONSOLATION_XP + ' (Q308) / kept at ' + CONSOLATION_XP + ', past ' + DISPUTE_FLOOR.DAY_CAP + ' such payments in a day | ' + s('disputeFloor', 0) + ' / ' + s('disputeFloorCapped', 0) + ' |',
       '| consolation XP writes that failed, owed to a later run / owed credits paid (of them on an XP row moved since) / owed writes found landed after all / owed given up, unpaid ' + Math.round(CONSOLE_OWED.MAX_MS / 86400000) + ' days / still owed, account not seen this run (Q315) | ' + s('owedNew', 0) + ' / ' + s('owedPaid', 0) + ' (' + s('owedMoved', 0) + ') / ' + s('owedLanded', 0) + ' / ' + s('owedExpired', 0) + ' / ' + s('owedWaiting', 0) + ' |',
@@ -5807,10 +5904,42 @@ function team2LateRefusers(g, known) {   // pids of accounts outside `known` tha
 }
 // ev (optional, Q286) = { complete, starts, startRecs }: the own-start evidence the Q63 question asks (team2AccusedKey),
 //   on a full read only; omitted (unit use) every seat reads as having started.
+// Q435: rejoinAsideVerdict took a joiner's early team-gamble refusal out of a group (g.t2Aside): he came back and played the
+//   match out, so he is no dissenter -- but the opposing host is charged for him as Q57 charges him for a struck opposing
+//   seat (signals.t2lh, a trust input only, the same records backing him as the host: team2HostOwnsSeat0), once per match
+//   and seat. And a fresh dissenter whose every record is such a refusal (rejoinEarlyOnly) waits like an absent seat
+//   (absenceHold: a full read and ABSENT_GRACE_MS since this job first saw the shape, signals.t2rh) for the finished record
+//   he writes if he came back -- it lands with the others' or minutes after (upload retries); nobody is struck, flagged or
+//   settled meanwhile, and past the wait the rule is as before.
+function t2AsideHostCharge(signals, res, m, g, now) {
+  const ts = teamSizeOfMt(g[0].d[2] | 0), roster = rosterConsensus(g);
+  const host = roster[0] != null ? String(roster[0]) : null;
+  if (!host) return;
+  const vic = g.t2Aside.filter((a) => String(a.sid) !== host && teamOfSeat(a.seat, ts) !== teamOfSeat(0, ts));
+  const rest = g.filter((r) => { const k = r.d[6] | 0; return k >= 1 && k <= 2 * ts; });
+  if (!vic.length || !team2HostOwnsSeat0({ host, rest, ds: vic })) return;
+  const hh = pid(host);
+  signals.t2lh = signals.t2lh || {};
+  const hl = signals.t2lh[hh] || (signals.t2lh[hh] = []);
+  let he = hl.find((e) => e && e.m === m);
+  if (!he) { he = { m, t: now, v: [] }; hl.push(he); }
+  const fresh = vic.map((a) => pid(String(a.sid))).filter((x) => he.v.indexOf(x) < 0);
+  if (!fresh.length) return;
+  for (const x of fresh) he.v.push(x);
+  const hp = sigPlayer(signals, hh, now); hp.lh = (hp.lh | 0) + fresh.length;
+  const n = hostDissentCount(hl, now);
+  res.dirty = true; res.hosts++; res.asideHost++; if (n >= TRUST_T.HD1) res.hostsAt++;
+  res.touched.push(host);
+  console.log('  team2 dissent host ' + m + ': ' + plog(host) + ' charged for ' + fresh.length + ' opposing seat(s) that came back and played the match out -> ' + n + ' in window' + (n >= TRUST_T.HD1 ? ' (trust threshold)' : '') + ' (Q435)');
+}
 function applyTeam2LoneDissent(gr, signals, processed, now, vecOf, ev) {
-  const res = { dirty: false, free: 0, settle: 0, touched: [], hosts: 0, hostsAt: 0 };
-  signals.t2ld = signals.t2ld || {}; signals.t2lv = signals.t2lv || {};
+  const res = { dirty: false, free: 0, settle: 0, touched: [], hosts: 0, hostsAt: 0, asideHost: 0, held: 0 };
+  signals.t2ld = signals.t2ld || {}; signals.t2lv = signals.t2lv || {}; signals.t2rh = signals.t2rh || {};
   const ownOf = (ev && ev.complete !== false) ? t2OwnEvidence(ev) : null;
+  for (const m of Object.keys(gr.groups || {})) {   // Q435: before the passes below (a settle verdict replaces gr.groups[m])
+    const g = gr.groups[m];
+    if (g && g.length && g.t2Aside && !processed.has(m)) t2AsideHostCharge(signals, res, m, g, now);
+  }
   const judge = (c) => {   // -> null (leave as is) | 'drop' | replacement consistent entry
     const m = c.m, prev = signals.t2lv[m];
     let g = c.g, late = null;
@@ -5820,6 +5949,18 @@ function applyTeam2LoneDissent(gr, signals, processed, now, vecOf, ev) {
     const stillHere = () => g.some(r => prevP.indexOf(pid(String(r.steamID))) >= 0);
     let td = team2Dissent(g, vecOf);
     if (!prev && td && team2AccusedKey(g, signals, m, ownOf ? ownOf(m) : undefined)) td = null;   // Q63: the Q43 accusation pass owns it (Q286: same own evidence)
+    if (!prev && td && td.ds.some((d) => rejoinEarlyOnly(d.recs, td.rest))) {   // Q435: his finished record may be on its way
+      const st = { absentAt: Number(signals.t2rh[m]) || 0 };
+      const ah = absenceHold(td.ds, st, now, !ev || ev.complete !== false, ABSENT_GRACE_MS);
+      if (signals.t2rh[m] !== st.absentAt) { signals.t2rh[m] = st.absentAt; res.dirty = true; }
+      if (ah.hold) {
+        res.held++;
+        console.log('  team2 dissent ' + m + ': ' + td.ds.filter((d) => rejoinEarlyOnly(d.recs, td.rest)).map((d) => 'seat ' + d.seat + ' = ' + plog(d.sid)).join(', ')
+          + ' wrote only an early team-gamble refusal -- ' + (ah.hold === 'read' ? 'not every record shard was read this run' : 'grace ' + Math.round(ah.waitMs / 1000) + 's left')
+          + ' for his finished record, nobody struck or flagged yet (Q435)');
+        return 'drop';
+      }
+    }
     if (prev && !(td && td.ds.some(d => prevP.indexOf(pid(d.sid)) >= 0))) {   // refusals first seen after the verdict do not overturn it
       const lt = team2LateRefusers(g, prevP);
       if (lt.length) {
@@ -11273,7 +11414,10 @@ function groupRecords(recs, opts) {
       const was = ra.aside.map((r) => plog(r.steamID) + '@' + r.shard + '=' + r.disp + ' after ' + ((r.d[7] | 0) >> 1) + ' level(s)').join('  ');
       g.splice(0, g.length, ...ra.g);   // in place: groups[m] is this array (the later passes and the start cross-check read it)
       g.rejoinAside = ra.aside.length;   // the run summary's count (main)
+      if (ra.t2) g.t2Aside = ra.t2;   // Q435: the opposing host's charge (applyTeam2LoneDissent) and the run summary
       console.log('  match=' + m + ': ' + ra.aside.length + ' earlier record(s) of ' + ra.sids.length + ' writer(s) who came back and finished the match set aside, nobody flagged for them (Q415): ' + was);
+      if (ra.t2) console.log('  match=' + m + ': ' + ra.t2.map((a) => 'seat ' + a.seat + ' = ' + plog(a.sid) + ' (' + a.recs.length + ' early team-gamble refusal(s)'
+        + (a.own ? ', his finished record a refusal too, read as the agreed winner' : '') + ')').join(', ') + ' -- came back and played the match out, not a dissenter (Q435)');
     }
     const writers = new Set(g.map(r => String(r.steamID))).size;
     const vecs = g.map(vecOf);
@@ -12357,7 +12501,9 @@ async function main() {
   RUN.tableSplit = tableSplit.keys.length; RUN.tableOne = tableSplit.one.length; RUN.tableHeld = tableSplit.held.length;
   const gr = groupRecords(recs, { vecOf, MAX_SEATS, starts: startsPending });   // audit 2026-09-06: pure, testable consensus grouping (writer-deduped); O156 lone bot lane (type 11, every channel)
   const groups = gr.groups, consistentMatches = gr.consistentMatches, inconsistentGroups = gr.inconsistentGroups;
-  RUN.rejoinAside = Object.keys(groups).filter((m) => groups[m].rejoinAside > 0).length;   // Q415 (groupRecords marks the group)
+  RUN.rejoinAside = Object.keys(groups).filter((m) => groups[m].rejoinAside > 0 && !groups[m].t2Aside).length;   // Q415 (groupRecords marks the group)
+  RUN.rejoinAsideT2 = Object.keys(groups).filter((m) => groups[m].t2Aside).length;   // Q435 (the team codes' own row)
+  RUN.rejoinAsideOwn = Object.keys(groups).filter((m) => (groups[m].t2Aside || []).some((a) => a.own)).length;
   RUN.flagged = gr.flagged;
   RUN.nosum = gr.nosum.settle + ' / ' + gr.nosum.pending + ' / ' + gr.nosum.host;   // Q68
   RUN.lorph = gr.lorph.settle + ' / ' + gr.lorph.hold;   // Q339
@@ -12446,6 +12592,7 @@ async function main() {
   // Q57: hosts charged for opposing seats dropping out of their gamble (in touched below; the trust pass re-tiers them)
   if (t2ldRes.hosts) console.log('team2 dissent hosts: ' + t2ldRes.hosts + ' charges, ' + t2ldRes.hostsAt + ' at the trust threshold');
   RUN.t2lh = t2ldRes.hosts + '/' + t2ldRes.hostsAt;
+  RUN.rejoinAsideHost = t2ldRes.asideHost; RUN.rejoinHeld = t2ldRes.held;   // Q435
   for (const sid of t2ldRes.touched) trustTouched.add(String(sid));
   if (t2ldRes.free || t2ldRes.settle) console.log('team2 lone dissent: ' + t2ldRes.free + ' left unsettled (dissenter flagged), ' + t2ldRes.settle + ' settling from the agreeing records');
   RUN.t2ld = t2ldRes.free + '/' + t2ldRes.settle;
@@ -17502,6 +17649,7 @@ Object.assign(module.exports, { endlessRecordSplit, endlessRerollCanon, SANITY_E
 Object.assign(module.exports, { endlessDispute });   // cloud audit Q317 endless co-op run of three writers or more whose records disagree (test/endless-co-op-dispute.js)
 Object.assign(module.exports, { roomDispute });   // cloud audit Q407 friends' room / bot match of three writers or more whose records disagree (test/room-dispute.js)
 Object.assign(module.exports, { REJOIN_ASIDE, rejoinAsideVerdict });   // cloud audit Q415 a writer's own earlier record of a friends' room / bot match he came back to and finished (test/rejoin-aside.js; seedcap.js reads it)
+Object.assign(module.exports, { rejoinAsideTeam, rejoinEarlyOnly, rejoinNamesSeat });   // cloud audit Q435 the same for a 2V2 / 3V3 joiner's team-gamble refusal (test/team2-rejoin-aside.js)
 Object.assign(module.exports, { noteOwnStarts, hasOwnStart, OWN_START_CAP });   // cloud audit Q69 own-record evidence for leaver verdicts
 Object.assign(module.exports, { resultRecOf, keptKeys, keptSeal, keptOpen, keptKeep, keptRecords, KEPT_REC_MAX_MS, KEPT_REC_CAP, KEPT_TAG, SETTLE_MAGIC });   // cloud audit Q373 a held group's results kept against shard rotation (test/kept-held-records.js)
 Object.assign(module.exports, { leaverXpRecordOnlyUntil, LEAVER_XP_RECORD_ONLY, LEAVER_XP_RECORD_ONLY_MAX_MS });   // M194 / W57 demo Next Fest: leaves recorded, XP not discounted
