@@ -1,54 +1,54 @@
-ELP shadow (O759 / O760) -- day 20261124, season 0. SHADOW ONLY: nothing is written to Steam or to the reconcile state.
+ELP shadow (O759 / O760) -- day 20261125, season 0. SHADOW ONLY: nothing is written to Steam or to the reconcile state.
 
 O760 pass lines: official (head-count blend, published) vs shadow (hybrid log-normal fit + credibility vs prior, TAU 0.3 + EMA 0.3)
 
-[solo] placed N 531 | official: table 20261124, w 1 | shadow prior: preset | smoothed with 20261123
+[solo] placed N 612 | official: table 20261125, w 0.261 | shadow prior: preset | smoothed with 20261124
   tier             bronze   silver     gold platinum  diamond   master grandmas
-  official              4       10       16       25       37       52       74
-  shadow                3        9       14       21       32       51       71
-  diff                 -1       -1       -2       -4       -5       -1       -3
-  credibility        0.98     0.98     0.98     0.98     0.97     0.94     0.90
-  est. error         4.1%     3.9%     4.1%     4.6%     5.4%     7.6%     9.9%
-  jump vs prev       0.5%     1.1%     1.7%     1.4%     1.4%     0.1%     2.4%
-  empirical             3        8       13       20       34       49       64   (the live reading the official job uses at w 1)
-  fit: mu 1.983, sigma 0.949 over 266 players (levels: 3.2 / 8.4 / 13.3 / 20.3 / 31.4 / 52.2 / 80.0)
-  placed players whose skill tier would differ under the shadow lines: 85 of 531
+  official             20       25       27       29       33       37       43
+  shadow                3        9       14       21       32       50       71
+  diff                -17      -16      -13       -8       -1      +13      +28
+  credibility        0.98     0.99     0.98     0.98     0.97     0.95     0.91
+  est. error         3.8%     3.6%     3.8%     4.2%     5.1%     7.0%     9.3%
+  jump vs prev       2.3%     0.8%     0.3%     0.7%     1.3%     1.1%     0.3%
+  empirical             3        9       14       21       32       45       57   (the live reading the official job uses at w 1)
+  fit: mu 2.05, sigma 0.898 over 306 players (levels: 3.4 / 8.9 / 13.8 / 20.6 / 31.0 / 50.1 / 75.4)
+  placed players whose skill tier would differ under the shadow lines: 368 of 612
 
-[duo] placed N 306 | official: table 20261124, w 1 | shadow prior: preset | smoothed with 20261123
+[duo] placed N 366 | official: table 20261125, w 0.144 | shadow prior: preset | smoothed with 20261124
   tier             bronze   silver     gold platinum  diamond   master grandmas
-  official              5       10       14       23       32       40       51
-  shadow                4       10       16       23       31       43       55
-  diff                 -1        0       +2        0       -1       +3       +4
-  credibility        0.97     0.97     0.97     0.96     0.95     0.90     0.84
-  est. error         5.4%     5.1%     5.4%     6.0%     7.1%     9.9%    13.1%
-  jump vs prev       1.4%     6.4%     9.7%    10.1%     9.2%     6.3%     3.2%
-  empirical             4        9       11       16       25       38       53   (the live reading the official job uses at w 1)
-  fit: mu 1.962, sigma 0.781 over 153 players (levels: 3.8 / 8.6 / 11.7 / 16.5 / 23.6 / 35.8 / 51.6)
-  placed players whose skill tier would differ under the shadow lines: 23 of 306
+  official             23       29       32       35       38       42       47
+  shadow                4       10       15       21       29       41       53
+  diff                -19      -19      -17      -14       -9       -1       +6
+  credibility        0.97     0.98     0.97     0.97     0.95     0.92     0.86
+  est. error         4.9%     4.7%     4.9%     5.5%     6.5%     9.1%    12.0%
+  jump vs prev       2.3%     4.2%     7.4%     7.9%     7.3%     5.0%     2.7%
+  empirical             4        9       11       16       26       38       53   (the live reading the official job uses at w 1)
+  fit: mu 1.977, sigma 0.766 over 183 players (levels: 4.0 / 8.9 / 11.7 / 16.5 / 23.4 / 35.3 / 50.6)
+  placed players whose skill tier would differ under the shadow lines: 235 of 366
 
-[trio] placed N 54 | official: table 20261124, w 0.172 | shadow prior: preset | smoothed with 20261123
+[trio] placed N 63 | official: table 20261125, w 0 | shadow prior: preset | smoothed with 20261124
   tier             bronze   silver     gold platinum  diamond   master grandmas
-  official              3        7       11       17       24       33       42
-  shadow                4       10       14       20       25       32       38
-  diff                 +1       +3       +3       +3       +1       -1       -4
-  credibility        0.85     0.86     0.85     0.81     0.76     0.62     0.48
-  est. error        12.8%    12.1%    12.8%    14.3%    17.0%    23.7%    31.2%
-  jump vs prev      14.4%     2.9%     4.7%     9.1%    10.9%     9.9%     8.4%
-  empirical             6       11       12       13       14       19       31   (the live reading the official job uses at w 1)
-  fit: mu 2.34, sigma 0.251 over 27 players (levels: 5.5 / 11.2 / 12.1 / 13.6 / 15.2 / 17.3 / 19.8)
-  placed players whose skill tier would differ under the shadow lines: 34 of 54
+  official             25       29       32       35       38       43       48
+  shadow                4       11       14       19       24       31       38
+  diff                -21      -18      -18      -16      -14      -12      -10
+  credibility        0.86     0.88     0.86     0.84     0.78     0.65     0.52
+  est. error        11.8%    11.2%    11.8%    13.2%    15.7%    21.9%    28.9%
+  jump vs prev       9.3%     2.3%     1.9%     3.8%     3.9%     1.9%     0.3%
+  empirical             6       12       13       14       24       32       33   (the live reading the official job uses at w 1)
+  fit: mu 2.268, sigma 0.476 over 32 players (levels: 5.5 / 11.3 / 13.0 / 16.1 / 20.0 / 25.8 / 32.8)
+  placed players whose skill tier would differ under the shadow lines: 57 of 63
 
-[quad] placed N 34 | official: table 20261124, w 0.078 | shadow prior: preset | smoothed with 20261123
+[quad] placed N 42 | official: table 20261125, w 0 | shadow prior: preset | smoothed with 20261124
   tier             bronze   silver     gold platinum  diamond   master grandmas
-  official              2        6       10       16       25       34       43
-  shadow                4       10       14       20       26       32       39
-  diff                 +2       +4       +4       +4       +1       -2       -4
-  credibility        0.78     0.79     0.78     0.73     0.66     0.50     0.37
-  est. error        16.1%    15.3%    16.1%    18.0%    21.4%    29.8%    39.3%
-  jump vs prev      10.5%     1.5%     4.6%     8.3%     9.6%     8.1%     6.4%
-  empirical             5       11       12       14       16       17       18   (the live reading the official job uses at w 1)
-  fit: mu 2.328, sigma 0.252 over 17 players (levels: 5.3 / 10.9 / 12.0 / 13.4 / 15.1 / 17.2 / 19.7)
-  placed players whose skill tier would differ under the shadow lines: 30 of 34
+  official             27       31       35       38       42       47       51
+  shadow                4       11       14       19       24       30       37
+  diff                -23      -20      -21      -19      -18      -17      -14
+  credibility        0.81     0.83     0.81     0.77     0.71     0.56     0.42
+  est. error        14.5%    13.7%    14.5%    16.2%    19.3%    26.8%    35.3%
+  jump vs prev       8.8%     2.3%     2.8%     6.5%     8.1%     7.3%     6.0%
+  empirical             6       11       13       14       15       16       17   (the live reading the official job uses at w 1)
+  fit: mu 2.383, sigma 0.221 over 21 players (levels: 5.5 / 11.4 / 12.4 / 13.7 / 15.2 / 17.0 / 19.2)
+  placed players whose skill tier would differ under the shadow lines: 42 of 42
 
 O759 grandmaster calibration (off; would open at an effective pool >= 20 with full windows and a day-over-day rank correlation >= 0.8)
   [solo] pool 0 | full window 0 | correlation - (0 pairs) | gate closed (pool 20 more, correlation not measured)
