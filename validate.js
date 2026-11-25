@@ -4575,6 +4575,7 @@ function writeRunSummary() {
       '| named-only FFA seats in the lower half counted on their account / of them repeated: ' + NL_REPEAT + ' or more such matches and different opponents / of those more lower places unwritten than written / not counted, no signals of his own (Q174, nobody flagged) | ' + s('nbSeat', 0) + ' / ' + s('nbRepeat', 0) + ' / ' + s('nbUnwritten', 0) + ' / ' + s('nbNone', 0) + ' |',
       '| match keys with two accounts on one seat or two seat layouts, not settled (Q75) | ' + s('contested', 0) + ' |',
       '| records off their start-roster seat, not counted / start keys with a seat claimed twice / start rosters the voters split, no seat gate (Q80) | ' + s('offSeat', 0) + ' / ' + s('disputed', 0) + ' / ' + s('split', 0) + ' |',
+      '| held team segments whose writers agree on the tail and differ only in the seat scores: the run\'s chain moved past one this run, the segment not settled, nothing of its own credited / still waiting for a check (Q418) | ' + s('seatOnlyPass', 0) + ' / ' + s('seatOnlyHeld', 0) + ' |',
       '| endless co-op groups held (records disagree on the roster, Q113) | ' + s('endlessHeld', 0) + ' |',
       '| endless runs of three writers or more whose records disagree, nobody flagged for it, not settled (Q317) / of them a writer flagged alone for a negative duration on his own record | ' + s('endlessDispute', 0) + ' / ' + s('endlessDisputeOwn', 0) + ' |',
       '| endless keys without a seat gate whose records disagree, nobody flagged (Q128) | ' + s('endlessUngated', 0) + ' |',
@@ -10407,6 +10408,52 @@ function endlessRosterHold(g, roster0, keyStarts, pend) {
   }
   return null;
 }
+// cloud audit Q418 (mail M825 (3), 2026-11-19): a team competitive / team classic segment whose writers all wrote the same
+//   depth tail and differ only in the seat scores. A checkpoint segment is written the moment the level-end verdict frame
+//   lands, from each client's OWN seat table (the frame carried the team total only; a joiner's table is realigned at the
+//   next shop's SHOP_START), so a joiner one payment behind at that instant writes one teammate's score a little low while
+//   the tail -- depths, flags, perk build and pick log, reroll bitmap: all copied from the host's frames -- is byte for byte
+//   the team's (live: a quad run, segment 10->15, one record 200 short on one seat; the next ten segments agreed 4 / 4 and
+//   waited behind it in chain-gap). The group stays held (Q317 / Q291: not settled, nobody flagged), and the run's chain
+//   used to stop at it: every later segment waited out CHAIN_WAIT_MS and was rejected. Such a segment now moves the chain
+//   past it (seatOnlyPass in main) when the tail passes every check a settle of it would, and credits nothing of its own.
+//   seatOnlyDispute(g) -> null (not that shape) or { lane: 'comp' | 'classic', t (the shared tail), pc, writers }:
+//   endless; every record one seat count, a tail of 6 ints or more (flags on it), the same tail ints (up to the 11th, the
+//   reroll bitmap's high half; the 12th, a resume tag, is outside the vector) and a depth claim (an all-zero tail is a
+//   cold rejoiner's abstention: not this shape); one record per account or copies of one; one writer per seat (every seat
+//   wrote); the seat scores differ; a team competitive or team classic segment, not resumed (a resume consumes a save point
+//   and owes the host's fee: left to the settle), never couch or casual; no sanity reason on any record (a writer's own
+//   negative duration stays Q317's flag; the roster checks are main's, with the starts).
+const SEAT_ONLY_TAIL_MAX = 11;
+function seatOnlyDispute(g) {
+  if (!g || g.length < 2 || !g[0] || !g[0].d) return null;
+  const mt = g[0].d[2] | 0, pc = g[0].d[8] | 0;
+  if (!isEndlessMt(mt) || pc < 2 || pc > 8) return null;
+  const at = 11 + 3 * pc;
+  let tail0 = null, sc0 = null, differ = false;
+  const bySid = new Map();
+  for (const r of g) {
+    if (!r || !r.d || (r.d[2] | 0) !== mt || (r.d[8] | 0) !== pc || r.d.length < at + 6) return null;
+    const tl = r.d.slice(at, at + Math.min(SEAT_ONLY_TAIL_MAX, r.d.length - at)).map((x) => x | 0).join(',');
+    if (tail0 == null) tail0 = tl; else if (tl !== tail0) return null;
+    const sc = r.d.slice(10, 10 + pc).map((x) => x | 0).join(',');
+    const sid = String(r.steamID);
+    if (bySid.has(sid) && bySid.get(sid) !== sc) return null;
+    bySid.set(sid, sc);
+    if (sc0 == null) sc0 = sc; else if (sc !== sc0) differ = true;
+    if (recordSanityFlags(r, ENDLESS.MT, pc).length) return null;
+  }
+  if (!differ || bySid.size !== pc) return null;
+  const seats = new Set(g.map((r) => r.d[5] | 0));
+  if (seats.size !== pc) return null;
+  const t = endlessTail(g[0].d);
+  if (!t || !((t.startDepth | 0) || (t.endDepth | 0))) return null;
+  const fl = t.flags | 0;
+  if (fl & (attest.SEG_RESUMED | attest.SEG_COUCH | attest.SEG_CASUAL)) return null;
+  const lane = (fl & attest.SEG_CLASSIC) ? ((fl & attest.SEG_COMP) ? null : 'classic') : ((fl & attest.SEG_COMP) ? 'comp' : null);
+  if (!lane) return null;
+  return { lane, t, pc, writers: [...bySid.keys()] };
+}
 // endlessTestified: the roster seats whose player said so himself (pids). A writer of the group did (his record names
 // this roster with him at this seat: endlessRosterHold). Anyone else only on his own records for the key -- the starts
 // read this run plus what the pending entry remembers (noteTestimony) -- and only if all of them name this roster and
@@ -12161,6 +12208,9 @@ async function main() {
   // trust-tier candidates seen this run (real sids; signals stay HMAC-keyed -- the only
   // place real ids persist is the trust board itself, which is the public artifact anyway)
   const trustTouched = new Set();
+  // Q418: held team segments whose writers differ only in the seat scores (seatOnlyDispute), collected in the flag loop
+  //   below -- still held there by Q317 / Q291 -- and passed on the chain before the settle loop (seatOnlyPass)
+  const seatOnlyCands = [];
   // Q80: every account that wrote a record off its seat was flagged once per key (only its own writes could put it here).
   // Q113 (review): except on endless keys. An endless roster registers from the first start read -- one solo-shaped start
   //   (its writer alone, at seat 0) is enough -- and everyone in a run knows its key (the host picks it; a team competitive
@@ -12606,6 +12656,7 @@ async function main() {
       console.log('  late-mismatch ' + m + ': ' + g.length + ' records disagree after the key settled -- nobody flagged (Q114)');
       continue;
     }
+    { const so = seatGateRoster(startsPending[m]) ? seatOnlyDispute(g) : null; if (so) seatOnlyCands.push(Object.assign({ m, g }, so)); }   // Q418
     // Q317: an endless co-op run of three writers or more on a gated key (endlessDispute): nobody flagged for the
     //   disagreement, a writer's own negative duration flags him alone, the run does not settle while its records disagree
     const ed = seatGateRoster(startsPending[m]) ? endlessDispute(g, vecOf) : null;
@@ -14850,6 +14901,55 @@ async function main() {
     for (const g of gs) if (await soloSettleOwner(Object.assign({}, c, { g }))) n++;
     return n > 0;
   };
+  // cloud audit Q418 (mail M825 (3)): a held team competitive / team classic segment whose writers differ only in the seat
+  //   scores (seatOnlyDispute) moves its run's chain past it -- before the settle loop, so the segments behind it settle this
+  //   run -- when the shared tail passes what a settle of it checks: one roster every writer names with him at his own seat
+  //   (Q110 / Q113 / Q314), no seedcap veto, the chain plan (a plain advance or the B-F2 overlap; a wait, a reject, a catch-up
+  //   or a resume leaves it held as before), the reroll and perk chains (team competitive), the depth-scaled pacing floor from
+  //   the segment's own start and one match at a time per account (a fabricated run reaches no depth faster than playing it).
+  //   Then soloAdvance only (head, save point, perk / reroll memory, FINAL mark): nothing of the segment's own is credited --
+  //   no XP, ladder, milestone, CP, rating history or run signals, no XP floor moved (run.xf: the depths stay owed to the
+  //   writers), the key not processed (still held and logged by Q317 / Q291 every run; whether to settle it by a majority is
+  //   a separate question). Its depth comes back to the writers through the next settled segments only as far as they
+  //   cover it (the ladder and milestones read the end depth; progress XP starts at that segment's start). run.so = the keys
+  //   passed (a later run finds it there and does nothing). Nobody flagged; no old settle recomputed.
+  const seatOnlyPass = (so) => {
+    const m = so.m, g = so.g, t = so.t, pc = so.pc, classic = so.lane === 'classic';
+    const tag = '  seat-only ' + m + ' (team ' + (classic ? 'classic' : 'comp') + ', depth ' + (t.startDepth | 0) + '->' + (t.endDepth | 0) + ')';
+    const roster0 = rosterConsensus(g), rosterSids = Object.values(roster0).map(String);
+    const keyStarts = starts.filter((r) => (r.d[3] + '_' + r.d[4] + '_' + r.d[2]) === m);
+    const rosterWhy = rosterSids.length !== pc ? 'roster incomplete' : endlessRosterHold(g, roster0, keyStarts, startsPending[m]);
+    if (rosterWhy) { console.log(tag + ': ' + rosterWhy + ' -- chain not passed (Q418)'); return 'roster'; }
+    if (SEEDCAP_ENFORCE && seedcap && seedcap.veto && seedcap.veto[so.m]) { console.log(tag + ': seedcap over-cap veto -- chain not passed (Q418)'); return 'seedcap'; }
+    const key = teamRunKey(rosterSids, classic ? 0 : t.seasonId, g[0].d[4] | 0);
+    const run0 = soloState.runs[key];
+    if (run0 && Array.isArray(run0.so) && run0.so.indexOf(m) >= 0) return 'done';
+    const f = classic
+      ? { startDepth: t.startDepth | 0, endDepth: t.endDepth | 0, flags: t.flags | 0, build: 0, picksLo: 0, picksHi: 0, seasonId: t.seasonId | 0, rerollLo: 0, rerollHi: 0, resumeTags: [] }
+      : { startDepth: t.startDepth | 0, endDepth: t.endDepth | 0, flags: t.flags | 0, build: t.build >>> 0, picksLo: t.picksLo | 0, picksHi: t.picksHi | 0, seasonId: t.seasonId | 0,
+        rerollLo: t.rerollLo >>> 0, rerollHi: t.rerollHi >>> 0, runSeed: g[0].d[4] | 0 };
+    const plan = soloChainPlan(soloState, key, f, m, nowMs);
+    if (plan.ok !== true || plan.consume) { console.log(tag + ': chain ' + (plan.ok === null ? 'waiting (' + plan.reason + ')' : plan.ok === false ? 'reject (' + plan.reason + ')' : 'resume') + ' -- not passed (Q418)'); return 'chain'; }
+    if (!classic) {
+      const rr = rerollChain(f, run0);
+      if (rr) { console.log(tag + ': reroll chain (' + rr + ') -- not passed (Q418)'); return 'reroll'; }
+      const pv = perks.verifyPerkPicks(f, run0, pc, PERK_CH);
+      if (!pv.ok) { console.log(tag + ': perk chain (' + pv.reason + ') -- not passed (Q418)'); return 'perk'; }
+    }
+    const pend = startsPending[m];
+    const req = endlessRequiredMs(f, plan.proven, classic ? CLASSIC.LEVEL_S_TEAM : 0);
+    if (!pend || nowMs - (pend.t0 || 0) < req) { console.log(tag + ': needs ' + Math.round(req / 1000) + 's real time from its start -- deferred (Q418)'); return 'pacing'; }
+    if (writerPaced(m, so.writers, pend.t0, req)) return 'writer';
+    const run = soloAdvance(soloState, key, f, m, plan, nowMs);
+    run.so = (Array.isArray(run.so) ? run.so : []).concat([m]).slice(-32);
+    RUN.seatOnlyPass = (RUN.seatOnlyPass | 0) + 1;
+    console.log(tag + ': the writers agree on the tail and differ only in the seat scores -- the run\'s chain moves past it (head ' + (run.max | 0)
+      + (plan.overlap != null ? ', overlap from ' + plan.overlap : '') + '), the segment is not settled, nothing of its own credited, nobody flagged (Q418)');
+    return 'passed';
+  };
+  // shallowest first (two held segments of one run next to each other pass in one run; the key breaks a tie)
+  seatOnlyCands.sort((a, b) => ((a.t.startDepth | 0) - (b.t.startDepth | 0)) || ((a.t.endDepth | 0) - (b.t.endDepth | 0)) || (a.m < b.m ? -1 : a.m > b.m ? 1 : 0));
+  for (const so of seatOnlyCands) { const r418 = seatOnlyPass(so); if (r418 !== 'passed' && r418 !== 'done') RUN.seatOnlyHeld = (RUN.seatOnlyHeld | 0) + 1; }
   for (const c of fresh) {
     if (scPendingRestore) { scRestore(scPendingRestore); scPendingRestore = null; }
     if (c.solo) { if (await soloSettle(c)) settledSolo++; continue; }
@@ -17208,6 +17308,7 @@ Object.assign(module.exports, { pruneFlagged, flagBaseKey, FLAG_PRUNE_WAIT_MS, b
 Object.assign(module.exports, { lateWriterRoster });   // cloud audit Q261 a 1V1 whose result writer's own start was first read with his result
 Object.assign(module.exports, { lone1v1Spoiled, lone1v1VoidClaims });   // cloud audit Q216 a ranked 1V1 whose loser wrote only records the job cannot use
 Object.assign(module.exports, { teamXpFloor, teamXpStarts, teamXpMark, teamRollbackPlan });   // cloud audit Q237 team competitive XP floors (test/team-comp-ghost-xp.js)
+Object.assign(module.exports, { seatOnlyDispute, SEAT_ONLY_TAIL_MAX });   // cloud audit Q418 held team segment that differs only in the seat scores: the chain moves past it (test/seat-only-chain.js)
 Object.assign(module.exports, { RATING, RATING_FAMS, ENDLESS_RATING_LB, ELP_ALL, elpAllKey, elpAllOf, elpEntryOk, elpFamEntries, elpMergeByStart, elpPassOrder, elpPlaceAt, elpLeftOf, elpOldUntil, elpMins, elpSeedNow, ratingOwed, ratingOwedLive, ratingWriteCode, elpPassOrders, elpTryOrder, elpPickOrders, ELP_ORDER_CAP, SEASON_UNSCHEDULED, elpSettledRuns, elpRunsBefore, elpSaveAt, elpOpenAt, elpBeforeItems, elpBeforeLists, elpBorrowCounts, elpBorrowOrders, ELP_BORROW_CAP, elpRowSkill, elpMemberReadings, elpTeamPick, elpLinesByFam, elpSkillsOf, elpCandidateTabs, ENDLESS_RATING_LB_SOLO, ENDLESS_RATING_LB_DUO, ENDLESS_RATING_LB_TRIO, ENDLESS_RATING_LB_QUAD, ENDLESS_TIERCUT_LB, ratingFamOf, fnv32, ratingRunId, ratingHistKey,
   ratingHistUpsert, ratingHistRemove, ratingHistFinal, elpRunRk, ratingScoreOf, ratingPlan, ratingTierOf, tiercutDay, tiercutEncode, tiercutDecode, tiercutDue, pruneRatingHist,
   elpSettledDepths, elpLinesAt, elpCandidates, elpSettleRun, elpTrim, elpSettleAll, elpRunReady, elpNewerRun, elpPendingSettles, elpTeamNote, elpMemberHiddenBefore, elpTeamHidden, elpTeamTrim, elpLinesOf, elpHiddensOf, elpLinesSkipBanned, elpTableKey, elpTabNewest, elpTabRecord });

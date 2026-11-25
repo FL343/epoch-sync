@@ -27,7 +27,7 @@ console.log('=== [1] validate.js channel wiring ===');
 {
   const s = src('validate.js');
   assert('PERK_CH derives from KEY_CHANNEL (v1 when a PT job cannot tell its channel)', /const PERK_CH = KEY_CHANNEL \|\| \(PT_MODE \? 'playtest' : 'ea'\);/.test(s));
-  assert('solo / team comp / casual co-op lanes all pass PERK_CH', (s.match(/perks\.verifyPerkPicks\([^\n]*, PERK_CH\)/g) || []).length === 3 && !/perks\.verifyPerkPicks\([^\n]*, (1|pc7)\);/.test(s));
+  assert('solo / team comp / casual co-op lanes (and the Q418 chain pass of a held team segment) all pass PERK_CH', (s.match(/perks\.verifyPerkPicks\([^\n]*, PERK_CH\)/g) || []).length === 4 && !/perks\.verifyPerkPicks\([^\n]*, (1|pc7)\);/.test(s));
 }
 
 console.log('=== [2] seedcap.js channel wiring ===');
