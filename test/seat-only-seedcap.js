@@ -172,7 +172,9 @@ const sc = require(path.join(ROOT, 'seedcap.js'));
     const r = recs.filter((x) => x.SC_STATE_FILE === c.SC_STATE_FILE);
     return { sc: c.SC_STATE_FILE, twin, rec: r.map((x) => x.STARTS_FILE || 'starts.json') };
   });
-  T('[1] the workflows: ' + caps.length + ' seedcap jobs, each paired with its channel\'s reconcile', caps.length >= 3 && pairs.every((p) => p.rec.length >= 1), JSON.stringify(pairs));
+  // 2026-11-20: seedcap.yml's playtest / demo twin jobs are retired (one seedcap job left, on the main channel) -> at least one
+  //   job, and every job still pairs with the reconcile that reads its state file.
+  T('[1] the workflows: ' + caps.length + ' seedcap jobs, each paired with its channel\'s reconcile', caps.length >= 1 && pairs.every((p) => p.rec.length >= 1), JSON.stringify(pairs));
   T('[1] each seedcap job reads the start rosters its channel\'s reconcile writes', pairs.every((p) => p.rec.every((x) => x === p.twin)), JSON.stringify(pairs));
 }
 const base = suite(sc, v, '');
