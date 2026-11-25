@@ -800,7 +800,8 @@ T('[12] one segment of a run that cannot be reopened holds the whole run', U12.w
 //   the live boards + state, apply, and the new rule live: each segment settles once, no continue charged, the run ends where
 //   the new rule from the start ends it. The state history is real git (a commit per reconcile run, as the job's).
 const OLD_RULE = (s) => s.replace("const pv = perks.verifyPerkPicks(f, soloState.runs[key], cc ? 2 : 1, PERK_CH);",
-  "const pv = (process.env.RESETTLE_TEST_OLD_RULE === '1' && (f.startDepth | 0) === 5) ? { ok: false, reason: 'perk_chain', why: 'prefix (test: the old rule)' } : perks.verifyPerkPicks(f, soloState.runs[key], cc ? 2 : 1, PERK_CH);");
+  "const pv = (process.env.RESETTLE_TEST_OLD_RULE === '1' && (f.startDepth | 0) === 5) ? { ok: false, reason: 'perk_chain', why: 'prefix (test: the old rule)' } : perks.verifyPerkPicks(f, soloState.runs[key], cc ? 2 : 1, PERK_CH);")
+  .replace("? lateResume('perk_chain') : null;   // Q425", "? (process.env.RESETTLE_TEST_OLD_RULE === '1' ? null : lateResume('perk_chain')) : null;   // Q425 (the old rule had no wait)");
 function liveRepo(tag) {
   const dir = fs.mkdtempSync(path.join(TMP, 'live-' + tag + '-'));
   const files = spawnSync('git', ['-C', ROOT, 'ls-files', '-z'], { encoding: 'utf8', maxBuffer: 1 << 28 }).stdout.split('\0').filter((f) => f && !f.startsWith('test/') && (!/^[^/]+\.json$/.test(f) || /^(attest-keys|recover-shards|gr-caps|rfduo-caps|confirmed-errors|feedback-mod|feedback-wordlist|campaign-endless|classic|chat-mute)\.json$/.test(f)));

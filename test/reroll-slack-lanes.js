@@ -33,6 +33,9 @@ const SITES = [
 ];
 // casual vs competitive slack of the canon vote, as the source decides it
 const RR_SLACK_LINE = 'const rrSlack = ((t0.flags | 0) & attest.SEG_COMP) ? 0 : CASUAL_LIVES;';
+// cloud audit Q425: a casual segment that may belong to a resumed session not seen yet is checked the way a resume at checkpoint C
+//   would be (casualLateResumeAt) -- casual solo / couch only, the casual lane's slack
+SITES.push(['Q425 late token resume (solo / couch casual)', 'rerollChain(f, run, CASUAL_LIVES, c)', 'CASUAL_LIVES']);
 
 function sitesOf(src) {
   const out = [];
