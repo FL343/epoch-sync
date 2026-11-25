@@ -99,6 +99,10 @@ const APPID = process.env.APPID;
 const PREFIX = process.env.LB_PREFIX;   // no default: the shard prefix is deployment config (de-identified repo)
 const SC_STATE_FILE = process.env.SC_STATE_FILE || 'seedcap.json';
 const PROCESSED_FILE = process.env.PROCESSED_FILE || 'processed.json';   // read-only (reconcile owns it)
+// cloud audit Q418 (round 2): the reconcile's start rosters of THIS channel, read-only (reconcile owns it) -- STARTS_FILE, else the
+//   processed file's twin (processed.json -> starts.json, pt- / demo- alike: the seedcap jobs set no STARTS_FILE; test/seat-only-seedcap.js
+//   pins the pairing against the workflows)
+const STARTS_FILE = process.env.STARTS_FILE || PROCESSED_FILE.replace(/processed\.json$/, 'starts.json');
 const SIGNALS_FILE = process.env.SIGNALS_FILE || 'signals.json';         // read-only (reconcile owns it; carries applied-correction ids)
 // O198 v1 trust ledger (knife 5.5b-1): every conviction is also queued in this file's `events` (ids from `evSeq`); the reconcile
 //   takes them into ITS trust.json and keeps the last id it took there (`taken.seedcap`) -- read back here to prune the queue
@@ -463,9 +467,26 @@ function signedSideOf(g) {
   const sp = v.signedPairOf(g.map((r) => Object.assign({}, r, { steamID: r.w })), msigPub(), v.sandboxOn());
   return sp.state === 'one' ? sp.recsA : null;
 }
-function pendingOfGroup(st, m, g) {
+// cloud audit Q418 (round 2, REVIEW section 3): a held team competitive / team classic segment whose writers agree on the tail and
+//   differ only in the seat scores (validate.seatOnlyDispute). The reconcile moves its run's chain past it (nothing of the segment's
+//   own settled) once this job has audited it -- before, this job audited no group whose vectors differ, so a segment moved past
+//   was never capped and the next segment's start bank fell back to the static bound (a raised bank on a modified host's frames,
+//   one seat of his own record nudged, crossed the per-seed cap). Read on the records the reconcile reads: the seat gate of this
+//   channel's start rosters (opt.starts = the reconcile's STARTS_FILE; an account the roster does not seat there counts nowhere,
+//   as the reconcile's applySeatGate drops it -- an outside record on the key cannot make the shape unreadable here while the
+//   reconcile reads it); no start roster = not this shape (null, not remembered: picked again once the roster is there).
+//   Returns the gated records, or null.
+function seatOnlyRecs(m, g, starts) {
+  const ro = v.seatGateRoster(starts ? starts[m] : null);
+  if (!ro) return null;
+  const gated = g.filter((r) => r && r.d && ro[r.d[5] | 0] === v.pid(String(r.w || '')));
+  return v.seatOnlyDispute(gated.map((r) => Object.assign({}, r, { steamID: r.w }))) ? gated : null;
+}
+// opt (optional): { starts } -- the reconcile's start rosters (the Q418 seat-only audit; without them that shape is not read)
+function pendingOfGroup(st, m, g, opt) {
   {
     let all = g;   // the records whose writers can be seats the verdict convicts (cloud audit Q68: those claiming the audited scores)
+    let seatOnly = false;   // Q418: audited with each seat's highest score, convicting nobody (below)
     const mt0 = g[0].d[2] | 0, pc0 = g[0].d[8] | 0;
     if (pc0 >= 1 && g[0].d.length >= 10 + pc0 && !g.every(r => r.d.slice(10, 10 + pc0).join(',') === g[0].d.slice(10, 10 + pc0).join(','))) {
       // Q68: a result written without the host guard's final summary (disp 10, never on an endless key) carries its writer's own
@@ -485,8 +506,10 @@ function pendingOfGroup(st, m, g) {
         if (lo && lo.kind === 'settle') g = all = lo.g.filter(r => r.nosumOwn == null);
         else {
           const side = (v.baseMt(mt0) === 1 || v.baseMt(mt0) === 2) ? signedSideOf(g) : null;
-          if (!side) return null;   // forgery-suspect groups are the reconcile's own flag lane
-          g = all = side;
+          const so = side ? null : seatOnlyRecs(m, g, opt && opt.starts);   // Q418
+          if (!side && !so) return null;   // forgery-suspect groups are the reconcile's own flag lane
+          g = all = side || so;
+          seatOnly = !!so;
         }
       }
     }
@@ -494,8 +517,11 @@ function pendingOfGroup(st, m, g) {
     const mt = d0[2] | 0, pc = d0[8] | 0, base = v.baseMt(mt);
     if (base < 1 || base > 10 || pc < 1 || pc > 8 || d0.length < 10 + pc) return null;   // 10 = O140 private (audited via capParamsOf); 11 = O156 bot matches excluded (record pc = humans only != world seat count -> no derivable cap; XP-only track, zero stakes)
     const vecOf = (d) => d.slice(10, 10 + pc).join(',');
-    if (!g.every(r => vecOf(r.d) === vecOf(d0))) return null;   // forgery-suspect groups are the reconcile's own flag lane
-    const scores = d0.slice(10, 10 + pc).map(x => x | 0);
+    if (!seatOnly && !g.every(r => vecOf(r.d) === vecOf(d0))) return null;   // forgery-suspect groups are the reconcile's own flag lane
+    // Q418: each seat's highest score over the writers (an honest table one payment behind sits under the host's; a raised bank
+    //   on the host's frames is in every copy)
+    const scores = seatOnly ? d0.slice(10, 10 + pc).map((x, i) => Math.max.apply(null, g.map((r) => r.d[10 + i] | 0)))
+      : d0.slice(10, 10 + pc).map(x => x | 0);
     let tail = null;
     if (v.isEndlessMt(mt)) {
       // conservative tail: widest consistent interpretation (zero-tail abstention
@@ -519,10 +545,15 @@ function pendingOfGroup(st, m, g) {
     // w (O198 v1 context): distinct accounts that wrote a record of the group
     // Q68: a writer whose own record carries the audited scores claimed them; a result written without the final summary that
     //   judged the seats differently never did, so it is not a seat the verdict may convict (every other group: all of g, as before)
+    // Q418: a seat-only segment convicts nobody (self empty: the writers disagree, no one vector is the group's claim -- as Q314 /
+    //   Q333); the veto stands as ever (the reconcile does not move the chain past a vetoed segment), and an audit under the cap
+    //   extends this run's audited chain for every writer's own seat (chainSelf) as a settled segment's does
     const claimed = all.filter(r => vecOf(r.d) === vecOf(d0));
-    return { m, mt, pc, scores, p, tail, roster, self: selfSeatsOf(claimed, roster), runSeed, keyId: (p.entry === 'endless' && p.keyId > 0) ? (p.keyId | 0) : 0,
+    const out = { m, mt, pc, scores, p, tail, roster, self: selfSeatsOf(claimed, roster), runSeed, keyId: (p.entry === 'endless' && p.keyId > 0) ? (p.keyId | 0) : 0,
       w: new Set(all.map(r => String((r && (r.w || r.steamID)) || ''))).size,
       couch: !!(tail && pc >= 2 && ((tail.flags | 0) & attest.SEG_COUCH)) };   // O606: judged like an observed core (SC_COUCH_CONVICT)
+    if (seatOnly) { out.so = 1; out.self = []; out.chainSelf = selfSeatsOf(all, roster); }
+    return out;
   }
 }
 // ---- O784: the remembered audits (st.audited in full + st.seen tokens) ----
@@ -569,7 +600,7 @@ function pickAuditable(st, groups, opt) {
   const pending = [];
   for (const m of Object.keys(groups)) {
     if (knownAudit(st, m)) continue;
-    const x = pendingOfGroup(st, m, groups[m]);
+    const x = pendingOfGroup(st, m, groups[m], opt);
     if (x) { if (re) x.re = 1; pending.push(x); }
   }
   return pending;
@@ -707,6 +738,7 @@ function applyAudit(st, pending, cliMap, processed, t, opt) {
     //   rate (the O198 alert): a re-audit of a group the state forgot would fill a new core's window with old matches
     if (x.re) st.audited[x.m].re = 1;
     else coreStat(st, k, t, overSeats.length > 0);
+    if (x.so) st.audited[x.m].so = 1;   // Q418: a seat-only segment (each seat's highest score, nobody convicted)
     if (overSeats.length) {
       over++;
       // the veto (no settlement) and the correction (reverse a settled gain) stay on every over-cap seat; a
@@ -757,7 +789,9 @@ function applyAudit(st, pending, cliMap, processed, t, opt) {
         trustLedger.queuePush(st, { t, src: 'sc', p: p2, sev: 3, m: x.m, ctx });   // O198 v1
       }
       const corrSeats = overSeats.filter(s2 => cleared.indexOf(s2) < 0);   // Q374: a cleared seat keeps its settlement
-      if (!obs && corrSeats.length && processed.has(x.m) && x.p.entry === 'endless' && !st.corrections.some(c => c.m === x.m)) {   // (O285 (1): no correction while observed)
+      // Q418: none from a seat-only audit either -- each seat's highest score is no one writer's claim (a late record of the host's on
+      //   a key already settled consistent could otherwise take an honest seat's settlement back); the key is held anyway
+      if (!obs && !x.so && corrSeats.length && processed.has(x.m) && x.p.entry === 'endless' && !st.corrections.some(c => c.m === x.m)) {   // (O285 (1): no correction while observed)
         st.corrections.push({ id: 'sc-' + x.m, m: x.m, seats: corrSeats, t });
       }
       flags.push({
@@ -769,6 +803,7 @@ function applyAudit(st, pending, cliMap, processed, t, opt) {
       const againStanding = again.filter(s2 => cleared.indexOf(s2) < 0);
       if (againStanding.length) console.log('seedcap: m=' + x.m + ' seat(s) ' + againStanding.join(',') + ' already convicted for this match -- vetoed, not convicted again (Q367)');
       if (cleared.length) console.log('seedcap: m=' + x.m + ' seat(s) ' + cleared.join(',') + ' over on core ' + k + ' (not the primary) for a match the replay reversed -- vetoed, not convicted again, no correction (Q374)');
+      if (x.so) console.log('seedcap: m=' + x.m + ' is a held segment whose writers differ only in the seat scores, audited on each seat\'s highest -- vetoed (the reconcile does not move the run\'s chain past it), nobody convicted (Q418)');
       if (obsCore) console.log('seedcap: core ' + k + ' is inside its observation window (first ' + SC_OBS_H + ' h / ' + SC_OBS_N + ' honest audits) -- m=' + x.m + ' vetoed, nobody convicted (' + selfOver.length + ' self-written seat(s) recorded only)');
       else if (couchHold) console.log('seedcap: couch segment m=' + x.m + ' vetoed, nobody convicted, no correction (couch audits observe only until SC_COUCH_CONVICT; ' + selfOver.length + ' self-written seat(s) recorded only)');
       // pids only in logs -- never sids (public run logs)
@@ -781,7 +816,7 @@ function applyAudit(st, pending, cliMap, processed, t, opt) {
         // extend the audited chain of THIS run for every seat whose own account wrote the record (knife 3.5c2a-A: a forged
         //   zero-score deep record can only lift the chain of the run it forges, never the account's other runs; a stranger
         //   named in a roster gets nothing)
-        const selfSet2 = new Set(x.self || []);
+        const selfSet2 = new Set(x.chainSelf || x.self || []);   // Q418: a seat-only segment convicts nobody, its writers' chain still extends
         for (const seatKey of Object.keys(x.roster)) {
           if (!selfSet2.has(seatKey | 0)) continue;
           const p2 = v.pid(x.roster[seatKey]);
@@ -1203,7 +1238,7 @@ async function main() {
   // O784: a run after memory was lost reads the forgotten groups again with the new ones -- every pick is taken as a re-audit
   const loss = auditLossOf(st);
   if (loss) console.log('seedcap: audit memory lost (' + loss + ') -- every audit of this run is a re-audit: judged as ever, not counted in the core honest audits / over-cap rate');
-  const picked = takeSkips(st, pickAuditable(st, groups, { re: !!loss }), nowMin());
+  const picked = takeSkips(st, pickAuditable(st, groups, { re: !!loss, starts: loadJsonObj(STARTS_FILE) }), nowMin());   // Q418: the reconcile's start rosters (seat-only audit)
   let stats = { over: 0, okN: 0, errN: 0, flags: [] };
   let audited = { pending: [], map: {}, deferred: 0, exact: 0, head: '' };
   if (picked.pending.length) {
@@ -1259,7 +1294,7 @@ async function main() {
     ' suspects=' + Object.keys(st.suspects).length + ' corrections=' + st.corrections.length);
 }
 
-module.exports = { LEGACY_AUDITED_KEEP, FOLD_MIN, SEEN_W, SEEN_W_MIN, SEEN_MAX_BYTES, seenToken, seenValid, knownAudit, auditLossOf, pruneAudits,
+module.exports = { STARTS_FILE, seatOnlyRecs, LEGACY_AUDITED_KEEP, FOLD_MIN, SEEN_W, SEEN_W_MIN, SEEN_MAX_BYTES, seenToken, seenValid, knownAudit, auditLossOf, pruneAudits,
   coreFirstSeen, honestSince, observationOf, observedAlerts, SC_OBS_H, SC_OBS_N, pendingOfGroup, coreOfVerdict, coreStat, coreRate24, coreAlerts, standingT1, convictedFor, replayCandidates, applyReplay, headHashOf, coreHashOf,
   REPLAY_DAYS, REPLAY_MAX, CONVICTION_KEEP, SC_RATE_PERMIL, SC_RATE_MIN_OVER, CORE_HOURS_KEEP,
   reversedFor, selectCores, resolveCores, mergeCaps, corePathOf, OVERLAP_GRACE_MS, OVERLAP_MAX_MS, cliSupportsRerolls, cliSupportsClassic, cliSupportsBuilds, cliSupportsFee, cliSupportsRv, capParamsOf, cliLineOf, cliSupportsBuild, chainKey, chainStartBank, tailOf, coreForBuildNum, selfSeatsOf, pickAuditable, takeSkips, applyAudit, pruneState, readGroups, coresForNow, auditPending, runCli, loadState, saveState, SC_STATE_FILE, VETO_KEEP_MIN, CHAIN_LEGACY_KEEP_MIN, CHAIN_KEEP_MIN, offensePlanOf, writeOffense, mailDecision, sendAlertMail, alertMailText, rejectWindowsOf, OFFENSE_LB, OFFENSE_MAGIC, SC_MAIL_MIN_OVER, SC_MAIL_SUS_MIN };

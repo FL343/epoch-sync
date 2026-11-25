@@ -4576,6 +4576,7 @@ function writeRunSummary() {
       '| match keys with two accounts on one seat or two seat layouts, not settled (Q75) | ' + s('contested', 0) + ' |',
       '| records off their start-roster seat, not counted / start keys with a seat claimed twice / start rosters the voters split, no seat gate (Q80) | ' + s('offSeat', 0) + ' / ' + s('disputed', 0) + ' / ' + s('split', 0) + ' |',
       '| held team segments whose writers agree on the tail and differ only in the seat scores: the run\'s chain moved past one this run, the segment not settled, nothing of its own credited / still waiting for a check (Q418) | ' + s('seatOnlyPass', 0) + ' / ' + s('seatOnlyHeld', 0) + ' |',
+      '| of those held: waiting for the seed-cap audit / moved past with the audit job silent ' + Math.round(SEAT_ONLY_AUDIT_WAIT_MS / 3600000) + ' h (Q418) | ' + s('seatOnlyAudit', 0) + ' / ' + s('seatOnlyUnaudited', 0) + ' |',
       '| endless co-op groups held (records disagree on the roster, Q113) | ' + s('endlessHeld', 0) + ' |',
       '| endless runs of three writers or more whose records disagree, nobody flagged for it, not settled (Q317) / of them a writer flagged alone for a negative duration on his own record | ' + s('endlessDispute', 0) + ' / ' + s('endlessDisputeOwn', 0) + ' |',
       '| endless keys without a seat gate whose records disagree, nobody flagged (Q128) | ' + s('endlessUngated', 0) + ' |',
@@ -8996,6 +8997,7 @@ function pruneSolo(st, nowMs) {
   for (const m of Object.keys(st.wait)) if (nowMs - (st.wait[m].t0 || 0) > COMP.CHAIN_WAIT_MS + 86400000) delete st.wait[m];
   for (const k of Object.keys(st.ms || {})) if (nowMs - (st.ms[k].t || 0) > COMP.MS_TTL_MS) delete st.ms[k];
   for (const m of Object.keys(st.held || {})) if (nowMs - (st.held[m].t || 0) > COMP.CHAIN_WAIT_MS + 86400000) delete st.held[m];   // gone from the board
+  for (const m of Object.keys(st.soAud || {})) if (nowMs - (st.soAud[m].t || 0) > COMP.CHAIN_WAIT_MS + 86400000) delete st.soAud[m];   // Q418 round 2: off the board
   const heldKeys = new Set(Object.values(st.held || {}).map((h) => h && h.k).filter(Boolean));
   const sNow = seasonNowMs();
   let kept = 0;
@@ -10425,6 +10427,41 @@ function endlessRosterHold(g, roster0, keyStarts, pend) {
 //   and owes the host's fee: left to the settle), never couch or casual; no sanity reason on any record (a writer's own
 //   negative duration stays Q317's flag; the roster checks are main's, with the starts).
 const SEAT_ONLY_TAIL_MAX = 11;
+// Q418 round 2 (REVIEW section 3): the seed-cap audit (seedcap.js) reads this shape too -- each seat's highest score, convicting
+//   nobody, its audited chain extended as a settled segment's -- and the reconcile moves the chain past such a segment only once
+//   that audit is in (seatOnlyAuditGate), so a raised bank on a segment moved past cannot escape the per-seed cap (the next
+//   segment's start bank would fall back to the static bound). The audit job runs every ten minutes; the reconcile goes on without
+//   it only when the job has filed no verdict at all for SEAT_ONLY_AUDIT_WAIT_MS while the segment waited that long (a stalled
+//   job must not hold an honest run's later segments into their CHAIN_WAIT_MS reject). A job that files verdicts but not this
+//   one (its records unreadable there, say) keeps it waiting: as before the fix, never past an unaudited segment.
+const SEAT_ONLY_AUDIT_WAIT_MS = 6 * 3600000;
+// a seed-cap state (seedcap.json, read-only here) knows match key m: a full audit entry, or its salted token in st.seen
+//   (seedcap.js knownAudit, the same HMAC under the shared STATE_SALT; test/seat-only-seedcap.js pins the two together)
+function seedcapKnowsKey(sc, m) {
+  if (!sc) return false;
+  if (sc.audited && sc.audited[m]) return true;
+  const sn = sc.seen, w = sn ? (sn.w | 0) : 0;
+  if (!sn || typeof sn.h !== 'string' || w < 1) return false;
+  const salt = String(SALT || '');
+  if (sn.s !== crypto.createHmac('sha256', salt).update('seedcap seen v1 salt check').digest('base64url').slice(0, 4)) return false;
+  const tok = crypto.createHmac('sha256', salt).update('seedcap seen v1 ' + m).digest('base64url').slice(0, w);
+  for (let i = 0; i + w <= sn.h.length; i += w) if (sn.h.slice(i, i + w) === tok) return true;
+  return false;
+}
+// the newest verdict a seed-cap state holds (ms; its minutes: a core's last first audit, any remembered audit), -Infinity = none
+function seedcapLastVerdictMs(sc) {
+  let t = -Infinity;
+  for (const c of Object.values((sc && sc.cores) || {})) if (c && Number.isFinite(c.ts)) t = Math.max(t, c.ts * 60000);
+  for (const a of Object.values((sc && sc.audited) || {})) if (a && Number.isFinite(a.t)) t = Math.max(t, a.t * 60000);
+  return t;
+}
+// Q418 round 2: may the chain move past held segment m now? null = audited (go on), 'wait', 'stalled' = go on without the audit
+//   (waited SEAT_ONLY_AUDIT_WAIT_MS since t0, the first run that saw it this way, and the job filed nothing that long)
+function seatOnlyAuditGate(sc, m, t0, nowMs) {
+  if (seedcapKnowsKey(sc, m)) return null;
+  if (nowMs - t0 < SEAT_ONLY_AUDIT_WAIT_MS || nowMs - seedcapLastVerdictMs(sc) < SEAT_ONLY_AUDIT_WAIT_MS) return 'wait';
+  return 'stalled';
+}
 function seatOnlyDispute(g) {
   if (!g || g.length < 2 || !g[0] || !g[0].d) return null;
   const mt = g[0].d[2] | 0, pc = g[0].d[8] | 0;
@@ -14920,10 +14957,31 @@ async function main() {
     const keyStarts = starts.filter((r) => (r.d[3] + '_' + r.d[4] + '_' + r.d[2]) === m);
     const rosterWhy = rosterSids.length !== pc ? 'roster incomplete' : endlessRosterHold(g, roster0, keyStarts, startsPending[m]);
     if (rosterWhy) { console.log(tag + ': ' + rosterWhy + ' -- chain not passed (Q418)'); return 'roster'; }
-    if (SEEDCAP_ENFORCE && seedcap && seedcap.veto && seedcap.veto[so.m]) { console.log(tag + ': seedcap over-cap veto -- chain not passed (Q418)'); return 'seedcap'; }
+    // round 2 (REVIEW section 4 item 1): every bound a settle reads off the group (span, depth, disp, tokens, flags, season, seats,
+    //   the depth-scaled score cap), on each record -- so each seat's highest score is in range too
+    const sane = [...new Set([].concat(...g.map((r) => sanityFlags([r]))))];
+    if (sane.length) { console.log(tag + ': sanity [' + sane.join(',') + '] -- chain not passed (Q418)'); return 'sanity'; }
+    const aw = (soloState.soAud || {})[m] || null;   // round 2: per key { t0 first run seen, t last, v vetoed once } (soloState.soAud, made on first use)
+    const note = (x) => { (soloState.soAud || (soloState.soAud = {}))[m] = x; };
+    if ((SEEDCAP_ENFORCE && seedcap && seedcap.veto && seedcap.veto[so.m]) || (aw && aw.v)) {   // a veto is remembered past its own expiry (VETO_KEEP)
+      note({ t0: aw ? aw.t0 : nowMs, t: nowMs, v: 1 });
+      console.log(tag + ': seedcap over-cap veto -- chain not passed (Q418)'); return 'seedcap';
+    }
     const key = teamRunKey(rosterSids, classic ? 0 : t.seasonId, g[0].d[4] | 0);
     const run0 = soloState.runs[key];
     if (run0 && Array.isArray(run0.so) && run0.so.indexOf(m) >= 0) return 'done';
+    // round 2 (REVIEW section 3): not past it before the seed-cap audit read it (seatOnlyAuditGate; the audit on each seat's highest
+    //   score extends the audited chain, so the next segment's start bank is that cap, not the static bound)
+    let unaudited = false;
+    if (SEEDCAP_ENFORCE) {
+      const t0 = aw ? aw.t0 : nowMs, ag = seatOnlyAuditGate(seedcap, m, t0, nowMs);
+      if (ag === 'wait') {
+        note({ t0, t: nowMs });
+        RUN.seatOnlyAudit = (RUN.seatOnlyAudit | 0) + 1;
+        console.log(tag + ': waiting for the seed-cap audit (' + Math.round((nowMs - t0) / 60000) + ' min) -- not passed (Q418)'); return 'audit';
+      }
+      unaudited = ag === 'stalled';
+    }
     const f = classic
       ? { startDepth: t.startDepth | 0, endDepth: t.endDepth | 0, flags: t.flags | 0, build: 0, picksLo: 0, picksHi: 0, seasonId: t.seasonId | 0, rerollLo: 0, rerollHi: 0, resumeTags: [] }
       : { startDepth: t.startDepth | 0, endDepth: t.endDepth | 0, flags: t.flags | 0, build: t.build >>> 0, picksLo: t.picksLo | 0, picksHi: t.picksHi | 0, seasonId: t.seasonId | 0,
@@ -14942,7 +15000,12 @@ async function main() {
     if (writerPaced(m, so.writers, pend.t0, req)) return 'writer';
     const run = soloAdvance(soloState, key, f, m, plan, nowMs);
     run.so = (Array.isArray(run.so) ? run.so : []).concat([m]).slice(-32);
+    if (soloState.soAud) delete soloState.soAud[m];
     RUN.seatOnlyPass = (RUN.seatOnlyPass | 0) + 1;
+    if (unaudited) {
+      RUN.seatOnlyUnaudited = (RUN.seatOnlyUnaudited | 0) + 1;
+      ghWarn('match=' + m + ': held team segment moved past without its seed-cap audit -- the audit job filed no verdict for ' + Math.round(SEAT_ONLY_AUDIT_WAIT_MS / 3600000) + ' h (Q418)');
+    }
     console.log(tag + ': the writers agree on the tail and differ only in the seat scores -- the run\'s chain moves past it (head ' + (run.max | 0)
       + (plan.overlap != null ? ', overlap from ' + plan.overlap : '') + '), the segment is not settled, nothing of its own credited, nobody flagged (Q418)');
     return 'passed';
@@ -17308,7 +17371,7 @@ Object.assign(module.exports, { pruneFlagged, flagBaseKey, FLAG_PRUNE_WAIT_MS, b
 Object.assign(module.exports, { lateWriterRoster });   // cloud audit Q261 a 1V1 whose result writer's own start was first read with his result
 Object.assign(module.exports, { lone1v1Spoiled, lone1v1VoidClaims });   // cloud audit Q216 a ranked 1V1 whose loser wrote only records the job cannot use
 Object.assign(module.exports, { teamXpFloor, teamXpStarts, teamXpMark, teamRollbackPlan });   // cloud audit Q237 team competitive XP floors (test/team-comp-ghost-xp.js)
-Object.assign(module.exports, { seatOnlyDispute, SEAT_ONLY_TAIL_MAX });   // cloud audit Q418 held team segment that differs only in the seat scores: the chain moves past it (test/seat-only-chain.js)
+Object.assign(module.exports, { seatOnlyDispute, SEAT_ONLY_TAIL_MAX, SEAT_ONLY_AUDIT_WAIT_MS, seedcapKnowsKey, seedcapLastVerdictMs, seatOnlyAuditGate });   // cloud audit Q418 held team segment that differs only in the seat scores: the chain moves past it (test/seat-only-chain.js)
 Object.assign(module.exports, { RATING, RATING_FAMS, ENDLESS_RATING_LB, ELP_ALL, elpAllKey, elpAllOf, elpEntryOk, elpFamEntries, elpMergeByStart, elpPassOrder, elpPlaceAt, elpLeftOf, elpOldUntil, elpMins, elpSeedNow, ratingOwed, ratingOwedLive, ratingWriteCode, elpPassOrders, elpTryOrder, elpPickOrders, ELP_ORDER_CAP, SEASON_UNSCHEDULED, elpSettledRuns, elpRunsBefore, elpSaveAt, elpOpenAt, elpBeforeItems, elpBeforeLists, elpBorrowCounts, elpBorrowOrders, ELP_BORROW_CAP, elpRowSkill, elpMemberReadings, elpTeamPick, elpLinesByFam, elpSkillsOf, elpCandidateTabs, ENDLESS_RATING_LB_SOLO, ENDLESS_RATING_LB_DUO, ENDLESS_RATING_LB_TRIO, ENDLESS_RATING_LB_QUAD, ENDLESS_TIERCUT_LB, ratingFamOf, fnv32, ratingRunId, ratingHistKey,
   ratingHistUpsert, ratingHistRemove, ratingHistFinal, elpRunRk, ratingScoreOf, ratingPlan, ratingTierOf, tiercutDay, tiercutEncode, tiercutDecode, tiercutDue, pruneRatingHist,
   elpSettledDepths, elpLinesAt, elpCandidates, elpSettleRun, elpTrim, elpSettleAll, elpRunReady, elpNewerRun, elpPendingSettles, elpTeamNote, elpMemberHiddenBefore, elpTeamHidden, elpTeamTrim, elpLinesOf, elpHiddensOf, elpLinesSkipBanned, elpTableKey, elpTabNewest, elpTabRecord });

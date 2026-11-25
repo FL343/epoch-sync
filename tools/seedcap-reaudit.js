@@ -12,6 +12,7 @@
 //   STEAM_PUBLISHER_KEY=... APPID=... LB_PREFIX=... STATE_SALT=... [SEEDCAP_CLI=... SEEDCAP_DIST_DIR=... SEEDCAP_CHANNEL=...]
 //   node tools/seedcap-reaudit.js [--state=<seedcap state file>] [--json] [--cli=<exe>] [--old-cli=<exe>] [--allow-over]
 //     --state    seed the scratch state's chain from a real state file (carry-in bounds as the cron would see them); default: empty
+//     --starts   the reconcile's start rosters (Q418 seat-only audit); default: STARTS_FILE / the PROCESSED_FILE twin, as seedcap.js
 //     --cli      audit with ONE core (this exe) instead of the live.json selection (e.g. a freshly built out/seedcap_cli.exe)
 //     --old-cli  also cap every group with a second exe and report the cap ratio distribution new/old (core change review)
 //     --json     machine-readable summary on stdout
@@ -43,7 +44,11 @@ const q = (arr, p) => { if (!arr.length) return null; const s = arr.slice().sort
   const st = { audited: {}, chain: {}, suspects: {}, veto: {}, corrections: [] };
   const stateFile = arg('state');
   if (stateFile) { try { st.chain = JSON.parse(fs.readFileSync(stateFile, 'utf8')).chain || {}; } catch (e) { console.error('seedcap-reaudit: cannot read --state ' + stateFile); process.exit(2); } }
-  const picked = sc.takeSkips(st, sc.pickAuditable(st, groups), Math.floor(Date.now() / 60000));
+  // Q418 round 2: the reconcile's start rosters (--starts=<file>, default the channel's STARTS_FILE as seedcap.js reads it) -- the
+  //   seat-only audit of a held team segment reads them; absent / unreadable = that shape is not audited (as before)
+  let starts = {};
+  try { starts = JSON.parse(fs.readFileSync(arg('starts') || sc.STARTS_FILE, 'utf8')) || {}; } catch (e) {}
+  const picked = sc.takeSkips(st, sc.pickAuditable(st, groups, { starts }), Math.floor(Date.now() / 60000));
   const distDir = process.env.SEEDCAP_DIST_DIR || path.dirname(process.env.SEEDCAP_CLI || './seedcap_cli.exe');
   const channel = process.env.SEEDCAP_CHANNEL || '';
   const cliOverride = arg('cli');

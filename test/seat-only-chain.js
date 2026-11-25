@@ -24,6 +24,16 @@
 //       the resume consumes it), a team classic resume held as before
 //   [7] run summary row; wiring pins
 //   [8] mutation self-checks
+// Round 2 (REVIEW round 1: the segment moved past was never seed-capped, so the next segment's start bank fell back to the static
+// bound -- a modified host raising the bank on his frames and nudging one seat of his own record crossed the per-seed cap):
+//   [9] what a settle checks, the two the round-1 tests missed (review probes P1 / P2: another roster on one record, a forged
+//       perk build on all four) and every sanity bound on each record (a span over five levels)
+//   [10] with the seed-cap audit on (SEEDCAP_ENFORCE=1; the real seedcap.js pickAuditable / applyAudit between two reconcile runs,
+//       a stand-in world core: a segment's cap = its start bank + SEG_CAP): the honest shape waits one run for the audit, then the
+//       rest settles; the attack (bank raised on the held segment, one seat +1 on the host's own record) is vetoed and nothing
+//       behind it settles, nobody convicted; a bank raised on the next segment instead meets the audited chain; an outside record
+//       on the key; a stalled audit job (no verdict for SEAT_ONLY_AUDIT_WAIT_MS) and a live job that does not read the segment;
+//       a veto remembered past its expiry; mutation self-checks on both files
 // State isolation is structural (every *_FILE var scanned and redirected, cwd = temp dir), like test/team-comp-ghost-xp.js.
 const { spawnSync } = require('child_process');
 const fs = require('fs'), path = require('path'), os = require('os');
@@ -106,6 +116,13 @@ function advance(state, ms) {
   if (sg && sg.players) for (const k of Object.keys(sg.players)) if (sg.players[k].bz) sg.players[k].bz -= ms;
   const so = files.SOLO_FILE;
   if (so && so.wait) for (const k of Object.keys(so.wait)) if (so.wait[k] && so.wait[k].t0) so.wait[k].t0 -= ms;
+  if (so && so.soAud) for (const k of Object.keys(so.soAud)) { const a = so.soAud[k]; if (a && a.t0) a.t0 -= ms; if (a && a.t) a.t -= ms; }   // Q418 round 2
+  const sc = files.SC_STATE_FILE, mn = Math.round(ms / 60000);   // the seed-cap state counts minutes
+  if (sc) {
+    for (const k of Object.keys(sc.cores || {})) if (sc.cores[k] && sc.cores[k].ts) sc.cores[k].ts -= mn;
+    for (const k of Object.keys(sc.audited || {})) if (sc.audited[k] && sc.audited[k].t) sc.audited[k].t -= mn;
+    for (const k of Object.keys(sc.veto || {})) if (sc.veto[k] && sc.veto[k].t) sc.veto[k].t -= mn;
+  }
   return files;
 }
 
@@ -389,8 +406,8 @@ console.log('-- [7] wiring --');
   T('[7] the pass runs once per run, after the chain memory and the one-match rule are set up, right before the settle loop', iPass > iSolo && iPass > iPaced && iLoop > iPass && iLoop - iPass < 400 && SRC.split(PASS_CALL).length === 2);
   const body = SRC.slice(SRC.indexOf('  const seatOnlyPass = (so) => {'), iPass);
   T('[7] the pass writes nothing but the chain (no processed, credit, signal or flag)', body.length > 0 && !/processed\.add|creditXp|creditCareer|recordFlag|recordEndlessSignals|cp\[|changedCp|\.best\[|ratingHist|teamXpMark|sigDay/.test(body));
-  T('[7] the pass checks what a settle checks: roster hold, seedcap veto, chain plan, reroll + perk chains, pacing, one match at a time, then soloAdvance',
-    ['endlessRosterHold(', 'seedcap.veto[so.m]', 'soloChainPlan(soloState, key, f, m, nowMs)', 'rerollChain(f, run0)', 'perks.verifyPerkPicks(f, run0, pc, PERK_CH)', 'endlessRequiredMs(f, plan.proven', 'writerPaced(m, so.writers, pend.t0, req)', 'soloAdvance(soloState, key, f, m, plan, nowMs)']
+  T('[7] the pass checks what a settle checks: roster hold, sanity bounds, seedcap veto, the seed-cap audit (round 2), chain plan, reroll + perk chains, pacing, one match at a time, then soloAdvance',
+    ['endlessRosterHold(', 'sanityFlags([r])', 'seedcap.veto[so.m]', 'seatOnlyAuditGate(seedcap, m, t0, nowMs)', 'soloChainPlan(soloState, key, f, m, nowMs)', 'rerollChain(f, run0)', 'perks.verifyPerkPicks(f, run0, pc, PERK_CH)', 'endlessRequiredMs(f, plan.proven', 'writerPaced(m, so.writers, pend.t0, req)', 'soloAdvance(soloState, key, f, m, plan, nowMs)']
       .every((s, i, a) => body.indexOf(s) > 0 && (i === 0 || body.indexOf(s) > body.indexOf(a[i - 1]))));
   T('[7] summary row present', /\(Q418\) \| ' \+ s\('seatOnlyPass', 0\) \+ ' \/ ' \+ s\('seatOnlyHeld', 0\)/.test(SRC));
 }
@@ -428,5 +445,170 @@ console.log('-- [8] mutation self-checks --');
   }
 }
 
+// ---- [9] round 2: what a settle checks (the review probes P1 / P2, the sanity bounds) ----
+console.log('-- [9] round 2: the roster, the perk chain, the sanity bounds --');
+// the live shape with one more fault on the held [10,15] (edit(rows of that segment, ros)); [0,5] [5,10] [15,20] agree
+function caseOdd(h, edit, script, env, ends) {
+  const ros = QUAD(h & 0xff), e = ends || [15, 20];
+  const segs = [seg(h, ros, 0, 5), seg(h + 1, ros, 5, 10), seg(h + 2, ros, 10, e[0], 0, SHORT), seg(h + 3, ros, e[0], e[1])];
+  if (edit) edit(segs[2], ros);
+  const p = timeline(played(segs, 2), ros, script, env);
+  return { p, ros, m: [0, 1, 2, 3].map((i) => keyOf(h + i)) };
+}
+const recOf = (rows, ros, seat) => rows.find((r) => r.sid === ros[seat] && r.d[0] === 0xB1);
+const P1_EDIT = (rows, ros) => { const r = recOf(rows, ros, 3); const q = sidPair(SID(9999)); r.d[15] = q[0]; r.d[16] = q[1]; };   // seat 0 of seat 3's roster: someone else
+const P2_EDIT = (rows) => { for (const r of rows) if (r.d[0] === 0xB1) r.d[23 + 6] = 1; };                                    // a perk build word, no pick log
+const ROSTER_RE = /seat-only [^\n]*the records name different rosters -- chain not passed/;
+const PERK_RE = /seat-only [^\n]*perk chain \(perk_forge\) -- not passed/;
+{
+  const a = caseOdd(0x3100, P1_EDIT);
+  T('[9] P1 one record names another roster (its writer still at his own seat): not passed, held at the roster', lines(a.p, PASS_RE) === 0 && ROSTER_RE.test(a.p.all) && !processedOf(a.p.last).has(a.m[3]),
+    (a.p.all.match(/seat-only [^\n]*/g) || []).slice(0, 2).join(' | '));
+  const b = caseOdd(0x3200, P2_EDIT);
+  T('[9] P2 all four carry a perk build with no pick log: not passed, held at the perk chain', lines(b.p, PASS_RE) === 0 && PERK_RE.test(b.p.all) && !processedOf(b.p.last).has(b.m[3]),
+    (b.p.all.match(/seat-only [^\n]*/g) || []).slice(0, 2).join(' | '));
+  const c = caseOdd(0x3300, null, null, null, [16, 21]);
+  T('[9] a span over five levels ([10,16], every record): not passed, held at the sanity bounds', lines(c.p, PASS_RE) === 0 && /seat-only [^\n]*sanity \[span\] -- chain not passed/.test(c.p.all) && !processedOf(c.p.last).has(c.m[3]),
+    (c.p.all.match(/seat-only [^\n]*/g) || []).slice(0, 2).join(' | '));
+}
+
+// ---- [10] round 2: the seed-cap audit ----
+console.log('-- [10] round 2: the seed-cap audit of the segment moved past --');
+const SEEDCAP = path.join(__dirname, '..', 'seedcap.js');
+const SEG_CAP = 50000;   // the stand-in world core: a segment adds at most this much to its start bank (a cap = start bank + SEG_CAP)
+// the seed-cap job between two reconcile runs, on what the shards hold: the real pickAuditable / takeSkips / applyAudit, the
+//   reconcile's start rosters; its state goes to the next reconcile run as SC_STATE_FILE. o.skip = keys it does not read.
+function seedcapRun(state, rows, scFile, o) {
+  const sc = require(scFile || SEEDCAP);
+  const st = state.SC_STATE_FILE ? JSON.parse(JSON.stringify(state.SC_STATE_FILE)) : {};
+  for (const [k, d] of [['audited', {}], ['chain', {}], ['suspects', {}], ['veto', {}], ['corrections', []]]) if (!st[k]) st[k] = d;
+  const groups = {};
+  for (const r of rows) if (r.d[0] === 0xB1) { const m = r.d[3] + '_' + r.d[4] + '_' + r.d[2]; if (!(o && o.skip && o.skip.indexOf(m) >= 0)) (groups[m] = groups[m] || []).push({ d: r.d, roster: v.decodeRoster(r.d), w: r.sid }); }
+  const t = Math.floor(Date.now() / 60000);
+  const log = console.log; console.log = () => {};   // the job's own lines stay out of this test's output
+  try {
+    const pend = sc.takeSkips(st, sc.pickAuditable(st, groups, { starts: state.STARTS_FILE || {} }), t).pending;
+    const cli = {}; pend.forEach((x, i) => { cli['m' + i] = { cap: ((x.p && x.p.startBank) | 0) + SEG_CAP }; });
+    if (pend.length) sc.applyAudit(st, pend, cli, new Set(state.PROCESSED_FILE || []), t);
+  } finally { console.log = log; }
+  state.SC_STATE_FILE = st;
+}
+// opt: sc (false = the job never runs), scSkip [run indexes the job does not follow: it runs every ten minutes, the reconcile
+//   every five], scFile (a mutant seedcap.js), skip, other (a fresh verdict on some other group before every
+//   run: the job is alive), jump { runIndex: extra ms before that run }, scEdit(st, runIndex) after the job ran
+function timelineSc(steps, cpHolders, script, opt) {
+  const o = opt || {}, runs = [];
+  let state = null;
+  steps.forEach((rows, i) => {
+    const files = state ? advance(state, 10 * 60000 + ((o.jump && o.jump[i]) | 0)) : null;
+    if (files && o.other) { files.SC_STATE_FILE = files.SC_STATE_FILE || {}; files.SC_STATE_FILE.audited = files.SC_STATE_FILE.audited || {}; files.SC_STATE_FILE.audited['other_' + i] = { c: 1, s: 0, o: 0, t: Math.floor(Date.now() / 60000) - 5, k: 'root' }; }
+    const r = runCron(world(rows, cpHolders), files, script, { SEEDCAP_ENFORCE: '1' });
+    runs.push(r); state = r.state;
+    if (o.sc !== false && !(o.scSkip && o.scSkip.indexOf(i) >= 0)) seedcapRun(state, rows, o.scFile, o);
+    if (o.scEdit) o.scEdit(state.SC_STATE_FILE, i);
+  });
+  return { runs, last: runs[runs.length - 1], all: runs.map(r => r.out).join('\n'), codes: runs.map(r => r.code), sc: state.SC_STATE_FILE };
+}
+const WAIT_RE = /seat-only [^\n]*waiting for the seed-cap audit/g;
+const VETO_RE = /seat-only [^\n]*seedcap over-cap veto -- chain not passed/;
+const UNAUD_RE = /held team segment moved past without its seed-cap audit/;
+const RAISE = (bank) => ({ 0: { scores: [bank, 30000, 20000, 10000] }, 1: { scores: [bank, 30000, 20000, 10000] }, 2: { scores: [bank, 30000, 20000, 10000] }, 3: { scores: [bank, 30000, 20000, 10000] } });
+// the host (seat 0) raised the bank on his frames (every copy carries it) and nudged seat 1 of his own record by one
+const ATTACK = (bank) => Object.assign(RAISE(bank), { 0: { scores: [bank, 30001, 20000, 10000] } });
+function caseCap(h, oddHeld, oddNext, script, opt) {
+  const ros = QUAD(h & 0xff), segs = [seg(h, ros, 0, 5), seg(h + 1, ros, 5, 10), seg(h + 2, ros, 10, 15, 0, oddHeld), seg(h + 3, ros, 15, 20, 0, oddNext), seg(h + 4, ros, 20, 25, 0, oddNext)];
+  if (opt && opt.outsider) segs[2] = segs[2].concat([{ sid: SID(0x7777), d: rec7(h + 2, 0, [SID(0x7777)].concat(ros.slice(1)), 10, 15, SEG_COMP, { scores: [1, 1, 1, 1] }) }]);
+  const p = timelineSc(played(segs, (opt && opt.extra) || 2), ros, script, opt);
+  return { p, ros, m: [0, 1, 2, 3, 4].map((i) => keyOf(h + i)) };
+}
+const scOf = (p) => p.sc || {};
+const convicted = (p) => Object.keys(scOf(p).suspects || {}).length + (scOf(p).corrections || []).length;
+const capOf = (p, m) => ((scOf(p).audited || {})[m] || {}).c;   // the cap a group was audited against (its start bank + SEG_CAP)
+// the stand-in caps: [0,5] 50000, [5,10] 100000, [10,15] 150000, [15,20] 200000 on the audited chain; the static bound at 15 is 1110000
+function honestCap(script, opt) { return caseCap(0x3A10, SHORT, null, script, opt); }
+// over [10,15]'s cap, far under the static bound; the job skips the run the held segment lands in (the next reconcile run comes first)
+function attackHeld(script, opt) { return caseCap(0x3B20, ATTACK(200000), RAISE(200000), script, Object.assign({ scSkip: [2] }, opt || {})); }
+function attackNext(script, opt) { return caseCap(0x3C30, SHORT, RAISE(250000), script, opt); }            // the held one honest, the bank raised on [15,20]
+{
+  const a = honestCap();
+  T('[10] honest shape: waits one run for the audit, then passes; the rest settles (head 25), nothing of its own credited',
+    allZero(a.p) && lines(a.p, WAIT_RE) === 1 && lines(a.p, PASS_RE) === 1 && [0, 1, 3, 4].every((i) => processedOf(a.p.last).has(a.m[i])) && !processedOf(a.p.last).has(a.m[2])
+      && (runOf(a.p, a.ros) || {}).max === 25 && a.ros.every((s) => xpOf(a.p, s) === XP(20)), (a.p.all.match(/seat-only [^\n]*/g) || []).join(' | ') + ' xp ' + a.ros.map((s) => xpOf(a.p, s)).join(','));
+  T('[10] honest shape: the audit read it as seat-only (cap 150000), convicted nobody; [15,20] was audited from that chain (cap 200000, not the static bound + 50000)',
+    ((scOf(a.p).audited || {})[a.m[2]] || {}).so === 1 && capOf(a.p, a.m[2]) === 150000 && capOf(a.p, a.m[3]) === 200000 && convicted(a.p) === 0 && Object.keys(scOf(a.p).veto || {}).length === 0,
+    JSON.stringify({ held: (scOf(a.p).audited || {})[a.m[2]], next: (scOf(a.p).audited || {})[a.m[3]] }));
+  T('[10] honest shape: nobody flagged; the summary counts the run that waited', a.ros.every((s) => flagsOf(a.p, s) === 0) && a.p.runs.some((r) => /\(Q418\) \| 1 \/ 0 \|/.test(r.summary)), a.p.runs.map((r) => (r.summary.match(/\(Q418\) \| [^\n]*/g) || []).join(' ; ')).join(' || '));
+  const b = attackHeld();
+  T('[10] attack on the held segment (bank 200000 > its cap 150000, host\'s own record seat 1 +1; the job one run behind): waits, vetoed, never passed, nothing behind it settles',
+    allZero(b.p) && lines(b.p, PASS_RE) === 0 && VETO_RE.test(b.p.all) && !!(scOf(b.p).veto || {})[b.m[2]] && ![3, 4].some((i) => processedOf(b.p.last).has(b.m[i])) && b.ros.every((s) => ladderOf(b.p, BOARD.compQuad, s) === 10),
+    (b.p.all.match(/seat-only [^\n]*/g) || []).slice(0, 3).join(' | '));
+  T('[10] attack on the held segment: nobody convicted, nobody flagged (a held key: no correction either)', convicted(b.p) === 0 && b.ros.every((s) => flagsOf(b.p, s) === 0), JSON.stringify({ su: scOf(b.p).suspects, cor: scOf(b.p).corrections }));
+  const c = attackNext();
+  T('[10] the bank raised on [15,20] instead (250000): the held [10,15] passes; [15,20] is audited from the audited chain at 15 (start bank 150000, cap 200000) and vetoed, its raiser (seat 0, the host) convicted alone',
+    allZero(c.p) && lines(c.p, PASS_RE) === 1 && capOf(c.p, c.m[3]) === 200000 && !!(scOf(c.p).veto || {})[c.m[3]] && Object.keys(scOf(c.p).suspects || {}).join(',') === v.pid(c.ros[0]),
+    JSON.stringify({ cap: capOf(c.p, c.m[3]), veto: Object.keys(scOf(c.p).veto || {}), su: Object.keys(scOf(c.p).suspects || {}) }));
+  const d = honestCap(null, { outsider: true });
+  T('[10] an outside account\'s record on the held key (the reconcile drops it, Q80): the audit leaves it out too, the segment passes',
+    allZero(d.p) && /record\(s\) from accounts the start roster does not seat there/.test(d.p.all) && lines(d.p, PASS_RE) === 1 && ((scOf(d.p).audited || {})[d.m[2]] || {}).so === 1 && processedOf(d.p.last).has(d.m[3]), (d.p.all.match(/seat-only [^\n]*/g) || []).join(' | '));
+}
+// the audit job silent: it never runs (no verdict at all), a jump of 6.5 h before run 5
+const JUMP = { 5: 6.5 * 3600000 };
+function stalled(script) { return caseCap(0x3D40, SHORT, null, script, { sc: false, jump: JUMP, extra: 3 }); }
+function unread(script) { return caseCap(0x3E50, SHORT, null, script, { skip: [keyOf(0x3E52)], other: true, jump: JUMP, extra: 3 }); }
+function vetoGone(script) {   // the attack, its veto aged out of the job's state after the reconcile saw it (VETO_KEEP)
+  return caseCap(0x3F60, ATTACK(200000), RAISE(200000), script, { extra: 3, scEdit: (st, i) => { if (i >= 4) st.veto = {}; } });
+}
+{
+  const s = stalled();
+  T('[10] a silent audit job: the segment waits ' + Math.round(v.SEAT_ONLY_AUDIT_WAIT_MS / 3600000) + ' h, then passes with a warning line; the rest settles',
+    allZero(s.p) && lines(s.p, WAIT_RE) >= 2 && lines(s.p, PASS_RE) === 1 && UNAUD_RE.test(s.p.all) && processedOf(s.p.last).has(s.m[4]) && s.p.runs.some((r) => /moved past with the audit job silent [0-9]+ h \(Q418\) \| [0-9]+ \/ 1 \|/.test(r.summary)),
+    (s.p.all.match(/seat-only [^\n]*/g) || []).slice(-3).join(' | '));
+  const u = unread();
+  T('[10] a live audit job that does not read this segment (verdicts on other groups): still waiting after the same 6.5 h, nothing behind it settles',
+    allZero(u.p) && lines(u.p, PASS_RE) === 0 && lines(u.p, WAIT_RE) >= 4 && !UNAUD_RE.test(u.p.all) && !processedOf(u.p.last).has(u.m[3]), (u.p.all.match(/seat-only [^\n]*/g) || []).slice(-2).join(' | '));
+  const g = vetoGone();
+  T('[10] a veto that aged out of the job\'s state: still not passed (the reconcile remembers it)', allZero(g.p) && lines(g.p, PASS_RE) === 0 && ![3, 4].some((i) => processedOf(g.p.last).has(g.m[i])), (g.p.all.match(/seat-only [^\n]*/g) || []).slice(-2).join(' | '));
+}
+// ---- mutation self-checks (round 2) ----
+console.log('-- [10] mutation self-checks --');
+{
+  const SC_SRC = fs.readFileSync(SEEDCAP, 'utf8');
+  function withScMutant(from, to, fn) {
+    if (SC_SRC.split(from).length !== 2) return { anchor: false };
+    const file = path.join(__dirname, '..', '.mutant-seat-only-chain-sc-' + process.pid + '.js');
+    try { fs.writeFileSync(file, SC_SRC.replace(from, to)); delete require.cache[file]; return { anchor: true, out: fn(file) }; }
+    finally { try { fs.unlinkSync(file); } catch (e) {} delete require.cache[file]; }
+  }
+  const vm = [
+    ['K1 no roster check', "    if (rosterWhy) { console.log(tag + ': ' + rosterWhy + ' -- chain not passed (Q418)'); return 'roster'; }\n", '', (s) => lines(caseOdd(0x3100, P1_EDIT, s).p, PASS_RE) !== 0],
+    ['K4 no perk chain', "      if (!pv.ok) { console.log(tag + ': perk chain (' + pv.reason + ') -- not passed (Q418)'); return 'perk'; }\n", '', (s) => lines(caseOdd(0x3200, P2_EDIT, s).p, PASS_RE) !== 0],
+    ['no sanity bounds', "    if (sane.length) { console.log(tag + ': sanity [' + sane.join(',') + '] -- chain not passed (Q418)'); return 'sanity'; }\n", '', (s) => lines(caseOdd(0x3300, null, s, null, [16, 21]).p, PASS_RE) !== 0],
+    ['the pass does not wait for the audit', "      if (ag === 'wait') {\n", "      if (false) {\n", (s) => { const b = attackHeld(s); return [3, 4].some((i) => processedOf(b.p.last).has(b.m[i])); }],
+    ['no wait for a live job (the 6 h cap alone)', "  if (nowMs - t0 < SEAT_ONLY_AUDIT_WAIT_MS || nowMs - seedcapLastVerdictMs(sc) < SEAT_ONLY_AUDIT_WAIT_MS) return 'wait';\n", "  if (nowMs - t0 < SEAT_ONLY_AUDIT_WAIT_MS) return 'wait';\n",
+      (s) => lines(unread(s).p, PASS_RE) !== 0],
+    ['a silent job holds it for good', "  return 'stalled';\n}", "  return 'wait';\n}", (s) => lines(stalled(s).p, PASS_RE) === 0],
+    ['the veto not remembered', "    if ((SEEDCAP_ENFORCE && seedcap && seedcap.veto && seedcap.veto[so.m]) || (aw && aw.v)) {", "    if (SEEDCAP_ENFORCE && seedcap && seedcap.veto && seedcap.veto[so.m]) {",
+      (s) => lines(vetoGone(s).p, PASS_RE) !== 0],
+  ];
+  for (const [label, from, to, check] of vm) {
+    const r = withMutant(from, to, check);
+    if (!r.anchor) { bad('[10] validate.js: ' + label + ': anchor not found exactly once'); continue; }
+    T('[10] validate.js: ' + label + ' -> red', r.out === true);
+  }
+  const sm = [
+    ['the seat-only shape not audited (round 1)', "          const so = side ? null : seatOnlyRecs(m, g, opt && opt.starts);   // Q418\n", '          const so = null;\n',
+      (f) => lines(honestCap(null, { scFile: f }).p, PASS_RE) === 0],
+    ['no seat gate', "  const gated = g.filter((r) => r && r.d && ro[r.d[5] | 0] === v.pid(String(r.w || '')));\n", '  const gated = g;\n',
+      (f) => lines(honestCap(null, { outsider: true, scFile: f }).p, PASS_RE) === 0],
+    ['the chain not extended from a seat-only audit', "        const selfSet2 = new Set(x.chainSelf || x.self || []);", '        const selfSet2 = new Set(x.self || []);',
+      (f) => { const c = attackNext(null, { scFile: f }); return capOf(c.p, c.m[3]) !== 200000 && !(scOf(c.p).veto || {})[c.m[3]]; }],
+    ['the writers convictable', "out.self = [];", 'out.self = selfSeatsOf(all, roster);', (f) => convicted(attackHeld(null, { scFile: f }).p) !== 0],
+  ];
+  for (const [label, from, to, check] of sm) {
+    const r = withScMutant(from, to, check);
+    if (!r.anchor) { bad('[10] seedcap.js: ' + label + ': anchor not found exactly once'); continue; }
+    T('[10] seedcap.js: ' + label + ' -> red', r.out === true);
+  }
+}
 console.log(failN ? ('FAIL x' + failN + ' (seat-only-chain)') : 'ALL OK (seat-only-chain)');
 process.exit(failN ? 1 : 0);
