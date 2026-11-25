@@ -30,6 +30,9 @@ const SITES = [
   ['solo / couch lane', 'rerollChain(f, soloState.runs[key], (casual || ccCas) ? CASUAL_LIVES : 0,', '(casual || ccCas) ? CASUAL_LIVES : 0'],
   ['team competitive segment lane', 'rerollChain(f, soloState.runs[key]);', '0'],
   ['casual co-op lane', 'rerollChain({ rerollLo: t.rerollLo >>> 0, rerollHi: t.rerollHi >>> 0, endDepth: t.endDepth | 0 }, null, CASUAL_LIVES);', 'CASUAL_LIVES'],
+  // Q418: the chain pass of a held team segment whose writers differ only in the seat scores (seatOnlyPass) checks the reroll
+  //   chain a settle of it would -- team competitive only (team classic has no reroll), one life: no slack, like the lane above
+  ['Q418 chain pass of a held team competitive segment', 'rerollChain(f, run0);', '0'],
 ];
 // casual vs competitive slack of the canon vote, as the source decides it
 const RR_SLACK_LINE = 'const rrSlack = ((t0.flags | 0) & attest.SEG_COMP) ? 0 : CASUAL_LIVES;';
