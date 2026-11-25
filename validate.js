@@ -3973,6 +3973,114 @@ function rejoinEarlyOnly(recs, rest) {
       && ((r.d[7] | 0) >> 1) < least && !rejoinNamesSeat(r);
   });
 }
+// Q438 (cloud audit, from Q437 / ASK_USER A86, 2026-11-23; player voice V123 "my teammate always shows as gone, then my
+//   placement failed at level 6"): a two-player endless run whose connection dropped. Neither client can reach the other, so
+//   each ends the run on its own and writes a result for the segment it was in: the one who lost the host writes host-left
+//   (2) or migrate-disband (4) with the run as it stood when the frames stopped; the host, alone, plays on through his grace
+//   (15 s to notice, 60 s to wait for a rejoin) and then writes peers-gone (1) -- or finished (0) when the run ended on a
+//   verdict inside that time, or on a checkpoint he passed alone (a checkpoint segment is written finished). The two records
+//   differ (depth, scores, the picks made past the drop), so the key went to the two-voice lane: nobody flagged, nothing
+//   settled -- no XP, competitive points or board for the levels the two played together, and the run's rating waited a day
+//   to settle at the last checkpoint (about 15 to 20 runs a day, Q437 section 4). A team competitive / classic segment that
+//   ends that way carries no final bit (the client sets it on a run-over verdict only), so even two equal records were held
+//   (B-F7: only a final segment may carry a non-finished disposition).
+// The user chose (A86 option 1) to settle such a segment on the part both records wrote: the smaller depth, each seat's
+//   smaller score, nobody flagged, the rating counted at that depth. endlessCommonVerdict(g) reads one group:
+//     - endless (type 7) of two seats, two writers with one record each (byte-identical copies of one record count once), one
+//       record host-left / migrate-disband, the other peers-gone / finished; one seat table that seats each writer at his own
+//       seat and names nobody else;
+//     - both tails of the same run and segment: the same start depth, continue nibbles, tokens and season, the same segment
+//       flags but for the final bit, never a save segment (suspended), no bit off the team lanes (couch / casual solo); a full
+//       tail (11 ints, through the reroll bitmap);
+//     - one tail is the common part of the other: its depth no deeper, its pick log a prefix of the other's, its reroll bitmap
+//       inside the other's. That record is S. Records that cross (deeper on one value, shallower on another) do not settle here.
+//   It rewrites both records (copies, in place in the group as Q68 / Q339 do) to S's tail (ints 0..10; each keeps its own
+//   resume tag, outside the consistency vector) with each seat's smaller score, and adds the final bit to a team competitive /
+//   classic segment: the run ended there for both clients, and a later segment of the run is past its end. Every lane then
+//   reads one consistent group of two writers (S first). Nothing a record says can raise what settles: the depth is the
+//   smaller one, each score the smaller one, the build / picks / bitmap the shallower record's own (replayed as ever), so a
+//   modified writer can only lower the result -- and with it his own, on the same team. What he can do is what the two-voice
+//   lane let him do before (write a record that disagrees and hold the segment); now the segment settles at the depth his own
+//   record names, never below the segment's start (the same start depth is required), where it used to wait a day and settle
+//   at the run's last checkpoint (that start) -- so the honest teammate never ends lower than before. The seedcap audit reads
+//   the same rewrite (seedcap.js pendingOfGroup), so the per-seed cap still covers the scores that settle; but only the
+//   writers in claim answer for it there: the writer whose own record is the one that settles (its tail is the settled tail
+//   but for the final bit -- S, and the other too when the two tails were the same). The other one reported his scores at
+//   his own deeper tail, where his own cap was read; at the settled depth he claimed nothing, so a seat of his over that cap
+//   is vetoed (held, as the two-voice lane held it) and never convicted -- otherwise a modified teammate who writes host-left
+//   at the segment's start could have the honest player's real deep scores convicted against the start's cap (Q438 review 1).
+//   Every settled score is at or under S's own, so an over-cap seat is one S reported over the cap at S's own depth.
+//   Not here (left as before, the two-voice lane): three or four seats (a drop there migrates the host or leaves a seat
+//   absent: other lanes), a user-quit (5) record (a player who leaves on purpose), records that differ on anything but the
+//   depth, scores, picks and bitmap. Returns null (not this shape, or nothing to change) or
+//   { kind: 'settle', g: [S', L'], low (the settled scores), depth (S's end depth), deep (the other's), final (the final bit
+//   added), left / stay (the writers by disposition), own: { sid: 'scores|depth' as written }, claim: [the writers who answer
+//   for the settled scores at the settled depth (seedcap)] }.
+const ENDLESS_COMMON = { LEFT: [2, 4], STAY: [0, 1], TAIL_N: 11 };
+function endlessCommonVerdict(g) {
+  if (!g || g.length < 2 || !g[0] || !Array.isArray(g[0].d)) return null;
+  const mt = g[0].d[2] | 0, pc = g[0].d[8] | 0;
+  if (baseMt(mt) !== ENDLESS.MT || pc !== 2) return null;
+  const at = 11 + 3 * pc;
+  const who = (r) => String(r.steamID != null ? r.steamID : (r.w || ''));
+  const dispOf = (r) => (r.dispCode != null ? r.dispCode : r.d[10 + pc]) | 0;
+  const by = new Map();
+  for (const r of g) {
+    if (!r || !Array.isArray(r.d) || (r.d[2] | 0) !== mt || (r.d[8] | 0) !== pc || r.d.length < at + ENDLESS_COMMON.TAIL_N) return null;
+    const s = who(r), k = JSON.stringify(r.d), e = by.get(s);
+    if (!e) by.set(s, { r, k });
+    else if (e.k !== k) return null;   // one account, two different records: not this shape (Q306 / the two-voice lane)
+  }
+  if (by.size !== 2) return null;
+  const [r0, r1] = [...by.values()].map((x) => x.r);
+  const isLeft = (r) => ENDLESS_COMMON.LEFT.indexOf(dispOf(r)) >= 0, isStay = (r) => ENDLESS_COMMON.STAY.indexOf(dispOf(r)) >= 0;
+  const left = isLeft(r0) && isStay(r1) ? r0 : (isLeft(r1) && isStay(r0) ? r1 : null);
+  if (!left) return null;
+  const stay = left === r0 ? r1 : r0;
+  // one table of exactly these two accounts, each writer at his own seat
+  const ro = rosterCanon(r0.roster);
+  if (!ro || rosterCanon(r1.roster) !== ro) return null;
+  const ros = r0.roster || {};
+  if (Object.keys(ros).length !== 2) return null;
+  for (const r of [r0, r1]) { const s = r.d[5] | 0; if (s < 0 || s >= pc || ros[s] == null || String(ros[s]) !== who(r)) return null; }
+  if ((r0.d[5] | 0) === (r1.d[5] | 0)) return null;
+  const t0 = endlessTail(r0.d), t1 = endlessTail(r1.d);
+  if (!t0 || !t1) return null;
+  const F = attest.SEG_FINAL, TEAM_BITS = attest.SEG_COMP | attest.SEG_FINAL | attest.SEG_RESUMED | attest.SEG_CLASSIC | attest.SEG_LINE | attest.SEG_V8;
+  for (const t of [t0, t1]) {
+    if (((t.flags | 0) & ~TEAM_BITS) !== 0) return null;   // a save segment (suspended), a couch / casual solo bit: not this shape
+    if ((t.startDepth | 0) < 0 || (t.endDepth | 0) < (t.startDepth | 0)) return null;   // sanity's ('depth'), not ours
+  }
+  if ((t0.startDepth | 0) !== (t1.startDepth | 0) || (t0.continuesUsed | 0) !== (t1.continuesUsed | 0) || (t0.tokensCp | 0) !== (t1.tokensCp | 0)
+    || (t0.seasonId | 0) !== (t1.seasonId | 0) || ((t0.flags | 0) & ~F) !== ((t1.flags | 0) & ~F)) return null;
+  // x is the common part of y: no deeper, its pick log a prefix of y's, its reroll bits inside y's
+  const within = (x, y) => (x.endDepth | 0) <= (y.endDepth | 0)
+    && perks.isPrefix(x.picksLo, x.picksHi, y.picksLo, y.picksHi)
+    && ((x.rerollLo | 0) & ~(y.rerollLo | 0)) === 0 && ((x.rerollHi | 0) & ~(y.rerollHi | 0)) === 0;
+  const w01 = within(t0, t1), w10 = within(t1, t0);
+  if (!w01 && !w10) return null;
+  // S: the record whose tail is the common part (equal tails: the record of the writer who lost the host)
+  const S = (w01 && w10) ? left : (w01 ? r0 : r1), L = S === r0 ? r1 : r0, tS = S === r0 ? t0 : t1, tL = S === r0 ? t1 : t0;
+  const low = [];
+  for (let i = 0; i < pc; i++) low.push(Math.min(S.d[10 + i] | 0, L.d[10 + i] | 0));
+  const fin = ((tS.flags | 0) & (attest.SEG_COMP | attest.SEG_CLASSIC)) && !((tS.flags | 0) & F) ? F : 0;
+  const tail = S.d.slice(at, at + ENDLESS_COMMON.TAIL_N).map((x) => x | 0);
+  tail[5] = (tail[5] | fin) | 0;
+  const same = (r) => low.every((x, i) => x === (r.d[10 + i] | 0)) && tail.every((x, i) => x === (r.d[at + i] | 0));
+  if (same(S) && same(L)) return null;   // nothing to change: the records already agree (the usual path)
+  const own = {};
+  const out = [S, L].map((r) => {
+    own[who(r)] = r.d.slice(10, 10 + pc).map((x) => x | 0).join(',') + '|' + (r.d[at + 1] | 0);
+    if (same(r)) return r;
+    const d = r.d.slice();
+    for (let i = 0; i < pc; i++) d[10 + i] = low[i];
+    for (let i = 0; i < ENDLESS_COMMON.TAIL_N; i++) d[at + i] = tail[i];
+    return Object.assign({}, r, { d, commonOwn: own[who(r)] });
+  });
+  // the writers whose own record is the one that settles (its tail ints 0..10 the settled tail, the final bit aside)
+  const claim = [S, L].filter((r) => tail.every((x, i) => (i === 5 ? (x & ~F) === ((r.d[at + 5] | 0) & ~F) : x === (r.d[at + i] | 0)))).map(who);
+  return { kind: 'settle', g: out, low, depth: tS.endDepth | 0, deep: tL.endDepth | 0, final: !!fin, left: who(left), stay: who(stay), own, claim };
+}
 // pacing gate: true = this settle group must wait (its start attestation is younger than the
 // physical minimum). No pending entry -> no constraint here; the settle loop never passes one any
 // more (since 2026-10-07 a group with no attestation ever sighted gets a synthetic entry stamped
@@ -4648,6 +4756,7 @@ function writeRunSummary() {
       '| endless sanity on fields copied from the host only: held, nobody flagged (Q305) | ' + s('sanityEndHost', 0) + ' |',
       '| endless sanity on one record only: set aside (its writer flagged only for his own field), the rest settles / held (Q306) | ' + s('sanityEndDrop', 0) + ' / ' + s('sanityEndHeld', 0) + ' |',
       '| endless writers naming different affix reroll bitmaps: the reachable one with the most votes read, nobody flagged (Q306) | ' + s('endlessRrDiff', 0) + ' |',
+      '| two-player endless runs after a dropped connection, settled on the part both records wrote (the smaller depth, each seat\'s smaller score), nobody flagged (Q438) | ' + s('endlessCommon', 0) + ' |',
       '| starts pending / exit-rate hits | ' + s('pending', 0) + ' / ' + s('convicted', 0) + ' |',
       '| start-orphan seats spared by their own exit note (Q64) | ' + s('exitNoteSpared', 0) + ' |',
       '| absent seats the anti-cheat removed, excused at a settle: named by the finishers / by their own exit note / past the cap, convicted as before (O886) | ' + s('eacExcused', 0) + ' / ' + s('eacExcusedNote', 0) + ' / ' + s('eacExcuseCapped', 0) + ' |',
@@ -11374,12 +11483,14 @@ function earlyEndVerdict(g, vecOf) {
 //     opts.starts (startsPending) gives the seats seen agreeing and the registered start roster.
 //   - Q414: a group neither of those passes claims, whose one early 'peers-gone' writer the others outlived (earlyEndVerdict):
 //     a consistent entry of the finishers' records with early = { sid, seat, levels, fLevels, n } (the settle excuses him).
-//   Returns { groups, consistentMatches, inconsistentGroups, consistent, flagged, lone, soloN, nosum, nosumHost, nosumHeld, lorph, early }.
+//   - Q438: ahead of both, a two-player endless group whose records a dropped connection left apart (endlessCommonVerdict): a
+//     consistent entry with common = the verdict, the records rewritten to the part both wrote.
+//   Returns { groups, consistentMatches, inconsistentGroups, consistent, flagged, lone, soloN, nosum, nosumHost, nosumHeld, lorph, early, common }.
 function groupRecords(recs, opts) {
   const vecOf = opts.vecOf, MAX_SEATS = opts.MAX_SEATS || 8;
   const groups = {};
   for (const r of recs) { const m = r.d[3] + '_' + r.d[4] + '_' + r.d[2]; (groups[m] = groups[m] || []).push(r); }
-  let consistent = 0, flagged = 0, lone = 0, soloN = 0;
+  let consistent = 0, flagged = 0, lone = 0, soloN = 0, common = 0;   // Q438: common = settled on the part both records wrote
   const consistentMatches = [], inconsistentGroups = [];
   const nosum = { settle: 0, pending: 0, host: 0 }, nosumHost = [], nosumHeld = [];   // Q68
   const lorph = { settle: 0, hold: 0 };   // Q339
@@ -11418,6 +11529,23 @@ function groupRecords(recs, opts) {
       console.log('  match=' + m + ': ' + ra.aside.length + ' earlier record(s) of ' + ra.sids.length + ' writer(s) who came back and finished the match set aside, nobody flagged for them (Q415): ' + was);
       if (ra.t2) console.log('  match=' + m + ': ' + ra.t2.map((a) => 'seat ' + a.seat + ' = ' + plog(a.sid) + ' (' + a.recs.length + ' early team-gamble refusal(s)'
         + (a.own ? ', his finished record a refusal too, read as the agreed winner' : '') + ')').join(', ') + ' -- came back and played the match out, not a dissenter (Q435)');
+    }
+    // Q438: a two-player endless run whose connection dropped (one record host-left / migrate-disband, the other peers-gone /
+    //   finished) settles on the part both records wrote -- the smaller depth, each seat's smaller score, the final bit on a
+    //   team segment; nobody flagged (endlessCommonVerdict). Ahead of the consistency test: two equal records of a team segment
+    //   that ended so carry no final bit and were held by sanity (B-F7) as well. Ahead of Q418's seat-only dispute too (it reads
+    //   the inconsistent groups): such a segment whose two depths agree settles here on the smaller scores, not moved past unsettled
+    const ec = endlessCommonVerdict(g);
+    if (ec) {
+      const was = g.map((r) => plog(r.steamID) + '@' + r.shard + ' ' + dispName(r.dispCode) + '=' + ec.own[String(r.steamID)]).join('  ');
+      g.splice(0, g.length, ...ec.g);   // in place, as Q68's / Q339's settle
+      consistent++; common++;
+      const cons = voidByConsensus(g.map(r => r.dispCode));
+      consistentMatches.push({ m, g, void: cons.isVoid, common: ec });
+      console.log('  match=' + m + ': two endless records after a dropped connection -- settled on the part both wrote: depth ' + ec.depth + (ec.deep !== ec.depth ? ' (the other ' + ec.deep + ')' : '')
+        + ', scores [' + ec.low.join(',') + '] (each seat\'s smaller)' + (ec.final ? ', final segment' : '') + ', nobody flagged (Q438) disp=[' + g.map(r => r.disp).join(',') + ']'
+        + (cons.isVoid ? ' -> consensus VOID, not settled (' + cons.voidVotes + '/' + cons.present + ')' : '') + ' -- as written (scores|depth): ' + was);
+      continue;
     }
     const writers = new Set(g.map(r => String(r.steamID))).size;
     const vecs = g.map(vecOf);
@@ -11515,8 +11643,9 @@ function groupRecords(recs, opts) {
   console.log('reconciled: ' + Object.keys(groups).length + ' (consistent ' + consistent + ' / lone ' + lone + ' / inconsistent ' + flagged + (soloN ? ' / solo ' + soloN : '')
     + ((nosum.settle || nosum.pending || nosum.host) ? ' / without the final summary: settled ' + nosum.settle + ', held ' + nosum.pending + ', nobody got it ' + nosum.host : '')
     + ((lorph.settle || lorph.hold) ? ' / host migration lifts named: settled ' + lorph.settle + ', held ' + lorph.hold : '')
-    + (early.settle ? ' / an early end set aside: ' + early.settle : '') + ')');
-  return { groups, consistentMatches, inconsistentGroups, consistent, flagged, lone, soloN, nosum, nosumHost, nosumHeld, lorph, early };
+    + (early.settle ? ' / an early end set aside: ' + early.settle : '')
+    + (common ? ' / endless after a dropped connection, settled on the part both wrote: ' + common : '') + ')');
+  return { groups, consistentMatches, inconsistentGroups, consistent, flagged, lone, soloN, nosum, nosumHost, nosumHeld, lorph, early, common };
 }
 
 async function main() {
@@ -12508,6 +12637,7 @@ async function main() {
   RUN.nosum = gr.nosum.settle + ' / ' + gr.nosum.pending + ' / ' + gr.nosum.host;   // Q68
   RUN.lorph = gr.lorph.settle + ' / ' + gr.lorph.hold;   // Q339
   RUN.earlySetAside = gr.early.settle;   // Q414
+  RUN.endlessCommon = gr.common | 0;   // Q438
 
   // start/settle cross-check runs BEFORE the early returns: the very scenario it exists for
   // (a match that started and was never settled by anyone) produces no consistent matches at all,
@@ -17650,6 +17780,7 @@ Object.assign(module.exports, { endlessDispute });   // cloud audit Q317 endless
 Object.assign(module.exports, { roomDispute });   // cloud audit Q407 friends' room / bot match of three writers or more whose records disagree (test/room-dispute.js)
 Object.assign(module.exports, { REJOIN_ASIDE, rejoinAsideVerdict });   // cloud audit Q415 a writer's own earlier record of a friends' room / bot match he came back to and finished (test/rejoin-aside.js; seedcap.js reads it)
 Object.assign(module.exports, { rejoinAsideTeam, rejoinEarlyOnly, rejoinNamesSeat });   // cloud audit Q435 the same for a 2V2 / 3V3 joiner's team-gamble refusal (test/team2-rejoin-aside.js)
+Object.assign(module.exports, { ENDLESS_COMMON, endlessCommonVerdict });   // cloud audit Q438 a two-player endless run after a dropped connection settles on the part both records wrote (test/endless-common-part.js)
 Object.assign(module.exports, { noteOwnStarts, hasOwnStart, OWN_START_CAP });   // cloud audit Q69 own-record evidence for leaver verdicts
 Object.assign(module.exports, { resultRecOf, keptKeys, keptSeal, keptOpen, keptKeep, keptRecords, KEPT_REC_MAX_MS, KEPT_REC_CAP, KEPT_TAG, SETTLE_MAGIC });   // cloud audit Q373 a held group's results kept against shard rotation (test/kept-held-records.js)
 Object.assign(module.exports, { leaverXpRecordOnlyUntil, LEAVER_XP_RECORD_ONLY, LEAVER_XP_RECORD_ONLY_MAX_MS });   // M194 / W57 demo Next Fest: leaves recorded, XP not discounted

@@ -493,6 +493,17 @@ function pendingOfGroup(st, m, g, opt) {
   {
     let all = g;   // the records whose writers can be seats the verdict convicts (cloud audit Q68: those claiming the audited scores)
     let seatOnly = false;   // Q418: audited with each seat's highest score, convicting nobody (below)
+    // cloud audit Q438: a two-player endless run whose connection dropped -- the reconcile settles on the part both records wrote
+    //   (endlessCommonVerdict: the smaller depth, each seat's smaller score, the shallower record's tail), so that rewrite is the
+    //   group audited here, its cap read at the depth that settles. Only the writers in ec.claim answer for it (Q438 review 1): the
+    //   one whose own record is the one that settles. The other wrote his scores at his own deeper tail and claimed nothing at
+    //   this depth -- a seat of his over this cap is vetoed (held, as before), never convicted: a modified teammate writing
+    //   host-left at the segment's start must not get the honest player's real deep scores convicted against the start's cap.
+    const ec = v.endlessCommonVerdict(g);
+    if (ec) {
+      g = ec.g;
+      all = ec.g.filter((r) => ec.claim.indexOf(String(r.steamID != null ? r.steamID : (r.w || ''))) >= 0);
+    }
     const mt0 = g[0].d[2] | 0, pc0 = g[0].d[8] | 0;
     if (pc0 >= 1 && g[0].d.length >= 10 + pc0 && !g.every(r => r.d.slice(10, 10 + pc0).join(',') === g[0].d.slice(10, 10 + pc0).join(','))) {
       // Q68: a result written without the host guard's final summary (disp 10, never on an endless key) carries its writer's own
