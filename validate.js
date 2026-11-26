@@ -8826,16 +8826,81 @@ function elpMemberLevelBefore8(st, q, fam, s, runId, at, nowMs, ctx) {
   if (last) return elpLvUniq([last.lv, elpRowLevel8(ctx, q, fam, runId, at)].concat(elpLvSetOfArrs8(last.set)));
   return elpLevelStarts8(st, q, elpAllOf(st, q, s), fam, s, h, runId, at, nowMs, ctx);
 }
+// Q441 (W386; O1015's narrow net for a team run): member q's silver-line starts for team run runId (first seen at `at`) when his
+//   client may have started it from the silver line although the job holds a version 7 level of the family -- it is his family's
+//   first version 8 run (no settled version 8 run of the family first seen before it: elpMemberLevelBefore8's own test) and he holds a
+//   version 7 level (elpV7StatesOf; none = the silver line is already among his starts). [] = not such a member
+function elpMemberSilver8(st, q, fam, s, runId, at, nowMs, ctx) {
+  const h = st && st.hist && st.hist[ratingHistKey(q, fam, s)], rid = runId >>> 0;
+  for (const x of ((h && Array.isArray(h.runs)) ? h.runs : [])) if ((x[0] >>> 0) !== rid && x[3] && ((x[7] | 0) & ELP_R_V8) && (x[2] || 0) < at && elpLvOfArr8(x[11])) return [];
+  if (!elpV7StatesOf(ctx, elpAllOf(st, q, s), q, fam, rid, at).length) return [];
+  return elpSilverStarts8(st, fam, s, h, rid, at, nowMs);
+}
+// the values that can be the highest of one choice per member (opts[i] = member i's choices): v is when a member may choose it and
+//   every member may choose v or lower (elpTeamLevel8's floor rule). Empty when a member has no choice
+function elpHighestOf(opts) {
+  const out = new Set();
+  if (!opts.length || opts.some((o) => !o.length)) return out;
+  const floor = Math.max.apply(null, opts.map((o) => Math.min.apply(null, o)));
+  for (const o of opts) for (const v of o) if (v >= floor) out.add(v);
+  return out;
+}
+// Q441: the team lines a member's settle may read only because a member's hello carried his silver start (the host's line is the
+//   highest hello: pointsPlan.elpTeamLine), frozen with the team entry next to lvLns8 so every member reads the same ones whatever
+//   order they settle in: sv8[pid] = [the lines with him on his silver start, the lines with him on one of his own states and another
+//   member on his]. sets = the members' level lists (elpMemberLevelBefore8), silv = their silver starts' levels (elpMemberSilver8), own
+//   = the entry's lines (lvLns8: never repeated here). 0 = none (no member may have started from silver)
+function elpTeamSilverLines8(pids, sets, silv, own) {
+  const lines = (vs) => [...vs].map((L) => pointsPlan.elpLineOfL8(L)).filter((ln) => !own.includes(ln));
+  const out = {};
+  let any = false;
+  for (let i = 0; i < pids.length; i++) {
+    const on = new Set(), off = new Set();
+    if (silv[i].length) for (const ln of lines(elpHighestOf(sets.map((xs, j) => (j === i ? silv[i] : xs.concat(silv[j])))))) on.add(ln);
+    for (let e = 0; e < pids.length; e++) {
+      if (e === i || !silv[e].length) continue;
+      for (const ln of lines(elpHighestOf(sets.map((xs, j) => (j === i ? xs : j === e ? silv[e] : xs.concat(silv[j])))))) off.add(ln);
+    }
+    if (on.size || off.size) { out[String(pids[i])] = [[...on].sort((a, b) => a - b), [...off].sort((a, b) => a - b)]; any = true; }
+  }
+  return any ? out : 0;
+}
+// Q441: the verdict-only readings of version 8 team run r for player p through a member's silver start (team.sv, elpTeamLevel8): a
+//   frozen line whose target is the run's depth, not a quit -- the same leniency as elpSilverReads8 (the record cannot tell a run that
+//   ended at that target from one that died on the next level), with his silver starts as the state where the line has him on his
+//   silver start, else his own states (xs). verdictOnly (elpLvChoose8): the pick only, never the carry, the outs or the team lines
+function elpTeamSilverReads8(st, p, r, fam, s, nowMs, ctx, team, quit, depth, seed, xs, reads) {
+  if (!team || quit || !team.sv) return [];
+  const mine = team.sv[String(p)];
+  if (!Array.isArray(mine)) return [];
+  const have = new Set(reads.filter((rd) => !rd.verdictOnly).map((rd) => rd.L | 0)), seen = new Set(), out = [];
+  const hit = (ln) => !have.has(ln * 100) && pointsPlan.elpTargetOfL8(ln * 100, seed) === (depth | 0);
+  const on = (mine[0] || []).filter(hit), off = (mine[1] || []).filter(hit);
+  if (!on.length && !off.length) return [];
+  const sx = on.length ? elpMemberSilver8(st, p, fam, s, r[0] >>> 0, team.at, nowMs, ctx) : [];
+  for (const [lns, xsOf] of [[on, sx.length ? sx : xs], [off, xs]]) {
+    for (const ln of lns) for (const x of xsOf) {
+      const k = ln + ':' + (x.L | 0) + ':' + (x.Lm | 0);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push({ x, L: ln * 100, verdictOnly: true });
+    }
+  }
+  return out;
+}
 // D5 + O992 for version 8: the lines a version 8 team run's target may have read, frozen in its team entry at its first settle
 //   (hasLv8 / lvL8 / lvLns8) -- elpTeamLevel's rule over the members' version 8 states (elpMemberLevelBefore8), the lines of
-//   elpLineOfL8. Returns { L, lns }; undefined = no roster recorded (solo, the couch pair): the player's own level.
+//   elpLineOfL8 -- and (Q441) the lines it may have read through a member's silver start (sv8, elpTeamSilverLines8; an entry frozen
+//   before it gets them at its next settle). Returns { L, lns, sv, at }; undefined = no roster recorded (solo, the couch pair): the
+//   player's own level.
 function elpTeamLevel8(st, r, fam, s, nowMs, ctx) {
   if (fam === 'solo' || !ELP.PRIOR[fam]) return undefined;
   const tm = st && st.elpTeam && st.elpTeam[String(r[0] >>> 0)];
   if (!tm || !Array.isArray(tm.r) || !tm.r.length) return undefined;
+  const at = tm.t0 || (r[2] ? r[2] : nowMs);
+  let sets = null;
   if (!tm.hasLv8) {
-    const at = tm.t0 || (r[2] ? r[2] : nowMs);
-    const sets = tm.r.map((q) => elpMemberLevelBefore8(st, q, fam, s, r[0] >>> 0, at, nowMs, ctx).map((x) => x.L));
+    sets = tm.r.map((q) => elpMemberLevelBefore8(st, q, fam, s, r[0] >>> 0, at, nowMs, ctx).map((x) => x.L));
     tm.lvL8 = pointsPlan.elpTeamLine(sets.map((xs) => xs[0]));
     const mins = sets.map((xs) => Math.min.apply(null, xs)), floor = Math.max.apply(null, mins), own = pointsPlan.elpLineOfL8(tm.lvL8), lns = new Set();
     for (const xs of sets) for (const L of xs) if (L >= floor) lns.add(pointsPlan.elpLineOfL8(L));
@@ -8847,7 +8912,15 @@ function elpTeamLevel8(st, r, fam, s, nowMs, ctx) {
     tm.lvLns8 = [own].concat([...lns].sort((a, b) => a - b));
     tm.hasLv8 = 1;
   }
-  return { L: tm.lvL8, lns: (Array.isArray(tm.lvLns8) && tm.lvLns8.length) ? tm.lvLns8 : [pointsPlan.elpLineOfL8(tm.lvL8)] };
+  const lines = (Array.isArray(tm.lvLns8) && tm.lvLns8.length) ? tm.lvLns8 : [pointsPlan.elpLineOfL8(tm.lvL8)];
+  if (tm.sv8 === undefined) {   // Q441: frozen once, like the lines (an entry frozen before Q441: here, at its next settle)
+    const silv = tm.r.map((q) => elpMemberSilver8(st, q, fam, s, r[0] >>> 0, at, nowMs, ctx).map((x) => x.L));
+    if (silv.some((xs) => xs.length)) {
+      if (!sets) sets = tm.r.map((q) => elpMemberLevelBefore8(st, q, fam, s, r[0] >>> 0, at, nowMs, ctx).map((x) => x.L));
+      tm.sv8 = elpTeamSilverLines8(tm.r, sets, silv, lines);
+    } else tm.sv8 = 0;
+  }
+  return { L: tm.lvL8, lns: lines, sv: tm.sv8 || null, at };
 }
 // elpLvChoose of version 8 (the same rule: a reading whose target is below the depth cannot have been his client's unless the run
 //   stood parked; the verdict and points the best for him; the carry the lowest of the kept readings' steps), with elpTargetOfL8 /
@@ -8885,6 +8958,7 @@ function elpSettleRunLv8(st, p, c, h, r, fam, s, nowMs, ctx) {
   const reads = [];
   for (const x of xs) { if (team) for (const ln of team.lns) reads.push({ x, L: ln * 100 }); else reads.push({ x, L: x.L }); }
   for (const rd of elpSilverReads8(st, p, c, h, r, fam, s, at, nowMs, ctx, team, quit, depth, seed, reads)) reads.push(rd);   // O1015 v8: verdict only
+  for (const rd of elpTeamSilverReads8(st, p, r, fam, s, nowMs, ctx, team, quit, depth, seed, xs, reads)) reads.push(rd);   // Q441: verdict only
   const placing = c.placed ? -1 : Math.min(ELP.MIN_RUNS - 1, c.n | 0);
   const off = pointsPlan.targetOffset(seed), cur = Math.max(0, Math.min(LP_MAX, c.lp | 0));
   const val = c.placed
@@ -18204,7 +18278,7 @@ Object.assign(module.exports, { ELP_R_V7, ELP_R_QUIT, elpSegLv, elpTabVer, elpPr
 Object.assign(module.exports, { ELP_LV_SET_MAX, elpLvSetOf, elpLvSet, elpQ432Lift });   // Q432   // O942 version 7 (test/endless-level.js)
 Object.assign(module.exports, { ELP_RESTART_BACK, elpRestartOn, elpRestartStart, elpRestartOwn, elpRestartChainAt, elpRestartReads, elpO1015Lift, elpLvChoose });   // O1015 (test/elp-restart-start.js)
 Object.assign(module.exports, { ELP_R_V8, ELP_V7_TABS, elpRunVer, elpCutVer, elpLinesAt8, elpLinesByFam8, elpCandidateTabs8, elpLvSet8, elpV7StatesOf, elpRowLevel8, elpLevelStarts8, elpLevelBefore8,
-  elpMemberLevelBefore8, elpTeamLevel8, elpLvChoose8, elpSettleRunLv8, elpLevelReplay8, soloMilestones, elpStartInputs8, elpSilverStarts8, elpSilverReads8 });   // O991 version 8 (test/endless-level8.js)
+  elpMemberLevelBefore8, elpTeamLevel8, elpLvChoose8, elpSettleRunLv8, elpLevelReplay8, soloMilestones, elpStartInputs8, elpSilverStarts8, elpSilverReads8, elpMemberSilver8, elpHighestOf, elpTeamSilverLines8, elpTeamSilverReads8 });   // O991 version 8 (test/endless-level8.js)
 Object.assign(module.exports, { CUP, CUP_FAMS, ENDLESS_CUP_LB, ENDLESS_CUP_HONOR_LB, cupWeekId, cupWeekStart, cupWeekBack, cupNextWeek, cupEdition, cupWeekBoardName, teamBlockSids,
   cupStandings, cupPodium, cupPodiumFor, cupVerdict, cupMarksOf, cupHonorEncode, cupHonorDecode, cupHonorPlan, cupHeldMasks, cupCarrierEncode, cupCarrierDecode, cupRevoke, pruneCup, cupId, cupScrub, cupPidVerdict });   // O180 Gold Rush Cup (client knife 5.1c-1; test/endless-cup.js)   // O103 endless competitive rating (client knife 5.1a; test/endless-rating.js)
 Object.assign(module.exports, { BAN_LB, BAN_ACT_MM, banRowFull, fullBanSet, cupSkipBanned, elpLinesSkipBanned, CUP_BAN_WAIT_MS });   // cloud audit Q338 full bans kept off the cup podium / tier cuts / composite ladders (test/ban-skip.js; sanctions.js reads BAN_LB from here)
