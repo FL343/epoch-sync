@@ -16560,7 +16560,22 @@ async function main() {
       continue;
     }
     // one match at a time per account; the private and bot lanes apply it after their own level-scaled floor below
-    if (!isPrivateMt(matchType) && !isBotMt(matchType) && writerPaced(c.m, pacedSids, pend.t0, SANITY.MIN_START_AGE_MS)) continue;
+    // Q277 (cloud audit, found by the Q265 review): a matchmade FFA seat seen agreeing on this match whose record is gone (the
+    //   seats the put-back step below picks from: Q185 puts such a seat back at his place, Q265 rates one) is ranked like a
+    //   writer, so it queues with the writers and counts in the per-day settle signal, as the records Q109 dropped do. Before,
+    //   one account in N parallel ranked FFAs (each with its own other writers) blanked his rows once seen agreeing, and all N
+    //   settled in one run with him put back first in each (points 2500 -> 2597 at once); with his records there they drain
+    //   one floor apart. Read here from the records and the agreeing marks alone -- no counter, no log, no state: the step
+    //   below still counts and logs once, when the group settles. A seat it then leaves out (another result, his own
+    //   confession standing) queues all the same: he was in this match. An honest player is in one match at a time, so only
+    //   an outage backlog drains one floor apart, as with his records there; deferral only, never a flag.
+    const goneIds = (baseMt(matchType) === 1 || baseMt(matchType) === 2)
+      ? [...new Set(detectLeavers(g).map((x) => String(x.steamID)))].filter((s) => agreed.indexOf(pid(s)) >= 0 && pacedSids.indexOf(s) < 0) : [];
+    const pacedAll = goneIds.length ? pacedSids.concat(goneIds) : pacedSids;
+    if (!isPrivateMt(matchType) && !isBotMt(matchType) && writerPaced(c.m, pacedAll, pend.t0, SANITY.MIN_START_AGE_MS)) {
+      if (goneIds.length) console.log('  writer-pacing ' + c.m + ': queued with ' + goneIds.map(plog).join(', ') + ' (seen agreeing, record gone; Q277)');
+      continue;
+    }
     // per-UTC-day settle counts are recorded as a pure SIGNAL (no gate): the future judgment
     // layer marks "suspiciously many matches per day" against real-traffic baselines. VOID
     // matches count too -- they still credit innocent-participation XP. Counted where a group
@@ -16568,7 +16583,7 @@ async function main() {
     // own floor (a deferred group used to be counted again on every run it waited).
     const countDay = () => {
       const day = sigDay(signals, nowMs);
-      for (const sid of pacedSids) day.n[pid(sid)] = (day.n[pid(sid)] || 0) + 1;
+      for (const sid of pacedAll) day.n[pid(sid)] = (day.n[pid(sid)] || 0) + 1;   // Q277: the seats seen agreeing whose record is gone too
       sigDirty = true;
     };
     if (!isPrivateMt(matchType) && !isBotMt(matchType)) countDay();

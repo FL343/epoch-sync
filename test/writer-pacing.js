@@ -329,7 +329,9 @@ const FLOOR = v.SANITY.MIN_START_AGE_MS;
   const gate = SRC.indexOf('let pend = startsPending[c.m];');
   T('[9] matchmade gate creates the synthetic first-sighting entry before pacing', gate > 0 && SRC.indexOf('pend = startsPending[c.m] = { t0: nowMs, mt: matchType, roster: {}, settled: [], synth: true };', gate) > gate &&
     SRC.indexOf('if (pacingDefer(pend, nowMs, SANITY.MIN_START_AGE_MS))', gate) > gate);
-  T('[9] matchmade lanes apply the one-match rule right after the floor', /if \(!isPrivateMt\(matchType\) && !isBotMt\(matchType\) && writerPaced\(c\.m, pacedSids, pend\.t0, SANITY\.MIN_START_AGE_MS\)\) continue;/.test(SRC));
+  T('[9] matchmade lanes apply the one-match rule right after the floor (the writers and, Q277, the seats seen agreeing whose record is gone)',
+    /if \(!isPrivateMt\(matchType\) && !isBotMt\(matchType\) && writerPaced\(c\.m, pacedAll, pend\.t0, SANITY\.MIN_START_AGE_MS\)\) \{\n[^\n]*\n\s*continue;\n\s*\}/.test(SRC) &&
+    /const pacedAll = goneIds\.length \? pacedSids\.concat\(goneIds\) : pacedSids;/.test(SRC));
   T('[9] private lane applies it after its own floor', /if \(writerPaced\(c\.m, writerSids, pendP\.t0, reqMsP\)\) continue;/.test(SRC));
   T('[9] bot lane applies it after its own floor (Q408: not again while a lone record waits for its signing key -- claimed on its first hold)',
     /const heldB = Number\(pendB\.bw\) > 0 && !!c\.botLone;\n\s*if \(!heldB && writerPaced\(c\.m, writerSids, pendB\.t0, reqMsB\)\) continue;/.test(SRC));
