@@ -71,8 +71,17 @@ for (const [m, c, d] of checks(sc, '')) ok(m, c, d);
 // wiring: pendingOfGroup puts p.chars from EVERY record of the key; the three caps objects carry chars
 {
   const src = fs.readFileSync(SC_PATH, 'utf8').replace(/\r\n/g, '\n');
-  ok('wiring: pendingOfGroup keeps the whole group (g0) and sets p.chars from it', /function pendingOfGroup\(st, m, g\) \{\n  const g0 = g;/.test(src) && /const chars = charsOfGroup\(g0, pc\);[^\n]*\n    if \(chars\) p\.chars = chars;/.test(src));
+  // g0 is the function's first line: taken before the Q415 rejoin-aside (validate.rejoinAsideVerdict drops a writer's own earlier short
+  //   record), the Q438 common rewrite and the Q68 narrowing -- the union only grows, so a record any of them leaves out still loosens
+  //   the cap, never tightens it (architecture decision 10)
+  const wiringOk = (s) => /function pendingOfGroup\(st, m, g(, opt)?\) \{\n  const g0 = g;/.test(s) && /const chars = charsOfGroup\(g0, pc\);[^\n]*\n    if \(chars\) p\.chars = chars;/.test(s);
+  ok('wiring: pendingOfGroup keeps the whole group (g0, first line, before the rejoin-aside) and sets p.chars from it', wiringOk(src));
   ok('wiring: every caps object asks the core about chars= (primary + overlap + exact)', (src.match(/chars: cliSupportsChars\(run(Primary)?\)/g) || []).length === 3);
+  // mutation: g0 taken after the rejoin-aside narrowed g -> the wiring pin turns red
+  const g0Line = src.split('\n').find((l) => /^  const g0 = g;/.test(l));
+  const raLine = '  if (ra) g = ra.g;';
+  if (!g0Line || src.split(raLine).length !== 2) ok('mutation anchor once: g0 after the rejoin-aside', false);
+  else ok('mutation "g0 taken after the rejoin-aside" -> the wiring pin turns red', !wiringOk(src.replace(g0Line + '\n', '').replace(raLine, () => raLine + '\n' + g0Line)));
 }
 
 // mutations: each must turn a check above red
