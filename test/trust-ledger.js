@@ -18,7 +18,8 @@
 //   [10] S2: each verdict filed under its world core (head hash / exact core), the conviction context, per-core 24 h rate
 //        alert (once a day), mail text, offense fp tail
 //   [11] S2: replay on a new core -- candidates (14 days, other core, not replayed, records still there), reversal (fp,
-//        window gone, n stays, veto stands, fp event -> ledger), negatives (still over / CLI error), main wiring
+//        window gone, n stays, fp event -> ledger; W265: the veto lifted once every seat is under), negatives (still over /
+//        CLI error: the veto stays), main wiring
 //   [12] S2 end to end over main(): an account whose only conviction was reversed settles again under SEEDCAP_REJECT
 //   [13] S4: trust_tier row score = tier | 8 while the reject window is open; the bit clears (row rewritten / deleted)
 //   [14] S4 end to end over main(): the bit is written, kept, cleared when the window passes; SHADOW_POOL=0 clears it at once;
@@ -306,7 +307,7 @@ console.log('=== trust ledger (O198 v1, knife 5.5b-1) ===');
   const fpEv = (st.events || [])[ev0] || {};
   T('[11] an fp event queued for the ledger (pid only)', fpEv.fp === 1 && fpEv.p === pB && fpEv.m === 'r1' && fpEv.ctx.k0 === 'oldcoreoldco' && fpEv.ctx.k1 === 'newcorenewco' && JSON.stringify(st.events).indexOf(SIDB) < 0, JSON.stringify(fpEv));
   T('[11] marked replayed on the new core (no second replay)', st.audited.r1.rk === 'newcorenewco' && sc.replayCandidates(st, groups, 'newcorenewco', 100200).ms.length === 0);
-  T('[11] the veto is not lifted', !!(st.veto && st.veto.r1));
+  T('[11] W265: the new cap covers every seat ([10, 6000] under 7000) -> the veto goes with the conviction (lifted, logged in out.lifted)', !(st.veto && st.veto.r1) && out.lifted.length === 1 && out.lifted[0].m === 'r1');
   T('[11] a second replay of the same conviction cannot count twice', sc.applyReplay(st, [mk('r1', [10, 6000])], { m0: { cap: 9000 } }, 'thirdcorethi', 100300).reversed.length === 0 && st.suspects[pB].fp === 1);
   // the ledger reads the fp event
   const L = TL.loadLedger({});
@@ -316,10 +317,12 @@ console.log('=== trust ledger (O198 v1, knife 5.5b-1) ===');
   const st2 = fresh();
   const o2 = sc.applyReplay(st2, [mk('r1', [10, 6000])], { m0: { cap: 5500 } }, 'newcorenewco', 100100);
   T('[11] new core still caps below the score: nothing reversed, the window stays', o2.reversed.length === 0 && o2.still === 1 && v.seedcapRejectActive(st2.suspects[pB], 100101) && st2.audited.r1.rk === 'newcorenewco');
+  T('[11] W265: ... and the veto stays (a seat still over)', !!(st2.veto && st2.veto.r1) && o2.lifted.length === 0);
   // an error answer: marked (the same core answers the same), nothing reversed
   const st3 = fresh();
   const o3 = sc.applyReplay(st3, [mk('r1', [10, 6000])], { m0: { err: 'x' } }, 'newcorenewco', 100100);
   T('[11] a CLI error on replay reverses nothing', o3.reversed.length === 0 && v.seedcapRejectActive(st3.suspects[pB], 100101));
+  T('[11] W265: ... and lifts no veto', !!(st3.veto && st3.veto.r1) && o3.lifted.length === 0);
   // wiring: main replays after the audit, with the run's cores, and mails the reversals
   const SJ = read('seedcap.js');
   T('[11] main: replay candidates on the primary core, re-audited through auditPending, applied by applyReplay', /replayCandidates\(st, groups, primaryHash, nowMin\(\)\)/.test(SJ) && /const ra = auditPending\(items, \{ cores, live: cf\.live, channel: SEEDCAP_CHANNEL, distDir: SEEDCAP_DIST_DIR \}\);/.test(SJ) && /rp = applyReplay\(st, ra\.pending, ra\.map, primaryHash, nowMin\(\)\);/.test(SJ));

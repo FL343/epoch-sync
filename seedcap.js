@@ -32,7 +32,11 @@
 //                        Cloud audit Q374 (2026-11-03): nor is a match the O198 replay
 //                        reversed for the seat, read over again (its veto aged out) on
 //                        a core that is not the run's primary -- vetoed, no correction;
-//                        the primary reading it over still convicts (it leaves fpm)
+//                        the primary reading it over still convicts (it leaves fpm).
+//                        W265 (2026-11-11): the O198 replay lifts it -- a later primary core that puts EVERY
+//                        seat of the match under its cap deletes the veto (applyReplay), so a match a core
+//                        vetoed by its own miscount settles on the reconcile's next tick instead of sitting
+//                        out the 30 days (by then a regular's shard rotation has written over its records)
 //   state.suspects[pid]  pseudonymous repeat-offender ledger (moderation layer;
 //                        sids never enter this public state -- resolution goes
 //                        through the shard records via the private ops tool).
@@ -920,9 +924,15 @@ function replayCandidates(st, groups, primary, tNow) {
 }
 // apply the new core's verdicts (pure): items = pending items of the candidate groups (pendingOfGroup), cliMap = their answers.
 //   A convicted self-written seat whose score the new cap covers -> reversed: su.fp++, su.fpm, su.t1e, an fp event queued.
+//   W265: the new cap covering EVERY seat (convicted or not, self-written or not) -> the match's veto is deleted too.
+//   The veto holds the whole match on the reconcile (not settled, not processed -- validate.js main path), the honest
+//   opponents included; a core inside its observation window vetoes and convicts nobody. Left standing it ran 30 days
+//   (VETO_KEEP_MIN), long enough for a regular's 50-shard rotation to write over the records, so the match never settled
+//   (the KNIFE_55B plan 2.2 (4) "the others settled long ago" holds for the reject window, not for the veto). One seat
+//   still over -> the veto stays as it was. A match already settled is untouched (validate.js skips processed keys).
 //   Every candidate is marked replayed on `primary` (an error included: the same core would answer the same).
 function applyReplay(st, items, cliMap, primary, t) {
-  const out = { replayed: 0, reversed: [], still: 0 };
+  const out = { replayed: 0, reversed: [], still: 0, lifted: [] };
   items.forEach((x, i) => {
     const a = st.audited[x.m];
     if (a) a.rk = primary;
@@ -930,6 +940,8 @@ function applyReplay(st, items, cliMap, primary, t) {
     if (!r || r.err != null || r.cap == null) return;
     out.replayed++;
     const capEff = Math.round(r.cap * ((x.p && x.p.capMult) || 1));
+    const scores = Array.isArray(x.scores) ? x.scores : [];
+    const allUnder = scores.length > 0 && scores.every(sc0 => (sc0 | 0) <= capEff);   // W265: no seat over on this core
     for (const seat of (x.self || [])) {
       const sid = x.roster[seat];
       if (!sid) continue;
@@ -943,7 +955,14 @@ function applyReplay(st, items, cliMap, primary, t) {
       trustLedger.queuePush(st, { t, src: 'sc', p: p2, m: x.m, fp: 1, ctx: { k0: (a && a.k) || '?', k1: primary, cap1: capEff } });
       out.reversed.push({ pid: p2, m: x.m, k0: (a && a.k) || '?', k1: primary, cap0: a ? a.c : null, cap1: capEff, score: x.scores[seat] | 0 });
       console.log('::warning::seedcap REPLAY m=' + x.m + ' core ' + ((a && a.k) || '?') + ' -> ' + primary + ': cap ' + (a ? a.c : '?') + ' -> ' + capEff +
-        ', seat ' + seat + ' score ' + (x.scores[seat] | 0) + ' now under the cap -- conviction of ' + p2.slice(0, 8) + ' reversed (n stays ' + su.n + ', effective ' + v.seedcapNEff(su) + '; the veto stands)');
+        ', seat ' + seat + ' score ' + (x.scores[seat] | 0) + ' now under the cap -- conviction of ' + p2.slice(0, 8) + ' reversed (n stays ' + su.n + ', effective ' + v.seedcapNEff(su) +
+        (allUnder ? '; the veto goes with it, every seat under the cap)' : '; the veto stands, another seat still over)'));
+    }
+    if (allUnder && st.veto && st.veto[x.m]) {
+      delete st.veto[x.m];
+      out.lifted.push({ m: x.m, k0: (a && a.k) || '?', k1: primary, cap0: a ? a.c : null, cap1: capEff });
+      console.log('::warning::seedcap REPLAY m=' + x.m + ' core ' + ((a && a.k) || '?') + ' -> ' + primary + ': cap ' + (a ? a.c : '?') + ' -> ' + capEff +
+        ', every seat now under the cap (scores ' + scores.join(',') + ') -- veto lifted (W265), the reconcile settles the match on its next run');
     }
   });
   return out;
@@ -1323,7 +1342,7 @@ async function main() {
   }
   if (stats.flags && stats.flags.length) await writeOffense(st, stats.flags);
   // O198 v1 (S2): reversal -- convictions of the last REPLAY_DAYS made on another core, re-audited on this run's primary
-  let rp = { replayed: 0, reversed: [], still: 0 };
+  let rp = { replayed: 0, reversed: [], still: 0, lifted: [] };
   {
     const rc = replayCandidates(st, groups, primaryHash, nowMin());
     for (const m of rc.gone) if (st.audited[m]) st.audited[m].rk = primaryHash;   // records gone: nothing to replay on this core
@@ -1335,7 +1354,7 @@ async function main() {
         if (ra.fail) v.ghWarn('seedcap: replay CLI run failed ' + ra.fail + ' -- convictions stay as they are, retried next run');
         else rp = applyReplay(st, ra.pending, ra.map, primaryHash, nowMin());   // capability-deferred items stay unmarked (next run)
       }
-      console.log('seedcap: replay on core ' + primaryHash + ': ' + rc.ms.length + ' candidate(s), ' + rp.replayed + ' re-audited, ' + rp.reversed.length + ' reversed, ' + rp.still + ' still over');
+      console.log('seedcap: replay on core ' + primaryHash + ': ' + rc.ms.length + ' candidate(s), ' + rp.replayed + ' re-audited, ' + rp.reversed.length + ' reversed, ' + rp.still + ' still over, ' + (rp.lifted ? rp.lifted.length : 0) + ' veto(es) lifted');
     }
   }
   const ca = coreAlerts(st, nowMin());
