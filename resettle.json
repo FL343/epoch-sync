@@ -1,7 +1,7 @@
 {
  "v": 1,
  "note": "cloud audit Q413 / O920 / O922: keys reopened once by tools/resettle-once.js; validate.js settles them without continue debits until `until`",
- "until": "2026-11-28T01:07:40Z",
+ "until": "2026-12-03T09:29:15Z",
  "keys": {
   "-1057409686_261483683_7": {
    "cp": "free",
@@ -422,6 +422,146 @@
     80,
     88
    ]
+  },
+  "-673622722_1606489221_7": {
+   "cp": "free",
+   "set": "q450",
+   "lane": "team",
+   "how": "reopened",
+   "at": "2026-11-26T09:29:15Z",
+   "closed": "54a75034fdbf",
+   "closedAt": "2026-11-25T18:42:34Z",
+   "start": "close",
+   "done": {},
+   "wait": {
+    "t0": 1795027252518
+   }
+  },
+  "-623289865_1606489221_7": {
+   "cp": "free",
+   "set": "q450",
+   "lane": "team",
+   "how": "reopened",
+   "at": "2026-11-26T09:29:15Z",
+   "closed": "2a7cc77bc8b0",
+   "closedAt": "2026-11-25T18:47:12Z",
+   "start": "close",
+   "done": {},
+   "wait": {
+    "t0": 1795027564545
+   }
+  },
+  "-640067484_1606489221_7": {
+   "cp": "free",
+   "set": "q450",
+   "lane": "team",
+   "how": "reopened",
+   "at": "2026-11-26T09:29:15Z",
+   "closed": "982c98b6144c",
+   "closedAt": "2026-11-25T18:57:26Z",
+   "start": "close",
+   "done": {},
+   "wait": {
+    "t0": 1795028162954
+   }
+  },
+  "-589734627_1606489221_7": {
+   "cp": "free",
+   "set": "q450",
+   "lane": "team",
+   "how": "reopened",
+   "at": "2026-11-26T09:29:15Z",
+   "closed": "e4b5dd485d83",
+   "closedAt": "2026-11-25T19:07:51Z",
+   "start": "close",
+   "done": {},
+   "wait": {
+    "t0": 1795028763237
+   }
+  },
+  "-606512246_1606489221_7": {
+   "cp": "free",
+   "set": "q450",
+   "lane": "team",
+   "how": "reopened",
+   "at": "2026-11-26T09:29:15Z",
+   "closed": "e5ff432e8534",
+   "closedAt": "2026-11-25T19:12:09Z",
+   "start": "close",
+   "done": {},
+   "wait": {
+    "t0": 1795029056100
+   }
+  },
+  "-824621293_1606489221_7": {
+   "cp": "free",
+   "set": "q450",
+   "lane": "team",
+   "how": "reopened",
+   "at": "2026-11-26T09:29:15Z",
+   "closed": "9842379b3373",
+   "closedAt": "2026-11-25T19:22:25Z",
+   "start": "close",
+   "done": {},
+   "wait": {
+    "t0": 1795029653869
+   }
+  },
+  "-841398912_1606489221_7": {
+   "cp": "free",
+   "set": "q450",
+   "lane": "team",
+   "how": "reopened",
+   "at": "2026-11-26T09:29:15Z",
+   "closed": "7552e20c0627",
+   "closedAt": "2026-11-25T19:27:11Z",
+   "start": "close",
+   "done": {},
+   "wait": {
+    "t0": 1795029961936
+   }
+  },
+  "-853781256_1606489221_7": {
+   "cp": "free",
+   "set": "q450",
+   "lane": "team",
+   "how": "reopened",
+   "at": "2026-11-26T09:29:15Z",
+   "closed": "7b6c10043b2a",
+   "closedAt": "2026-11-25T19:32:20Z",
+   "start": "close",
+   "done": {},
+   "wait": {
+    "t0": 1795030264979
+   }
+  },
+  "-837003637_1606489221_7": {
+   "cp": "free",
+   "set": "q450",
+   "lane": "team",
+   "how": "reopened",
+   "at": "2026-11-26T09:29:15Z",
+   "closed": "96cf73a227cb",
+   "closedAt": "2026-11-25T19:42:56Z",
+   "start": "close",
+   "done": {},
+   "wait": {
+    "t0": 1795030860747
+   }
+  },
+  "-820226018_1606489221_7": {
+   "cp": "free",
+   "set": "q450",
+   "lane": "team",
+   "how": "reopened",
+   "at": "2026-11-26T09:29:15Z",
+   "closed": "96cf73a227cb",
+   "closedAt": "2026-11-25T19:42:56Z",
+   "start": "close",
+   "done": {},
+   "wait": {
+    "t0": 1795030860747
+   }
   }
  }
 }
