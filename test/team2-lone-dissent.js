@@ -23,6 +23,10 @@
 const { spawnSync } = require('child_process');
 const fs = require('fs'), path = require('path'), os = require('os');
 process.env.STATE_SALT = 's';
+// Q443: this file pins the ORIGINAL rule (a due lone dissent convicts) -- the one the restore brings back with the Q436 /
+//   Q442 fixes -- so it runs with the temporary hold off, here and in every validate.js run it spawns (they copy process.env).
+//   The hold itself (a due lone dissent excused, not convicted) is test/team2-lone-hold.js.
+process.env.T2LD_HOLD_LONE = '0';
 const v = require(path.join(__dirname, '..', 'validate.js'));
 
 let failN = 0;

@@ -23,6 +23,9 @@
 const { spawnSync } = require('child_process');
 const fs = require('fs'), path = require('path'), os = require('os');
 process.env.STATE_SALT = 's';
+// Q443: [3b] pins the ORIGINAL rule (his second lone strike convicts him), so this file runs with the temporary hold off,
+//   here and in every validate.js run it spawns (they copy process.env); the hold is test/team2-lone-hold.js.
+process.env.T2LD_HOLD_LONE = '0';
 const v = require(path.join(__dirname, '..', 'validate.js'));
 
 let failN = 0;

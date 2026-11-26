@@ -4791,7 +4791,7 @@ function writeRunSummary() {
       '| endless points (O728): runs settled / rows written / deleted / pass-line table | ' + s('elpSettled', 0) + ' / ' + s('ratingW', 0) + ' / ' + s('ratingD', 0) + ' / ' + s('tiercut', '-') + (RUN.elpError ? ' / SETTLE THREW, lane skipped: ' + RUN.elpError : '') + ' |',
       '| Gold Rush Cup (O180): settled / honor rows written / deleted / carrier | ' + s('cup', '-') + ' / ' + s('cupHonorW', 0) + ' / ' + s('cupHonorD', 0) + ' / ' + s('cupCarrier', '-') + ' |',
       '| fully banned accounts on the ban board (left off the cup podium / tier cuts / composite ladders, Q338) / their composite rows deleted | ' + s('bans', '-') + ' / ' + s('ovBanD', 0) + ' |',
-      '| team-gamble lone / team dissent unsettled / settled | ' + s('t2ld', '0/0') + ' |',
+      '| team-gamble lone / team dissent unsettled / settled | ' + s('t2ld', '0/0') + (RUN.t2ldHold ? ' (' + RUN.t2ldHold + ' due lone dissent(s), the dissenter excused, not convicted: Q443 hold)' : '') + ' |',
       '| team-gamble accusation strikes / judged as leaver | ' + s('t2ac', '0/0') + ' |',
       '| board writes rating/points/xp | ' + s('writes', '0/0 0/0 0/0') + ' |',
       '| endless settles / cp+board writes | ' + s('endless', 0) + ' (+' + s('endlessComp', 0) + ' team comp, +' + s('solo', 0) + ' solo) / ' + s('writesEndless', '0/0 0/0') + ' |',
@@ -5782,7 +5782,24 @@ const T2LD = {
   K: Math.max(1, Number(process.env.T2LD_K || 2)),
   K_HARD: Math.max(1, Number(process.env.T2LD_K_HARD || 4)),
   WINDOW_MS: Number(process.env.T2LD_WINDOW_MS || 30 * 86400000),
+  HOLD_LONE: process.env.T2LD_HOLD_LONE !== '0',   // Q443 temporary hold (below); T2LD_HOLD_LONE=0 = the original rule
 };
+// Q443 (cloud audit, TEMPORARY; asked by the local FU4 coordinator 2026-11-24, mail M1009): while HOLD_LONE is on, a LONE
+//   dissent (team2LoneDissent) whose verdict comes out 'settle' no longer convicts the dissenter. His strike is stored as
+//   always (marked hd: 1 -- read by nothing here, kept for review and for the restore), the match still settles from the
+//   agreeing records, and he is EXCUSED for it exactly like a Q56 dissenter not yet due (t2ex: flagged once; absent from
+//   the settle -- teammate shield, but no exit rate, no fine, no streak break, no placement seed: this match moves nothing
+//   of his). Why: the live lone dissents of 2026-11-20..24 (18 accounts, one strike each in the window) include at least
+//   three shapes an honest player writes -- the old host's early 'peers-gone' record (Q436), a 2v2 host who played all six
+//   levels on a different table (Q442), a host's refusal naming his own teammate (Q436) -- so a second one convicts an
+//   honest player (one did on 2026-11-23, undone by hand: ASK_USER A90). Architecture decision 10: spare the honest first.
+//   Not 'free' (the whole match left unsettled, as M1009 worded it): that would also take the result from every agreeing
+//   writer and give a lone blocker back his "lose -> void" for the whole lobby; excused, only his own seat is out of it --
+//   the treatment the Q414 set-aside gives such a seat, which the Q436 fix extends to team codes for good. Nothing else
+//   moves: a first strike is free as before (a modded host cutting an opponent still gains nothing there, and no more
+//   than before on a later one: the match settles as it did, only the cut seat is no longer convicted); team dissents (Q56,
+//   two or more teammates all refusing with the host on the agreeing side -- none of the three shapes can make one) and
+//   the Q57 host charges are unchanged. Restore the original rule together with the Q436 / Q442 fixes: HOLD_LONE off.
 // Q76: a dissenter's seat is the one the agreeing writers' roster consensus names him at (not an agreeing writer's
 // own seat), else -1. The agreeing records share one seat count and pass sanity (no account twice in a roster), so
 // the consensus names him at most once and inside the seats. His own records never place him: the seat he writes
@@ -6117,9 +6134,11 @@ function applyTeam2LoneDissent(gr, signals, processed, now, vecOf, ev) {
         const list = signals.t2ld[h] || (signals.t2ld[h] = []);
         const cur = { m, t: now, h: td.host ? pid(td.host) : '', o: d.opp };
         if (d.opp) cur.x = xs;
-        const vd = t2ldVerdict(list, cur, now);
+        let vd = t2ldVerdict(list, cur, now);
+        if (vd === 'settle' && td.lone && T2LD.HOLD_LONE) { vd = 'held'; cur.hd = 1; res.ldHold = (res.ldHold | 0) + 1; RUN.t2ldHold = (RUN.t2ldHold | 0) + 1; }   // Q443: due, excused (not convicted) while the hold is on
         if (!list.some(e => e && e.m === m)) list.push(cur);
-        if (vd === 'settle') v = 'settle'; else ex.push(h);
+        if (vd === 'settle' || vd === 'held') v = 'settle';
+        if (vd !== 'settle') ex.push(h);
         const sp = sigPlayer(signals, h, now); sp.ld = (sp.ld | 0) + 1;
         if (d.opp && td.host) { const hp = sigPlayer(signals, pid(td.host), now); hp.lh = (hp.lh | 0) + 1; }
         res.dirty = true;
@@ -6127,13 +6146,13 @@ function applyTeam2LoneDissent(gr, signals, processed, now, vecOf, ev) {
         // Q76: seats he wrote himself that differ from the roster's (never read, logged for review)
         const wrote = d.recs.map(r => r.d[5] | 0).filter((x, i, a) => x !== d.seat && a.indexOf(x) === i);
         const seatLog = 'seat ' + d.seat + (wrote.length ? ' (wrote seat ' + wrote.join('/') + ')' : '');
-        if (td.lone && !prev) console.log('  team2 lone dissent ' + m + ': ' + seatLog + ' = ' + plog(d.sid) + ' (' + g.length + ' records, ' + (d.opp ? 'opposing host' : 'own-side host') + ') -> strike, verdict ' + vd);
+        if (td.lone && !prev) console.log('  team2 lone dissent ' + m + ': ' + seatLog + ' = ' + plog(d.sid) + ' (' + g.length + ' records, ' + (d.opp ? 'opposing host' : 'own-side host') + ') -> strike, verdict ' + (vd === 'held' ? 'settle held (Q443): settles, he is excused, not a leaver' : vd));
         else console.log('  team2 team dissent ' + m + ': ' + seatLog + ' = ' + plog(d.sid) + ' (' + td.ds.length + ' dissenters, ' + g.length + ' records, ' + (d.opp ? 'opposing host' : 'own-side host') + ') -> strike, own verdict ' + vd);
       }
       if (fresh.length) {
         const all = prevP.concat(fresh.map(d => pid(d.sid)));
         if (v !== 'settle') ex = [];
-        signals.t2lv[m] = Object.assign((all.length === 1) ? { p: all[0], t: prev ? prev.t : now, v } : { p: all, t: prev ? prev.t : now, v, ex }, prevLt.length ? { lt: prevLt } : {});
+        signals.t2lv[m] = Object.assign((all.length === 1) ? { p: all[0], t: prev ? prev.t : now, v } : { p: all, t: prev ? prev.t : now, v, ex }, (all.length === 1 && ex.length) ? { ex } : {}, prevLt.length ? { lt: prevLt } : {});   // Q443: a held lone dissenter keeps his excuse (ex) on later runs
         if (!td.lone || prev) console.log('  team2 team dissent ' + m + ': ' + all.length + ' dissenters -> match verdict ' + v + (v === 'settle' && ex.length ? ' (excused ' + ex.length + ')' : ''));
       }
       // Q57: the opposing seats struck just now charge the host who wrote the agreeing side (one entry per match)
