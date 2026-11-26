@@ -158,11 +158,13 @@ const SC_MAIL_SUS_MIN = Math.max(1, Number(process.env.SC_MAIL_SUS_MIN || 5));
 const SC_RATE_PERMIL = Math.max(1, Number(process.env.SC_RATE_PERMIL || 50));
 const SC_RATE_MIN_OVER = Math.max(1, Number(process.env.SC_RATE_MIN_OVER || 3));
 const CORE_HOURS_KEEP = 7 * 24;
-// O198 v1 (S2): automatic reversal. When the primary world core changes (a new package's core goes live), every conviction
-//   of the last REPLAY_DAYS made on another core is re-audited on the new one (with the usual overlap max); a self-written
-//   seat the new cap no longer exceeds was a cap bug -> the conviction is marked false (su.fp / su.fpm; the reconcile's window
-//   reads n - fp), the trust ledger gets an fp event, the mail says so. The veto is not lifted (that match settled for the
-//   others long ago); n stays (the permanent count). Once per (match, core): audited[m].rk.
+// O198 v1 (S2): automatic reversal. When the primary world core changes (a new package's core goes live), every over-cap
+//   verdict of the last REPLAY_DAYS made on another core (a conviction or an observe-only veto) is re-audited on the new one
+//   (with the usual overlap max); a convicted self-written seat the new cap no longer exceeds was a cap bug -> the conviction
+//   is marked false (su.fp / su.fpm; the reconcile's window reads n - fp), the trust ledger gets an fp event, the mail says so;
+//   n stays (the permanent count). W265: when the new cap covers EVERY seat of the match its veto is lifted too (the veto
+//   holds the whole match on the reconcile, honest seats included -- not only the convicted one); one seat still over keeps
+//   it. Once per (match, core): audited[m].rk.
 const REPLAY_DAYS = 14;
 const REPLAY_MAX = Math.max(1, Number(process.env.SC_REPLAY_MAX || 100));
 const CONVICTION_KEEP = 8;   // su.cv / su.fpm: the latest convictions [m, t] and the reversed match keys
