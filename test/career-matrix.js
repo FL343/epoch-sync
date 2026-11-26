@@ -39,7 +39,7 @@ function rec(o) {
 console.log('=== constants (client career.js mirror; pinned two-way in mvp ledger-schema-lockstep) ===');
 eq('modes wire order', CAREER_MODES, ['quick', 'ranked', 'private', 'bots', 'endless']);
 eq('W/L mask = quick + ranked', CAREER_WL_MASK, 3);
-eq('columns = code 0 + characters 1..4', CAREER_COLS, 5);
+eq('columns = code 0 + characters 1..5 (O1006 gem lady = code 5)', CAREER_COLS, 6);
 eq('char block magic 0xD8 / matrix magic 0xC2', [CHAR_MAGIC, CAREER_MATRIX_MAGIC], [0xD8, 0xC2]);
 eq('mode of mt', [1, 3, 5, 8, 2, 4, 6, 9, 10, 11, 7, 0x17, 0].map(careerModeOfMt), [0, 0, 0, 0, 1, 1, 1, 1, 2, 3, 4, 4, -1]);
 
@@ -143,10 +143,10 @@ console.log('=== careerBlockOf v2 ===');
   eq('empty state -> null', careerBlockOf({ games: 3 }), null);
   const st = { cg: 3, cw: 2, cl: 1, cm: { '0:3': [2, 960, 1, 1], '1:2': [1, 600, 1, 0], '2:4': [1, 900, 0, 0], '4:1': [2, 2400, 0, 0], '0:0': [1, 120, 0, 0] } };
   const b = careerBlockOf(st);
-  eq('length 6 + 2 x 5 x 2 + 3 x 5', b.length, 41);
+  eq('length 6 + 2 x 6 x 2 + 3 x 6', b.length, 48);
   eq('head = v1 meaning + ver 2', b.slice(0, 5), [0xCA, 2, 3, 2, 1]);
-  eq('matrix header', b[5] >>> 0, (0xC2 | (5 << 8) | (5 << 16) | (3 << 24)) >>> 0);
-  const cellAt = (m, c) => { let i = 6; for (let mm = 0; mm < 5; mm++) for (let cc = 0; cc < 5; cc++) { const wl = (3 >> mm) & 1; if (mm === m && cc === c) return wl ? [b[i], b[i + 1]] : [b[i]]; i += wl ? 2 : 1; } return null; };
+  eq('matrix header (5 modes, CAREER_COLS columns = 6 since O1006, W/L mask 3)', b[5] >>> 0, (0xC2 | (5 << 8) | (CAREER_COLS << 16) | (3 << 24)) >>> 0);
+  const cellAt = (m, c) => { let i = 6; for (let mm = 0; mm < 5; mm++) for (let cc = 0; cc < CAREER_COLS; cc++) { const wl = (3 >> mm) & 1; if (mm === m && cc === c) return wl ? [b[i], b[i + 1]] : [b[i]]; i += wl ? 2 : 1; } return null; };
   eq('quick strongman: games 2 | 16 min, wins 1 | losses 1', cellAt(0, 3), [2 | (16 << 16), 1 | (1 << 16)]);
   eq('private tamer: games 1 | 15 min (no W/L int)', cellAt(2, 4), [1 | (15 << 16)]);
   eq('endless default: games 2 | 40 min', cellAt(4, 1), [2 | (40 << 16)]);

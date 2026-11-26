@@ -9,7 +9,7 @@
 //   [6] out of order: a loss that STARTED before two wins settles after them and zeroes nothing
 //   [7] absences: the week's first freezes (and is remembered), the second breaks, a pardon turns it into a freeze and gives
 //       the grant back; streakApplyEarly applies a run's early events in order
-//   [8] the published block: 41 ints without a streak state (unchanged), 45 with one; the v1 reader ([2..4]) and the matrix
+//   [8] the published block: 48 ints without a streak state (unchanged; 41 before O1006 added the 6th career column), 52 with one; the v1 reader ([2..4]) and the matrix
 //       header are untouched, the tail reads back after the matrix
 //   [9] the playtest / demo jobs (PT_MODE=1): no state, no tier, no tail (a child process)
 // Over the REAL validate.js main() (offline board stub, test/lib/settle-stub.js):
@@ -74,8 +74,8 @@ const want = (cls, rank0, money, first, lvl, pct) => v.computeXpGain(cls, rank0,
   T('[2] the loser earns no tier', [g1, g2, g3].every((g) => g.gy > 0) && g2.gy === want('valid', 1, 3000, false, lvlOf(s.xp[B] - g3.gy - g2.gy), 0));
   const ca = SP.current(s.xpState[v.pid(A)].sk), cb = SP.current(s.xpState[v.pid(B)].sk);
   T('[2] state: A streak 3 (best 3, last match 103), B 0', ca.cur === 3 && ca.best === 3 && ca.mh === 103 && cb.cur === 0 && cb.best === 0, J(ca) + ' ' + J(cb));
-  const tail = SP.tailOf(s.det[A], 41);
-  T('[2] the career block creditXp built carries the tail (streak 3)', s.det[A].length === 45 && tail && tail.cur === 3 && tail.best === 3 && tail.mh === 103, J(s.det[A]));
+  const tail = SP.tailOf(s.det[A], 48);
+  T('[2] the career block creditXp built carries the tail (streak 3)', s.det[A].length === 52 && tail && tail.cur === 3 && tail.best === 3 && tail.mh === 103, J(s.det[A]));
   // a fourth: a loss zeroes, no tier
   const g4 = settle1v1(s, A, B, false, 104, NOW - 5 * MIN);
   T('[2] a loss zeroes the streak (best stays 3)', SP.current(s.xpState[v.pid(A)].sk).cur === 0 && SP.current(s.xpState[v.pid(A)].sk).best === 3 && g4.gx > 0);
@@ -88,7 +88,7 @@ const want = (cls, rank0, money, first, lvl, pct) => v.computeXpGain(cls, rank0,
   settle1v1(s2, A, B, true, 201, NOW - 40 * MIN);
   const g2s = settle1v1(s2, A, B, true, 202, NOW - 20 * MIN);
   T('[3] without the streak argument: no state, the old gain (no tier)', !s.xpState[v.pid(A)].sk && g2.gx === want('valid', 0, 5000, false, lvlOf(s.xp[A] - g2.gx), 0) && g2s.gx > g2.gx);
-  T('[3] ... and the block has no tail (41 ints)', s.det[A].length === 41);
+  T('[3] ... and the block has no tail (48 ints)', s.det[A].length === 48);
 }
 // ---- [4] ----
 {
@@ -158,10 +158,10 @@ const want = (cls, rank0, money, first, lvl, pct) => v.computeXpGain(cls, rank0,
 {
   const st = { cg: 3, cw: 2, cl: 1, cm: { '1:2': [3, 900, 2, 1] } };
   const b0 = v.careerBlockOf(st);
-  T('[8] no streak state: 41 ints, as before', b0.length === 41);
+  T('[8] no streak state: 48 ints, as before', b0.length === 48);
   const b1 = v.careerBlockOf(Object.assign({}, st, { sk: { p: 5, b: 7, l: 42 } }));
-  T('[8] with a streak state: 45 ints, the first 41 identical', b1.length === 45 && J(b1.slice(0, 41)) === J(b0));
-  T('[8] the tail reads back after the matrix (streak 5, best 7, last match 42)', J(SP.tailOf(b1, 41)) === J({ ver: 1, cur: 5, best: 7, mh: 42 }));
+  T('[8] with a streak state: 52 ints, the first 48 identical', b1.length === 52 && J(b1.slice(0, 48)) === J(b0));
+  T('[8] the tail reads back after the matrix (streak 5, best 7, last match 42)', J(SP.tailOf(b1, 48)) === J({ ver: 1, cur: 5, best: 7, mh: 42 }));
   T('[8] a deployed client\'s v1 read ([2..4]) and the matrix header are untouched', b1[0] === v.CAREER_MAGIC && b1[2] === 3 && b1[3] === 2 && b1[4] === 1 && (b1[5] & 0xff) === v.CAREER_MATRIX_MAGIC);
   T('[8] room left under the 64-int details cap', b1.length <= 64);
 }
@@ -180,7 +180,7 @@ const want = (cls, rank0, money, first, lvl, pct) => v.computeXpGain(cls, rank0,
   const r = spawnSync(process.execPath, ['-e', code], { encoding: 'utf8', cwd: path.join(__dirname, '..'), env: Object.assign({}, process.env, { PT_MODE: '1' }), timeout: 60000 });
   let o = null;
   try { o = JSON.parse(String(r.stdout || '').trim().split('\n').pop()); } catch (e) {}
-  T('[9] PT_MODE=1: the gate is off, no state after two wins, a 41-int block, absences and early events move nothing', !!o && o.gate === false && o.sk === null && o.len === 41 && o.ab === null && o.early === 0, (r.stdout || '').slice(-300) + (r.stderr || '').slice(-300));
+  T('[9] PT_MODE=1: the gate is off, no state after two wins, a 48-int block, absences and early events move nothing', !!o && o.gate === false && o.sk === null && o.len === 48 && o.ab === null && o.early === 0, (r.stdout || '').slice(-300) + (r.stderr || '').slice(-300));
 }
 
 // ================= end to end =================
@@ -258,7 +258,7 @@ const skOf = (r, sid) => { const e = (r.state.XP_FILE || {})[v.pid(sid)]; return
     T('[10] win 1: no tier (daily first win)', g1 === want('valid', 0, 6000, true, 0, 0), g1 + ' vs ' + want('valid', 0, 6000, true, 0, 0));
     T('[10] win 2: +5 %', g2 === want('valid', 0, 6000, false, lvlOf(w[0].score), 5), g2 + ' vs ' + want('valid', 0, 6000, false, lvlOf(w[0].score), 5));
     T('[10] win 3: +10 %', g3 === want('valid', 0, 6000, false, lvlOf(w[1].score), 10), g3 + ' vs ' + want('valid', 0, 6000, false, lvlOf(w[1].score), 10));
-    const t3 = SP.tailOf(w[2].details, 41), t4 = SP.tailOf(w[3].details, 41);
+    const t3 = SP.tailOf(w[2].details, 48), t4 = SP.tailOf(w[3].details, 48);
     T('[10] after win 3 the row publishes streak 3', t3 && t3.cur === 3 && t3.best === 3 && t3.mh === W3.mh, J(t3));
     T('[10] the loss that started first settles last and zeroes nothing: the row still publishes 3', t4 && t4.cur === 3 && t4.best === 3 && t4.mh === W3.mh, J(t4));
     T('[10] its settle logged the loss as a late event', /streak l0/.test(m.rs[7].out) && /streak w3 \+10%/.test(m.rs[6].out), m.rs[7].out.slice(-400));
@@ -288,14 +288,14 @@ const skOf = (r, sid) => { const e = (r.state.XP_FILE || {})[v.pid(sid)]; return
   const sk = skOf(m.last, Z), wz = xpWrites(m, Z);
   T('[12] settled, Z convicted', m.okAll && settledKeys(m).has(mm.key) && /in roster, no record/.test(m.out), m.out.slice(-600));
   T('[12] the week\'s first absence freezes Z (4 kept), the grant remembered', sk && SP.current(sk).cur === 4 && sk.f.length === 1 && sk.e.some((e) => e[1] === mm.mh && e[2] === 0), J(sk));
-  T('[12] Z\'s row rewritten, same score, with the tail', wz.length === 1 && wz[0].score === 5000 && (() => { const t = SP.tailOf(wz[0].details, 41); return t && t.cur === 4; })(), J(wz));
+  T('[12] Z\'s row rewritten, same score, with the tail', wz.length === 1 && wz[0].score === 5000 && (() => { const t = SP.tailOf(wz[0].details, 48); return t && t.cur === 4; })(), J(wz));
   // again within the week: a break
   const mm2 = match(2, 0x5B322, [X, Y, Z], [0, 1]);
   const m2 = run([[0, mm2.S], [7 * MIN, mm2.S.concat(mm2.R)], [GRACE, mm2.S.concat(mm2.R)], [LEAVE, mm2.S.concat(mm2.R)], [3 * HOUR, mm2.S.concat(mm2.R)]],
     m.prog, { XP_FILE: m.last.state.XP_FILE });
   const sk2 = skOf(m2.last, Z), wz2 = xpWrites(m2, Z);
   T('[12] the next absence within the week breaks (0)', sk2 && SP.current(sk2).cur === 0 && sk2.e.some((e) => e[1] === mm2.mh && e[2] === 3), J(sk2));
-  T('[12] ... and the rewritten row publishes 0', wz2.length === 1 && (() => { const t = SP.tailOf(wz2[0].details, 41); return t && t.cur === 0 && t.best === 4; })(), J(wz2));
+  T('[12] ... and the rewritten row publishes 0', wz2.length === 1 && (() => { const t = SP.tailOf(wz2[0].details, 48); return t && t.cur === 0 && t.best === 4; })(), J(wz2));
 }
 
 console.log(failN ? ('streak: ' + failN + ' FAIL') : 'streak: all ok');

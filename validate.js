@@ -6811,7 +6811,7 @@ const CHAR_MAGIC = 0xD8;
 const CAREER_MATRIX_MAGIC = 0xC2;
 const CAREER_MODES = ['quick', 'ranked', 'private', 'bots', 'endless'];   // wire order, append-only
 const CAREER_WL_MASK = 0x3;   // quick + ranked carry wins / losses
-const CAREER_COLS = 5;        // code 0 (unknown) + characters 1..4 (= client CHARACTERS max code + 1; lockstep test)
+const CAREER_COLS = 6;        // code 0 (unknown) + characters 1..5 (client O1006: the gem lady = code 5); >= client CHARACTERS max code + 1 (the reader may lead the client, architecture decision 9; lockstep test)
 const CAREER_DUR_CAP = 3600, CAREER_ENDLESS_PER_LEVEL = 300, CAREER_ENDLESS_MIN_CAP = 600;
 const CAREER_SESSION_END = 1 | 2;   // segment flags SUSPENDED | FINAL: a segmented endless session ends -> counts one game
 function careerModeOfMt(mt) {
@@ -6945,7 +6945,7 @@ function careerBlockOf(st) {
     }
   }
   // O181: the win streak tail after the matrix ([0xC9 | ver << 8 | len << 16, cur, best, matchHash], streak-plan.js tail): a
-  //   self-describing block, so a deployed client (reads [2..4] or the matrix by its header) never sees it; 41 -> 45 of 64 ints
+  //   self-describing block, so a deployed client (reads [2..4] or the matrix by its header) never sees it; 48 -> 52 of 64 ints with 6 columns (O1006; 41 -> 45 with 5)
   if (V54B3_STREAK && st.sk) for (const x of streakPlan.tail(st.sk)) out.push(x | 0);
   return out;
 }
