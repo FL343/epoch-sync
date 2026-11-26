@@ -288,10 +288,10 @@ function cliLineOf(tag, p, runSeed, caps) {
     return 'E ' + tag + ' ' + (runSeed | 0) + ' ' + p.pc + ' ' + (p.startDepth | 0) + ' ' + (p.endDepth | 0) + ' ' + Math.round(p.startBank || 0) +
       (season != null ? (' ' + season) : '') + ((bd || hasRr || cl) ? (' ' + bd) : '') + ((hasRr || cl) ? (' ' + rl + ' ' + rh) : '') + (cl ? ' 1' : '') + listTok +
       // knife 5.10b: fee= (debt cash) / rv= (rules version >= 2) only to a core that reads them (caps.fee / caps.rv; the caller defers otherwise)
-      (((p.fee | 0) > 0 && caps && caps.fee) ? (' fee=' + (p.fee | 0)) : '') + (((p.rv | 0) > 1 && caps && caps.rv) ? (' rv=' + (p.rv | 0)) : '');
+      (((p.fee | 0) > 0 && caps && caps.fee) ? (' fee=' + (p.fee | 0)) : '') + (((p.rv | 0) > 1 && caps && caps.rv) ? (' rv=' + (p.rv | 0)) : '') + charsTokOf(p, caps);
   }
   return 'C ' + tag + ' ' + (runSeed | 0) + ' ' + p.entry + ' ' + p.pc + ' ' + (p.ts | 0) + ' ' +
-    (p.isTeam ? 1 : 0) + ' ' + (p.team2 ? 1 : 0) + ' ' + p.levels + ' ' + (p.teams && p.teams.length ? p.teams.join('') : '-');
+    (p.isTeam ? 1 : 0) + ' ' + (p.team2 ? 1 : 0) + ' ' + p.levels + ' ' + (p.teams && p.teams.length ? p.teams.join('') : '-') + charsTokOf(p, caps);
 }
 // The build field is read only by a CLI built after 2026-09-07; an older CLI silently ignores it and returns the
 //   build-0 cap, which would veto honest perk runs during the CLI rollout window. Not supported -> groups carrying a
@@ -326,6 +326,31 @@ function cliSupportsClassic(run) {
 function cliSupportsFee(run) {
   const r = (run || runCli)(['V p0']);
   return !!(r && !r.fail && r.map && r.map.p0 && r.map.p0.v && /\bfee=1\b/.test(r.map.p0.v));
+}
+// O1006 chars= (client O1006; user 2026-11-25 "loosen the cap only in matches she is in" + "the cap core can know the characters in the
+//   end"): the character wire codes present in the match = the union of the char blocks (0xD8) of EVERY record of the group (each block
+//   lists every seat; the block of the seat that played a character names it). The core's gem lady envelope then counts only those
+//   characters. Any record without a block / with a block of another seat count / a 0 (unknown) code -> null = no token = the core counts
+//   every enabled character (the loose envelope): an incomplete view must never tighten the cap (architecture decision 10). Same block
+//   offset as careerSeatCodes.
+function charsOfGroup(recs, pc) {
+  if (!Array.isArray(recs) || !recs.length || !((pc | 0) >= 1)) return null;
+  const set = new Set();
+  for (const r of recs) {
+    const d = r && r.d;
+    if (!Array.isArray(d) || (d[8] | 0) !== (pc | 0)) return null;
+    const from = 11 + 3 * pc + ((v.baseMt(d[2] | 0) === 7 && pc >= 2) ? 12 : 0);
+    const codes = v.decodeCharBlock(d, from, pc);
+    if (!codes || codes.length !== (pc | 0)) return null;
+    for (const c of codes) { if (!((c | 0) > 0 && (c | 0) < 32)) return null; set.add(c | 0); }
+  }
+  return [...set].sort((a, b) => a - b);
+}
+// the token on a CLI line: only to a core that reads it (caps.chars; an older core would skip it anyway — the probe keeps the line exact)
+function charsTokOf(p, caps) { return (caps && caps.chars && p && Array.isArray(p.chars) && p.chars.length) ? (' chars=' + p.chars.join(',')) : ''; }
+function cliSupportsChars(run) {
+  const r = (run || runCli)(['V p0']);
+  return !!(r && !r.fail && r.map && r.map.p0 && r.map.p0.v && /\bchars=1\b/.test(r.map.p0.v));
 }
 function cliSupportsRv(run) {
   const r = (run || runCli)(['V p0']);
@@ -484,6 +509,7 @@ function seatOnlyRecs(m, g, starts) {
 }
 // opt (optional): { starts } -- the reconcile's start rosters (the Q418 seat-only audit; without them that shape is not read)
 function pendingOfGroup(st, m, g, opt) {
+  const g0 = g;   // O1006 chars=: every record of the match key, before the Q415 rejoin-aside / Q438 common rewrite / Q68 narrowing below (a record left out of the audited subset still says who played; the union only grows = the cap only loosens)
   // cloud audit Q415: a writer's own earlier 'host-left' / 'level-begin-timeout' / 'migrate-disband' result of a friends' room he
   //   came back to and finished leaves the group first, as in the reconcile (validate.rejoinAsideVerdict, ahead of every lane
   //   there): the key settles on the others' records, so those are audited -- one extra short record of his would otherwise
@@ -556,6 +582,8 @@ function pendingOfGroup(st, m, g, opt) {
       if ((tail.startDepth | 0) < 0 || (tail.endDepth | 0) > v.ENDLESS.DEPTH_CAP) return { m, mt, pc, scores, p: null, tail, roster: {}, self: [], runSeed: d0[4] | 0, skip: 'depth' };
     }
     const p = capParamsOf(mt, pc, tail);
+    const chars = charsOfGroup(g0, pc);   // O1006 chars= (charsOfGroup): null = not sent = the loose envelope as before
+    if (chars) p.chars = chars;
     const roster = v.rosterConsensus(all);
     const rosterPids = Object.keys(roster).map(s2 => v.pid(roster[s2]));
     const runSeed = d0[4] | 0;
@@ -1201,7 +1229,7 @@ function auditPending(pendingIn, ctx) {
   out.deferred = pendingIn.length - pending.length;
   out.pending = pending;
   if (!pending.length) return out;
-  const capsPrimary = { builds: cliSupportsBuilds(runPrimary), fee: cliSupportsFee(runPrimary), rv: cliSupportsRv(runPrimary) };
+  const capsPrimary = { builds: cliSupportsBuilds(runPrimary), fee: cliSupportsFee(runPrimary), rv: cliSupportsRv(runPrimary), chars: cliSupportsChars(runPrimary) };
   const res = runPrimary(pending.map((x, i) => cliLineOf('m' + i, x.p, x.runSeed, capsPrimary)));
   if (res.fail) return Object.assign(out, { fail: 'CLI run failed ' + res.fail });
   out.head = res.head;
@@ -1209,7 +1237,7 @@ function auditPending(pendingIn, ctx) {
   //   costs nothing but the extra headroom (the primary verdicts stand)
   for (const c of cores.slice(1)) {
     const run = runOf(c.exe);
-    const okRr = cliSupportsRerolls(run), okBuild = cliSupportsBuild(run), okCl = cliSupportsClassic(run), caps = { builds: cliSupportsBuilds(run), fee: cliSupportsFee(run), rv: cliSupportsRv(run) };
+    const okRr = cliSupportsRerolls(run), okBuild = cliSupportsBuild(run), okCl = cliSupportsClassic(run), caps = { builds: cliSupportsBuilds(run), fee: cliSupportsFee(run), rv: cliSupportsRv(run), chars: cliSupportsChars(run) };
     const lines = [];
     pending.forEach((x, i) => {
       if (!okRr && x.p && (x.p.rerollLo || x.p.rerollHi)) return;
@@ -1236,7 +1264,7 @@ function auditPending(pendingIn, ctx) {
   });
   for (const [exe, ex] of exactOf) {
     const run = runOf(exe);
-    const okRr = cliSupportsRerolls(run), okBuild = cliSupportsBuild(run), okCl = cliSupportsClassic(run), caps = { builds: cliSupportsBuilds(run), fee: cliSupportsFee(run), rv: cliSupportsRv(run) };
+    const okRr = cliSupportsRerolls(run), okBuild = cliSupportsBuild(run), okCl = cliSupportsClassic(run), caps = { builds: cliSupportsBuilds(run), fee: cliSupportsFee(run), rv: cliSupportsRv(run), chars: cliSupportsChars(run) };
     const lines = [];
     for (const i of ex.idx) {
       const x = pending[i];
@@ -1341,7 +1369,7 @@ async function main() {
 module.exports = { STARTS_FILE, seatOnlyRecs, LEGACY_AUDITED_KEEP, FOLD_MIN, SEEN_W, SEEN_W_MIN, SEEN_MAX_BYTES, seenToken, seenValid, knownAudit, auditLossOf, pruneAudits,
   coreFirstSeen, honestSince, observationOf, observedAlerts, SC_OBS_H, SC_OBS_N, pendingOfGroup, coreOfVerdict, coreStat, coreRate24, coreAlerts, standingT1, convictedFor, replayCandidates, applyReplay, headHashOf, coreHashOf,
   REPLAY_DAYS, REPLAY_MAX, CONVICTION_KEEP, SC_RATE_PERMIL, SC_RATE_MIN_OVER, CORE_HOURS_KEEP,
-  reversedFor, selectCores, resolveCores, mergeCaps, corePathOf, OVERLAP_GRACE_MS, OVERLAP_MAX_MS, cliSupportsRerolls, cliSupportsClassic, cliSupportsBuilds, cliSupportsFee, cliSupportsRv, capParamsOf, cliLineOf, cliSupportsBuild, chainKey, chainStartBank, tailOf, coreForBuildNum, selfSeatsOf, pickAuditable, takeSkips, applyAudit, pruneState, readGroups, coresForNow, auditPending, runCli, loadState, saveState, SC_STATE_FILE, VETO_KEEP_MIN, CHAIN_LEGACY_KEEP_MIN, CHAIN_KEEP_MIN, offensePlanOf, writeOffense, mailDecision, sendAlertMail, alertMailText, rejectWindowsOf, OFFENSE_LB, OFFENSE_MAGIC, SC_MAIL_MIN_OVER, SC_MAIL_SUS_MIN };
+  reversedFor, selectCores, resolveCores, mergeCaps, corePathOf, OVERLAP_GRACE_MS, OVERLAP_MAX_MS, cliSupportsRerolls, cliSupportsClassic, cliSupportsBuilds, cliSupportsFee, cliSupportsRv, cliSupportsChars, charsOfGroup, charsTokOf, capParamsOf, cliLineOf, cliSupportsBuild, chainKey, chainStartBank, tailOf, coreForBuildNum, selfSeatsOf, pickAuditable, takeSkips, applyAudit, pruneState, readGroups, coresForNow, auditPending, runCli, loadState, saveState, SC_STATE_FILE, VETO_KEEP_MIN, CHAIN_LEGACY_KEEP_MIN, CHAIN_KEEP_MIN, offensePlanOf, writeOffense, mailDecision, sendAlertMail, alertMailText, rejectWindowsOf, OFFENSE_LB, OFFENSE_MAGIC, SC_MAIL_MIN_OVER, SC_MAIL_SUS_MIN };
 if (require.main === module) {
   main().catch(e => { console.log('::error::seedcap run failed: ' + (e && e.stack || e)); process.exit(1); });
 }
