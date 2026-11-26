@@ -2,7 +2,7 @@
 'use strict';
 // ============================================================
 // tools/resettle-once.js -- one-shot re-settlement of endless keys the reconcile closed under rules fixed since
-//   (cloud audit Q413 + O920 / O922, 2026-11-20)
+//   (cloud audit Q413 + O920 / O922, 2026-11-20; the team competitive lane Q450, 2026-11-26)
 // ============================================================
 // Why: honest endless runs were closed without a settle by checks that were wrong for them, and the fixes only judge records
 //   that come after them -- a closed key is never read again:
@@ -10,6 +10,9 @@
 //   o922  24 resumed casual co-op sessions: `endless perk REJECT (perk_forge: build-mismatch)` (fixed by O922, batch B177)
 //   q413  35 casual solo / couch segments resumed from an older checkpoint: `perk REJECT (perk_chain: prefix)` (fixed by Q410 =
 //         O903), and every later segment of those runs, closed because the chain memory still followed the old timeline
+//   q450  10 segments of one team competitive run (four players, depth 15 -> 61): `team comp segment chain REJECT (chain-gap)`
+//         after waiting COMP.CHAIN_WAIT_MS behind a held segment the chain could not pass (fixed by Q418, batch B179, main
+//         f1731d33: it moved the chain past that segment 3 hours after the last of them was refused)
 //   The players were told to expect them back: settle what the records still on the shards show, take nothing (no continue
 //   debit -- they were never charged; nobody's points go down), never settle a key twice (Q144), shallow starts first (the
 //   reconcile's own segment order, freshOrder, does that inside a run).
@@ -27,13 +30,22 @@
 //   A later segment of such a run that is still open (its result read: waiting at the chain, refused after 7 days on the old
 //   timeline) settles once the run's reopened segments do: it is planned with the run (kind 'unblocked'), nothing of it is
 //   edited, the list names it for the exemption only (how 'unblocked'), and the dry run must see it settle too.
+//   Team competitive keys (lane 'team', Q450): a segment the lane refused at the chain leaves no done entry; its wait clock goes
+//   (undo puts it back) and its start entry comes back as above. It is one of these only when, at its close, its run's chain (the
+//   start entry's players, the seed) did not move, the wait clock it left was as old as the chain window, and the chain has moved
+//   past that head since (run.so: Q418's pass); the run holds no save point (a resumed segment would charge the host the resume
+//   fee: nothing is taken) and no other segment under the seed is open or refused outside the list. The lane has no continue
+//   debit: the exemption changes nothing for these keys (the list still names them, for undo / status / the reopen-once guard).
+//   The chain orders a team run's segments: one the dry run does not see settle (its records gone from the shards, ...) holds
+//   the ones after it -- they chain on it -- not the ones before (holdKeys).
 //   Nothing else: no board write, no commit, no push. A key listed in any version of resettle.json in the history is never
 //   reopened again (`undo` re-closes keys still open; `--again` only reopens a key whose last record says undo re-closed it).
 // Subcommands (run from an epoch-sync checkout; read-only unless --yes):
-//   plan    --set o920,o922,q413 [--at <commit>] [--json <file>] [--skip m,m]   what would be reopened, from the git history alone
+//   plan    --set o920,o922,q413,q450 [--at <commit>] [--json <file>] [--skip m,m]   what would be reopened, from the git history alone
 //   apply   --set ... --from-dry <report.json> [--skip m,m] [--yes] [--until-days 7] [--again]
-//           edit the working tree (the reconcile job paused); only keys the dry run saw settle, a run whole or not at all; a report
-//           with a value down, a key closed in B only outside the plan, a new flag outside the plan or a failed run is refused
+//           edit the working tree (the reconcile job paused); only keys the dry run saw settle, a solo / couch run whole or not at
+//           all, a team run from its first segment up to the first that would not settle; a report with a value down, a key
+//           closed in B only outside the plan, a new flag outside the plan or a failed run is refused
 //   undo    [--yes]                                                  re-close every listed key the reconcile has not taken again
 //   finish  [--yes]                                                  delete resettle.json once every key is closed again / expired
 //   status                                                           where each listed key is now
@@ -83,6 +95,16 @@ const SETS = {
     '306848399_134454718_7': null, '728021899_1982546866_7': null, '-1888688969_1321976693_7': null, '-843680383_464287609_7': null,
     '-1448083451_1727966839_7': null, '965906560_1420489742_7': null, '928483442_1889606694_7': null, '1003282118_1889606694_7': null,
     '413513400_1889606694_7': null, '-88966206_1729740589_7': null, '-1486860584_1056385758_7': null } },
+  // q450 (cloud audit Q450, mailbox M1075; the run of cloud audit Q418): the state history alone -- each of the 10 closed by one
+  //   run between 11-25T18:42Z and 19:42Z (two in the last), the chain unmoved at depth 10 behind the held segment
+  //   -656845103_1606489221_7 (10 -> 15), each 7.001 days after the wait clock it left (11-18T18:40Z .. 19:41Z); Q418 reached main
+  //   at 11-25T21:33Z and passed that segment (run.so, head 15). In start order (the chain's: 15 -> 20 first). The run's two other
+  //   keys under the seed, -690400341_ (0 -> 5) and -707177960_1606489221_7 (5 -> 10), settled on 11-18 and are not listed (a
+  //   reopened settle would settle twice; `plan` holds such a key for review: the chain moved at its close).
+  q450: { lane: 'team', fix: 'Q418 (B179)', why: 'team comp segment chain REJECT (chain-gap) behind a held segment the chain could not pass', keys: {
+    '-673622722_1606489221_7': null, '-623289865_1606489221_7': null, '-640067484_1606489221_7': null, '-589734627_1606489221_7': null,
+    '-606512246_1606489221_7': null, '-824621293_1606489221_7': null, '-841398912_1606489221_7': null, '-853781256_1606489221_7': null,
+    '-837003637_1606489221_7': null, '-820226018_1606489221_7': null } },
 };
 // the flags `flags` takes back: q413 = the 35 segments above (their writers were flagged when the segment was refused);
 //   q407 = the two friends' rooms of six (cloud audit Q407; only once its fix is on main, else the old rule flags again)
@@ -101,8 +123,10 @@ function codeReady(dir, set) {
     o922: /function coopResumePerkLoose\(pv, startDepth\) \{/.test(v),   // review 1's form: no backing asked for
     q413: /function chainCutOf\(/.test(pk),
     q407: /const rd = roomDispute\(g, vecOf\);/.test(v),
+    q450: /function seatOnlyDispute\(/.test(v) && /run\.so = \(Array\.isArray\(run\.so\) \? run\.so : \[\]\)\.concat\(\[m\]\)/.test(v),   // Q418's pass
   };
-  return { ok: (set === 'q407' || hook) && !!ready[set], hook, fix: !!ready[set] };
+  // q450: the team lane has no continue debit, so it does not need the exemption hook
+  return { ok: (set === 'q407' || set === 'q450' || hook) && !!ready[set], hook, fix: !!ready[set] };
 }
 
 // ---- git
@@ -192,7 +216,8 @@ function startFor(G, c, t, m) {
 // ---- plan: read-only, git history up to `at`
 //   -> { at, head time, keys: [{ m, set, lane, status, why?, closed, closedAt, start: {src, e}, done: { entryKey: entry }, run?, listed, kind? }],
 //        (kind 'unblocked': a later segment of a reopened run still open at `at` -- no close, no start, only the exemption)
-//        runs: [{ rk, owner, status, why?, keys }], counts }
+//        runs: [{ rk, owner, status, why?, keys, prefix?, t0? }], counts }
+//        (prefix: a team run, keys in its chain's order, t0 = each key's start entry's first sighting -- holdKeys holds from a key on)
 function planKeys(G, at, setNames, opts) {
   const o = opts || {};
   const SS = o.lists || SETS;   // (tests hand their own lists)
@@ -330,6 +355,73 @@ function planKeys(G, at, setNames, opts) {
       out.runs.push({ rk: g.rk, owner: g.owner, status: g.status, why: g.why || null, keys: g.keys.map((k) => k.m) });
     }
   }
+  // team competitive lists (cloud audit Q450): segments the lane refused at the chain -- soloChainPlan's wait ran out
+  //   (COMP.CHAIN_WAIT_MS) -- behind a held segment its chain has moved past since (Q418's pass, run.so). Such a refusal leaves no
+  //   done entry and keeps its wait clock (applyToDir takes it out); a run is reopened only when every listed segment of it is one
+  //   of these and nothing of the run could charge anyone (see the header).
+  const teamNames = setNames.filter((n) => SS[n] && SS[n].lane === 'team');
+  if (teamNames.length) {
+    const waitMs = Number(o.chainWaitMs || process.env.COMP_CHAIN_WAIT_MS || 7 * 86400000);   // validate.js COMP.CHAIN_WAIT_MS (same env)
+    const sH = G.at(head, STATE.solo) || {}, stH = G.at(head, STATE.starts) || {};
+    const groups = new Map();   // seed -> { seed, rk, keys, status, why }: every listed key under one seed, whatever its status
+    for (const name of teamNames) for (const m of Object.keys(SS[name].keys)) {
+      const k = { m, set: name, lane: 'team', listed: true, done: {} };
+      { const sd = seedOf(m); let g = groups.get(sd); if (!g) groups.set(sd, (g = { seed: sd, rk: null, keys: [], status: 'ok', why: null })); g.keys.push(k); }
+      const review = (why) => { Object.assign(k, { status: 'review', why }); out.keys.push(k); };
+      const why = refuse(m);
+      if (why) { Object.assign(k, { status: 'refused', why }); out.keys.push(k); continue; }
+      const cl = closeOf(G, procHist, m);
+      if (cl.status !== 'ok') { Object.assign(k, { status: cl.status === 'not-processed' ? 'not-processed' : 'review', why: cl.status === 'not-processed' ? 'not in the processed list (nothing to reopen)' : 'closed before the oldest commit in reach (fetch more history)' }); out.keys.push(k); continue; }
+      const par = G.parent(cl.c), st = G.at(cl.c, STATE.solo) || {}, st0 = (par && G.at(par, STATE.solo)) || {};
+      Object.assign(k, { closed: cl.c, closedAt: cl.t, start: startFor(G, cl.c, cl.t, m) });
+      // whose run: the players its start entry names (the run's chain key is their set + the seed)
+      const e = k.start.e || {};
+      const team = [...new Set((Array.isArray(e.started) && e.started.length ? e.started : Object.values(e.roster || {})).map(String))].sort();
+      if (k.start.src === 'synth' || team.length < 2) { review('no start entry naming the team at its close (whose run is it?)'); continue; }
+      k.team = team;
+      const seed = seedOf(m);
+      const cands = Object.keys(st.runs || {}).filter((rk) => { const a = String(rk).split('|'); return a[0] === 'T' && a[a.length - 1] === seed && String(a[1] || '').split('+').sort().join('+') === team.join('+'); });
+      if (cands.length !== 1) { review(cands.length ? cands.length + ' team chains of these players under the seed at its close' : 'no team chain of these players under the seed at its close'); continue; }
+      const rk = cands[0];
+      k.run = rk;
+      if (!same((st0.runs || {})[rk], (st.runs || {})[rk])) { review('the chain moved at its close (a settle, not a reject)'); continue; }
+      const w0 = (st0.wait || {})[m];
+      if (!w0 || typeof w0 !== 'object' || !Number.isFinite(Number(w0.t0))) { review('no chain wait clock before its close (not refused at the chain)'); continue; }
+      // (commit times are whole seconds; the run that refused it read its clock before it committed)
+      if (!(cl.t + 1000 - Number(w0.t0) > waitMs)) { review('closed ' + Math.round((cl.t - Number(w0.t0)) / 60000) + ' min after its wait clock started, inside the chain window (' + Math.round(waitMs / 60000) + ' min): not the wait-out refusal'); continue; }
+      const dN = st.done || {}, d0 = st0.done || {};
+      if (Object.keys(dN).some((x) => doneKeyOf(x) === m && !same(dN[x], d0[x]))) { review('a done entry written at its close (the team lane writes none when it refuses)'); continue; }
+      Object.assign(k, { status: 'ok', waitT0: Number(w0.t0), headAtClose: (((st.runs || {})[rk] || {}).max | 0) });
+      out.keys.push(k);
+    }
+    for (const g of groups.values()) {
+      // a team run is reopened only when every listed segment of it can be (a listed key that cannot -- one that settled, one
+      //   whose run cannot be told -- means the list or the state is not what it was drawn from: review, nothing of the run)
+      const bad = g.keys.find((k) => k.status !== 'ok'), rks = [...new Set(g.keys.map((k) => k.run).filter(Boolean))];
+      g.rk = rks.length === 1 ? rks[0] : null;
+      const rH = g.rk ? (sH.runs || {})[g.rk] : null;
+      const mine = new Set(g.keys.map((k) => k.m)), passed = new Set(rH && Array.isArray(rH.so) ? rH.so : []);
+      const under = (mp) => Object.keys(mp || {}).filter((m) => KEY_RE.test(m) && seedOf(m) === g.seed && !mine.has(m) && !passed.has(m));
+      const openK = [...new Set(under(sH.wait).concat(under(stH)))].filter((m) => !procHead.has(m)).sort();
+      const leftK = under(sH.wait).filter((m) => procHead.has(m)).sort();
+      const hi = Math.max(...g.keys.map((k) => k.headAtClose | 0));
+      if (bad) g.why = 'segment ' + bad.m + ' is ' + bad.status + (bad.why ? ' (' + bad.why + ')' : '') + ' -- a team run goes from its first listed segment or not at all';
+      else if (rks.length !== 1) g.why = rks.length + ' team chains among the listed segments under the seed';
+      else if (!rH) g.why = 'the chain left the memory';
+      else if (!((rH.max | 0) > hi)) g.why = 'the chain has not moved past ' + hi + ' since (head ' + (rH.max | 0) + '): nothing for these segments to chain on';
+      else if (!passed.size) g.why = 'no held segment passed on the run (run.so, Q418): not this list\'s case';
+      else if (rH.saves && typeof rH.saves === 'object' && Object.keys(rH.saves).length) g.why = 'the run holds save points: a resumed segment would charge the host the resume fee (nothing is to be taken)';
+      else if (rH.burnt) g.why = 'the run is burnt (a used save row: it settles nothing more)';
+      else if (openK.length) g.why = 'a segment under the seed is still open outside the list (' + openK.join(' ') + ')';
+      else if (leftK.length) g.why = 'a segment under the seed refused at the chain is not in the list (' + leftK.join(' ') + ')';
+      if (g.why) g.status = 'review';
+      // the chain's order: the start entries' first sightings (a segment starts once the one before it ended; a tie = one pass)
+      const t0Of = (k) => Number(k.start && k.start.e && k.start.e.t0) || 0;
+      g.keys.sort((a, b) => (t0Of(a) - t0Of(b)) || (a.m < b.m ? -1 : a.m > b.m ? 1 : 0));
+      if (g.status !== 'ok') for (const k of g.keys) if (k.status === 'ok') { k.status = 'review'; k.why = 'run held: ' + g.why; }
+      out.runs.push({ rk: g.rk || ('T|?|' + g.seed), owner: null, status: g.status, why: g.why, keys: g.keys.map((k) => k.m), prefix: true, t0: Object.fromEntries(g.keys.map((k) => [k.m, t0Of(k)])) });
+    }
+  }
   // a key both lists name, or a later segment of one run that another list names: once
   const seenK = new Set();
   out.keys = out.keys.filter((k) => (seenK.has(k.m) ? false : (seenK.add(k.m), true)));
@@ -340,7 +432,9 @@ function planKeys(G, at, setNames, opts) {
 }
 
 // keys not to reopen (Map m -> why): a co-op key alone; a solo / couch key with every segment of its run (a run reopened with
-//   a hole in it would be judged against the old timeline again). Mutates the plan; counts recomputed.
+//   a hole in it would be judged against the old timeline again); a team key with the segments of its run that start no earlier
+//   (Q450: they chain on it -- reopened without it they would only wait at the chain again; the ones before it settle as they
+//   are). Mutates the plan; counts recomputed.
 function holdKeys(plan, skip) {
   if (!skip || !skip.size) return plan;
   const runOf = new Map();
@@ -349,6 +443,12 @@ function holdKeys(plan, skip) {
   for (const [m, why] of skip) {
     const r = runOf.get(m);
     if (!r) { held.set(m, why); continue; }
+    if (r.prefix) {
+      const t = (r.t0 || {})[m] || 0;
+      for (const x of r.keys) if (((r.t0 || {})[x] || 0) >= t && !held.has(x)) held.set(x, x === m ? why : 'it chains on ' + m + ' (' + why + ')');
+      if (r.status === 'ok' || r.status === 'part') { const all = r.keys.every((x) => held.has(x)); r.status = all ? 'held' : 'part'; r.why = (r.why && r.status === 'part' ? r.why + '; ' : '') + 'held from ' + m + ' on (' + why + ')'; }
+      continue;
+    }
     for (const x of r.keys) if (!held.has(x)) held.set(x, x === m ? why : 'its run holds ' + m + ' (' + why + ')');
     if (r.status === 'ok') { r.status = 'held'; r.why = 'by hand: ' + m + ' (' + why + ')'; }
   }
@@ -376,14 +476,14 @@ function printPlan(plan, log) {
   for (const n of plan.notes) log('  note: ' + n);
   for (const k of plan.keys) {
     const dep = k.depths ? ' depth ' + k.depths[0] + '->' + k.depths[1] : '';
-    const who = k.owner ? ' owner ' + k.owner.slice(0, 8) : '';
+    const who = k.owner ? ' owner ' + k.owner.slice(0, 8) : k.team ? ' team ' + k.team.map((p) => p.slice(0, 8)).join('+') + (k.waitT0 ? ' (waited at the chain from ' + iso(k.waitT0) + ')' : '') : '';
     const st = k.start ? ' start ' + k.start.src + ' ' + iso(k.start.e && k.start.e.t0) : '';
     const later = k.listed ? '' : k.kind === 'unblocked' ? ' (later segment, still open' + (k.waitT0 ? ': waiting at the chain since ' + iso(k.waitT0) : ': its result read') + ' -- joins the run, exemption only)' : ' (later segment)';
     log('  ' + k.status.padEnd(13) + ' ' + k.set + ' ' + k.lane + ' ' + k.m + later + dep + who
       + (k.closed ? ' closed ' + short(k.closed) + ' ' + iso(k.closedAt) : '') + st + (k.done && Object.keys(k.done).length ? ' done ' + Object.keys(k.done).length : '') + (k.why ? ' -- ' + k.why : ''));
   }
   const unb = new Set(plan.keys.filter((k) => k.kind === 'unblocked').map((k) => k.m));
-  for (const r of plan.runs) { const u = r.keys.filter((m) => unb.has(m)).length; log('  run ' + r.rk.replace(/[0-9a-f]{16}/g, (p) => p.slice(0, 8)) + ': ' + r.status + ', ' + r.keys.length + ' segment(s)' + (u ? ' (' + u + ' still open, exemption only)' : '') + (r.why ? ' -- ' + r.why : '')); }
+  for (const r of plan.runs) { const u = r.keys.filter((m) => unb.has(m)).length; log('  run ' + r.rk.replace(/[0-9a-f]{16}/g, (p) => p.slice(0, 8)) + ': ' + r.status + ', ' + r.keys.length + ' segment(s)' + (u ? ' (' + u + ' still open, exemption only)' : '') + (r.prefix ? ' (team: in chain order, from the first up to the first that cannot settle)' : '') + (r.why ? ' -- ' + r.why : '')); }
 }
 
 // ---- apply: edit the state files in dir (a working tree or a dry run's copy)
@@ -393,7 +493,7 @@ function applyToDir(dir, plan, opts) {
   const P = path.join(dir, STATE.processed), SO = path.join(dir, STATE.solo), SS = path.join(dir, STATE.starts), RS = path.join(dir, RESETTLE);
   const proc = readJson(P, null), solo = readJson(SO, null), starts = readJson(SS, null);
   if (!Array.isArray(proc) || !solo || !starts) throw new Error('state files missing or unreadable in ' + dir);
-  const rs = readJson(RS, null) || { v: 1, note: 'cloud audit Q413 / O920 / O922: keys reopened once by tools/resettle-once.js; validate.js settles them without continue debits until `until`', until: '', keys: {} };
+  const rs = readJson(RS, null) || { v: 1, note: 'cloud audit Q413 / O920 / O922 / Q450: keys reopened once by tools/resettle-once.js; validate.js settles them without continue debits until `until`', until: '', keys: {} };
   const inProc = new Set(proc);
   const res = { reopened: [], unblocked: [], skipped: [] };
   for (const k of plan.keys) {
@@ -623,7 +723,7 @@ function dryRun(o) {
     const h = cp.spawnSync('git', ['-C', repo, 'hash-object', snapF], { encoding: 'utf8' }).stdout.trim();
     if (oid !== h) throw new Error(f + ' in the snapshot is not ' + f + ' at ' + short(at));
   }
-  const plan = planKeys(G, at, o.sets, { dir: null, lists: o.lists });
+  const plan = planKeys(G, at, o.sets, { dir: null, lists: o.lists, chainWaitMs: o.chainWaitMs || (o.envExtra && o.envExtra.COMP_CHAIN_WAIT_MS) });   // the chain window the reconcile in B runs with
   printPlan(plan, log);
   const targets = plan.keys.filter((k) => k.status === 'ok').map((k) => k.m);
   const snapAt = Date.parse(man.at || '') || Number(G.run(['log', '-1', '--format=%ct', at]).trim()) * 1000;
@@ -668,10 +768,15 @@ function dryRun(o) {
   //   since) are no settle of this list -- the key is held (dryVerdicts; cloud audit Q413 review 1, suggestion 1)
   const outcome = (m, depths) => {
     let last = 'not read (no record of it this run)';
-    const settled = new RegExp('(endless|solo|couch) settle ' + m.replace(/[-]/g, '\\-') + ':');
+    const settled = new RegExp('(endless|endless-comp|solo|couch) settle ' + m.replace(/[-]/g, '\\-') + ':');   // Q450: + the team competitive lane's line
     for (const r of B.runs) {
+      let charged = false;
       for (const l of r.out.split('\n').filter((x) => x.indexOf(m) >= 0)) {
+        const tv = teamLineOf(l, m);
+        if (tv === 'fee') { charged = true; continue; }
+        if (tv === 'catch-up') return 'settled as a catch-up (tick ' + r.t + '): the chain left as it is -- not this list\'s settle';
         if (settled.test(l)) {
+          if (charged) return 'settled with the resume fee charged to the host (tick ' + r.t + '): nothing is to be taken';
           const dm = depths ? / depth (-?[0-9]+)->(-?[0-9]+)/.exec(l) : null;
           if (depths && (!dm || Number(dm[1]) !== depths[0] || Number(dm[2]) !== depths[1])) return 'settled at ' + (dm ? 'depth ' + dm[1] + '->' + dm[2] : 'depths the log line does not show') + ', not the listed ' + depths[0] + '->' + depths[1] + ' (tick ' + r.t + '): another record than the one rejected';
           return 'settled (tick ' + r.t + ')';
@@ -734,6 +839,15 @@ function dryRun(o) {
   log('work directory (holds Steam IDs, keep it on this machine): ' + work);
   return { plan, rows, diff, down: down.length, onlyB, unblockedB, flagsOther, exitBad, work };
 }
+// Q450: what a validate.js log line says about team competitive key m beyond a settle: 'fee' (the host was charged the resume
+//   fee: a resumed segment -- nothing is to be taken, the key is held), 'catch-up' (settled for the writers behind only, the chain
+//   left as it is: not this list's settle), else null. The formats are validate.js's (test/resettle-team.js pins them).
+function teamLineOf(l, m) {
+  const esc = String(m).replace(/[-]/g, '\\-');
+  if (new RegExp('endless-comp cp ' + esc + ': host \\S+ -[0-9]+ resume').test(l)) return 'fee';
+  if (new RegExp('endless-comp catch-up ' + esc + ':').test(l)) return 'catch-up';
+  return null;
+}
 function readJsonText(f) { try { return fs.readFileSync(f, 'utf8'); } catch (e) { return ''; } }
 
 // ---- command line
@@ -766,7 +880,7 @@ function main(argv) {
   const G = makeGit(repo);
   if (cmd === 'plan' || cmd === 'apply') {
     const sets = setList(a.set, SETS);
-    if (!sets.length) { console.error('--set o920 / o922 / q413 (comma separated, or all)'); return 2; }
+    if (!sets.length) { console.error('--set o920 / o922 / q413 / q450 (comma separated, or all)'); return 2; }
     for (const s of sets) { const r = codeReady(repo, s); log('code: ' + s + ' needs ' + SETS[s].fix + (r.fix ? ' -- in this checkout' : ' -- NOT in this checkout') + (r.hook ? '' : '; the resettle hook is not in validate.js')); }
     if (cmd === 'apply') {
       const dirty = cleanState(G, [STATE.processed, STATE.solo, STATE.starts, RESETTLE]);
@@ -852,7 +966,7 @@ function main(argv) {
   return 2;
 }
 
-module.exports = { SETS, FLAG_SETS, STATE, RESETTLE, KEY_RE, codeReady, makeGit, listedBefore, closeOf, startFor, planKeys, holdKeys, dryVerdicts, reportGate, printPlan, applyToDir, undoInDir, statusOf, flagsInDir, flagCells, workflowEnv, loadSnapshot, recordsOf, boardDiff, dryRun, parseArgs };
+module.exports = { SETS, FLAG_SETS, STATE, RESETTLE, KEY_RE, codeReady, teamLineOf, makeGit, listedBefore, closeOf, startFor, planKeys, holdKeys, dryVerdicts, reportGate, printPlan, applyToDir, undoInDir, statusOf, flagsInDir, flagCells, workflowEnv, loadSnapshot, recordsOf, boardDiff, dryRun, parseArgs };
 
 if (require.main === module) {
   let code = 1;
