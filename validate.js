@@ -4867,6 +4867,7 @@ function writeRunSummary() {
       '| backlog writes answered result 27 (the account no longer owns the app): accounts marked this run / waiting writes not sent (they go a day after the last 27, or with a settle of his) / marks cleared by a settle of his (O775) | ' + s('wGone', 0) + ' / ' + s('wHeld', 0) + ' / ' + s('wBack', 0) + ' |',
       '| solo segments held by the key policy (other channel / retired key; new this run) | ' + s('keyHeld', 0) + ' (' + s('keyHeldNew', 0) + ') |',
       '| solo / couch segments whose predecessor never came, settled on their own once the wait ran out (Q428: XP from their own start, nothing taken) | ' + s('soloGapSettled', 0) + ' |',
+      '| competitive solo / couch runs a segment of which waits or is deferred: not settled by 24 h idle / a newer run / the cutover meanwhile (Q433) | ' + s('elpHeld', 0) + ' |',
       '| solo / couch segments settling only because a chain gap was waited out: late debits (continues, resume) cut so the balance stays at 0 or above / CP not taken (Q428 floor) | ' + s('soloGapCpFloor', 0) + ' / ' + s('soloGapCpFloorCp', 0) + ' |',
       '| duration | ' + ((Date.now() - (RUN.t0 || Date.now())) / 1000).toFixed(1) + 's |',
       '',
@@ -7315,10 +7316,12 @@ function overallDominant(bests) {
 //     = what the settle gave), old (ids that left: never re-enter), gone ([runId, d, runSeed] of settled runs out of the window: a conviction
 //     still refunds them), lp (null until placed), placed, seedRun (the run that seeded), n (runs settled this season), ring
 //     (points receipts, mh = the run seed | 0: the client knows it, the chain key holds the salted pid), best [runId, depth] (kept for the logs), t. A run is its chain key hashed (solo: runSeed;
-//     team: roster set + runSeed); its segments raise its depth in place.
+//     team: roster set + runSeed); its segments raise its depth in place. hold (Q433, optional) { runId: the last instant the
+//     solo lane saw a segment of that unsettled run waiting / deferred } (elpHoldNote).
 //   - a run settles when its final segment came, a newer run of the player in the family started (starting another run gives a
 //     save up), or no segment came for ELP_IDLE_MS while no save point is open (a crash / a killed process counts at the depth it
-//     reached). A run waits for the runs before it. Runs of an ended season are left as they are.
+//     reached) -- the last two (and the cutover) not while a segment of it still waits in the solo lane (Q433: elpRunHeld). A run
+//     waits for the runs before it. Runs of an ended season are left as they are.
 //   - the pass lines (they place the hidden skill in a tier: the factor, the floor, the gate, the seed): the tables in force a day
 //     before the job first saw the run, at that moment, and now (the client may have held any of them); the settle takes the one
 //     that leaves the player the most points (architecture decision 10).
@@ -7423,6 +7426,7 @@ const RATING = {
   GONE_CAP: 100,                              // settled runs out of the window whose points a conviction still refunds
   HIST_SEASONS: 2,                            // history kept for the current and the previous season
   IDLE_MS: Number(process.env.ELP_IDLE_MS || 24 * 3600000),   // a run with no segment for this long and no save point settles at its depth
+  HOLD_MS: Number(process.env.ELP_HOLD_MS || 2 * 3600000),    // Q433: a run the solo lane last saw a segment of waiting this long ago settles by the old rules again
   TAB_DAYS: 14,                               // tables kept in the chain memory (the settle reads the one in force at the run's start)
   // O942 (version 7) lever: the rules version the published pass-line table carries (and the priors it falls back to). 6 until the gate
   //   of the version 7 package is raised: a version 6 client reads a version 7 table as "being rated" (rulesSame false), so the
@@ -7514,6 +7518,9 @@ function ratingHistUpsert(st, p, fam, seasonId, runId, depth, nowMs, segFlags, r
     // O942: the version bit stays as its first segment set it; the quit bit comes with the final segment only (nothing moves after it)
     r[6] = nowMs; r[7] = ((r[7] | 0) & 1) | fin | (((r[7] | 0) & 1) ? 0 : sus) | ((r[7] | 0) & (ELP_R_V7 | ELP_R_V8 | ELP_R_QUIT)) | (((r[7] | 0) & 1) ? 0 : quit);
     if (r[8] == null && runSeed != null) r[8] = runSeed | 0;
+    // cloud audit Q433: a segment of the run settled -- a hold note of an earlier pass leaves (one of this pass stays: a segment
+    //   of the run still waits behind this one, elpHoldNote), so a note never outlives the deferral it stood for
+    if (h.hold && typeof h.hold === 'object' && Number(h.hold[String(runId)]) < nowMs) { delete h.hold[String(runId)]; if (!Object.keys(h.hold).length) delete h.hold; }
   } else if (h.old.indexOf(runId) < 0 && !(h.gone || []).some((g) => (g[0] >>> 0) === runId)) {
     h.runs.push(sus ? [runId, depth, nowMs, 0, 0, 0, nowMs, fin | sus | vb, runSeed | 0, [depth, nowMs, 0]] : [runId, depth, nowMs, 0, 0, 0, nowMs, fin | sus | vb | quit, runSeed | 0]);   // first-seen order (nowMs never runs back within a job); a run that enters parked carries its save point (RC2-02)
   }
@@ -7564,7 +7571,9 @@ function elpNewerRun(h, i) {
   return false;
 }
 function elpRunReady(h, i, nowMs) {
-  const r = h.runs[i], newer = elpNewerRun(h, i), idle = nowMs != null && nowMs - (r[6] || r[2] || 0) >= RATING.IDLE_MS;
+  // cloud audit Q433: while a segment of the run still waits in the solo lane (elpRunHeld), its final segment alone settles it --
+  //   not a newer run, not IDLE_MS, not the cutover below
+  const r = h.runs[i], held = elpRunHeld(h, r, nowMs), newer = elpNewerRun(h, i) && !held, idle = nowMs != null && nowMs - (r[6] || r[2] || 0) >= RATING.IDLE_MS && !held;
   // O942 D6: once the version 7 package's gate is up (RATING.CUTOVER_MS, the upload runbook sets it), a version 6 run PARKED at a save
   //   point is never continued (the new client offers no resume of an old key's save) -- it settles at its save depth. A version 6 run
   //   still being PLAYED then (an old client mid-run: its checkpoint segments are on the board) is NOT cut: settling it now would read
@@ -7573,7 +7582,36 @@ function elpRunReady(h, i, nowMs) {
   //   O991 D6: the same at the version 8 package's gate (ELP_PUB_VER=8 with ELP_CUTOVER_MS at that instant): a parked run below the
   //   published version (elpCutVer) settles at its save depth -- a version 7 one under the version 7 rules; never a version 8 run
   const cut = RATING.CUTOVER_MS > 0 && nowMs != null && nowMs >= RATING.CUTOVER_MS && elpRunVer(r) < elpCutVer() && !!((r[7] | 0) & 2);
-  return !!(((r[7] | 0) & 1) || newer || (idle && !((r[7] | 0) & 2)) || cut);
+  return !!(((r[7] | 0) & 1) || newer || (idle && !((r[7] | 0) & 2)) || (cut && !held));
+}
+// ---- cloud audit Q433 (2026-11-25; architecture decision 10): a run whose later segment waits is still being settled ----
+// A competitive solo / couch run whose middle segment did not reach the shards yet (the guard's retry outbox, a segment written over)
+//   holds only its chain head in the history: the later segments wait in the solo lane for it (soloChainPlan), and Q428 settles
+//   them on their own once the gap window ran out. Meanwhile 24 h without a settled segment, a newer run of his (or the cutover)
+//   settled the run at the depth of its chain head: a run that reached its line was read as a miss (a placed player, a run to 20
+//   with its line at 20: -10 instead of +83), and the later segments raised its depth with its points already gone. The solo lane
+//   now notes such a run every pass it sees a segment of it waiting for its chain -- while the job may still settle that segment
+//   itself (inside the gap window) -- or chained and deferred (pacing, a board unresolved): elpHoldNote, the run's entry of the
+//   history, hold[runId] = that instant. A run noted within RATING.HOLD_MS settles on its final segment only. A segment of the run
+//   that settles takes a note of an earlier pass away (ratingHistUpsert; a note of this pass stays: another segment still waits),
+//   so a deferral that ended leaves nothing behind; a segment that was rejected, left the shards or waited past the window stops
+//   noting, and RATING.HOLD_MS later the run settles as before. Notes only an unsettled run the entry holds (nothing is created;
+//   the records under a player's own id are his to write: he holds his own runs only). Returns true when it noted.
+function elpHoldNote(st, p, fam, seasonId, runId, nowMs) {
+  const h = st && st.hist && st.hist[ratingHistKey(p, fam, seasonId)];
+  if (!elpEntryOk(h)) return false;
+  const r = h.runs.find((x) => (x[0] >>> 0) === (runId >>> 0));
+  if (!r || r[3] || ((r[7] | 0) & 1)) return false;   // settled, or its final segment came (that settles it whatever waits)
+  const w = (h.hold && typeof h.hold === 'object' && !Array.isArray(h.hold)) ? h.hold : (h.hold = {});
+  for (const k of Object.keys(w)) if (!(nowMs - Number(w[k]) < RATING.HOLD_MS)) delete w[k];
+  w[String(runId >>> 0)] = nowMs;
+  return true;
+}
+// run r of entry h is held (elpHoldNote): the solo lane saw a segment of it waiting / deferred less than RATING.HOLD_MS ago
+function elpRunHeld(h, r, nowMs) {
+  if (nowMs == null || !h || !h.hold || typeof h.hold !== 'object') return false;
+  const t = Number(h.hold[String(r[0] >>> 0)]);
+  return t <= nowMs && nowMs - t < RATING.HOLD_MS;
 }
 // the unsettled runs of entry h that this settle pass will settle (elpSettleAll: in start order, up to the first run that may not):
 //   the set of their indexes in h.runs
@@ -8762,6 +8800,12 @@ function elpTrim(h) {
   while (settled > ELP.WINDOW && h.runs.length && h.runs[0][3]) { const g = h.runs.shift(); settled--; h.old.push(g[0] >>> 0); (h.gone = h.gone || []).push(g[3] === 2 ? [g[0] >>> 0, g[4] | 0, g[8] | 0, 1] : [g[0] >>> 0, g[4] | 0, g[8] | 0]); }
   if (h.old.length > RATING.OLD_IDS) h.old.splice(0, h.old.length - RATING.OLD_IDS);
   if (h.gone && h.gone.length > RATING.GONE_CAP) h.gone.splice(0, h.gone.length - RATING.GONE_CAP);
+  // Q433: a hold note leaves with its run's settle (or the run leaving the entry); a stale one left by a run still open goes with
+  //   the next note (elpHoldNote)
+  if (h.hold) {
+    for (const k of Object.keys(h.hold)) if (!h.runs.some((r) => !r[3] && String(r[0] >>> 0) === k)) delete h.hold[k];
+    if (!Object.keys(h.hold).length) delete h.hold;
+  }
 }
 // settle every settleable run of the current season's competitive histories: player by player, each player's runs of every family
 //   in his pass order (elpPassOrder) onto his one points entry. The windows are trimmed once every player is through (a member
@@ -14945,6 +14989,7 @@ async function main() {
   //   (soloState is read before the fresh list -- cloud audit Q245)
   const ratingTouched = new Set();   // O103: sids whose competitive run history moved this run (settled segment / conviction) -> their rating row is redone in maintainRating
   const soloGapTick = { seen: {} };   // cloud audit Q428: soloChainPlan opts.gapSettle -- the solo lane's segments open this run, per chain key
+  const elpHeldRuns = new Set();   // cloud audit Q433: the competitive runs (chain keys) the solo lane held back from settling this run (elpHoldNote)
   // O180 (client knife 5.1c-1): this week's boards -- the id from the chain memory (kept when the week's first write created the
   //   board; the listing can lag behind a fresh board) or the listing; neither = no row this week yet (created at the first write).
   //   A read failure leaves cupWeekOk false: weekly rows are skipped this run (a KeepBest against an unread board could overwrite a
@@ -15173,6 +15218,15 @@ async function main() {
     }
     const key = laneKeyOf(f, p);
     const plan = soloChainPlan(soloState, key, f, m, nowMs, { recovered: !!r.recovered, gapSettle: soloGapTick });   // Q428: signed lane -- a waited-out chain gap settles on its own
+    // cloud audit Q433: a competitive run (solo / couch) with a segment waiting here -- while the job may still settle it itself
+    //   (the gap window) -- or chained and deferred below (pacing, a board unresolved) is not settled by 24 h without a segment / a newer run / the cutover
+    //   meanwhile (elpHoldNote; its final segment settles it as ever)
+    const elpHold = (waiting) => {
+      if (PT_MODE || casual || classic || ccCas) return;
+      if (waiting && !(nowMs - ((soloState.wait[m] && soloState.wait[m].t0) || nowMs) <= Math.min(COMP.GAP_SETTLE_MS, COMP.CHAIN_WAIT_MS))) return;
+      if (elpHoldNote(soloState, p, cc ? couchRatingFam() : 'solo', f.seasonId, ratingRunId(key), nowMs)) elpHeldRuns.add(key);
+    };
+    if (plan.ok === null) elpHold(true);   // waiting for its chain (logged just below)
     if (plan.ok === null) { console.log('  solo ' + m + ': ' + plog(sid) + ' depth ' + f.startDepth + '->' + f.endDepth + ' waiting for its chain (' + plan.reason + ')'); return false; }
     // Q425: a casual segment the run's own line refuses (after-final / reroll-lost / perk_chain) that fits a token resume at an
     //   earlier checkpoint whose record has not been seen yet waits for it -- 'wait'; past the chain wait 'gone' (the old verdict,
@@ -15232,7 +15286,7 @@ async function main() {
     // O606: a couch run writes the duo pair (merged) and the couch pair (always: the dual write a split relies on)
     const couchBoardsOk = () => [compFam.DUO, couchComp].every((F) => F.id && !(seasonId >= 1 && !F.seasonId));
     const couchCasOk = () => !!couchCas.id && !(seasonId >= 1 && !couchCas.seasonId);   // knife C3a: the casual couch pair only
-    if (!cpId || (cc ? (ccCas ? !couchCasOk() : !couchBoardsOk()) : classic ? !enClassicSoloId : casual ? (!cas.id || (seasonId >= 1 && !cas.seasonId)) : (!compId || (seasonId >= 1 && !compSeasonId)))) { console.log('  ' + laneTag + ' ' + m + ': cp/' + (cc ? (ccCas ? 'couch casual' : 'duo+couch comp') : classic ? 'classic-solo' : casual ? 'casual-solo' : 'comp') + '/seasonal board unresolved -- left pending'); return false; }
+    if (!cpId || (cc ? (ccCas ? !couchCasOk() : !couchBoardsOk()) : classic ? !enClassicSoloId : casual ? (!cas.id || (seasonId >= 1 && !cas.seasonId)) : (!compId || (seasonId >= 1 && !compSeasonId)))) { elpHold(false); console.log('  ' + laneTag + ' ' + m + ': cp/' + (cc ? (ccCas ? 'couch casual' : 'duo+couch comp') : classic ? 'classic-solo' : casual ? 'casual-solo' : 'comp') + '/seasonal board unresolved -- left pending'); return false; }
     // pacing: the segment's own start attestation (single guard attester) or its first sighting
     let pend = startsPending[m];
     // Q245: a key reopened for this account -- its start row went when the other account's segment closed the key; pace from
@@ -15246,6 +15300,7 @@ async function main() {
     }
     const reqMs = endlessRequiredMs({ startDepth: f.startDepth, endDepth: f.endDepth }, plan.proven, classic ? CLASSIC.LEVEL_S_SOLO : 0);   // O216: classic 60s levels
     if (nowMs - (pend.t0 || 0) < reqMs) {
+      elpHold(false);
       console.log('  solo-pacing ' + m + ': depth ' + f.startDepth + '->' + f.endDepth + ' (proven ' + plan.proven + ') needs ' + Math.round(reqMs / 1000) + 's real time, seen ' + Math.round((nowMs - (pend.t0 || 0)) / 1000) + 's -- deferred');
       return false;
     }
@@ -17345,6 +17400,7 @@ async function main() {
   for (const sid of Object.keys(changedXp)) rowLayAhead('xw', sid, changedXp[sid] | 0);
   for (const sid of Object.keys(changedCp)) rowLayAhead('cw', sid, cpClamp(changedCp[sid]));
   for (const d of ebBoards) for (const sid of Object.keys(d.pool || {})) ebLayAhead(d.name, sid, d.pool[sid]);
+  RUN.elpHeld = elpHeldRuns.size;   // cloud audit Q433
   await elpUpkeep(soloState);   // O728: the runs that can settle settle (start order) + today's pass-line table, before the chain memory is saved below
   { const nPr = pruneRatingHist(soloState, seasonId); if (nPr) console.log('rating history: ' + nPr + ' entries older than the previous season pruned'); }   // O103: before the chain memory is saved below
   if (aheadNow.size) console.log('write-ahead: ' + aheadNow.size + ' write(s) of this run on disk before the first one goes out (Q334)');
@@ -17817,7 +17873,7 @@ Object.assign(module.exports, { teamXpFloor, teamXpStarts, teamXpMark, teamRollb
 Object.assign(module.exports, { seatOnlyDispute, SEAT_ONLY_TAIL_MAX, SEAT_ONLY_AUDIT_WAIT_MS, seedcapKnowsKey, seedcapLastVerdictMs, seatOnlyAuditGate });   // cloud audit Q418 held team segment that differs only in the seat scores: the chain moves past it (test/seat-only-chain.js)
 Object.assign(module.exports, { RATING, RATING_FAMS, ENDLESS_RATING_LB, ELP_ALL, elpAllKey, elpAllOf, elpEntryOk, elpFamEntries, elpMergeByStart, elpPassOrder, elpPlaceAt, elpLeftOf, elpOldUntil, elpMins, elpSeedNow, ratingOwed, ratingOwedLive, ratingWriteCode, elpPassOrders, elpTryOrder, elpPickOrders, ELP_ORDER_CAP, SEASON_UNSCHEDULED, elpSettledRuns, elpRunsBefore, elpSaveAt, elpOpenAt, elpBeforeItems, elpBeforeLists, elpBorrowCounts, elpBorrowOrders, ELP_BORROW_CAP, elpRowSkill, elpMemberReadings, elpTeamPick, elpLinesByFam, elpSkillsOf, elpCandidateTabs, ENDLESS_RATING_LB_SOLO, ENDLESS_RATING_LB_DUO, ENDLESS_RATING_LB_TRIO, ENDLESS_RATING_LB_QUAD, ENDLESS_TIERCUT_LB, ratingFamOf, fnv32, ratingRunId, ratingHistKey,
   ratingHistUpsert, ratingHistRemove, ratingHistFinal, elpRunRk, ratingScoreOf, ratingPlan, ratingTierOf, tiercutDay, tiercutEncode, tiercutDecode, tiercutDue, pruneRatingHist,
-  elpSettledDepths, elpLinesAt, elpCandidates, elpSettleRun, elpTrim, elpSettleAll, elpRunReady, elpNewerRun, elpPendingSettles, elpTeamNote, elpMemberHiddenBefore, elpTeamHidden, elpTeamTrim, elpLinesOf, elpHiddensOf, elpLinesSkipBanned, elpTableKey, elpTabNewest, elpTabRecord });
+  elpSettledDepths, elpLinesAt, elpCandidates, elpSettleRun, elpTrim, elpSettleAll, elpRunReady, elpNewerRun, elpPendingSettles, elpHoldNote, elpRunHeld, elpTeamNote, elpMemberHiddenBefore, elpTeamHidden, elpTeamTrim, elpLinesOf, elpHiddensOf, elpLinesSkipBanned, elpTableKey, elpTabNewest, elpTabRecord });
 Object.assign(module.exports, { ELP_R_V7, ELP_R_QUIT, elpSegLv, elpTabVer, elpPriorPub, elpLevelBefore, elpMemberLevelBefore, elpTeamLevel, elpRowFresh, elpRowLevel, elpSettleRunLv, elpLevelReplay });
 Object.assign(module.exports, { ELP_LV_SET_MAX, elpLvSetOf, elpLvSet, elpQ432Lift });   // Q432   // O942 version 7 (test/endless-level.js)
 Object.assign(module.exports, { ELP_RESTART_BACK, elpRestartOn, elpRestartStart, elpRestartOwn, elpRestartChainAt, elpRestartReads, elpO1015Lift, elpLvChoose });   // O1015 (test/elp-restart-start.js)
