@@ -239,7 +239,7 @@ try {
       ['[8d] peers-gone only', 'const early = g.filter((r) => dispOf(r) === 1), fin', 'const early = g.filter((r) => dispOf(r) === 1 || dispOf(r) === 5), fin', () => shape(1, 0x41C2, { e: { disp: 5 } })],
       ['[8e] finished only', 'fin = g.filter((r) => dispOf(r) === 0);', 'fin = g.filter((r) => dispOf(r) === 0 || dispOf(r) === 6);', () => shape(1, 0x41C3, { c: { disp: 6 } })],
       ['[8f] one vector', 'if (fl < 1 || !fin.every((r) => vo(r) === v0 && lv(r) === fl)', 'if (fl < 1 || !fin.every((r) => lv(r) === fl)', () => shape(1, 0x41C4, { c: { sc: [0, 16037, 14550] } })],
-      ['[8g] free-for-all', 'if (isEndlessMt(mt) || isBotMt(mt) || isTeamMt(mt) || pc < 3 || pc > 6) return null;\n  const vo', 'if (isEndlessMt(mt) || isBotMt(mt) || pc < 3 || pc > 6) return null;\n  const vo', () => shape(3, 0x41C5)],
+      ['[8g] free-for-all', 'if (isEndlessMt(mt) || isBotMt(mt) || (isTeamMt(mt) && !team) || pc < 3 || pc > 6) return null;', 'if (isEndlessMt(mt) || isBotMt(mt) || pc < 3 || pc > 6) return null;', () => shape(3, 0x41C5)],   // Q436: the 2V2 / 3V3 codes are taken (test/team2-host-early-end.js)
       ['[8h] one table', 'if (table[s] != null && table[s] !== sid) return null;', '', () => shape(1, 0x41C6, { b: { ros: [A, B, X] } })],
       ['[8i] the finishers seat him', '.length * 2 <= fin.length) return null;', '.length * 2 < 0) return null;', () => shape(1, 0x41C7, { b: { ros: ['0', B, C] }, c: { ros: ['0', B, C] } })],
       ['[8j] his own seat', 'if (early.some((r) => who(r) !== es || (r.d[5] | 0) !== eSeat) || fin.some((r) => who(r) === es)) return null;', 'if (fin.some((r) => who(r) === es)) return null;',

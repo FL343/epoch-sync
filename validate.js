@@ -4761,6 +4761,7 @@ function writeRunSummary() {
       '| start-orphan seats spared by their own exit note (Q64) | ' + s('exitNoteSpared', 0) + ' |',
       '| absent seats the anti-cheat removed, excused at a settle: named by the finishers / by their own exit note / past the cap, convicted as before (O886) | ' + s('eacExcused', 0) + ' / ' + s('eacExcusedNote', 0) + ' / ' + s('eacExcuseCapped', 0) + ' |',
       '| keys whose one early \'peers-gone\' writer the others outlived (Q414): his record set aside, the rest settled, nobody flagged / excused at the settle (the O886 cap) / past the cap, convicted / consolation owed | ' + s('earlySetAside', 0) + ' / ' + s('earlyExcused', 0) + ' / ' + s('earlyExcuseCapped', 0) + ' / ' + s('earlyOwed', 0) + ' |',
+      '| of those, quick / ranked 2V2 / 3V3 keys whose early writer was the opening host, not a lone dissenter (Q436) / 2V2 / 3V3 keys whose one refusal named only its writer\'s own team, his table the others\', read as the agreed winner, not a lone dissenter (Q436) / opening hosts past the excuse cap held, not convicted, while the team-code hold is on (Q436) | ' + s('earlyT2', 0) + ' / ' + s('t2OwnName', 0) + ' / ' + s('earlyT2Held', 0) + ' |',
       '| keys the host\'s match header held voided at maturity / seats spared there (Q294) | ' + s('headerVoid', 0) + ' / ' + s('headerSpared', 0) + ' |',
       '| starts-state notes / endless, friends\' room and bot entries dropped, no record of the key left on the shards (Q144) | ' + s('noteGone', 0) + ' / ' + s('entryGone', 0) + ' |',
       '| processed keys remembered / dropped past the cap (Q144) | ' + s('processedN', 0) + ' / ' + s('processedPruned', 0) + ' |',
@@ -11522,12 +11523,32 @@ function applyLiftOrphans(gr, signals, processed, now) {
 //   past it convicted as a leave) and owed the consolation a void paid him (CONSOLATION_XP, through the Q315 queue). A
 //   match the early writer finished himself (the 5-seat key: a 'finished' record of his own with other scores) is not
 //   this shape and stays as it was.
+// Q436 (cloud audit, W374 section 7; the raw records read by the local job 11-24, mailbox M1008): the same end in quick /
+//   ranked 2V2 / 3V3 (base 5 / 6 / 8 / 9) went to the team-gamble lone dissent pass instead (Q51): the old host's record
+//   is the one that differs, so he was the lone dissenter of his own match ('own-side host'): struck, flagged, the key left
+//   unsettled (each writer the 50), and his second strike in 30 days judged him a leaver (ranked: the fine) -- six keys
+//   11-21..11-23, one of them his second (182117ac, undone by hand 11-24, user's call A90). Two of the six had nobody leave
+//   first: the promote step's close above is enough. The team codes take the shape with two more guards: the early writer
+//   is the opening host (seat 0 -- the one whose connection the promote step closes; a joiner's early end is a refusal or a
+//   host-left, Q435 / Q51 lanes), and the finishers' rank claims name one winner (the settle's only reading of a team
+//   outcome). What the old rule guarded against is not given up: a host who drops out of a match his team is losing no
+//   longer voids it (it settles as the others played it, he is an absent seat under the shared excuse cap); his excused
+//   seat shields his teammates as an anti-cheat removal does (O886), as any absent teammate's seat does.
+//   Past the shared cap (review of Q436, round 1): while the team-code hold is on (T2_EARLY_HOLD, the same knob as the Q443
+//   hold, T2LD_HOLD_LONE=0 turns both off), such an opening host is HELD at the settle instead of convicted: excused for the
+//   match as a t2ex seat (no conviction, no fine, no streak break, not a counted losing seat), no excuse spent, no
+//   consolation, a log line and the earlyT2Held count -- never heavier than the old rule (it struck him; his second strike
+//   now settles under the Q443 hold with him excused the same way). Off (restored with the Q442 fix): convicted as Q414 does.
 // Pure. vecOf: the reconcile's consistency vector (a 'BAD' one is never taken). null, or { kind: 'early', g: the
-//   finishers' records (same objects, same order), early: { sid, seat, levels, fLevels, n: his records }, fin: [sids] }.
+//   finishers' records (same objects, same order), early: { sid, seat, levels, fLevels, n: his records }, fin: [sids],
+//   team: 1 on a 2V2 / 3V3 code (Q436), else 0 }.
+const T2_EARLY_HOLD = process.env.T2LD_HOLD_LONE !== '0';   // Q436 (above): the past-cap opening host of a 2V2 / 3V3 is held, not convicted
 function earlyEndVerdict(g, vecOf) {
   if (!g || g.length < 3) return null;
   const mt = g[0].d[2] | 0, pc = g[0].d[8] | 0;
-  if (isEndlessMt(mt) || isBotMt(mt) || isTeamMt(mt) || pc < 3 || pc > 6) return null;
+  const team = isSubScoreMt(mt);   // Q436: quick / ranked 2V2 / 3V3; the other team codes (3 / 4) keep their rules
+  if (isEndlessMt(mt) || isBotMt(mt) || (isTeamMt(mt) && !team) || pc < 3 || pc > 6) return null;
+  if (team && pc !== 2 * teamSizeOfMt(mt)) return null;
   const vo = vecOf || ((r) => JSON.stringify(r.d.slice(10, 10 + pc)));
   const who = (r) => String(r.steamID != null ? r.steamID : (r.w || ''));
   for (const r of g) {
@@ -11544,6 +11565,7 @@ function earlyEndVerdict(g, vecOf) {
   if (fs.length < 2) return null;
   const v0 = vo(fin[0]), fl = lv(fin[0]);
   if (fl < 1 || !fin.every((r) => vo(r) === v0 && lv(r) === fl) || !early.every((r) => lv(r) < fl)) return null;
+  if (team && (eSeat !== 0 || team2WinTeamOf(fin) == null)) return null;   // Q436: the opening host; one winner the finishers name
   const table = {};
   for (const r of g) {
     const ro = r.roster || decodeRoster(r.d);
@@ -11560,7 +11582,72 @@ function earlyEndVerdict(g, vecOf) {
   if (fin.filter((r) => String((r.roster || decodeRoster(r.d))[eSeat]) === es).length * 2 <= fin.length) return null;
   for (const s of Object.keys(table)) if ((s | 0) !== eSeat && table[s] === es) return null;
   for (const r of fin) if (table[r.d[5] | 0] !== who(r)) return null;
-  return { kind: 'early', g: fin, early: { sid: es, seat: eSeat, levels: Math.max(...early.map(lv)), fLevels: fl, n: early.length }, fin: fs };
+  return { kind: 'early', g: fin, early: { sid: es, seat: eSeat, levels: Math.max(...early.map(lv)), fLevels: fl, n: early.length }, fin: fs, team: team ? 1 : 0 };
+}
+
+// ---- a lone team-gamble refusal that names only its writer's own team, his table the agreed one (cloud audit Q436, M1008) ----
+// Two of the keys the lone dissent pass (Q51) struck 11-23 (-2117525534_1786354570_12293, 2V2, its writer the opening host;
+//   -1359323181_125788339_65544, 3V3, a joiner of the host's team) carry a refusal (rank 0) that names a seat of its writer's
+//   OWN team (Q43's T2BY_TAG int) beside a score table equal to the others' cell by cell. A client names the seat it holds
+//   responsible for the gamble round going wrong for it (client authority.js _t2Flag(.., by)): the host that took its reveal
+//   and gave it no verified settle frame in time -- a client that only loses large packets writes that too (client test
+//   team2-culprit.js [1d]) -- or that sent a frame it could not verify. When the named seat is on the refuser's own team,
+//   whatever that host did to the round it did for the refuser's team: it cannot have cheated him. A host cheating the
+//   other team is named by that team's clients as well (each verifies the same frames), so such a refusal is not alone;
+//   and the others, the opposing team among them, verified the round and agree on its outcome. Still Q51 struck him (a
+//   refusal is a refusal: free, the key unsettled for everybody, his second strike in 30 days a leave), and the Q43 pass
+//   only counted the name (one accuser).
+// Read here as the agreed outcome, before any lane weighs the group (as Q435 reads a warm rejoin's finished refusal): each
+//   record of his is replaced by a copy claiming the winner the others agree on from his seat (rank 1 on the winning team,
+//   teamSize + 1 on the other; the settle derives the ranks from the scores; t2OwnName keeps his own claim), so the key
+//   settles as played and nobody is struck or flagged for it. Only when:
+//   - quick / ranked 2V2 / 3V3 (base 5 / 6 / 8 / 9), every record of the key on one code and one seat count (2 * teamSize);
+//   - exactly one account wrote a refusal (a rank outside 1..2*ts), and every record of his is one (no claim of his beside
+//     it, Q76's both sides), written from the seat the others' roster consensus names him at;
+//   - each of them names seats (T2BY_TAG: a mask inside the seats, not his own) and every seat it names is on his team;
+//   - his records' score vector is the others' cell by cell, at the levels they played, ended 'finished' (0 / 10);
+//   - the others: two accounts or more, every record a sane claim ended 'finished' (0 / 10), one vector, one level count,
+//     one winner, settleable on their own (sanity, distinct seats, not void by consensus);
+//   - no record of the key carries a Q61 gamble block (a client took a frame's amounts back) or a Q339 lift block.
+//   A refusal that names nobody (t2-forfeit: it may be the opposing host cutting him -- Q51's own case), one that names a
+//   seat of the other team, two refusers (Q56 / Q43), a table of his that differs: the old rules. A modified client gains
+//   nothing from the shape: the key settles as the others wrote it, whatever he claims.
+// Pure. null, or { g: the group with his records replaced (same order, the others' the same objects), sid, seat, n: his
+//   records, named: [seats], win }.
+function t2OwnNameVerdict(g) {
+  if (!g || g.length < 3) return null;
+  const mt = g[0].d[2] | 0;
+  if (!isSubScoreMt(mt)) return null;
+  const ts = teamSizeOfMt(mt), pc = 2 * ts, at = 11 + 3 * pc;
+  const who = (r) => String(r.steamID != null ? r.steamID : (r.w || ''));
+  const refused = (r) => { const k = r.d[6] | 0; return k < 1 || k > pc; };
+  const vk = (r) => JSON.stringify(r.d.slice(10, 10 + pc));
+  const lv = (r) => (r.d[7] | 0) >> 1, fin = (r) => REJOIN_ASIDE.FIN.indexOf(r.d[10 + pc] | 0) >= 0;
+  const tagOf = (r) => (r.d.length > at && ((r.d[at] | 0) & ~0x3F) === T2BY_TAG) ? ((r.d[at] | 0) & 0x3F) : 0;
+  for (const r of g) if ((r.d[2] | 0) !== mt || (r.d[8] | 0) !== pc || r.d.length < at || !who(r) || gambleTagOf(r) || liftOrphanBlockOf(r)) return null;
+  const refusers = [...new Set(g.filter(refused).map(who))];
+  if (refusers.length !== 1) return null;
+  const sid = refusers[0];
+  const mine = g.filter((r) => who(r) === sid), rest = g.filter((r) => who(r) !== sid);
+  if (!mine.every(refused) || new Set(rest.map(who)).size < 2 || !rest.every(fin)) return null;
+  const v0 = vk(rest[0]), l0 = lv(rest[0]);
+  if (l0 < 1 || !rest.every((r) => vk(r) === v0 && lv(r) === l0)) return null;
+  const win = team2WinTeamOf(rest);
+  if (win == null || sanityFlags(rest).length) return null;
+  const taken = rest.map((r) => r.d[5] | 0);
+  if (new Set(taken).size !== taken.length || voidByConsensus(rest.map((r) => r.dispCode | 0)).isVoid) return null;
+  const seat = team2RosterSeat(rosterConsensus(rest), sid, taken);   // where the others name him (Q76), never the seat he writes
+  if (seat < 0) return null;
+  const named = new Set();
+  for (const r of mine) {
+    if ((r.d[5] | 0) !== seat || vk(r) !== v0 || lv(r) !== l0 || !fin(r)) return null;
+    const m = tagOf(r);
+    if (!m || (m & (1 << seat)) || (m >> pc)) return null;
+    for (let s = 0; s < pc; s++) if (m & (1 << s)) { if (teamOfSeat(s, ts) !== teamOfSeat(seat, ts)) return null; named.add(s); }
+  }
+  const rank = (teamOfSeat(seat, ts) === win) ? 1 : ts + 1;
+  const g2 = g.map((r) => { if (who(r) !== sid) return r; const d = r.d.slice(); d[6] = rank; return Object.assign({}, r, { d, t2OwnName: r.d[6] | 0 }); });
+  return { g: g2, sid, seat, n: mine.length, named: [...named].sort((a, b) => a - b), win };
 }
 
 // ===== consensus grouping (audit 2026-09-06 D-F11 / B-F10 / E-G3: extracted from main() so the "N ends agree" rule is testable) =====
@@ -11589,7 +11676,8 @@ function groupRecords(recs, opts) {
   const consistentMatches = [], inconsistentGroups = [];
   const nosum = { settle: 0, pending: 0, host: 0 }, nosumHost = [], nosumHeld = [];   // Q68
   const lorph = { settle: 0, hold: 0 };   // Q339
-  const early = { settle: 0 };   // Q414
+  const early = { settle: 0, team: 0 };   // Q414 (team: of them 2V2 / 3V3 keys, Q436)
+  const ownName = { n: 0 };   // Q436: lone refusals naming only their writer's own team, read as the agreed winner
   for (const m of Object.keys(groups)) {
     const g = groups[m];
     // O93 solo competitive segment (pc=1 endless, guard-signed): one seat = no consensus lane. It enters
@@ -11624,6 +11712,15 @@ function groupRecords(recs, opts) {
       console.log('  match=' + m + ': ' + ra.aside.length + ' earlier record(s) of ' + ra.sids.length + ' writer(s) who came back and finished the match set aside, nobody flagged for them (Q415): ' + was);
       if (ra.t2) console.log('  match=' + m + ': ' + ra.t2.map((a) => 'seat ' + a.seat + ' = ' + plog(a.sid) + ' (' + a.recs.length + ' early team-gamble refusal(s)'
         + (a.own ? ', his finished record a refusal too, read as the agreed winner' : '') + ')').join(', ') + ' -- came back and played the match out, not a dissenter (Q435)');
+    }
+    // Q436: a lone team-gamble refusal naming only seats of its writer's own team, his table the others' cell by cell
+    //   (t2OwnNameVerdict), is read as the agreed winner from his seat before any lane weighs the group (in place, as above)
+    const on = t2OwnNameVerdict(g);
+    if (on) {
+      g.splice(0, g.length, ...on.g);
+      g.t2OwnName = on.n; ownName.n++;   // the run summary's count (main)
+      console.log('  match=' + m + ': seat ' + on.seat + ' = ' + plog(on.sid) + ' refused the team gamble (' + on.n + ' record(s)) naming only his own team\'s seat(s) '
+        + on.named.join('/') + ', his table the others\' cell by cell -- read as the agreed winner (team ' + on.win + '), not a dissenter, nobody flagged (Q436)');
     }
     // Q438: a two-player endless run whose connection dropped (one record host-left / migrate-disband, the other peers-gone /
     //   finished) settles on the part both records wrote -- the smaller depth, each seat's smaller score, the final bit on a
@@ -11717,12 +11814,12 @@ function groupRecords(recs, opts) {
       } else if (ee) {
         const was = own();
         g.splice(0, g.length, ...ee.g);   // in place, as Q68's settle: the early writer's records leave the group
-        consistent++; early.settle++;
+        consistent++; early.settle++; if (ee.team) early.team++;
         const cons = voidByConsensus(g.map(r => r.dispCode));
         consistentMatches.push({ m, g, void: cons.isVoid, early: ee.early });
         console.log('  match=' + m + ': ' + plog(ee.early.sid) + ' (seat ' + ee.early.seat + ') settled alone as the one player left after '
           + ee.early.levels + ' level(s), ' + ee.fin.length + ' others finished all ' + ee.early.fLevels + ' on one vector -- his record set aside,'
-          + ' the rest consistent, nobody flagged (Q414) disp=[' + g.map(r => r.disp).join(',') + ']'
+          + ' the rest consistent, nobody flagged (' + (ee.team ? 'Q436: the opening host of a 2V2 / 3V3, not a lone dissenter' : 'Q414') + ') disp=[' + g.map(r => r.disp).join(',') + ']'
           + (cons.isVoid ? ' -> consensus VOID, not settled (' + cons.voidVotes + '/' + cons.present + ')' : '') + ' -- as written: ' + was);
       } else {
         flagged++;
@@ -11738,9 +11835,10 @@ function groupRecords(recs, opts) {
   console.log('reconciled: ' + Object.keys(groups).length + ' (consistent ' + consistent + ' / lone ' + lone + ' / inconsistent ' + flagged + (soloN ? ' / solo ' + soloN : '')
     + ((nosum.settle || nosum.pending || nosum.host) ? ' / without the final summary: settled ' + nosum.settle + ', held ' + nosum.pending + ', nobody got it ' + nosum.host : '')
     + ((lorph.settle || lorph.hold) ? ' / host migration lifts named: settled ' + lorph.settle + ', held ' + lorph.hold : '')
-    + (early.settle ? ' / an early end set aside: ' + early.settle : '')
+    + (early.settle ? ' / an early end set aside: ' + early.settle + (early.team ? ' (2V2 / 3V3: ' + early.team + ')' : '') : '')
+    + (ownName.n ? ' / a lone refusal naming its own team read as agreed: ' + ownName.n : '')
     + (common ? ' / endless after a dropped connection, settled on the part both wrote: ' + common : '') + ')');
-  return { groups, consistentMatches, inconsistentGroups, consistent, flagged, lone, soloN, nosum, nosumHost, nosumHeld, lorph, early, common };
+  return { groups, consistentMatches, inconsistentGroups, consistent, flagged, lone, soloN, nosum, nosumHost, nosumHeld, lorph, early, common, ownName };
 }
 
 async function main() {
@@ -12732,6 +12830,7 @@ async function main() {
   RUN.nosum = gr.nosum.settle + ' / ' + gr.nosum.pending + ' / ' + gr.nosum.host;   // Q68
   RUN.lorph = gr.lorph.settle + ' / ' + gr.lorph.hold;   // Q339
   RUN.earlySetAside = gr.early.settle;   // Q414
+  RUN.earlyT2 = gr.early.team; RUN.t2OwnName = gr.ownName.n;   // Q436
   RUN.endlessCommon = gr.common | 0;   // Q438
 
   // start/settle cross-check runs BEFORE the early returns: the very scenario it exists for
@@ -16665,6 +16764,10 @@ async function main() {
     //   spent at the conviction loop, where the settle can no longer be deferred. Q414: the early writer set aside (c.early) too.
     const edPlan = eacExcusePlan(g, leavers0, pend, leavers, nowMs, (h) => !!confState[h + '|' + c.m] || confSeen.has(h + '|' + c.m) || t2ex.has(h), c.early);
     for (const h of edPlan.ex.keys()) t2ex.add(h);
+    // Q436: a 2V2 / 3V3 opening host set aside (c.early) past the cap is held while the team-code hold is on (T2_EARLY_HOLD):
+    //   excused for this match like t2ex, no excuse spent, no consolation (the conviction loop logs and counts him)
+    const edHeld = new Set((c.early && isSubScoreMt(matchType) && T2_EARLY_HOLD) ? edPlan.capped.filter((y) => y.by === 'early').map((y) => y.h) : []);
+    for (const h of edHeld) t2ex.add(h);
     // Q136 (see teamLossCounted): a team match whose losing team counts nobody at this settle -- no writer on a losing seat,
     //   no losing seat convicted on his own record -- moves no rating: no TrueSkill update, no points, no placement seed of a
     //   writer, no group-decay step. Nobody is flagged (each writer already carries the Q69 `un` signal per named-only seat);
@@ -17221,6 +17324,12 @@ async function main() {
           if (nv !== cur) { lp[x.steamID] = nv; changedLp[x.steamID] = nv; noteReceipt(x.steamID, g[0].d[3] | 0, nv - cur, RECEIPT_F.LEAVE, 0); }
           console.log('  excused LP ' + c.m + ': ' + plog(x.steamID) + ' pts ' + cur + '-' + EAC_EXCUSE.FINE + '->' + nv);
         }
+        continue;
+      }
+      if (edHeld.has(pid(String(x.steamID)))) {   // Q436: past the cap, held while the team-code hold is on
+        RUN.earlyT2Held = (RUN.earlyT2Held | 0) + 1;
+        console.log('  leaver ' + c.m + ': seat ' + x.seat + ' = ' + plog(x.steamID) + ' the opening host of a 2V2 / 3V3 settled alone after ' + c.early.levels
+          + ' level(s) (his record set aside), past ' + EAC_EXCUSE.CAP + ' excuses in the window -- held while the team-code hold is on, no conviction, no excuse spent (Q436)');
         continue;
       }
       if (t2ex.has(pid(String(x.steamID)))) {
@@ -17887,6 +17996,7 @@ Object.assign(module.exports, { endlessDispute });   // cloud audit Q317 endless
 Object.assign(module.exports, { roomDispute });   // cloud audit Q407 friends' room / bot match of three writers or more whose records disagree (test/room-dispute.js)
 Object.assign(module.exports, { REJOIN_ASIDE, rejoinAsideVerdict });   // cloud audit Q415 a writer's own earlier record of a friends' room / bot match he came back to and finished (test/rejoin-aside.js; seedcap.js reads it)
 Object.assign(module.exports, { rejoinAsideTeam, rejoinEarlyOnly, rejoinNamesSeat });   // cloud audit Q435 the same for a 2V2 / 3V3 joiner's team-gamble refusal (test/team2-rejoin-aside.js)
+Object.assign(module.exports, { t2OwnNameVerdict, T2_EARLY_HOLD });   // cloud audit Q436 a lone 2V2 / 3V3 refusal naming only its writer's own team (test/team2-host-early-end.js)
 Object.assign(module.exports, { ENDLESS_COMMON, endlessCommonVerdict });   // cloud audit Q438 a two-player endless run after a dropped connection settles on the part both records wrote (test/endless-common-part.js)
 Object.assign(module.exports, { noteOwnStarts, hasOwnStart, OWN_START_CAP });   // cloud audit Q69 own-record evidence for leaver verdicts
 Object.assign(module.exports, { resultRecOf, keptKeys, keptSeal, keptOpen, keptKeep, keptRecords, KEPT_REC_MAX_MS, KEPT_REC_CAP, KEPT_TAG, SETTLE_MAGIC });   // cloud audit Q373 a held group's results kept against shard rotation (test/kept-held-records.js)
