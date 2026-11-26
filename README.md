@@ -246,8 +246,9 @@ absent, so a run is unaffected before it is provisioned.
   `test/endless-lp.js` + golden cases kind `endless`; settle `test/endless-rating.js`): every settled
   competitive endless segment (solo lane, team lane, couch lane on duo while merged) enters or raises its
   run in a per-(player, family, season) history kept in `endless-solo.json` (`hist`, pid-keyed). Each run
-  settles once, in start order (its final segment, a newer run of the player, or 24 h without a segment and
-  without a save point), onto the family's points on the versus scale, shaped like a versus match (rules v2):
+  settles once, in start order (its final segment, a newer run of the player once 2 h passed with neither the
+  newer run nor a segment of the run new [Q433], or 24 h without a segment and without a save point), onto the
+  family's points on the versus scale, shaped like a versus match (rules v2):
   the target follows the player's own hidden skill (trimmed mean depth of the last 10 runs) plus an offset by
   the run seed, so about half the runs pass; passing gains, missing loses, the versus table times a per-tier
   multiplier (capped under the series margin). Below master grinding climbs (no pull down, a tier floor);

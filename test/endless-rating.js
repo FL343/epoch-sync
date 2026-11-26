@@ -84,6 +84,11 @@ const SCRUB = ['PT_MODE', 'STRICT_BOARDS', 'APPLY_MMR', 'ALLOW_TEST', 'DEMO_APPI
   'ENDLESS_COMP_LB_DUO', 'ENDLESS_COMP_LB_TRIO', 'ENDLESS_COMP_LB_QUAD', 'ENDLESS_RATING_LB', 'ENDLESS_RATING_LB_SOLO', 'ENDLESS_RATING_LB_DUO', 'ENDLESS_RATING_LB_TRIO', 'ENDLESS_RATING_LB_QUAD',
   'ENDLESS_TIERCUT_LB', 'TIERCUT_CARRIER_SID', 'ELP_IDLE_MS', 'COUCH_DUO'];
 for (const k of SCRUB) delete process.env[k];
+// Q433 (2): a newer run now gives an unfinished run up only after RATING.GIVEUP_MS (2 h) with neither a segment of it nor the newer
+// run new. The worlds below were written for the instant rule (a newer run settles the older one in the same pass); a grace of 0 is
+// that rule exactly (elpGiveUpDue is true at once; test/elp-newer-grace.js [5] checks the two agree on random histories), so this file
+// keeps reading them so, and the grace itself is tested in test/elp-newer-grace.js. The child runs below inherit it.
+process.env.ELP_GIVEUP_MS = '0';
 process.env.STATE_SALT = 's';   // same salt as the child runs below, so v.pid() addresses their state rows
 const v = require(path.join(__dirname, '..', 'validate.js'));
 const attest = require(path.join(__dirname, '..', 'attest.js'));

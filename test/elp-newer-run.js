@@ -9,7 +9,9 @@
 //   [1] elpNewerRun / elpRunReady / elpPendingSettles on small shapes: an old-version run after it (first seen in the same pass or
 //       later) does not settle the run before it; a same- or newer-version run does, first seen in the same pass (every run a pass
 //       first sees carries that pass's instant) or later; a parked run followed by a finished run of its version in one pass: both
-//       settle in that pass; final / idle / a parked run alone as before
+//       settle in that pass; final / idle / a parked run alone as before. Q433 second draft (cloud audit 2026-11-25): a newer run
+//       gives a run up once RATING.GIVEUP_MS passed after the later of its first sighting and the run's last segment
+//       (elpGiveUpDue, test/elp-newer-grace.js) -- the shapes that give a run up are read that long after the pass
 //   [2] replay of the real case (fixtures/elp-early-settle-1124.json: the two players' state before that pass, keys anonymised,
 //       their new and old run as the pass first saw them): the pass at 14:03Z settles neither new run (nor the old run behind it);
 //       once each ends at 24 (its final segment), each settles as a pass at T 24 (p1 +99, p2 +119), and the old runs settle exactly
@@ -44,16 +46,17 @@ const OLD_NEWER = 'newer = i < h.runs.length - 1';
 // [1] small shapes: [runId, depth, firstSeen, settled, d, T, lastMs, flags, seed]; flags 1 final, 2 parked, 4 v7, 16 v8
 function shapes(v) {
   const t0 = 1795528957049, now = t0 + 60000, IDLE = v.RATING.IDLE_MS;
+  const late = t0 + 5000 + v.RATING.GIVEUP_MS;   // Q433 second draft: a newer run gives the run up once its grace passed
   const run = (id, depth, seen, flags) => [id, depth, seen, 0, 0, 0, seen, flags, id];
   const H = (...runs) => ({ runs });
   return {
     sameInstantOld: !v.elpNewerRun(H(run(1, 10, t0, 16), run(2, 7, t0, 6)), 0) && !v.elpRunReady(H(run(1, 10, t0, 16), run(2, 7, t0, 6)), 0, now),
     oldBlockedBehind: JSON.stringify([...v.elpPendingSettles(H(run(1, 10, t0, 16), run(2, 7, t0, 6)), now)]) === '[]',
-    samePassSame: v.elpNewerRun(H(run(1, 10, t0, 16), run(2, 3, t0, 16)), 0) && v.elpRunReady(H(run(1, 10, t0, 16), run(2, 3, t0, 16)), 0, now),
+    samePassSame: v.elpNewerRun(H(run(1, 10, t0, 16), run(2, 3, t0, 16)), 0) && v.elpRunReady(H(run(1, 10, t0, 16), run(2, 3, t0, 16)), 0, late),
     samePassNewer: v.elpNewerRun(H(run(1, 10, t0, 4), run(2, 3, t0, 16)), 0),
-    samePassParkedThenFinal: JSON.stringify([...v.elpPendingSettles(H(run(1, 10, t0, 18), run(2, 5, t0, 17)), now)]) === '[0,1]',
+    samePassParkedThenFinal: JSON.stringify([...v.elpPendingSettles(H(run(1, 10, t0, 18), run(2, 5, t0, 17)), late)]) === '[0,1]',
     laterOld: !v.elpNewerRun(H(run(1, 10, t0, 16), run(2, 7, t0 + 5000, 6)), 0),
-    laterSame: v.elpNewerRun(H(run(1, 10, t0, 16), run(2, 3, t0 + 5000, 16)), 0) && v.elpRunReady(H(run(1, 10, t0, 16), run(2, 3, t0 + 5000, 16)), 0, now),
+    laterSame: v.elpNewerRun(H(run(1, 10, t0, 16), run(2, 3, t0 + 5000, 16)), 0) && v.elpRunReady(H(run(1, 10, t0, 16), run(2, 3, t0 + 5000, 16)), 0, late),
     laterNewer: v.elpNewerRun(H(run(1, 10, t0, 4), run(2, 3, t0 + 5000, 16)), 0),
     final: v.elpRunReady(H(run(1, 24, t0, 17), run(2, 7, t0, 6)), 0, now),
     idle: v.elpRunReady(H(run(1, 10, t0, 16)), 0, t0 + IDLE) && !v.elpRunReady(H(run(1, 10, t0, 16)), 0, t0 + IDLE - 1),

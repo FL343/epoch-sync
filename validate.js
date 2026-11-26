@@ -7427,6 +7427,7 @@ const RATING = {
   HIST_SEASONS: 2,                            // history kept for the current and the previous season
   IDLE_MS: Number(process.env.ELP_IDLE_MS || 24 * 3600000),   // a run with no segment for this long and no save point settles at its depth
   HOLD_MS: Number(process.env.ELP_HOLD_MS || 2 * 3600000),    // Q433: a run the solo lane last saw a segment of waiting this long ago settles by the old rules again
+  GIVEUP_MS: Number(process.env.ELP_GIVEUP_MS || 2 * 3600000),   // Q433 (2): a newer run gives a run up once neither it nor a segment of the run came for this long (elpGiveUpDue)
   TAB_DAYS: 14,                               // tables kept in the chain memory (the settle reads the one in force at the run's start)
   // O942 (version 7) lever: the rules version the published pass-line table carries (and the priors it falls back to). 6 until the gate
   //   of the version 7 package is raised: a version 6 client reads a version 7 table as "being rated" (rulesSame false), so the
@@ -7554,7 +7555,8 @@ function elpTeamNote(st, runId, pids, fam, s, nowMs) {
   return (st.elpTeam[k] = { r: pids.map(String).slice().sort(), fam, s: s | 0, at: nowMs, t0: nowMs });
 }
 // run i of entry h may settle now (its own condition; elpSettleAll also needs every run before it settled first): its final segment
-//   came, a newer run of the player in the family started (starting another run gives a save up), or no segment came for IDLE_MS
+//   came, a newer run of the player in the family started (starting another run gives a save up; once RATING.GIVEUP_MS passed, Q433
+//   second draft: elpGiveUpDue), or no segment came for IDLE_MS
 //   while no save point is open. The one predicate of elpSettleAll's loop and of elpPendingSettles (RC2-01: they must not drift).
 //   "A newer run" (elpNewerRun) is a run after it in the list of the same rules version or a later one -- not merely any run after
 //   it. 2026-11-24, the night the version 8 package went up: a player's first version 8 run and his old version 7 run (parked at a
@@ -7564,7 +7566,8 @@ function elpTeamNote(st, runId, pids, fam, s, nowMs) {
 //   client cannot continue it). Such a run settles on its final segment, on a newer run of its version or a later one, or after
 //   IDLE_MS. The list position still decides between runs of one version, those first seen in the same pass included (every run a
 //   pass first sees carries that pass's instant): a parked run followed by a finished run of its version in one pass is given up
-//   there, as before -- a rule asking for a later first-seen instant would hold both back until the player plays again.
+//   by it, as before (GIVEUP_MS later since the Q433 second draft) -- a rule asking for a later first-seen instant would hold both
+//   back until the player plays again.
 function elpNewerRun(h, i) {
   const v = elpRunVer(h.runs[i]);
   for (let k = i + 1; k < h.runs.length; k++) if (elpRunVer(h.runs[k]) >= v) return true;
@@ -7573,7 +7576,10 @@ function elpNewerRun(h, i) {
 function elpRunReady(h, i, nowMs) {
   // cloud audit Q433: while a segment of the run still waits in the solo lane (elpRunHeld), its final segment alone settles it --
   //   not a newer run, not IDLE_MS, not the cutover below
-  const r = h.runs[i], held = elpRunHeld(h, r, nowMs), newer = elpNewerRun(h, i) && !held, idle = nowMs != null && nowMs - (r[6] || r[2] || 0) >= RATING.IDLE_MS && !held;
+  // Q433 second draft: a newer run gives it up only once the grace after the newer run's first sighting and its own last segment
+  //   passed (elpGiveUpDue): a final segment still on its way settles it at its true depth, a run still being played is never given
+  //   up by a run first seen beside it (O1044 1)
+  const r = h.runs[i], held = elpRunHeld(h, r, nowMs), newer = elpNewerRun(h, i) && elpGiveUpDue(h, i, nowMs) && !held, idle = nowMs != null && nowMs - (r[6] || r[2] || 0) >= RATING.IDLE_MS && !held;
   // O942 D6: once the version 7 package's gate is up (RATING.CUTOVER_MS, the upload runbook sets it), a version 6 run PARKED at a save
   //   point is never continued (the new client offers no resume of an old key's save) -- it settles at its save depth. A version 6 run
   //   still being PLAYED then (an old client mid-run: its checkpoint segments are on the board) is NOT cut: settling it now would read
@@ -7612,6 +7618,32 @@ function elpRunHeld(h, r, nowMs) {
   if (nowMs == null || !h || !h.hold || typeof h.hold !== 'object') return false;
   const t = Number(h.hold[String(r[0] >>> 0)]);
   return t <= nowMs && nowMs - t < RATING.HOLD_MS;
+}
+// ---- cloud audit Q433, second draft (2026-11-25; architecture decision 10): a newer run gives a run up only after a grace ----
+// A newer run of the family (elpNewerRun) gave a run up the very pass the job first saw it, at the depth the run held then. The
+//   run's own last segment was often not settled yet at that moment:
+//   - the one-match-at-a-time rule (writerPaced) deferred it one floor because the newer run's first segment took the account's
+//     slot in the same pass. 2026-11-24 10:11:50Z: a version 7 solo run at depth 15 (line 17), its final segment to 17 read in that
+//     pass and deferred 67 s behind a run quit at depth 0 that the same pass settled first -- the run settled at 15, a miss of -11;
+//     the final segment settled at 10:16:27Z and only raised the depth;
+//   - the guard sends a segment again from its retry outbox at the next run start (the newer run itself), so the newer run's first
+//     segment is on the shards before the old run's last one;
+//   - a run still being played sat before a run finished in the same pass (O1044 1: first-seen order within one pass is the shard
+//     read order) and was given up by it.
+//   Now a newer run gives the run up only once RATING.GIVEUP_MS passed since the later of the newer run's first sighting and the
+//   run's own last settled segment. A final segment arriving meanwhile settles the run at its true depth; a run still being played
+//   (its segments keep coming) is never given up by a run seen beside it; a run whose final never comes (a crash, a killed process,
+//   a lost record) is given up GIVEUP_MS later at the depth it reached, as before -- the same verdict, later. Waiting gives nothing:
+//   the runs behind it in its family wait with it (start order), the other families do not. No clock, or an anchor from the future
+//   (a damaged file): given up as before.
+function elpGiveUpDue(h, i, nowMs) {
+  if (nowMs == null) return true;
+  const r = h.runs[i], v = elpRunVer(r);
+  let k = i + 1;
+  while (k < h.runs.length && elpRunVer(h.runs[k]) < v) k++;   // the first run elpNewerRun counts (the list is in first-seen order)
+  if (k >= h.runs.length) return true;
+  const at = Math.max(Number(h.runs[k][2]) || 0, Number(r[6] || r[2]) || 0);
+  return !(at <= nowMs) || nowMs - at >= RATING.GIVEUP_MS;
 }
 // the unsettled runs of entry h that this settle pass will settle (elpSettleAll: in start order, up to the first run that may not):
 //   the set of their indexes in h.runs
@@ -8802,7 +8834,7 @@ function elpTrim(h) {
   if (h.gone && h.gone.length > RATING.GONE_CAP) h.gone.splice(0, h.gone.length - RATING.GONE_CAP);
   // Q433: a hold note leaves with its run's settle (or the run leaving the entry); a stale one left by a run still open goes with
   //   the next note (elpHoldNote)
-  if (h.hold) {
+  if (h.hold && typeof h.hold === 'object') {   // Q433 review P3: a hold that is not a map (a damaged file) is left alone, never thrown on
     for (const k of Object.keys(h.hold)) if (!h.runs.some((r) => !r[3] && String(r[0] >>> 0) === k)) delete h.hold[k];
     if (!Object.keys(h.hold).length) delete h.hold;
   }
@@ -17873,7 +17905,7 @@ Object.assign(module.exports, { teamXpFloor, teamXpStarts, teamXpMark, teamRollb
 Object.assign(module.exports, { seatOnlyDispute, SEAT_ONLY_TAIL_MAX, SEAT_ONLY_AUDIT_WAIT_MS, seedcapKnowsKey, seedcapLastVerdictMs, seatOnlyAuditGate });   // cloud audit Q418 held team segment that differs only in the seat scores: the chain moves past it (test/seat-only-chain.js)
 Object.assign(module.exports, { RATING, RATING_FAMS, ENDLESS_RATING_LB, ELP_ALL, elpAllKey, elpAllOf, elpEntryOk, elpFamEntries, elpMergeByStart, elpPassOrder, elpPlaceAt, elpLeftOf, elpOldUntil, elpMins, elpSeedNow, ratingOwed, ratingOwedLive, ratingWriteCode, elpPassOrders, elpTryOrder, elpPickOrders, ELP_ORDER_CAP, SEASON_UNSCHEDULED, elpSettledRuns, elpRunsBefore, elpSaveAt, elpOpenAt, elpBeforeItems, elpBeforeLists, elpBorrowCounts, elpBorrowOrders, ELP_BORROW_CAP, elpRowSkill, elpMemberReadings, elpTeamPick, elpLinesByFam, elpSkillsOf, elpCandidateTabs, ENDLESS_RATING_LB_SOLO, ENDLESS_RATING_LB_DUO, ENDLESS_RATING_LB_TRIO, ENDLESS_RATING_LB_QUAD, ENDLESS_TIERCUT_LB, ratingFamOf, fnv32, ratingRunId, ratingHistKey,
   ratingHistUpsert, ratingHistRemove, ratingHistFinal, elpRunRk, ratingScoreOf, ratingPlan, ratingTierOf, tiercutDay, tiercutEncode, tiercutDecode, tiercutDue, pruneRatingHist,
-  elpSettledDepths, elpLinesAt, elpCandidates, elpSettleRun, elpTrim, elpSettleAll, elpRunReady, elpNewerRun, elpPendingSettles, elpHoldNote, elpRunHeld, elpTeamNote, elpMemberHiddenBefore, elpTeamHidden, elpTeamTrim, elpLinesOf, elpHiddensOf, elpLinesSkipBanned, elpTableKey, elpTabNewest, elpTabRecord });
+  elpSettledDepths, elpLinesAt, elpCandidates, elpSettleRun, elpTrim, elpSettleAll, elpRunReady, elpNewerRun, elpPendingSettles, elpHoldNote, elpRunHeld, elpGiveUpDue, elpTeamNote, elpMemberHiddenBefore, elpTeamHidden, elpTeamTrim, elpLinesOf, elpHiddensOf, elpLinesSkipBanned, elpTableKey, elpTabNewest, elpTabRecord });
 Object.assign(module.exports, { ELP_R_V7, ELP_R_QUIT, elpSegLv, elpTabVer, elpPriorPub, elpLevelBefore, elpMemberLevelBefore, elpTeamLevel, elpRowFresh, elpRowLevel, elpSettleRunLv, elpLevelReplay });
 Object.assign(module.exports, { ELP_LV_SET_MAX, elpLvSetOf, elpLvSet, elpQ432Lift });   // Q432   // O942 version 7 (test/endless-level.js)
 Object.assign(module.exports, { ELP_RESTART_BACK, elpRestartOn, elpRestartStart, elpRestartOwn, elpRestartChainAt, elpRestartReads, elpO1015Lift, elpLvChoose });   // O1015 (test/elp-restart-start.js)

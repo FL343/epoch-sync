@@ -9,6 +9,9 @@
 //   and deferred (pacing / a board unresolved) -- validate.js elpHoldNote, the entry's hold[runId] -- and elpRunReady settles a
 //   run noted within RATING.HOLD_MS on its final segment only; a segment of the run that settles takes a note of an earlier pass
 //   away (ratingHistUpsert), so a deferral that ended leaves nothing behind.
+//   Second draft (same day): a newer run gives a run up only once RATING.GIVEUP_MS passed after the later of the newer run's first
+//   sighting and the run's own last segment (elpGiveUpDue; its own file test/elp-newer-grace.js). The shapes below that end with a
+//   newer run giving a run up now move on by that grace first.
 //   [0] static pins: the predicate (final first, the hold only on newer / idle / cut), the three lane sites, the lane's skip of
 //       casual / classic / couch casual / the trial channel, the gap-window bound, the history family (couch: couchRatingFam),
 //       the one caller of elpHoldNote, the clear in ratingHistUpsert, elpTrim's prune, the summary row
@@ -37,7 +40,7 @@ const SCRUB = ['PT_MODE', 'STRICT_BOARDS', 'APPLY_MMR', 'ALLOW_TEST', 'DEMO_APPI
   'SHARD_STRICT_BODY', 'CP_LB', 'ENDLESS_LB', 'ENDLESS_LB_TRIO', 'ENDLESS_LB_QUAD', 'TRUST_LB', 'REPORT_LB', 'START_CONFIRM_MS', 'RESUME_TAG_REQUIRED',
   'ENDLESS_COMP_LB', 'ENDLESS_COMP_LB_DUO', 'ENDLESS_COMP_LB_COUCH', 'SAVE_BOX_LB_COUCH', 'ENDLESS_LB_SOLO', 'COMP_RUN_TTL_MS', 'SOLO_DONE_CAP', 'COUCH_DUO', 'COUCH_SIG_FLAG',
   'ENDLESS_LB_COUCH', 'SAVE_BOX_LB_CASUAL_COUCH', 'COMP_CHAIN_WAIT_MS', 'COMP_GAP_SETTLE_MS', 'ENDLESS_PACE_FRAC', 'SEASON_NOW',
-  'ELP_IDLE_MS', 'ELP_HOLD_MS', 'ELP_CUTOVER_MS', 'ELP_PUB_VER'];
+  'ELP_IDLE_MS', 'ELP_HOLD_MS', 'ELP_GIVEUP_MS', 'ELP_CUTOVER_MS', 'ELP_PUB_VER'];
 for (const k of SCRUB) delete process.env[k];
 process.env.STATE_SALT = 's';
 const ROOT = path.join(__dirname, '..');
@@ -216,7 +219,7 @@ function couchSeg(sid, id, runSeed, o) {
 // ---- [0] static pins ----
 {
   const pin = (label, s) => T('[0] ' + label, SRC.split(s).length === 2, 'not found exactly once: ' + s.slice(0, 140));
-  pin('elpRunReady: the hold read once', 'const r = h.runs[i], held = elpRunHeld(h, r, nowMs), newer = elpNewerRun(h, i) && !held, idle = nowMs != null && nowMs - (r[6] || r[2] || 0) >= RATING.IDLE_MS && !held;');
+  pin('elpRunReady: the hold read once (a newer run: after its grace too, Q433 second draft)', 'const r = h.runs[i], held = elpRunHeld(h, r, nowMs), newer = elpNewerRun(h, i) && elpGiveUpDue(h, i, nowMs) && !held, idle = nowMs != null && nowMs - (r[6] || r[2] || 0) >= RATING.IDLE_MS && !held;');
   pin('elpRunReady: the final segment settles whatever is held, the cutover not while held', 'return !!(((r[7] | 0) & 1) || newer || (idle && !((r[7] | 0) & 2)) || (cut && !held));');
   pin('the lane: a segment waiting for its chain notes its run', "    if (plan.ok === null) elpHold(true);   // waiting for its chain (logged just below)\n    if (plan.ok === null) { console.log('  solo ' + m");
   pin('the lane: a chained segment left pending (a board unresolved) notes its run', "{ elpHold(false); console.log('  ' + laneTag + ' ' + m + ': cp/'");
@@ -257,6 +260,8 @@ function units(vv) {
   const h = { runs: [run(1, 5, t0, 0)], hold: { 1: t0 } };
   o.heldIn = vv.elpRunHeld(h, h.runs[0], t0) && vv.elpRunHeld(h, h.runs[0], t0 + H0 - 1);
   o.heldOut = !vv.elpRunHeld(h, h.runs[0], t0 + H0);
+  { const s7 = st(); vv.elpHoldNote(s7, 'p', 'solo', 0, 1, t0); vv.elpHoldNote(s7, 'p', 'solo', 0, 1, t0 + HOUR); const h7 = E(s7);
+    o.refresh = h7.hold['1'] === t0 + HOUR && vv.elpRunHeld(h7, h7.runs[0], t0 + HOUR + H0 - MIN) && !vv.elpRunHeld(h7, h7.runs[0], t0 + HOUR + H0); }
   o.heldFutureNull = !vv.elpRunHeld(h, h.runs[0], t0 - 1) && !vv.elpRunHeld(h, h.runs[0], null) && !vv.elpRunHeld({ runs: h.runs }, h.runs[0], t0);
   // elpRunReady: idle
   const now = t0 + IDLE + 5 * MIN;
@@ -266,7 +271,7 @@ function units(vv) {
   o.idleStale = vv.elpRunReady(idleH(now - H0), 0, now);
   // a newer run: the held run does not settle, and holds back the run behind it
   const nh = (note) => ({ runs: [run(1, 5, t0, 0), run(2, 20, t0 + HOUR, 1)], hold: note == null ? undefined : { 1: note } });
-  const n1 = t0 + 2 * HOUR;
+  const n1 = t0 + HOUR + vv.RATING.GIVEUP_MS;   // past the grace after the newer run (Q433 second draft: elpGiveUpDue)
   o.newerOld = vv.elpRunReady(nh(null), 0, n1) && JSON.stringify([...vv.elpPendingSettles(nh(null), n1)]) === '[0,1]';
   o.newerHeld = !vv.elpRunReady(nh(n1 - MIN), 0, n1) && JSON.stringify([...vv.elpPendingSettles(nh(n1 - MIN), n1)]) === '[]';
   // the final segment settles a held run
@@ -286,6 +291,8 @@ function units(vv) {
   tr.runs[0][3] = 2; vv.elpTrim(tr);
   const tr2 = { runs: [run(1, 5, t0, 0)], old: [], hold: { 1: t0 } }; tr2.runs[0][3] = 2; vv.elpTrim(tr2);
   o.trim = JSON.stringify(tr.hold) === JSON.stringify({ 2: t0 }) && !('hold' in tr2);
+  { const bad = ['x', 7, true].map((hv) => { const b = { runs: [run(1, 5, t0, 0)], old: [], hold: hv }; b.runs[0][3] = 2; try { vv.elpTrim(b); return b.hold === hv; } catch (e) { return false; } });
+    o.trimBad = bad.every(Boolean); }
   // ratingHistUpsert: a segment of the run settles -- a note of an earlier pass leaves (the map with it when empty), one of this pass
   //   stays, another run's note is not touched
   const up = { hist: { 'p|solo|0': { best: [0, 0], runs: [run(1, 5, t0, 0), run(2, 5, t0, 0)], old: [], t: t0, hold: { 1: t0 + MIN, 2: t0 + MIN } } } };
@@ -307,6 +314,7 @@ T('[1] ... a stale note of another run leaves with the next note, a fresh one st
 T('[1] elpRunHeld: inside RATING.HOLD_MS', U.heldIn);
 T('[1] elpRunHeld: not at RATING.HOLD_MS', U.heldOut);
 T('[1] elpRunHeld: a note from the future / no clock / no map: not held', U.heldFutureNull);
+T('[1] each note replaces the last: the hold runs RATING.HOLD_MS from the newest note (review round 1, P3)', U.refresh);
 T('[1] elpRunReady idle: settles without a note (as before)', U.idleOld);
 T('[1] elpRunReady idle: not while held', U.idleHeld);
 T('[1] elpRunReady idle: the old rule again once the note is RATING.HOLD_MS old', U.idleStale);
@@ -317,6 +325,7 @@ T('[1] the cutover settles a parked old-version run without a note (as before)',
 T('[1] the cutover: not while held', U.cutHeld);
 T('[1] a parked run is not idle-settled (unchanged)', U.parkedIdle);
 T('[1] elpTrim: the notes of settled / gone runs leave, an empty map goes', U.trim);
+T('[1] elpTrim: a hold that is not a map (a damaged file) is left alone, nothing thrown (review round 1, P3)', U.trimBad);
 T('[1] ratingHistUpsert: a settled segment takes its run\'s note of an earlier pass away (an empty map goes), one of this pass stays, another run\'s stays', U.upsertClears);
 
 // ---- [2] pure points (the review's elp-points shape) ----
@@ -351,7 +360,7 @@ const same = (x, y) => JSON.stringify(x) === JSON.stringify(y);
 T('[2] control (no gap): the run passes at its line 20 (+83), the newer run after it settles too', PT.ctl.a[0] === 2 && PT.ctl.a[1] === 83 && PT.ctl.a[2] === 20 && PT.ctl.b[0] === 2, JSON.stringify(PT.ctl));
 T('[2] the bug shape, no notes: 24 h on, the run settles at its head 5 (-10)', !!PN.idle.early && PN.idle.early.r[0] === 5 && PN.idle.early.r[3] === -10, JSON.stringify(PN.idle));
 T('[2] idle, noted: nothing settles while its segments wait; the final segment settles it at 20 exactly as the control (+83)', !PT.idle.early && PT.idle.end[0] === 20 && same(PT.idle.end.slice(2), PT.ctl.a), JSON.stringify(PT.idle));
-T('[2] the bug shape, no notes: the newer run gives it up at its head at once (-10)', !!PN.newer.early && PN.newer.early.r[0] === 5 && PN.newer.early.r[3] === -10 && PN.newer.early.at === HOUR, JSON.stringify(PN.newer));
+T('[2] the bug shape, no notes: the newer run gives it up at its head once its grace passed (-10; second draft: the grace, not the notes, decides when)', !!PN.newer.early && PN.newer.early.r[0] === 5 && PN.newer.early.r[3] === -10 && PN.newer.early.at === HOUR + v.RATING.GIVEUP_MS, JSON.stringify(PN.newer));
 T('[2] a newer run, noted: neither settles while it waits; then both in order, each as the control', !PT.newer.early && same(PT.newer.a, PT.ctl.a) && same(PT.newer.b, PT.ctl.b), JSON.stringify(PT.newer));
 
 // ---- [3] main() ----
@@ -407,7 +416,8 @@ const SCEN = {
   // no gap, a deferral that ended: [5,10] (not final) first seen with its start (pacing defers it: noted), settles 10 min on; he
   //   stops (a crash) and plays another run 10 min later: its first segment deferred, then settled -- the run is given up at 10 in
   //   that pass, as without this rule
-  ended: (tree) => play(tree, [[0, HEAD], [2 * HOUR, HEAD], [10 * MIN, HEAD.concat(MID)], [10 * MIN, HEAD.concat(MID)], [10 * MIN, HEAD.concat(MID, BRUN)], [10 * MIN, HEAD.concat(MID, BRUN)]]),
+  //   Q433 second draft: given up once the grace after the newer run passed (the pass 2 h on), not in the pass that first saw it
+  ended: (tree) => play(tree, [[0, HEAD], [2 * HOUR, HEAD], [10 * MIN, HEAD.concat(MID)], [10 * MIN, HEAD.concat(MID)], [10 * MIN, HEAD.concat(MID, BRUN)], [10 * MIN, HEAD.concat(MID, BRUN)], [2 * HOUR, HEAD.concat(MID, BRUN)]]),
 };
 function judge(tree, which) {
   const o = {}, want = (k) => !which || which.indexOf(k) >= 0;
@@ -419,7 +429,7 @@ function judge(tree, which) {
   if (want('late')) { const r = SCEN.late(tree); o.late = { codes: codes(r), atB: snap(r[4], RS_A), end: snap(r[r.length - 1], RS_A), b: snap(r[r.length - 1], RS_B) }; o.late.ok = !o.late.atB.settled && likeCtl(o.late.end) && !!o.late.b && o.late.b.settled === 2; }
   if (want('pacing')) { const r = SCEN.pacing(tree); o.pacing = { codes: codes(r), deferred: /solo-pacing .*deferred/.test(r[3].out), after: snap(r[3], RS_A), end: snap(r[r.length - 1], RS_A) }; o.pacing.ok = o.pacing.deferred && !o.pacing.after.settled && !!o.pacing.end && o.pacing.end.settled === 2 && o.pacing.end.depth === 10; }
   if (want('board')) { const r = SCEN.board(tree); o.board = { codes: codes(r), pending: /board unresolved -- left pending/.test(r[3].out), after: snap(r[3], RS_A), end: snap(r[r.length - 1], RS_A) }; o.board.ok = o.board.pending && !o.board.after.settled && !!o.board.end && o.board.end.settled === 2 && o.board.end.depth === 10; }
-  if (want('ended')) { const r = SCEN.ended(tree); o.ended = { codes: codes(r), deferred: /solo-pacing .*deferred/.test(r[2].out), noteGone: holdOf(r[3]).length === 0, end: snap(r[5], RS_A), b: snap(r[5], RS_B) }; o.ended.ok = o.ended.deferred && o.ended.noteGone && !!o.ended.end && o.ended.end.settled === 2 && o.ended.end.depth === 10 && !!o.ended.b && o.ended.b.settled === 2; }
+  if (want('ended')) { const r = SCEN.ended(tree); o.ended = { codes: codes(r), deferred: /solo-pacing .*deferred/.test(r[2].out), noteGone: holdOf(r[3]).length === 0, inGrace: snap(r[5], RS_A), end: snap(r[6], RS_A), b: snap(r[6], RS_B) }; o.ended.ok = o.ended.deferred && o.ended.noteGone && !!o.ended.inGrace && !o.ended.inGrace.settled && !!o.ended.end && o.ended.end.settled === 2 && o.ended.end.depth === 10 && !!o.ended.b && o.ended.b.settled === 2; }
   if (want('orphan')) { const r = SCEN.orphan(tree); o.orphan = { codes: codes(r), orphan: /save-orphan/.test(r[3].out), in: snap(r[3], RS_A), after: snap(r[4], RS_A), end: snap(r[r.length - 1], RS_A) }; o.orphan.ok = o.orphan.orphan && !o.orphan.in.settled && !o.orphan.after.settled && !!o.orphan.end && o.orphan.end.settled === 2 && o.orphan.end.depth === 5; }
   return o;
 }
@@ -434,13 +444,15 @@ T('[3] a newer run: neither the run nor the newer run settles while its segments
 T('[3] a late predecessor (3 h, a newer run in between): the run waits for it and settles as the control', /^0+$/.test(J.late.codes) && J.late.ok, js(J.late));
 T('[3] a segment deferred by pacing over the idle instant holds the run; it then settles at 10', /^0+$/.test(J.pacing.codes) && J.pacing.ok, js(J.pacing));
 T('[3] a segment left pending (the CP board missing) over the idle instant holds the run; it then settles at 10', /^0+$/.test(J.board.codes) && J.board.ok, js(J.board));
-T('[3] a deferral that ended (pacing, then settled) leaves no hold: the newer run gives the run up at 10 in the same pass as before', /^0+$/.test(J.ended.codes) && J.ended.ok, js(J.ended));
+T('[3] a deferral that ended (pacing, then settled) leaves no hold: the newer run gives the run up at 10 as before -- once its grace passed (second draft), not in the pass that first saw it', /^0+$/.test(J.ended.codes) && J.ended.ok, js(J.ended));
 T('[3] a resume whose save point never came: held inside the gap window and RATING.HOLD_MS after, then the run settles at its head 5 as before', /^0+$/.test(J.orphan.codes) && J.orphan.ok, js(J.orphan));
 
 // ---- [4] mutations ----
 const MUT = [
   ['the predicate without the hold', 'held = elpRunHeld(h, r, nowMs), newer', 'held = false, newer', 'points+idle'],
-  ['the hold not on a newer run', 'newer = elpNewerRun(h, i) && !held,', 'newer = elpNewerRun(h, i),', 'units'],
+  ['the hold not on a newer run', 'newer = elpNewerRun(h, i) && elpGiveUpDue(h, i, nowMs) && !held,', 'newer = elpNewerRun(h, i) && elpGiveUpDue(h, i, nowMs),', 'units'],
+  ['a note kept until it is stale (not replaced each pass: review round 1, X7)', '  w[String(runId >>> 0)] = nowMs;', '  if (!(String(runId >>> 0) in w)) w[String(runId >>> 0)] = nowMs;', 'units'],
+  ['elpTrim walks a hold that is not a map', "  if (h.hold && typeof h.hold === 'object') {   // Q433 review P3", '  if (h.hold) {   // Q433 review P3', 'units'],
   ['the hold not on the idle settle', '>= RATING.IDLE_MS && !held;', '>= RATING.IDLE_MS;', 'units'],
   ['the hold not on the cutover', '|| (cut && !held));', '|| cut);', 'units'],
   ['the hold over the final segment too', 'return !!(((r[7] | 0) & 1) || newer ||', 'return !!((((r[7] | 0) & 1) && !held) || newer ||', 'units'],
