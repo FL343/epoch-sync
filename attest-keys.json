@@ -560,15 +560,18 @@
       "pubInfo": {
         "20e5a7c0a06b5cf8125d8e5fbc925edc240a5c0b4dfeb8133c875d4343864452": {
           "ch": "ea",
-          "elp": 8
+          "elp": 8,
+          "retiredAt": "2026-11-27T03:27:55.266Z"
         },
         "cce1e2fbad0b0aedd538bda57c6cba4e672ead1108eb460299205dc8ff134bb9": {
           "ch": "ea",
-          "elp": 8
+          "elp": 8,
+          "retiredAt": "2026-11-27T03:27:55.266Z"
         },
         "de060d97c04661dd5a0455f108d5b27d02a9f3ed93eefb40e7fcd1d801a34e47": {
           "ch": "ea",
-          "elp": 8
+          "elp": 8,
+          "retiredAt": "2026-11-27T03:27:55.266Z"
         }
       }
     },
@@ -582,11 +585,13 @@
       "pubInfo": {
         "06cda3716963536ec9d268678f4729ac3fa8bcac89e6d764385c6570b3d5f20a": {
           "ch": "ea",
-          "elp": 8
+          "elp": 8,
+          "retiredAt": "2026-11-27T03:07:00.000Z"
         },
         "fa8f20a5814500d28774b1ba2d23bafd50e60a9ecd8839dde9cb0fc572a9c2f2": {
           "ch": "ea",
-          "elp": 8
+          "elp": 8,
+          "retiredAt": "2026-11-27T03:07:00.000Z"
         }
       }
     },
