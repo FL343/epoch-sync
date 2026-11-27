@@ -44,6 +44,22 @@ const { RULES_VER, LP_MAX, LP_SEG, lpSeg, LP_SEED, seedLp, SOFT_RESET, softReset
   rankedSeatMaskOf, mtSansSeats, seatAppliesLp, anyAppliesLp, guestSeatMaskOf, isGuestSeat, guestSeatOfMain, accountSeatsOf,
   RS_MAGIC, reducedStakesPlan, teamLpPlan, RS_THRESHOLD, RS_UPSET_BONUS, RS_STRONG_UPSET_LOSS, RS_SOLO_VS_TRIO, RS_TRIO_WIN, LEAVER_LP_PENALTY,
   ratingDetails, RECEIPT_F, lpDetailsOf, lpDetails, receiptPush, pulseDetails, PLACEMENT_TARGET, placementOf } = pointsPlan;
+// O1093 SHADOW (companion KNIFE_O1093 section 5 a; catch-up.js): a ranked versus player's deserved points -- the points at the
+//   place of the points board that matches his hidden-rating place -- are computed at the end of a run that settled matches,
+//   for the players whose rating row the run writes; published in the 4th int of that row (a constant 0 before; no reader of
+//   the shipped builds takes it: points-plan.js ratingDetailsOf reads the first three) and kept in his skill entry (`cu`,
+//   absent = none, so the state of a player without one is byte for byte what it was). NO POINTS MOVE BY IT: the settle logs
+//   what the catch-up rule would have added (the log line `catch-up (shadow)`), nothing more. The rule itself comes with
+//   points-plan.js RULES_VER 3 and the client build that carries the same file. points-plan.js is untouched here on purpose
+//   (the companion repo holds a byte-locked copy of it): the 4th int is patched onto ratingDetails() below.
+//   CATCH_UP=off: nothing computed, nothing published (the int stays 0), a `cu` is dropped at its player's next rating write.
+//   Fail-open: whatever the table does (a throw, an incomplete board read), the run settles as ever and publishes no new number.
+const catchTab = require('./catch-up.js');
+const CATCH_UP_ON = String(process.env.CATCH_UP || '').toLowerCase() !== 'off';
+// a skill entry's deserved points (0 = none)
+function cuOf(sk) { return (CATCH_UP_ON && sk && Number.isFinite(sk.cu) && sk.cu > 0) ? (sk.cu | 0) : 0; }
+// the rating row's details with the deserved points in the 4th int
+function ratingDet(plan, cu) { const d = ratingDetails(plan); if ((cu | 0) > 0) d[3] = cu | 0; return d; }
 // O480 points receipts: the details of every points-board write = the RS reveal slot (rv = this run's flagged outcome { matchHash,
 //   seed, flag, adjDelta, normalDelta }, else the unread reveal already on the row, kept as before) + the receipt ring (the row's
 //   ring with this run's events of the player applied in order: { mh, change, set, clear }, see points-plan.js receiptPush). Every
@@ -12497,7 +12513,7 @@ async function main() {
     if (!sk || !Number.isFinite(sk.mu) || !Number.isFinite(sk.sigma)) return null;
     const disp = ts.displayRating(sk.mu, sk.sigma), rr = rankedRatingOf(sk);
     const plan = rr ? ts.displayRating(rr.mu, rr.sigma) : disp;
-    return { disp, plan, det: ratingDetails(plan), mu: sk.mu, sigma: sk.sigma };
+    return { disp, plan, det: ratingDet(plan, cuOf(sk)), mu: sk.mu, sigma: sk.sigma };   // O1093: + his deserved points (the 4th int)
   };
   // his write of that board waiting for its retry (meant for the board this job writes), or null
   const rowWaiting = (f, sid) => { const e = lpBacklog[pid(String(sid))], w = e && e[f]; return (w && ROW_LB[f] && w.b === ROW_LB[f]) ? w : null; };
@@ -15316,6 +15332,7 @@ async function main() {
   };
   // ===== O93 solo competitive segment settle (COMP block above) =====
   //   (soloState is read before the fresh list -- cloud audit Q245)
+  const catchRun = { n: 0, pts: 0, lowN: 0, lowPts: 0 };   // O1093 SHADOW: the lines the catch-up rule would have raised this run and by how much (low: under the floor, counted apart)
   const ratingTouched = new Set();   // O103: sids whose competitive run history moved this run (settled segment / conviction) -> their rating row is redone in maintainRating
   const soloGapTick = { seen: {} };   // cloud audit Q428: soloChainPlan opts.gapSettle -- the solo lane's segments open this run, per chain key
   const elpHeldRuns = new Set();   // cloud audit Q433: the competitive runs (chain keys) the solo lane held back from settling this run (elpHoldNote)
@@ -17455,6 +17472,7 @@ async function main() {
           // O716: ... and at a quick seat of a mixed table too (his seat settles as a quick one: a quick seat moving it was Q160's hole)
           const prevR = rankedRatingOf(skill[pid(r.id)]), po = playedOut && seatLp(r.id) && playedOut.find((x) => x.id === r.id);
           const ent = { mu: r.mu, sigma: r.sigma };
+          { const cu0 = skill[pid(r.id)] && skill[pid(r.id)].cu; if (Number.isFinite(cu0) && cu0 > 0) ent.cu = cu0 | 0; }   // O1093: his deserved points stay as the run found them (refreshed after the run's settles)
           if (po) { ent.rm = po.mu; ent.rv = po.sigma; }
           else if (prevR) { ent.rm = prevR.mu; ent.rv = prevR.sigma; }
           skill[pid(r.id)] = ent;
@@ -17473,6 +17491,20 @@ async function main() {
           const sl = settleLine(cur, rs, rankX[r.id], nP, lineMode(r.id));
           const d0 = sl.d0, wonLike = sl.won, d = sl.d, nv = sl.nv;
           lp[r.id] = nv; changedLp[r.id] = nv; lpMoved[r.id] = nv - cur;
+          // O1093 SHADOW: what the catch-up rule would have added to this line (his deserved points as the run found them: the
+          //   number his client read off his rating row when the match began). Logged and counted, never applied.
+          try {
+            const desIn = cuOf(skill[pid(r.id)]);
+            if (desIn > 0 && rs) {
+              const seatR = seatOfSid.get(String(r.id)), t0c = premadeTrioAtOf(matchType) - 1;
+              const taxed = guestSeatOfMain(matchType, seatR) >= 0 || (!isTeamMt(matchType) && t0c >= 0 && seatR >= t0c && seatR <= t0c + 2);
+              const sx = catchTab.shadowExtra(rs, cur, desIn, taxed);
+              if (sx.extra > 0) { catchRun.n++; catchRun.pts += sx.extra; }
+              if (sx.low > 0) { catchRun.lowN++; catchRun.lowPts += sx.low; }
+              if (sx.extra > 0 || sx.low > 0) console.log('  catch-up (shadow) ' + c.m + ': ' + plog(r.id) + ' pts ' + cur + ' deserved ' + desIn + ', the win ' + (rs.adjDelta | 0) + ' of ' + (rs.normalDelta | 0)
+                + ' -> the rule would add ' + (sx.extra || sx.low) + (sx.low > 0 ? ' (under ' + catchTab.CATCH_FLOOR + ': not in the rule, counted apart)' : '') + (sx.approx ? ' (a taxed unit: a little high)' : '') + ' -- NOT applied (O1093)');
+            }
+          } catch (eC) { ghWarn('catch-up shadow: ' + String((eC && eC.message) || eC).slice(0, 120) + ' -- the line settled as ever'); }
           // O480: the match's points receipt on his row (what this settle moved, why: reveal flag / series clamp / seeded).
           //   SERIES = a series landing moved the points. A placement match held under the master line (sl.capped, O717) landed
           //   nowhere -- the promotion was taken back by the cap -- so it carries no SERIES: his client reads the same
@@ -17775,13 +17807,46 @@ async function main() {
     if (!c) return ratingRowOf(skill[pid(sid)]);
     const disp = ts.displayRating(c.mu, c.sigma), rr = rankedRatingOf(skill[pid(sid)]);
     const plan = rr ? ts.displayRating(rr.mu, rr.sigma) : disp;
-    return { disp, plan, det: ratingDetails(plan), mu: c.mu, sigma: c.sigma };
+    return { disp, plan, det: ratingDet(plan, cuOf(skill[pid(sid)])), mu: c.mu, sigma: c.sigma };   // O1093: + his deserved points (the 4th int)
   };
   const ratingSids = Object.keys(changed);
   for (const sid of goneHoldList(rowPendingSids('rw', ratingSids), 'rw', changed)) {   // O775: not one answered 27 less than a day ago
     if (changed[sid] || pastFuse('rating', sid, rowWaiting('rw', sid))) continue;
     if (ratingRowOf(skill[pid(sid)])) ratingSids.push(sid);
     else { console.log('  rating write of ' + plog(sid) + ': no rating in the skill state -- dropped (Q334)'); rowDrop('rw', sid); }
+  }
+  // O1093 SHADOW: the deserved points of the players whose rating row this run writes, from the points board as this run leaves it
+  //   (every row read + this run's settles and seeds) and the hidden rating the plan reads for each row's player. Before the
+  //   rows are laid ahead and the state is saved: a rating write that waits is rebuilt from the skill state (ratingRowOf).
+  if (!PT_MODE && rankedId && lpId) {
+    try {
+      if (!CATCH_UP_ON) { for (const sid of ratingSids) { const sk = skill[pid(sid)]; if (sk && sk.cu != null) delete sk.cu; } }
+      else if (!lpComplete) console.log('catch-up: the points board read was cut short -- no table this run, the deserved points stay as they were (O1093)');
+      else if (ratingSids.length) {
+        const hiddenOf = (sk) => { const rr = rankedRatingOf(sk) || ((sk && Number.isFinite(sk.mu) && Number.isFinite(sk.sigma)) ? sk : ts.DEFAULTS); return ts.displayRating(rr.mu, rr.sigma); };
+        const pop = Object.keys(lp).filter((sid) => lp[sid] != null);
+        const table = catchTab.tableOf(pop.map((sid) => ({ lp: lp[sid] | 0, hidden: hiddenOf(skill[pid(sid)]) })));
+        let above = 0;
+        for (const sid of ratingSids) {
+          const k = pid(sid), sk = skill[k];
+          if (!sk) continue;
+          const des = lp[sid] == null ? 0 : catchTab.desOf(table, hiddenOf(sk), catchTab.rankedGamesOf(xpState[k]));
+          if (des > 0) { sk.cu = des; if (des > (lp[sid] | 0)) above++; } else if (sk.cu != null) delete sk.cu;
+        }
+        // the table's own summary (numbers only): the players at the floor and up, and those of them the rule would serve today
+        let top = 0, pool = 0, poolPts = 0;
+        for (const sid of pop) {
+          if ((lp[sid] | 0) < catchTab.CATCH_FLOOR) continue;
+          top++;
+          const k = pid(sid), d = catchTab.desOf(table, hiddenOf(skill[k]), catchTab.rankedGamesOf(xpState[k]));
+          if (d > (lp[sid] | 0)) { pool++; poolPts += d - (lp[sid] | 0); }
+        }
+        RUN.catchUp = table.n + ' / ' + top + ' / ' + pool + ' / ' + poolPts;
+        console.log('catch-up (shadow): table of ' + table.n + ' points rows; ' + top + ' at ' + catchTab.CATCH_FLOOR + ' and up, ' + pool + ' of them under their deserved points (' + poolPts + ' in all); '
+          + ratingSids.length + ' rating row(s) this run, ' + above + ' published above the points of their player; the rule would have added ' + catchRun.pts + ' to ' + catchRun.n + ' line(s) this run'
+          + (catchRun.lowN ? ', and ' + catchRun.lowPts + ' to ' + catchRun.lowN + ' line(s) under the floor (not in the rule)' : '') + ' -- nothing applied (O1093)');
+      }
+    } catch (eC) { ghWarn('catch-up: the table could not be built (' + String((eC && eC.message) || eC).slice(0, 120) + ') -- the deserved points stay as they were'); }
   }
   for (const sid of ratingSids) rowLayAhead('rw', sid, ratingWriteOf(sid).disp);
   goneReport();   // O775: the settle's line (every fold of the backlog into this run's writes is behind it)

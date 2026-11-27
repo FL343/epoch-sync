@@ -97,8 +97,8 @@ const A = H.SID(4801), B = H.SID(4802), C = H.SID(4803), D = H.SID(4804), E = H.
 // ---- [5] wiring ----
 T('[5] the plan reads rankedRatingOf(skill) at a ranked settle, the writer publishes the same (else the stored display)',
   /const rIn = \(sid, base\) => \{ const rr = rankedNow \? rankedRatingOf\(skill\[pid\(sid\)\]\) : null;/.test(H.SRC)
-  && /const disp = ts\.displayRating\(c\.mu, c\.sigma\), rr = rankedRatingOf\(skill\[pid\(sid\)\]\);\n\s*const plan = rr \? ts\.displayRating\(rr\.mu, rr\.sigma\) : disp;\n\s*return \{ disp, plan, det: ratingDetails\(plan\)/.test(H.SRC)
-  && /const disp = ts\.displayRating\(sk\.mu, sk\.sigma\), rr = rankedRatingOf\(sk\);\n\s*const plan = rr \? ts\.displayRating\(rr\.mu, rr\.sigma\) : disp;\n\s*return \{ disp, plan, det: ratingDetails\(plan\)/.test(H.SRC)   // Q334: a rating write that waits, from the skill state
+  && /const disp = ts\.displayRating\(c\.mu, c\.sigma\), rr = rankedRatingOf\(skill\[pid\(sid\)\]\);\n\s*const plan = rr \? ts\.displayRating\(rr\.mu, rr\.sigma\) : disp;\n\s*return \{ disp, plan, det: ratingDet\(plan, cuOf\(skill\[pid\(sid\)\]\)\)/.test(H.SRC)
+  && /const disp = ts\.displayRating\(sk\.mu, sk\.sigma\), rr = rankedRatingOf\(sk\);\n\s*const plan = rr \? ts\.displayRating\(rr\.mu, rr\.sigma\) : disp;\n\s*return \{ disp, plan, det: ratingDet\(plan, cuOf\(sk\)\)/.test(H.SRC)   // Q334: a rating write that waits, from the skill state (O1093: both through ratingDet, the deserved points on the 4th int -- test/catch-up.js)
   && /score: disp, scoremethod: 'ForceUpdate', format: 'json' \}, rw\.det\);/.test(H.SRC));
 
 console.log(failN ? ('rating-details: ' + failN + ' FAIL') : 'rating-details: all ok');
