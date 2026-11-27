@@ -613,6 +613,24 @@
         }
       }
     },
+    "2026112702": {
+      "pubs": [
+        "610230943db0557a449db48e518a3b5164fe31e44caab95ae7821b731e72c08a",
+        "4e0a763c737eb161ed1908891e4b6cf02c20651d11d25b7fff97e5f9ba38bae2"
+      ],
+      "sealed": true,
+      "at": "2026-11-27T09:59:07.924Z",
+      "pubInfo": {
+        "4e0a763c737eb161ed1908891e4b6cf02c20651d11d25b7fff97e5f9ba38bae2": {
+          "ch": "ea",
+          "elp": 8
+        },
+        "610230943db0557a449db48e518a3b5164fe31e44caab95ae7821b731e72c08a": {
+          "ch": "ea",
+          "elp": 8
+        }
+      }
+    },
     "dev": {
       "pubs": [
         "f341d48777a90ad4ca0db15deb16824c7162c872fd48fa8c07b9b0458844d835"
