@@ -4920,6 +4920,7 @@ function writeRunSummary() {
       '| perk replay rejects | ' + s('perkRej', 0) + ' |',
       '| co-op resumes settled without a perk replay (O922) | ' + s('perkResumeLoose', 0) + ' |',
       '| casual segments that fit a token resume not seen yet (Q425): waiting / the resume never came (not settled, nobody flagged) | ' + s('resumeLateWait', 0) + ' / ' + s('resumeLateGone', 0) + ' |',
+      '| classic segments of a FINAL run that fit a classic token resume not seen yet (Q454): waiting / the resume never came (not settled, nobody flagged) | ' + s('classicLateWait', 0) + ' / ' + s('classicLateGone', 0) + ' |',
       '| endless co-op checks on values every writer copies from the host, nobody flagged (Q314): seat table short of the seat count (held) / reroll bitmap out of reach (rejected) | ' + s('endlessRosterShort', 0) + ' / ' + s('endlessRrRej', 0) + ' |',
       '| token resumes: replays caught / burnt-run segments / untagged settled / untagged refused | ' + s('resumeReplay', 0) + ' / ' + s('runBurnt', 0) + ' / ' + s('resumeUntagged', 0) + ' / ' + s('resumeUntaggedRej', 0) + ' |',
       '| solo same-key forks (another signed record under a settled segment key) | ' + s('soloKeyFork', 0) + ' |',
@@ -10776,6 +10777,28 @@ function casualLateResumeAt(run, f, pc, ch) {
   }
   return null;
 }
+// ---- cloud audit Q454 (2026-11-27, player voice V225): a classic segment of a resumed session seen while its run is still FINAL ----
+// A classic token resume (O216: the shop-token row the guard cut at the purchase depth) revives a FINAL run at any depth the run has
+//   proven; only the resumed session's first segment carries SEG_RESUMED + the row's tag. Its next segment (a plain classic one) could
+//   be judged before that first one settled -- the guard's outbox retried the first one later, or the one-match-at-a-time slot
+//   (writerPaced) pushed it a run because the dead session's last segments settled in the same run. Judged on the dead line it was
+//   chain REJECT (after-final), processed: it never settled, and every later segment of the run waited for it (live 11-27, a classic
+//   solo run at 407: 84 FINAL, the resume [84,85] deferred by the writer slot, [85,90] rejected, the run stuck at 85 until Q428's gap
+//   rule let the next one settle on its own a day later -- the five levels' XP lost). Q425 made the casual one wait; a classic one now
+//   waits too (the lane's lateResume) when it fits: a plain classic segment (not a resume, never casual / competitive / couch) of a
+//   FINAL run that is not burnt, starting above 0 (a depth-0 segment is a restart) and ending past the run's head (only such a segment
+//   can chain after a revive: one ending at or behind the head is a chain-back on the resumed line as well). A classic resume may
+//   start at any proven depth, so there is no checkpoint to work out (Q425's C), and classic has no continues, so no count to keep
+//   (run.lw stays casual). It credits nothing: only the resume -- one row, one session (R1-A3-02) -- revives the run; the wait runs on
+//   the chain-wait clock (st.wait[m], first sighting) and past COMP.CHAIN_WAIT_MS the old verdict applies (processed, nobody
+//   flagged). Never through the chain-gap rule: a waited-out gap settles on its own (Q428), and on a dead run that would be play past
+//   the death without a resume (soloChainVerdict judges after-final before it looks at the chain).
+function classicLateResumeFits(run, f) {
+  const fl = (f && f.flags) | 0;
+  if (!run || run.burnt || !run.final) return false;
+  if (!(fl & attest.SEG_CLASSIC) || (fl & (attest.SEG_RESUMED | attest.SEG_CASUAL | attest.SEG_COMP | attest.SEG_COUCH))) return false;
+  return (f.startDepth | 0) > 0 && (f.endDepth | 0) > (run.max | 0);
+}
 // zero-tail abstention (2026-07-19 audit M3): a cold reconnector who lands straight on results
 // never saw a verdict frame -- his GAME.endless is all zeros, so his record carries a legitimate
 // all-zero depth tail while his score slice matches everyone (the strict byte-equal vector used
@@ -15655,16 +15678,21 @@ async function main() {
     // Q425: a casual segment the run's own line refuses (after-final / reroll-lost / perk_chain) that fits a token resume at an
     //   earlier checkpoint whose record has not been seen yet waits for it -- 'wait'; past the chain wait 'gone' (the old verdict,
     //   nobody flagged); null = it fits no resume (the old path)
+    //   Q454: + a classic segment of a FINAL run that fits a classic token resume not seen yet (classicLateResumeFits; after-final is
+    //   the only refusal a classic segment meets here -- no picks, no rerolls): the same wait, its own counters and log line
     const lateResume = (why) => {
-      if (!(casual || ccCas)) return null;
-      const at = casualLateResumeAt(soloState.runs[key], f, cc ? 2 : 1, PERK_CH);
-      if (at == null) return null;
-      casualLateMark(soloState.runs[key], at);   // Q425 rework 1: that resume, when it comes, keeps the continue count
+      const cl = classic && why === 'after-final' && classicLateResumeFits(soloState.runs[key], f);
+      if (!cl && !(casual || ccCas)) return null;
+      const at = cl ? null : casualLateResumeAt(soloState.runs[key], f, cc ? 2 : 1, PERK_CH);
+      if (!cl && at == null) return null;
+      if (!cl) casualLateMark(soloState.runs[key], at);   // Q425 rework 1: that resume, when it comes, keeps the continue count
       const w = soloState.wait[m] || (soloState.wait[m] = { t0: nowMs });
       const gone = nowMs - (w.t0 || 0) > COMP.CHAIN_WAIT_MS;
-      if (gone) RUN.resumeLateGone = (RUN.resumeLateGone | 0) + 1; else RUN.resumeLateWait = (RUN.resumeLateWait | 0) + 1;
-      console.log('  solo ' + m + ': ' + plog(sid) + ' depth ' + f.startDepth + '->' + f.endDepth + ' ' + why + ' on the run\'s line, fits a token resume at depth ' + at +
-        (gone ? ' that never came -- not settled, nobody flagged (Q425)' : ' not seen yet -- waits for it (Q425)'));
+      if (cl) { if (gone) RUN.classicLateGone = (RUN.classicLateGone | 0) + 1; else RUN.classicLateWait = (RUN.classicLateWait | 0) + 1; }
+      else if (gone) RUN.resumeLateGone = (RUN.resumeLateGone | 0) + 1; else RUN.resumeLateWait = (RUN.resumeLateWait | 0) + 1;
+      const q = cl ? 'Q454' : 'Q425';
+      console.log('  solo ' + m + ': ' + plog(sid) + ' depth ' + f.startDepth + '->' + f.endDepth + ' ' + why + ' on the run\'s line, fits a ' + (cl ? 'classic token resume (any proven depth)' : 'token resume at depth ' + at) +
+        (gone ? ' that never came -- not settled, nobody flagged (' + q + ')' : ' not seen yet -- waits for it (' + q + ')'));
       return gone ? 'gone' : 'wait';
     };
     if (plan.ok === false && plan.reason === 'after-final' && lateResume('after-final') === 'wait') return false;
@@ -16258,6 +16286,17 @@ async function main() {
         const plan = soloChainPlan(soloState, key, f, c.m, nowMs);
         if (plan.ok === null) { console.log('  endless-classic ' + c.m + ': depth ' + f.startDepth + '->' + f.endDepth + ' waiting for its chain (' + plan.reason + ')'); continue; }
         if (plan.ok === false) {
+          // cloud audit Q454: a segment of a FINAL run that fits a classic token resume not seen yet waits for it (the solo lane's rule,
+          //   classicLateResumeFits: the resume may be held a run by the writer slot or a seat's missing record, Q47, or reach the shards
+          //   later); past the chain wait the reject below, nobody flagged
+          if (plan.reason === 'after-final' && classicLateResumeFits(soloState.runs[key], f)) {
+            const wK = soloState.wait[c.m] || (soloState.wait[c.m] = { t0: nowMs });
+            const goneK = nowMs - (wK.t0 || 0) > COMP.CHAIN_WAIT_MS;
+            if (goneK) RUN.classicLateGone = (RUN.classicLateGone | 0) + 1; else RUN.classicLateWait = (RUN.classicLateWait | 0) + 1;
+            console.log('  endless-classic ' + c.m + ': depth ' + f.startDepth + '->' + f.endDepth + ' after-final on the run\'s line, fits a classic token resume (any proven depth)' +
+              (goneK ? ' that never came -- not settled, nobody flagged (Q454)' : ' not seen yet -- waits for it (Q454)'));
+            if (!goneK) continue;
+          }
           RUN.soloRej = (RUN.soloRej | 0) + 1;
           noteResumeRule(plan.reason, true, loneSilent(rosterSids[0]) ? null : rosterSids[0]);   // seat 0 = the host (resumed rosters are re-seated host-first) = the row's box; Q406: not on one writer's word about him
           ghWarn('match=' + c.m + ': team classic segment chain REJECT (' + plan.reason + ') depth ' + f.startDepth + '->' + f.endDepth + ' ' + rosterSids.map(plog).join('+'));
@@ -18394,6 +18433,7 @@ Object.assign(module.exports, { BOT_KEY_WAIT_MS, botKeyPending });   // cloud au
 Object.assign(module.exports, { flagPlayer, flagsInWindow, stampLegacyFlags, TRUST_F_WINDOW_MS, SIG_FLAG_KEYS_CAP });   // cloud audit Q98 forgery flags age out of the trust tier (test/trust-decay.js)
 Object.assign(module.exports, { endlessHostOnly, SANITY_ENDLESS_HOST_SLUGS });   // cloud audit Q305 endless sanity on host-copied fields flags nobody (test/endless-host-fields.js)
 Object.assign(module.exports, { casualLateResumeAt, casualLateMark });   // cloud audit Q425 a resumed session's segment seen before its resume record waits for it (test/casual-resume-late.js)
+Object.assign(module.exports, { classicLateResumeFits });   // cloud audit Q454 a classic segment of a FINAL run waits for its resume not seen yet (test/classic-resume-late.js)
 Object.assign(module.exports, { endlessRecordSplit, endlessRerollCanon, SANITY_ENDLESS_OWN_SLUGS, SANITY_ENDLESS_REC_SLUGS, SANITY_ENDLESS_GROUP_HOST });   // cloud audit Q306 endless: one record's own fields drop that record (test/endless-own-fields.js)
 Object.assign(module.exports, { endlessDispute });   // cloud audit Q317 endless co-op run of three writers or more whose records disagree (test/endless-co-op-dispute.js)
 Object.assign(module.exports, { roomDispute });   // cloud audit Q407 friends' room / bot match of three writers or more whose records disagree (test/room-dispute.js)
