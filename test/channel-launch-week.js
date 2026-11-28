@@ -317,9 +317,14 @@ function check6(vv, src) {
   assert.ok(calls.length >= 2, 'fine sites found: ' + calls.length);
   // O886: one site is not a leave fine -- the amount an EXCUSED seat (removed by the anti-cheat) pays instead, its own knob
   //   (EAC_EXCUSE.FINE, 0 today; test/eac-excuse.js [8]). Exactly one such site; every leave fine stays on LEAVER_LP_FINE.
+  // Q447: the settle conviction's fine reads `graced ? gFine : LEAVER_LP_FINE`, gFine = absentGraceFine(LEAVER_LP_FINE, g)
+  //   (the week's first absence fined only what it handed his party, ABSENT_GRACE; test/absent-fine-grace.js) -- still
+  //   LEAVER_LP_FINE, never LEAVER_LP_PENALTY.
   const excuse = calls.filter((l) => /leaverLpPenalty\(cur, EAC_EXCUSE\.FINE\)/.test(l));
   assert.ok(excuse.length <= 1, 'excuse-fine sites: ' + excuse.length);
-  for (const l of calls) if (excuse.indexOf(l) < 0) assert.ok(/leaverLpPenalty\([^,]+, (LEAVER_LP_FINE|opts\.penalty)\)/.test(l), 'a fine site not on LEAVER_LP_FINE: ' + l.trim());
+  for (const l of calls) if (excuse.indexOf(l) < 0) assert.ok(/leaverLpPenalty\([^,]+, (LEAVER_LP_FINE|opts\.penalty|graced \? gFine : LEAVER_LP_FINE)\)/.test(l), 'a fine site not on LEAVER_LP_FINE: ' + l.trim());
+  // Q447: the graced fine is cut from LEAVER_LP_FINE itself (absentGraceFine), never from LEAVER_LP_PENALTY
+  if (calls.some((l) => /graced \? gFine : LEAVER_LP_FINE/.test(l))) assert.strictEqual(code.filter((l) => /\bconst gFine = absentGraceFine\(LEAVER_LP_FINE, /.test(l)).length, 1, 'the graced fine not cut from LEAVER_LP_FINE');
   const pen = code.filter((l) => /\bpenalty: /.test(l));
   assert.ok(pen.length >= 1 && pen.every((l) => /penalty: LEAVER_LP_FINE\b/.test(l)), 'the confession fine: ' + pen.map((l) => l.trim()).join(' | '));
   // LEAVER_LP_PENALTY in code only where it is the base of the window's fine, the knob, or a log
@@ -347,7 +352,8 @@ const UNIT = {
   harsherFine: ['  if (!(fine <= Number(base))) return off;\n', '', check1],
   markNotRead: ['    if (w[j] && w[j][2]) continue;   // O777', '    if (false) continue;   // O777', check2b],
   markNotReadXp: ['    if (w[j] && w[j][2]) continue;   // O777', '    if (false) continue;   // O777', check3],
-  fineSiteSource: ['        const nv = leaverLpPenalty(cur, LEAVER_LP_FINE);', '        const nv = leaverLpPenalty(cur, LEAVER_LP_PENALTY);', check6],
+  fineSiteSource: ['        const nv = leaverLpPenalty(cur, graced ? gFine : LEAVER_LP_FINE);', '        const nv = leaverLpPenalty(cur, graced ? gFine : LEAVER_LP_PENALTY);', check6],
+  graceFineSource: ['        const gFine = absentGraceFine(LEAVER_LP_FINE, confState[cvKey].g);', '        const gFine = absentGraceFine(LEAVER_LP_PENALTY, confState[cvKey].g);', check6],   // Q447
 };
 for (const key of Object.keys(UNIT)) {
   const [from, to, fn] = UNIT[key];
@@ -365,7 +371,7 @@ const E2E = {
     const c = cell('on', file), a = after(c, file);
     return c.m.okAll && a.n.okAll && !checkMarked(c) && J(c.entryI && c.entryI.w) === J([[MM.mh, 0]]) && a.xpI === XP_HALF;   // unmarked, counted after the window
   }],
-  fineSiteOld: ['        const nv = leaverLpPenalty(cur, LEAVER_LP_FINE);', '        const nv = leaverLpPenalty(cur, LEAVER_LP_PENALTY);', (file) => {
+  fineSiteOld: ['        const nv = leaverLpPenalty(cur, graced ? gFine : LEAVER_LP_FINE);', '        const nv = leaverLpPenalty(cur, graced ? gFine : LEAVER_LP_PENALTY);', (file) => {
     const c = cell('on', file);
     return c.m.okAll && !checkOn(c) && c.w.length === 1 && c.w[0].score === 1400;   // the 100 inside the window
   }],

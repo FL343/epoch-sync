@@ -4890,6 +4890,7 @@ function writeRunSummary() {
       '| results of a held group kept by the job / read from that copy, their shard row overwritten by a newer record (Q373) | ' + s('keptKeep', 0) + ' / ' + s('keptRead', 0) + ' |',
       '| confessions seen/penalized/refunded | ' + s('confess', '0/0/0') + ' |',
       '| leaves convicted at a settle this run, kept for a late result / late results forgiven (points of the finish, exit retracted) / late results over the cap, the leave stands (Q228) | ' + s('lateCv', 0) + ' / ' + s('lateForgive', 0) + ' / ' + s('lateCapped', 0) + ' |',
+      '| ranked absences convicted at a settle and not fined, the week\'s first (Q447; ABSENT_GRACE_N ' + ABSENT_GRACE.N + ' per ' + Math.round(ABSENT_GRACE.MS / 86400000) + ' days, 0 = off) | ' + s('absentGraced', 0) + ' |',
       '| win streak events landing before matches already counted (a late settle; its own tier counts what came before it) / stale (older than the fold, ignored) / absences frozen (the first in a week) / absences that broke a streak (O181) | ' + s('streakLate', 0) + ' / ' + s('streakStale', 0) + ' / ' + s('streakAbsFreeze', 0) + ' / ' + s('streakAbsBreak', 0) + ' |',
       '| ranked 1V1s only the winner wrote (Q184): counted on the silent seat / waiting for a second opponent / paid (points written) / not counted, no signals of his own / over the weekly cap | ' + s('lone1v1', '0 / 0 / 0 / 0 / 0') + ' (' + s('lone1v1Paid', 0) + ') |',
       '| of those paid, 1V1s of the one quick + ranked queue (match type 1, any ranked-seat mask): the consolation XP only, no points (Q446, O716 D12) | ' + s('lone1v1XpOnly', 0) + ' |',
@@ -5485,6 +5486,11 @@ async function reconcileConfessions(confs, groups, processed, confState, leavers
       }
       if (st.ex && leavers[p]) { unnoteLeave(leavers, p, m); st.ex = 0; retracted = true; res.retracted++; }   // O717 N2: + its listed leave
       if (st.cv) { leavers[p].lf = lf.concat([now]); res.late++; res.skEv.push({ p, mh: mhOfKey(m), t0: st.t0 || now, kind: 'pardon' }); }   // O181: the conviction's streak event turns into a freeze
+      // Q447: a graced conviction forgiven by his late result gives its grace back when it saved him nothing in the end
+      //   (absentGraceBack: ded + w - g >= 0, he ends where the fine and the same late result would leave him); a loss the
+      //   grace kept from him (never taken late) keeps it spent -- else holding a losing record back past the settle and
+      //   writing it later would cost nothing, every week
+      if (absentGraceBack(st) && returnAbsentGrace(leavers, p, m)) console.log(tag + m + ': ' + plog(p) + ' -- the week\'s grace of that conviction given back (Q447)');
       st.refunded = 1;
       if (wrote && opts.checkpoint) opts.checkpoint();   // R1-B2-03: the refund is relative too -- its marker on disk before the next exit
       else if ((retracted || st.cv) && opts.checkpoint) opts.checkpoint();   // Q228: an exit retracted or a late result forgiven alone too
@@ -5521,6 +5527,7 @@ async function reconcileConfessions(confs, groups, processed, confState, leavers
     } else console.log(what + (onBoard ? '' : ' on another points board') + ' (exit signal retracted)');
     if (st.ex && leavers[p]) { unnoteLeave(leavers, p, m); st.ex = 0; res.retracted++; }   // O717 N2: + its listed leave
     if (st.cv) res.skEv.push({ p, mh: mhOfKey(m), t0: st.t0 || now, kind: 'pardon' });   // O181: the conviction's streak event turns into a freeze
+    if (st.cv && st.gr && returnAbsentGrace(leavers, p, m)) console.log(what + ' -- the week\'s grace of that conviction given back (Q447)');
     st.refunded = 1; st.er = 1; res.errRefunded = (res.errRefunded | 0) + 1;
     if (opts.checkpoint) opts.checkpoint();   // R1-B2-03: its marker on disk before the next exit
   }
@@ -7198,6 +7205,77 @@ const LEAVER_LP_FINE = LEAVER_LP_EASY_ON.fine;   // the fine every ranked leave 
   else if ((rawF || rawU) && !(Date.parse(rawU) <= Date.now())) ghWarn('LEAVER_LP_EASY=' + JSON.stringify(rawF) + ' / LEAVER_LP_EASY_UNTIL=' + JSON.stringify(rawU) + ' not honored (a whole number 0..' + LEAVER_LP_PENALTY
     + ' and a strict ISO-8601 UTC instant at most ' + (LEAVER_XP_RECORD_ONLY_MAX_MS / 86400000) + ' days ahead) -- ranked leave fine stays ' + LEAVER_LP_PENALTY);
   else if (rawF || rawU) console.log('leaver points: the easy fine ended at ' + rawU + ' -- ranked leave fine ' + LEAVER_LP_PENALTY + ' again');
+}
+// ---- Q447 (cloud audit; ASK_USER A93): the week's first ranked absence is not fined ----
+// A ranked seat convicted absent at a settle (in the roster, his own start read, no record and no confession of his: a
+//   connection that dropped and never came back, a crash, a pulled cable, a killed process -- this job can not tell them
+//   apart; the others' records agree) took LEAVER_LP_FINE every time, the honest player whose connection died as the
+//   quitter (O554 kept it so; two players reported it, V123 / V157, 54 such fines on 11-23 / 11-24). With the grace on, the
+//   first such conviction in ABSENT_GRACE.MS is fined only what his absence handed his own premade party (the entry's g,
+//   Q228 lateShadow: a pair placing 1st and 4th takes +3 each together, the 1st +38 alone; at most the fine) -- a solo seat
+//   (g 0: V157, most of them) nothing. The streak's crash grace (streak-plan.js FREEZE_GRACE_MIN, the week's first absence
+//   freezes the streak instead of breaking it) on the points. Everything else of the conviction stands: the leave is
+//   counted unless his late result retracts it (Q228, LATE_CAP), the streak event, no points for the finish, his entry (cv)
+//   for a late result (Q228: max(0, ded + w - g) given back). Spent only where it saves him something (the fine less the g
+//   part, through the board's floor at 0: nothing at 0 points, nothing when g covers the fine); a conviction forgiven later
+//   gives it back when it saved him nothing in the end (his late result with ded + w - g >= 0: he ends where a fined
+//   conviction and the same late result leave him; a confirmed game error: refunded in full either way).
+//   Graced as any absence: a conviction past the O886 / Q414 cap of excuses (edCap, "convicted as a leave") -- the two
+//   lists are counted apart, so the week's 2 excuses + this 1. Not graced: a confession (his own word that he left), the
+//   start-orphan verdict and every other conviction path (no points fine there), a quick seat (no fine).
+// Why it opens little (architecture decision 10): a client that wants out of a losing match can pull the cable instead of
+//   quitting and save ABSENT_GRACE.N fines a week; not sending his record, it still takes the leave and the loss of the
+//   finish (no points for the match); sending it late (Q228), the leave goes but so does the grace (a loss keeps it spent).
+//   A party cannot cash a member's cable: the g part is fined as before. Past N, the fine as before. An honest solo
+//   player whose connection drops once a week pays no points for it.
+// ABSENT_GRACE_N = graces per window (unset / 0 = off: the status quo, every conviction fined); validate.yml turns it on
+//   for the main channel (the user's choice in A93 picks the number); ABSENT_GRACE_WINDOW_MS = the window (7 days).
+//   State: leavers[pid].ag = [[epoch seconds, match hash], ...], window-pruned when written, only at a graced conviction;
+//   the confessions entry gr 1 (ded = what was taken, the g part).
+const ABSENT_GRACE = {
+  N: Math.max(0, Number(process.env.ABSENT_GRACE_N || 0) | 0),
+  MS: Math.max(0, Number(process.env.ABSENT_GRACE_WINDOW_MS || 7 * 86400000)),
+};
+// the graces an account has listed inside the window; nothing is written
+function absentGraceUsed(leavers, p, now) {
+  const e = leavers && leavers[p];
+  if (!e || !Array.isArray(e.ag)) return 0;
+  const from = Math.floor((now - ABSENT_GRACE.MS) / 1000);
+  return e.ag.filter((x) => Array.isArray(x) && Number(x[0]) > from).length;
+}
+// the fine of a graced conviction: what his absence handed his own premade party (g = the entry's sum, Q228), at most the fine
+function absentGraceFine(fine, g) { return Math.min(Math.max(0, fine | 0), Math.max(0, g | 0)); }
+// the points the grace saves him at this conviction: the fine less the graced one, both through the board's floor at 0
+//   (leaverLpPenalty: max(0, cur - fine)) -- 0 = nothing to waive (0 points / g covers the fine), the grace not spent
+function absentGraceSaves(cur, fine, gFine) {
+  const c = Math.max(0, cur | 0);
+  return Math.max(0, Math.min(c, Math.max(0, fine | 0)) - Math.min(c, Math.max(0, gFine | 0)));
+}
+// is this conviction graced? (pure: the grace is spent by noteAbsentGrace) -- saves = absentGraceSaves(...)
+function absentGraceFree(leavers, p, now, saves) {
+  return ABSENT_GRACE.N > 0 && (saves | 0) > 0 && absentGraceUsed(leavers, p, now) < ABSENT_GRACE.N;
+}
+// a graced conviction forgiven by his late result: give the grace back? Only when it saved him nothing in the end -- a fined
+//   conviction nets max(-fine, w - g) with the same late result, a graced one max(-ded, w - g): equal iff ded + w - g >= 0
+function absentGraceBack(st) {
+  return !!(st && st.cv && st.gr) && (st.ded | 0) + (st.w | 0) - (st.g | 0) >= 0;
+}
+// a grace given at a settle: listed on the leaver state (window-pruned), keyed by the match so a forgiven conviction can
+//   give it back; the leave itself is counted by noteLeave as before
+function noteAbsentGrace(leavers, p, now, m) {
+  const e = leavers[p] = leavers[p] || { leaves: 0, lastMatch: '' };
+  const from = Math.floor((now - ABSENT_GRACE.MS) / 1000);
+  e.ag = (Array.isArray(e.ag) ? e.ag.filter((x) => Array.isArray(x) && Number(x[0]) > from) : []).concat([[Math.floor(now / 1000), mhOfKey(m)]]);
+  return e;
+}
+// a graced conviction forgiven (his late result, a confirmed game error): its grace comes back -> true when one was listed
+function returnAbsentGrace(leavers, p, m) {
+  const e = leavers && leavers[p];
+  if (!e || !Array.isArray(e.ag)) return false;
+  const mh = mhOfKey(m), n = e.ag.length;
+  e.ag = e.ag.filter((x) => !(Array.isArray(x) && (x[1] | 0) === mh));
+  if (!e.ag.length) delete e.ag;
+  return (e.ag ? e.ag.length : 0) < n;
 }
 // per-record point gain, mirroring the client per-game formula + credit rules. rank0 = 0-based; factor = repeat-leaver discount.
 //   valid = full (rank + money + ranked x + daily-first); innocent = base only; abandoner = 0.
@@ -17649,10 +17727,17 @@ async function main() {
       //   (would otherwise be reverted). Ranked-only; consensus-detected leaver only (single side can't frame); once/match (processed).
       if (lpId && seatAppliesLp(matchType, x.seat)) {   // O716: the leaver's own entry -- a ranked seat -100, a quick seat the exit rate only (D9)
         const cur = lp[x.steamID] == null ? 0 : lp[x.steamID];
-        const nv = leaverLpPenalty(cur, LEAVER_LP_FINE);
+        // Q447: the week's first absence of his is fined only what it handed his own premade party (ABSENT_GRACE; a solo seat
+        //   nothing; the conviction itself stands)
+        const gFine = absentGraceFine(LEAVER_LP_FINE, confState[cvKey].g);
+        const graced = absentGraceFree(leavers, pid(x.steamID), nowMs, absentGraceSaves(cur, LEAVER_LP_FINE, gFine));
+        if (graced) { noteAbsentGrace(leavers, pid(x.steamID), nowMs, c.m); confState[cvKey].gr = 1; RUN.absentGraced = (RUN.absentGraced | 0) + 1; }
+        const nv = leaverLpPenalty(cur, graced ? gFine : LEAVER_LP_FINE);
         if (nv !== cur) { lp[x.steamID] = nv; changedLp[x.steamID] = nv; confState[cvKey].ded = cur - nv; }
         noteReceipt(x.steamID, g[0].d[3] | 0, nv - cur, RECEIPT_F.LEAVE | (seededSet && seededSet.has(x.steamID) ? RECEIPT_F.SEEDED : 0), 0);   // O480
-        console.log('  leaver LP ' + c.m + ': ' + plog(x.steamID) + ' pts ' + cur + '-' + LEAVER_LP_FINE + '->' + nv);
+        console.log('  leaver LP ' + c.m + ': ' + plog(x.steamID) + (graced
+          ? ' pts ' + cur + (nv !== cur ? '-' + (cur - nv) + '->' + nv + ' only what his absence handed his party, not the fine (' + LEAVER_LP_FINE + ')' : ' not fined') + ' -- his first absence in ' + Math.round(ABSENT_GRACE.MS / 86400000) + ' days (' + absentGraceUsed(leavers, pid(x.steamID), nowMs) + ' of ' + ABSENT_GRACE.N + ' in the window, Q447)'
+          : ' pts ' + cur + '-' + LEAVER_LP_FINE + '->' + nv));
       }
     }
     processed.add(c.m); settled++; likeKeys.push(c.m);
@@ -18320,6 +18405,7 @@ Object.assign(module.exports, { noteOwnStarts, hasOwnStart, OWN_START_CAP });   
 Object.assign(module.exports, { resultRecOf, keptKeys, keptSeal, keptOpen, keptKeep, keptRecords, KEPT_REC_MAX_MS, KEPT_REC_CAP, KEPT_TAG, SETTLE_MAGIC });   // cloud audit Q373 a held group's results kept against shard rotation (test/kept-held-records.js)
 Object.assign(module.exports, { leaverXpRecordOnlyUntil, LEAVER_XP_RECORD_ONLY, LEAVER_XP_RECORD_ONLY_MAX_MS });   // M194 / W57 demo Next Fest: leaves recorded, XP not discounted
 Object.assign(module.exports, { leaverSwitchUntil, LEAVER_XP_RECORD_ONLY_CHANNELS, leaverLpFineOf, LEAVER_LP_EASY_ON, LEAVER_LP_FINE });   // O777 launch week: + the main channel, window leaves marked, ranked leave fine
+Object.assign(module.exports, { ABSENT_GRACE, absentGraceUsed, absentGraceFine, absentGraceSaves, absentGraceFree, absentGraceBack, noteAbsentGrace, returnAbsentGrace });   // cloud audit Q447 the week's first ranked absence is not fined (test/absent-fine-grace.js)
 Object.assign(module.exports, { leaverEntry, noteLeave, unnoteLeave, leaverWindowOf, leaverFactorOf, noteFinish });   // O717 N2: the leave window
 Object.assign(module.exports, { NL_OPP_CAP, NL_REPEAT });   // cloud audit Q161 named-only losing seats counted on the account
 Object.assign(module.exports, { PAIR_DISPUTE, pairDispute1v1, pairDisputeTable, pairDisputeCount, SANITY_HOST_SLUGS, SANITY_HEADER_SLUGS, sanityHeaderHeld, sanityWriterFaults });   // cloud audit Q289 / Q290 / Q291 / Q292 a key of two voices whose writers disagree

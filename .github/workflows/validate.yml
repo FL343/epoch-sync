@@ -217,6 +217,12 @@ jobs:
           LEAVER_XP_RECORD_ONLY_UNTIL: '2026-12-15T12:26:00Z'
           LEAVER_LP_EASY: '50'
           LEAVER_LP_EASY_UNTIL: '2026-12-15T12:26:00Z'
+          # Q447 (cloud audit; ASK_USER A93, recommended option 1): a ranked seat convicted absent at a settle (no record and no
+          # confession of his own: a dropped connection, a crash, a pulled cable) is not fined the first time in 7 days -- only
+          # what his absence handed his own premade party, if any -- the streak's crash grace on the points; the leave is still
+          # counted. 0 / unset = every conviction fined (the status quo). Main channel only (the only one with a points board).
+          # test/absent-fine-grace.js pins this line.
+          ABSENT_GRACE_N: '1'
         run: node validate.js
       - name: persist
         id: persist
